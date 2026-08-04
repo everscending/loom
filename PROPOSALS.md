@@ -57,12 +57,16 @@ evidence, and implementation notes belong in this file, not there.
 | ID | Proposal | Status |
 |----|----------|--------|
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — proposed 2026-08-03; 4 of 5 gate rejections in one build |
+| P37 | Let a re-scoped ticket retire the rejection history of its old scope | open — proposed 2026-08-04; #67 was rewritten into different work and still carried a spent cap |
+| P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
 | P3 | Actually arm the safety-net timer, and check that it worked | open — re-opened 2026-08-02; build-1 paid 2h08m for the unarmed backstop, and the shipped warning cried wolf after arming |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
 | P20 | Parallelise the human-gated front half | open |
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
+| P39 | A viewer that cannot open a pane must say so and exit | open — proposed 2026-08-04; a build ran 13 minutes with no ticker and no lane panes |
+| P40 | The viewer singleton guard deletes a pidfile it does not own | open — proposed 2026-08-04; found live, viewer running with no pidfile |
 
 ## What the evidence says
 
@@ -196,6 +200,63 @@ worse. Do not tighten slug matching on this evidence.
 check exits 7 on a branch the review gate would have passed — a false rc 7 is more expensive than
 the round it saves.
 
+## P37 · Let a re-scoped ticket retire the rejection history of its old scope
+
+**Evidence.** build-3, 2026-08-04. #67 was rejected three times, every one class
+`fifo-tiebreak-still-races`, against browser-side arrival-order pairing. A human decision then
+narrowed the ticket to a bounded give-up and moved the general race to #48. #48 merged and deleted
+the pairing code entirely, so the old rejections were about machinery that no longer exists. The
+ticket was rewritten — new title, new body, new branch, MR !63 closed — and came back to the board
+carrying `rejections.total: 3` against `rejection_cap: 3`. Its first gate rejection would have
+blocked it on the spot, and `same_class_tail: 3` would have skipped even the rework round. The
+implementation passed, so it did not bite this time. Nothing stops it biting next time.
+
+**Root cause.** `rejections_of` (`scripts/tick.sh:1893`) derives the whole history by scanning
+every `<!-- orch-verdict FAIL … class=… -->` trailer in a ticket's comment thread. That scan is
+deliberately un-losable — the thread fetch was widened twice so a ticket could not shed its history
+by passing through `blocked` — and there is no way to say "this ticket is now different work". The
+cap is attached to the issue number, not to the scope.
+
+**Fix.** A tracker-resident marker, so the constitution's no-shadow-state rule holds and a fresh
+session sees the same history any wave does:
+
+- `lane.sh rescope <iid> [--file F]` posts the comment explaining what changed and ends it with
+  `<!-- orch-scope-reset <iso8601> -->`. One verb, like every other tracker write.
+- `rejections_of` stops its scan at the newest reset marker: trailers older than it count toward
+  neither `total` nor `same_class_tail`. Keep them visible in the thread — this retires the cap,
+  it does not hide the history.
+- Refuse the verb from an automated caller, exactly as P36 refuses `--release-hold`. Re-scoping is
+  a human decision about what a ticket *is*; a lane that could reset its own cap has no cap.
+
+**Tests.** A ticket with three FAIL trailers and a newer reset marker reads `total: 0`; the same
+ticket with the marker older than one of the FAILs still counts that one; a lane calling `rescope`
+is refused and writes nothing.
+
+## P38 · One way for a lane to fire the next wave, not two
+
+**Evidence.** build-3, 2026-08-04 14:19:48. The merge lane for #68 merged MR !65, closed the
+ticket, and then ran `tick.sh tick` itself in the foreground — pid 26952 — instead of letting its
+exit epilogue fire one. It took the tick lock and then waited on itself. The wave that noticed
+logged it verbatim: *"self-invoked tick.sh tick directly … waiting for that nested wave to release
+the tick lock before proceeding."* Cost was a few minutes, not correctness, but it recurs at every
+merge and the loop is the one thing that must not deadlock.
+
+**Root cause.** Two mechanisms produce the same effect. `spawn-lane` already appends the epilogue
+`( "$SELF_PATH" tick --from-lane … & )` to a lane's command (`scripts/tick.sh:1143`), and
+`_tick_exit` replays a pending tick on the way out (`:656`). Meanwhile SKILL.md step 5 tells the
+reader *"the merge lane fires its own tick when it lands"* (`SKILL.md:350`) — an invitation a model
+takes literally. It then reaches for the wrong verb: `tick` is the human contract (always runs,
+ignores switch and gap), where a lane handoff is `tick --from-lane` (respects the switch, ignores
+the gap). Foreground, wrong contract, wrong pacing.
+
+**Fix.** Make the wrong call impossible rather than discouraged: `cmd_tick` refuses when
+`ORCH_LANE_ID` is set, naming `--from-lane` and the epilogue in the error. Then delete the sentence
+in step 5 that invites it — the epilogue already does this work, and a rule the scripts enforce
+does not need restating in prose (this file's own "Keep SKILL.md small").
+
+**Tests.** `ORCH_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
+`tick --from-lane` from the same environment still runs.
+
 ## P3 · Actually arm the safety-net timer, and check that it worked
 
 A slow background timer exists to restart a stalled loop. It was never running.
@@ -317,3 +378,54 @@ bootstrap seeds nothing.
 **What would falsify it.** A lane or wave that errors or measurably slows
 with the collector down (seam built wrong), or dashboards nobody has opened
 after two instrumented builds (artifact without a consumer — drop it).
+
+## P39 · A viewer that cannot open a pane must say so and exit
+
+**Evidence.** build-3, 2026-08-04, 12:46 → 12:59. `watch-panes.sh` was alive the whole time, and
+opened nothing: no anchor pane, no build ticker, no lane panes. The build ran two implementation
+lanes through it unseen, and the human noticed only by asking why the ticker was missing. Killing
+it and relaunching from a live pane opened all three panes in four seconds.
+
+**Root cause.** The viewer anchors every split to the pane it was launched from,
+`$HERDR_PANE_ID` (`scripts/watch-panes.sh:168`, and again at `:343`). When the launching session is
+gone, that pane id refers to nothing and every `herdr pane split` fails. `new_pane` swallows the
+failure — `2>/dev/null`, `|| true`, empty string on error (`:151`) — and the startup check is
+`if [ -n "$anchor" ]`, so an empty result reads as "skip this", not "I am broken". `ensure_ticker`
+does log its own failure, but the launcher redirects the viewer's output to `/dev/null`, so nothing
+reaches a human. The result is a process that looks healthy in `pgrep`, polls forever, and shows
+nothing.
+
+**Fix.** Treat a failed split off the anchor as fatal, not as a skip. On the first failure,
+re-resolve the anchor against a live pane; if that also fails, print the reason and exit non-zero
+so the singleton is released and the next `/orchestrate watch` or manual tick starts a working
+viewer. Separately, launch it with its output going to `$ORCH_HOME/watch-panes.log` rather than
+`/dev/null` — a silent diagnostic is not a diagnostic. Depends on P40: exiting is only safe once
+the pidfile is owned correctly.
+
+**Tests.** With the pane opener stubbed to fail, the viewer exits non-zero within one poll, prints
+a reason naming the dead anchor, and leaves no pidfile behind. With it succeeding, behaviour is
+unchanged.
+
+## P40 · The viewer singleton guard deletes a pidfile it does not own
+
+**Evidence.** build-3, 2026-08-04. Found live: `watch-panes.sh` running as pid 1805 with
+`$ORCH_HOME/watch-panes.pid` absent. The likely sequence is an older viewer still shutting down
+when 1805 started — 1805 found no pidfile, wrote its own, and the older one's `EXIT` trap then
+deleted it.
+
+**Root cause.** `trap 'rm -f "$MAP" "$MAP.new" "$WP_PID"' EXIT` (`scripts/watch-panes.sh:118`)
+removes the pidfile unconditionally, without checking it still contains this process's own pid.
+
+**Why it matters in both directions.** With the pidfile missing, the guard at `:112` passes and the
+next manual tick opens a **duplicate** viewer — two panes per lane, two tickers. With the pidfile
+present but belonging to a viewer that can no longer open panes (P39), the guard does the opposite:
+it reports "already running — nothing to do" and refuses to start a healthy one. The guard is
+load-bearing precisely because `/orchestrate tick` launches the viewer opportunistically on every
+manual tick.
+
+**Fix.** Remove the pidfile only when it still holds this process's own pid — read it back in the
+trap and compare against `$$` before deleting. Pair with P39 so a broken viewer releases the guard
+by exiting rather than holding it forever.
+
+**Tests.** Two viewers started in sequence leave exactly one pidfile holding the surviving pid; a
+viewer whose pidfile was overwritten by a newer one does not delete it on exit.
