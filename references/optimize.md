@@ -22,11 +22,12 @@ check is a real build, which costs hours and real money. Do not attempt one.
 
 ## Before touching anything
 
-The skill directory is **not** a git repository. Copy the file first:
+The skill directory **is** a git repository, and its last commit is your revert
+path: `git checkout -- SKILL.md` undoes the whole pass. So start from a clean
+tree — `git status --short` empty — and report the SHA you started from.
 
-    cp SKILL.md SKILL.md.bak
-
-Report that path in your summary so the human can revert with one command.
+Never make a `.bak` copy. A stale one is a second SKILL.md that nobody knows is
+stale, and it is the file a later reader greps by accident.
 
 ## Step 1 — structural moves, before any rewording
 
@@ -150,11 +151,14 @@ a paragraph arguing for it.
 
 ## Step 7 — verify mechanically
 
-This part *is* executable, and it takes two seconds. Run both against the
-backup and the rewrite, and diff:
+This part *is* executable, and it takes two seconds. Run both lists against the
+committed file and the rewrite, and diff:
 
-    grep -oE '(tick|lane|bootstrap|watch-panes)\.sh [a-z-]+' SKILL.md | sort -u
-    grep -oE '\-\-[a-z-]+' SKILL.md | sort -u
+    inv() { grep -oE '(tick|lane|bootstrap|watch-panes)\.sh [a-z-]+' "$1" | sort -u; }
+    flg() { grep -oE '\-\-[a-z-]+' "$1" | sort -u; }
+    git show HEAD:SKILL.md > /tmp/skill-before.md
+    diff <(inv /tmp/skill-before.md) <(inv SKILL.md)
+    diff <(flg /tmp/skill-before.md) <(flg SKILL.md)
 
 Any invocation or flag present before and absent after is a defect unless you
 can name the sentence that made it redundant. This catches the whole
@@ -163,7 +167,7 @@ silent-damage class, which is why it is not optional.
 ## Deliver
 
 - the rewritten `SKILL.md`, plus any new `references/` files
-- the backup path
+- the SHA you started from
 - before/after word counts, overall and per section
 - the two grep diffs from step 7
 - anything you were unsure whether to cut — **flag it, do not guess**

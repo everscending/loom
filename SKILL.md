@@ -56,6 +56,7 @@ technique of its own.
 | `replan` | any | Diff amended PRD, regenerate only affected tickets |
 | `qa` | any | Review this skill's own files; report defects, never fix |
 | `optimize` | any | Compact this SKILL.md without changing behaviour |
+| `prop <Pn>` | any | Implement proposal `Pn` from PROPOSALS.md, then archive it |
 | `retro` | after 6 | Explain a finished build's timings; write proposals |
 
 **Verb boundaries are hard stops.** A verb ends at its own output and returns
@@ -554,6 +555,14 @@ this file is also the only place a wave learns to drive the scripts, and the
 damage from a careless cut is mostly silent. The procedure, the untouchable
 machine contracts, and the mechanical check that catches the silent class:
 [references/optimize.md](references/optimize.md).
+
+### `prop <Pn>`
+
+Implement one proposal from `PROPOSALS.md` — human-run, never invoked by a
+wave. Its Fix section is a decision already made: implement it in the
+machinery, spend `SKILL.md` lines last, test it, then archive the proposal.
+Resolution, layer order, the test bar and the archive step:
+[references/prop.md](references/prop.md).
 
 ## Failure policy
 
