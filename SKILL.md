@@ -496,7 +496,9 @@ ticker alive every poll, so Ctrl-C and closing the pane is futile — the
 gestures that stick are **`q` inside the ticker pane**, `watch-panes.sh ticker
 off|on` for that strip, and `watch-panes.sh off|on` for the whole viewer
 (closes every pane it owns and exits, honored mid-run and at launch, so the
-next tick cannot undo it). Detached, so the panes outlive this session.
+next tick cannot undo it). Only `start` clears those switches — arming a build
+is a newer intent than a close, and it raises the viewer itself. Detached, so
+the panes outlive this session.
 Outside herdr, name those commands instead. `--no-panes` for the summary
 alone. Never hand the human a command to paste when it can just be run.
 

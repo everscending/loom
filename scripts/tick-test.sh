@@ -659,6 +659,53 @@ fi
 MENV "$TICK" kill-lane impl-8 >/dev/null 2>&1
 rm -f "$MT/home/loop.stopped"
 
+# 4f2. `start` raises the viewer, and outranks both off-switches.
+#      Before this, `start` armed an unattended build and opened no window on
+#      it: only `watch` and a manual tick raised the panes. Worse, a `q` in one
+#      build's ticker persisted, so the next build started blind.
+#      (Asked for by the human, 2026-08-04.)
+WPCAP="$MT/wp.calls"; WPSTUB="$MT/wp-stub.sh"
+printf '#!/bin/sh\necho "wp $*" >> "%s"\n' "$WPCAP" > "$WPSTUB"; chmod +x "$WPSTUB"
+export WATCH_PANES_CMD="$WPSTUB"
+
+# Outside the multiplexer there are no panes to open, and no viewer to launch.
+: > "$WPCAP"; export HERDR_ENV=0
+MENV "$TICK" install 60 >/dev/null 2>&1
+[ ! -s "$WPCAP" ] && ok "start: outside herdr, raises no viewer" \
+                  || bad "start: launched a viewer with no multiplexer to put it in"
+
+# Inside it, start launches the viewer AND clears both off-switches — a `q` in
+# a previous build's ticker must not leave this one unwatched.
+: > "$WPCAP"; export HERDR_ENV=1
+touch "$MT/home/ticker-off" "$MT/home/viewer-off"
+MENV "$TICK" install 60 >/dev/null 2>&1
+sleep 0.3
+if [ -s "$WPCAP" ] && [ ! -f "$MT/home/ticker-off" ] && [ ! -f "$MT/home/viewer-off" ]; then
+    ok "start: raises the viewer and clears a quit ticker / an off viewer"
+else
+    bad "start: viewer=$(cat "$WPCAP") ticker-off=$([ -f "$MT/home/ticker-off" ] && echo yes) viewer-off=$([ -f "$MT/home/viewer-off" ] && echo yes)"
+fi
+
+# But ONLY start clears them. An automatic tick that undid a deliberate `q`
+# would make the switch worthless — the human closed it 40 seconds ago.
+: > "$WPCAP"; touch "$MT/home/ticker-off" "$MT/home/viewer-off"
+MTICK tick --from-lane
+if [ -f "$MT/home/ticker-off" ] && [ -f "$MT/home/viewer-off" ] && [ ! -s "$WPCAP" ]; then
+    ok "off-switches: a tick never clears them, only a typed start does"
+else
+    bad "off-switches: a tick undid the human's close"
+fi
+rm -f "$MT/home/ticker-off" "$MT/home/viewer-off"
+
+# A dry run generates the plist and touches nothing else.
+: > "$WPCAP"; touch "$MT/home/ticker-off"
+MENV "$TICK" install --dry-run >/dev/null 2>&1
+[ ! -s "$WPCAP" ] && [ -f "$MT/home/ticker-off" ] \
+    && ok "start --dry-run: no viewer, no switch cleared" \
+    || bad "start --dry-run: had side effects"
+rm -f "$MT/home/ticker-off"
+unset WATCH_PANES_CMD HERDR_ENV
+
 # THE property the whole merge rests on: watching happens even while a wave
 # holds the lock. The old scheduler bailed at the lock BEFORE it stamped or
 # classified anything, so during a wave — the exact window in which a lane
@@ -2735,14 +2782,44 @@ FENV "$TICK" render-log no-such-lane --follow >/dev/null 2>&1 \
     || ok "follow: a lane with no pid file and no stream is refused"
 
 # 13d. The pane opener is an accessory: it must refuse outside herdr rather than
-#      degrade, and the machinery must never call it.
+#      degrade, and the UNATTENDED machinery must never call it.
+#      Narrowed 2026-08-04. This used to be a text grep — tick.sh was not
+#      allowed to contain the word "herdr" at all — and `install` now breaks
+#      that letter deliberately: `start` raises the viewer, so arming a build
+#      and opening a window on it are one gesture. What the rule protects is
+#      unchanged and is now tested directly: nothing that runs without a human
+#      at the keyboard may touch the pane opener.
 HERDR_ENV= bash "$(dirname "$TICK")/watch-panes.sh" >/dev/null 2>&1 \
     && bad "watch-panes: ran outside a herdr session" \
     || ok "watch-panes: refuses to run outside herdr instead of degrading"
-if grep -qE 'watch-panes|herdr' "$TICK"; then
-    bad "watch-panes-violation: tick.sh knows herdr exists"
+WPT="$T/wp-layer"; mkdir -p "$WPT/repo" "$WPT/home" "$WPT/agents"
+WPCALLS="$WPT/calls"
+printf '#!/bin/sh\necho called >> "%s"\n' "$WPCALLS" > "$WPT/stub"; chmod +x "$WPT/stub"
+: > "$WPCALLS"
+# HERDR_ENV=1 throughout: a lane inherits its parent's environment, so the
+# multiplexer variable IS set in the unattended paths. Only the caller decides.
+(  export HERDR_ENV=1 WATCH_PANES_CMD="$WPT/stub" ORCH_WAVE_CMD=true
+   export ORCH_REPO="$WPT/repo" ORCH_HOME="$WPT/home" ORCH_PLIST_DIR="$WPT/agents"
+   export ORCH_GLOBAL_CONFIG="$T/none.yml" ORCH_SKIP_BOOTSTRAP=1
+   "$TICK" tick --auto      >/dev/null 2>&1 || :
+   "$TICK" tick --from-lane >/dev/null 2>&1 || :
+   "$TICK" snapshot         >/dev/null 2>&1 || :
+   "$TICK" spawn-lane impl-1 --no-tick -- true >/dev/null 2>&1 || : ) || :
+sleep 0.3
+if [ ! -s "$WPCALLS" ]; then
+    ok "watch-panes: no unattended path — tick, wave, snapshot, spawn — calls the pane opener"
 else
-    ok "watch-panes-violation: tick.sh has no idea herdr exists"
+    bad "watch-panes-violation: the unattended machinery opened panes ($(wc -l < "$WPCALLS") calls)"
+fi
+# And what launchd actually runs must carry no trace of the multiplexer.
+out=$(ORCH_REPO="$WPT/repo" ORCH_HOME="$WPT/home" ORCH_PLIST_DIR="$WPT/agents" \
+      ORCH_GLOBAL_CONFIG="$T/none.yml" ORCH_SKIP_BOOTSTRAP=1 \
+      "$TICK" install --dry-run 2>&1)
+wplist=$(echo "$out" | sed -n 's/^generated (dry-run): //p')
+if [ -n "$wplist" ] && ! grep -qiE 'herdr|watch-panes' "$wplist"; then
+    ok "watch-panes: the installed agent has no idea herdr exists"
+else
+    bad "watch-panes-violation: the launchd agent references the multiplexer"
 fi
 
 # 13e. Singleton: `/orchestrate tick` launches the viewer opportunistically on

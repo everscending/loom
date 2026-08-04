@@ -33,7 +33,7 @@
 #                                the git repo root (P30). Never writes trust.
 #
 # Test seams (env): ORCH_HOME, ORCH_REPO, ORCH_LOCK_DIR, ORCH_WAVE_CMD,
-# GLAB_CMD, SNAP_BATCH, NTFY_CMD, NTFY_BASE. macOS has no flock(1), so the
+# GLAB_CMD, SNAP_BATCH, NTFY_CMD, NTFY_BASE, WATCH_PANES_CMD. macOS has no flock(1), so the
 # lock is an atomic mkdir holding the owner PID — exit-if-held, and a lock
 # whose owner PID is dead is broken on the next tick (same semantics,
 # portable). That same bash-3.2 floor is why the snapshot fan-out batches
@@ -79,6 +79,10 @@ SNAP_BATCH="${SNAP_BATCH:-8}"
 # Absolute path to this script, so a lane can re-invoke it on completion
 # regardless of the cwd it exits in.
 SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+# Sibling script, same seam pattern as LAUNCHCTL_CMD: `start` raises the herdr
+# viewer itself (see _raise_viewer), and the test suite must never open a real
+# pane.
+WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 
 mkdir -p "$ORCH_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
 
@@ -2815,6 +2819,22 @@ cmd_install_settings() { # install-settings [--force]
     echo "install-settings: wrote $target"
 }
 
+# `start` opens the human's window on the build, rather than printing a command
+# to paste. Both off-switches are CLEARED first, deliberately: they exist to
+# stop a *running* viewer from reopening panes the human closed, and pressing
+# `q` in one build's ticker must not leave the next build unwatched. `start` is
+# a newer intent than either switch, and it is the only path that clears them —
+# an automatic tick must never undo the human. Launch is a no-op when a viewer
+# is already up (watch-panes is a singleton per repo) and outside herdr.
+# (Asked for by the human, 2026-08-04.)
+_raise_viewer() {
+    [ "${HERDR_ENV:-}" = 1 ] || return 0
+    [ -x "$WATCH_PANES_CMD" ] || return 0
+    rm -f "$ORCH_HOME/ticker-off" "$ORCH_HOME/viewer-off"
+    nohup "$WATCH_PANES_CMD" >>"$ORCH_HOME/watch-panes.out" 2>&1 &
+    echo "orchestrate: viewer raised — a pane per live worker, plus the build ticker."
+}
+
 cmd_install() {  # install [--dry-run] [interval-seconds]
     local dry=0; [ "${1:-}" = "--dry-run" ] && { dry=1; shift; }
     # 60s, because this ONE agent now does both jobs: it watches on every
@@ -2839,6 +2859,7 @@ cmd_install() {  # install [--dry-run] [interval-seconds]
     # the new agent, doing the same work twice and notifying twice.
     cmd_watcher_disarm >/dev/null 2>&1 || true
     echo "orchestrate: build agent LOADED ($ORCH_LABEL, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
+    _raise_viewer
 }
 
 cmd_uninstall() {  # uninstall [--now]

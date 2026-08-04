@@ -113,6 +113,13 @@ on and `min_wave_gap_minutes` (default 10) has elapsed. `RunAtLoad` fires wave 1
 and lane handoffs carry it from there. This is the *only* thing the human runs
 to go unattended — no `launchctl`, no plist, no cron.
 
+**`start` also opens the window on the build it just armed.** Inside herdr it
+raises the viewer itself — a pane per live worker plus the build ticker — and
+clears both off-switches on the way, so a `q` pressed in a previous build's
+ticker cannot leave this one unwatched. It is the only path that clears them:
+an automatic tick undoing a human's close would make the switch worthless.
+Outside herdr, and when a viewer is already up, it does nothing.
+
 **`start` is now what makes a build autonomous, not a side effect of ticking.**
 Without it, a lane cannot chain and an automatic tick does nothing; a manual
 `/orchestrate tick` still runs exactly one wave. *(paid: a single manual tick
