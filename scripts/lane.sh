@@ -99,18 +99,44 @@ _post_note() { # <issues|merge_requests> <iid> <bodyfile>
     echo "lane.sh: note posted on $1/$2"
 }
 
+# P36: is this process running inside something the loop spawned? A lane
+# exports ORCH_LANE_ID; a wave session is launched carrying ORCH_WAVE_PROMPT.
+# A human at a terminal has neither. Consumer: the release guard below — the
+# one write no automated caller may ever make.
+_automated_caller() {
+    [ -n "${ORCH_LANE_ID:-}" ] || [ -n "${ORCH_WAVE_PROMPT:-}" ]
+}
+
+RELEASE_HOLD=0   # set by `transition --release-hold`; never inherited
+
 _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine flow
     # `blocked` is STICKY: labels are last-writer-wins, so before this guard
     # an in-flight lane could stomp a human hold — an orphaned impl-29-r2
     # flipped its held ticket to review and #29 merged straight through the
-    # hold (2026-08-02). Only the unblock direction (ready-for-agent) and
-    # blocking itself may touch a blocked ticket; everything else bounces.
+    # hold (2026-08-02). Blocking itself may always proceed; every other
+    # direction bounces.
+    #
+    # P36: releasing a hold is a HUMAN act and needs `--release-hold` said out
+    # loud, which an automated caller may not say at all. `ready-for-agent`
+    # used to be a free pass here, so the release path was a plain label write
+    # any wave could make — and one did: a hold comment ended with the sentence
+    # "Release: when #48 merges, /orchestrate unblock 67", a wave read that
+    # prose as an instruction addressed to itself, and requeued the held ticket
+    # nine seconds later. The hold is the one mechanism that must outrank
+    # everything the loop decides on its own, so the prose can stay wrong
+    # forever as long as the write is refused. (Paid for: #67, build-3
+    # 2026-08-04.)
     local iid="$1" intended="${2:-}"
-    case "$intended" in blocked|ready-for-agent) return 0 ;; esac
+    case "$intended" in blocked) return 0 ;; esac
     if "$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null \
         | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
-        die "issue $iid is blocked — a human hold; refusing to advance it (unblock first)"
+        [ "$RELEASE_HOLD" = 1 ] \
+            || die "issue $iid is blocked — a human hold. Refusing to advance it. Releasing a hold is a human decision, made with 'transition $iid <state> --release-hold'; nothing written in the ticket authorises it."
+        if _automated_caller; then
+            die "issue $iid is blocked — a human hold, and this is an automated session (${ORCH_LANE_ID:-wave}). --release-hold is refused here: a hold is released by a person, never by a lane or a wave acting on ticket text."
+        fi
     fi
+    return 0
 }
 
 _set_state() { # <iid> <state> [extra -f args...]
@@ -365,9 +391,16 @@ _sync_deps() { # <sha-before-merge>
     return 0
 }
 
-cmd_transition() { # <iid> <state>
+cmd_transition() { # <iid> <state> [--release-hold]
     local iid="${1:-}" state="${2:-}" ok=0 s istate
     _check_iid "$iid"
+    # P36: the only way out of a human hold, and deliberately unpleasant to
+    # reach by accident — see `_blocked_guard`.
+    set -- "${@:3}"
+    while [ $# -gt 0 ]; do case "$1" in
+        --release-hold) RELEASE_HOLD=1; shift ;;
+        *) die "transition: unknown option '$1'" ;;
+    esac; done
     for s in $STATES; do [ "$s" = "$state" ] && ok=1; done
     [ "$ok" = 1 ] || die "unknown state '$state' (one of: $STATES)"
     # A closed ticket is finished; state labels on it are pure misinformation.
@@ -463,5 +496,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

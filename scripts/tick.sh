@@ -1744,6 +1744,25 @@ cmd_snapshot() {
             "build lessons thread" ) &
         _snap_batch_gate
     fi
+    # P35: the CLOSED members of this build. An epic whose last ticket closed
+    # has nothing left in the open-issue payload to find it by, and that is
+    # precisely the moment it becomes probe-ready — so the one epic the
+    # acceptance step must see is the one an open-only read cannot show it.
+    # Deriving completed epics from the milestone titles of closed members is
+    # exact; the Build-issue body parse below is a heuristic kept only as a
+    # fallback. (Paid for: build-3 2026-08-04 — the Build issue lists its
+    # epics as a markdown TABLE, the body parse scans markdown LIST items, so
+    # it matched nothing and `epics_awaiting_probe` was empty for every
+    # finished epic in the build. E4 reached zero open tickets six times and
+    # the probe only ever ran because a wave reasoned around the gap by hand;
+    # in build-2 the same blind spot let E6 and E7 close unprobed.)
+    printf '[]\n' > "$SNAP_TMP/closed.json"
+    if [ -n "$label" ]; then
+        ( _snap_api "$SNAP_TMP/closed.json" \
+            "projects/:id/issues?labels=$label&state=closed&per_page=100" \
+            "closed build members" ) &
+        _snap_batch_gate
+    fi
     ( cmd_lane_status > "$SNAP_TMP/lanes.txt" 2>/dev/null || : ) &
     wait || true
 
@@ -1788,6 +1807,7 @@ cmd_snapshot() {
         --slurpfile mrs "$SNAP_TMP/mrs.json" --slurpfile notes "$SNAP_TMP/notes.json" \
         --slurpfile tnotes "$SNAP_TMP/tnotes.json" \
         --slurpfile milestones "$SNAP_TMP/milestones.json" \
+        --slurpfile closed "$SNAP_TMP/closed.json" \
         --rawfile lanes_raw "$SNAP_TMP/lanes.txt" --rawfile warn_raw "$SNAP_TMP/warn.txt" \
         --argjson config "$config_json" --arg logs_dir "$LOGS_DIR" \
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1994,8 +2014,18 @@ cmd_snapshot() {
           | gsub("[*`\\[\\]]"; "") | sub("\\s*\\(#[^)]*\\).*$"; "")
           | sub("\\s+[—–-]\\s+[^—–]*$"; "") | gsub("^\\s+|\\s+$"; "")]
        | map(select(length > 0 and length < 120 and (test("^[a-z_][a-z0-9_]*:") | not)))) as $items
+    # P35: completed epics derived EXACTLY, from the milestone titles of this
+    # builds CLOSED members. The body parse above is a heuristic that reads
+    # markdown list items, so a Build issue listing its epics in a table
+    # matches nothing and every finished epic goes invisible at the exact
+    # moment it becomes probe-ready. Milestone titles on closed members are
+    # the same fact without the guesswork; the parse stays only as a fallback
+    # for a build whose tickets carry no milestone at all.
+    | (($closed[0] // []) | map(.milestone.title? // empty) | unique
+       | map(select(. as $t | ($epics_open | map(.name) | index($t)) | not))
+       | map({name: ., open_tickets: 0, complete: true, source: "closed-members"})) as $epics_closed
     | ($items | map(select(ascii_downcase as $it
-        | ($epics_open | map(.name | ascii_downcase)
+        | (($epics_open + $epics_closed) | map(.name | ascii_downcase)
            | any(. as $n | ($it | contains($n)) or ($n | contains($it)))) | not))
        | map({name: ., open_tickets: 0, complete: true, source: "build-issue"})) as $epics_done
     # Acceptance, joined from the milestone the probe closes. Matching uses the
@@ -2003,7 +2033,7 @@ cmd_snapshot() {
     # closes a milestone and what reads it back can never disagree about which
     # milestone belongs to which epic. `accepted: null` = no milestone found,
     # which asserts nothing and never manufactures a probe.
-    | (($epics_open + $epics_done)
+    | (($epics_open + $epics_closed + $epics_done)
        | map(. as $e
              | ($milestones[0] // []
                 | map(select((.title | epic_norm) as $mt | ($e.name | epic_norm) as $en

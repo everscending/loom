@@ -1230,6 +1230,7 @@ echo "$*" >> "${STUB_LOG:-/dev/null}"
 case "$*" in
   *"state=opened"*) [ -n "${STUB_FAIL_STAGE1:-}" ] && { echo "500 boom" >&2; exit 1; }
                     cat "${STUB_OPEN:-$FX/open.json}" ;;
+  *"state=closed"*) cat "${STUB_CLOSED:-$FX/closed-none.json}" 2>/dev/null || echo '[]' ;;
   *"/links"*)       [ -n "${STUB_403_LINKS:-}" ] && { echo "403 Forbidden" >&2; exit 1; }
                     n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/links.*#\1#p')
                     cat "$FX/links-$n.json" 2>/dev/null || echo '[]' ;;
@@ -1243,6 +1244,7 @@ case "$*" in
 esac
 EOF
 chmod +x "$FX/glab-stub.sh"
+echo '[]' > "$FX/closed-none.json"
 SNAP() { GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$CALLS" "$TICK" snapshot 2>"$T/snap.err"; }
 
 # 7a. Assembly holds: one document carrying the whole read set.
@@ -1514,10 +1516,12 @@ jq -e '[.lessons_tail[].body] | any(test("added ~"))' "$T/snap.json" >/dev/null 
 #     the guard against re-adding a serial question-per-fact read, plus the
 #     project-level milestone read that carries epic acceptance. Comment
 #     threads and milestones ride the same concurrent fan-out, so they cost a
-#     call each but almost no wall clock.
+#     call each but almost no wall clock. P35 adds one more: the closed
+#     members, without which an epic whose last ticket closed cannot be seen
+#     at all — bought deliberately, and on the same fan-out.
 n=$(wc -l < "$CALLS" | tr -d ' ')
-[ "$n" = 10 ] && ok "snapshot: whole read set cost 10 calls (1 list + 1 milestones + 3 links + 1 MR + 3 threads + 1 lessons)" \
-             || bad "snapshot: read set cost $n calls, expected 10 ($(cat "$CALLS" | tr '\n' ';'))"
+[ "$n" = 11 ] && ok "snapshot: whole read set cost 11 calls (1 list + 1 milestones + 3 links + 1 MR + 3 threads + 1 lessons + 1 closed members)" \
+             || bad "snapshot: read set cost $n calls, expected 11 ($(cat "$CALLS" | tr '\n' ';'))"
 # Planted violation: MRs are fetched only for started tickets. If the active
 # filter were dropped, ready-for-agent tickets (which cannot have an MR) would
 # each add a call — the count above is what proves the filter is live.
@@ -1663,6 +1667,52 @@ if [ "$(jq -r '.epics[]|select(.name=="Reporting surface")|.accepted' "$T/snap-a
 else
     bad "snapshot: accepted epic still wanted a probe ($(jq -c '[.epics[]|{name,accepted,needs_probe}]' "$T/snap-acc.json"))"
 fi
+# 7a3. P35: a finished epic is found from the milestones of this builds CLOSED
+#      members, not from prose in the Build issue. The body parse reads markdown
+#      LIST items; a Build issue that lists its epics in a TABLE matches nothing,
+#      so every epic whose last ticket closed went invisible at exactly the
+#      moment it became probe-ready. (Paid for: build-3 2026-08-04 — E4 reached
+#      zero open tickets six times with `epics_awaiting_probe` empty each time,
+#      and the probe only ever ran because a wave spotted the gap and reasoned
+#      around it; in build-2 the same blind spot let E6 and E7 close unprobed.)
+cat > "$FX/open-table.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"## Selected epics\n\n| Epic | Milestone | Tickets | Status |\n|------|-----------|---------|--------|\n| Ledger core | %4 | #10 | open |\n| Reporting surface | %5 | #13 | open |\n"},
+ {"iid":10,"title":"Add ledger table","project_id":1,"web_url":"https://x/10",
+  "labels":["build-2","ready-for-agent"],"assignees":[],"updated_at":"2026-07-28T10:00:00Z",
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\napi\n"}
+]
+EOF
+printf '%s\n' '[{"iid":13,"milestone":{"title":"Reporting surface"}}]' > "$FX/closed-members.json"
+printf '%s\n' '[{"title":"Ledger core","state":"active"},{"title":"Reporting surface","state":"active"}]' \
+    > "$FX/milestones.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-table.json" STUB_CLOSED="$FX/closed-members.json" \
+    STUB_LOG="$T/calls-p35" "$TICK" snapshot > "$T/snap-p35.json" 2>/dev/null
+if [ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35.json")" = '["Reporting surface"]' ] \
+   && [ "$(jq -r '.epics[]|select(.name=="Reporting surface")|.source' "$T/snap-p35.json")" = "closed-members" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="Ledger core")|.needs_probe' "$T/snap-p35.json")" = "false" ]; then
+    ok "snapshot: an epic whose last ticket closed is found even when the Build issue lists epics in a table"
+else
+    bad "snapshot: finished epic invisible ($(jq -c '[.epics[]|{name,source,complete,needs_probe}]' "$T/snap-p35.json"))"
+fi
+# Planted violation: the fix must come from the CLOSED members, not from a
+# loosened body parse. Same table body, no closed members — nothing is invented.
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-table.json" STUB_CLOSED="$FX/closed-none.json" \
+    "$TICK" snapshot > "$T/snap-p35b.json" 2>/dev/null
+[ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35b.json")" = '[]' ] \
+    && ok "snapshot: with no closed members, a table-listed epic is not conjured into a probe" \
+    || bad "snapshot: invented a probe-ready epic from prose ($(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35b.json"))"
+# An epic still holding open tickets is never reported complete, however many of
+# its OTHER tickets have closed — closed members widen discovery, never verdict.
+printf '%s\n' '[{"iid":9,"milestone":{"title":"Ledger core"}},{"iid":13,"milestone":{"title":"Reporting surface"}}]' \
+    > "$FX/closed-mixed.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-table.json" STUB_CLOSED="$FX/closed-mixed.json" \
+    "$TICK" snapshot > "$T/snap-p35c.json" 2>/dev/null
+[ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35c.json")" = '["Reporting surface"]' ] \
+    && ok "snapshot: an epic with an open ticket stays out of the probe list even with closed members" \
+    || bad "snapshot: probed an epic that still has open work ($(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35c.json"))"
+
 # Planted violation: with NO milestones at all (a tier or project that does not
 # use them) acceptance is UNKNOWN — it must never manufacture a probe request.
 printf '[]\n' > "$FX/milestones.json"
@@ -3348,8 +3398,8 @@ case "$out" in *"⚠ #88 — implementation killed (whole tree)"*) \
 
 # 16a3. `blocked` is STICKY: labels are last-writer-wins, so without this an
 #       in-flight lane stomps a human hold (#29, 2026-08-02). Every advance
-#       bounces off a blocked ticket; only the unblock direction
-#       (ready-for-agent) and re-blocking may touch it.
+#       bounces off a blocked ticket; only re-blocking may touch it freely, and
+#       the release direction needs `--release-hold` from a human caller (P36).
 cat > "$T/glab-blocked-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
@@ -3371,9 +3421,38 @@ GB close 50 >/dev/null 2>&1 && bad "sticky-blocked: close closed a blocked ticke
 grep -q "add_labels\|state_event=close" "$BCAP2" \
     && bad "sticky-blocked: a state write reached the tracker despite the hold" \
     || ok "sticky-blocked: no state write reached the tracker"
+# P36: the unblock direction is no longer a free pass. It was — `ready-for-agent`
+# skipped the guard entirely — so releasing a hold was a plain label write any
+# automated caller could make, and one did: a hold comment ended with the
+# sentence "Release: when #48 merges, /orchestrate unblock 67", and a wave read
+# that prose as an instruction addressed to itself and requeued the held ticket
+# nine seconds later. (Paid for: #67, build-3 2026-08-04.)
 GB transition 50 ready-for-agent >/dev/null 2>&1 \
-    && ok "sticky-blocked: the unblock direction still works" \
-    || bad "sticky-blocked: unblock direction refused"
+    && bad "sticky-blocked: a hold was released without --release-hold" \
+    || ok "sticky-blocked: releasing a hold needs --release-hold said out loud"
+: > "$BCAP2"
+GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
+    && ok "sticky-blocked: a human releasing the hold still works" \
+    || bad "sticky-blocked: --release-hold refused for a human caller"
+# The same release, from inside a lane and from inside a wave: refused. These
+# are the only two callers that can act on ticket prose, and the env markers
+# are set by the loop itself, not by the caller asking nicely.
+: > "$BCAP2"
+ORCH_LANE_ID=impl-50 GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
+    && bad "sticky-blocked: a lane released a human hold" \
+    || ok "sticky-blocked: a lane cannot release a human hold, even with the flag"
+ORCH_WAVE_PROMPT="/orchestrate tick" GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
+    && bad "sticky-blocked: a wave released a human hold" \
+    || ok "sticky-blocked: a wave cannot release a human hold, even with the flag"
+grep -q "add_labels" "$BCAP2" \
+    && bad "sticky-blocked: an automated release still reached the tracker" \
+    || ok "sticky-blocked: no automated release write reached the tracker"
+# `unblock --to-review` routes through the same door: the human completed the
+# work by hand, so it goes back to the gate rather than to the backlog. Before
+# P36 this direction had no door at all — `review` bounced with nothing to say.
+GB transition 50 review --release-hold >/dev/null 2>&1 \
+    && ok "sticky-blocked: a human can release a hold straight to review" \
+    || bad "sticky-blocked: --to-review has no way past the guard"
 GB transition 51 review >/dev/null 2>&1 \
     && ok "sticky-blocked: an unblocked ticket still advances normally" \
     || bad "sticky-blocked: guard blocked a ticket with no hold"
