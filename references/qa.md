@@ -53,6 +53,15 @@ so a `//` fallback evaluates against the wrong value — that one shipped twice 
 that assumes a lane is alive or dead without reading its state; and any window between reserving
 something and stamping ownership of it.
 
+### `scripts/snapshot.jq` — the document a wave reads
+
+The whole snapshot in one pass, so every derived field must be a pure function of fields already
+in the document — anything sourced independently can disagree with the thing it was derived from.
+The `//` fallback evaluating against a rebound `.` is the recurring defect here, and the reason
+this file is worth reading on its own: read each `//` and name the value it actually falls back to.
+Check `epic_norm` still matches the milestone slugify in `lane.sh` byte for byte — they are two
+implementations of one key, and drift writes an epic acceptance where nothing reads it.
+
 ### `scripts/tick-test.sh` — the suite
 
 Assume it is lying. Find: assertions that **cannot fail** — `ok` called in both branches, or a

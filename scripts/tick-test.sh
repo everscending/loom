@@ -999,13 +999,19 @@ kill "$(cat "$ORCH_HOME/lanes/gate-33.pid")" 2>/dev/null
 #      and the whole queue behind it (build-3, 2026-08-03). What survives the
 #      filter has to be a MODEL TURN. The stamp holds the filtered count, so
 #      this is asserted on the number, not on timing.
+# The watch pass is what `tick --auto` runs BEFORE it considers the lock, so
+# with the loop switch off it stamps, flags and classifies while spending
+# nothing. These tests drive that — the production path — rather than a verb
+# that would exist only to be tested. (The old separate watcher had its own
+# `quiet-tick` entry point; retiring it took the entry point with it.)
+WATCH() { : > "$ORCH_HOME/loop.stopped"; "$TICK" tick --auto >/dev/null 2>&1; rm -f "$ORCH_HOME/loop.stopped"; }
 "$TICK" spawn-lane gate-34 --no-tick -- sleep 30 >/dev/null
 PJ="$ORCH_HOME/logs/lane-gate-34.jsonl"; PS="$ORCH_HOME/lanes/gate-34.progress"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bash scripts/gate.sh logic"}}]}}' > "$PJ"
-"$TICK" quiet-tick >/dev/null 2>&1
+WATCH
 p0=$(cat "$PS" 2>/dev/null || echo missing)
 for _ in $(seq 1 40); do printf '%s\n' '{"type":"tool_progress"}' >> "$PJ"; done
-"$TICK" quiet-tick >/dev/null 2>&1
+WATCH
 p1=$(cat "$PS" 2>/dev/null || echo missing)
 [ "$p0" = "$p1" ] && [ "$p0" != missing ] \
     && ok "staleness: 40 tool_progress polls are not progress — the stamp holds" \
@@ -1013,7 +1019,7 @@ p1=$(cat "$PS" 2>/dev/null || echo missing)
 # Planted violation: a real model turn MUST move it, or the stamp would freeze
 # on every healthy lane and the watcher would kill working sessions.
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"gate came back red"}]}}' >> "$PJ"
-"$TICK" quiet-tick >/dev/null 2>&1
+WATCH
 p2=$(cat "$PS" 2>/dev/null || echo missing)
 [ "$p2" != "$p1" ] \
     && ok "staleness: a model turn still counts as progress" \
@@ -1041,6 +1047,7 @@ esac
 EOF
 chmod +x "$QH/bin/glab"
 printf 'build-2\n' > "$QH/home/.build-label"
+: > "$QH/home/loop.stopped"     # watch, never spend — same reason as WATCH above
 # Own ntfy capture: section 7 defines the shared one, and this runs before it.
 QSTUB="$QH/ntfy.sh"; QCAP="$T/quiet-ntfy"
 printf '#!/bin/sh\necho "$@" >> "%s"\n' "$QCAP" > "$QSTUB"; chmod +x "$QSTUB"
@@ -1049,7 +1056,7 @@ printf '%s\n' '[{"id":9,"title":"Reporting surface"}]' > "$QH/ms-open.json"
 : > "$QCAP"
 PATH="$QH/bin:$PATH" ORCH_HOME="$QH/home" ORCH_QUIET_SETTLE=0 \
     NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-open.json" ORCH_NTFY_TOPIC=test-topic \
-    "$TICK" quiet-tick >/dev/null 2>&1
+    WATCH
 # Assert on the state sentinel, not the push: whether a given event reaches
 # ntfy depends on the push allowlist, but the CLASSIFICATION is the thing
 # under test — and it is also what step 8 tears the agent down on.
@@ -1064,7 +1071,7 @@ rm -f "$QH/home/quiet.state"; : > "$QCAP"
 printf '[]\n' > "$QH/ms-closed.json"
 PATH="$QH/bin:$PATH" ORCH_HOME="$QH/home" ORCH_QUIET_SETTLE=0 \
     NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-closed.json" ORCH_NTFY_TOPIC=test-topic \
-    "$TICK" quiet-tick >/dev/null 2>&1
+    WATCH
 qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qs" = complete ] \
     && ok "quiet-check: once every epic is accepted the build completes normally" \
@@ -1803,6 +1810,28 @@ case "$rc:$out" in
     0:*) bad "snapshot: missing jq did not fail" ;;
     *"jq required"*) ok "snapshot: missing jq fails loudly" ;;
     *) bad "snapshot: missing jq failed unclearly ($out)" ;;
+esac
+
+# 7j2. The document builder is a FILE now (snapshot.jq beside tick.sh), not a
+#      370-line string inside a shell quote. Two things follow, and both are
+#      cheap to check: it must parse on its own — which is the whole reason it
+#      was lifted out, after an apostrophe in a comment ended the shell quote
+#      mid-word and broke 250 tests — and a missing one must be named as a
+#      missing file, not left to jq to complain about its -f argument.
+SNAPJQ="$(dirname "$TICK")/snapshot.jq"
+err=$(jq -n -f "$SNAPJQ" </dev/null 2>&1 || true)
+case "$err" in
+    *"syntax error"*|*"unexpected"*) bad "snapshot.jq: does not parse ($(printf '%s' "$err" | head -1))" ;;
+    *) ok "snapshot.jq: parses standalone — checkable without running a snapshot" ;;
+esac
+# Planted violation: hide the file and the guard must name it.
+mv "$SNAPJQ" "$T/snapshot.jq.hidden"
+out=$(GLAB_CMD="$FX/glab-stub.sh" "$TICK" snapshot 2>&1); rc=$?
+mv "$T/snapshot.jq.hidden" "$SNAPJQ"
+case "$rc:$out" in
+    0:*) bad "snapshot: ran with no document builder on disk" ;;
+    *snapshot.jq*) ok "snapshot: a missing snapshot.jq is named as the missing file" ;;
+    *) bad "snapshot: missing builder failed unclearly ($(printf '%s' "$out" | head -1))" ;;
 esac
 
 # 7k. Read-only guardrail: tick.sh must never mutate tracker state (its whole
@@ -3194,47 +3223,32 @@ else
     bad "proposals-hygiene: PROPOSALS.md not found next to scripts/"
 fi
 
-# 15. Watcher containment: arming must stay inside the seams (stub launchctl,
-#     sandbox plist dir), and a watcher whose repo vanished must disarm itself
-#     on its next firing instead of dying every 60s forever. (Paid for:
-#     2026-08-02 — 26 zombie launchd agents from earlier suite runs.)
-# The suite's install tests re-exported ORCH_PLIST_DIR (line ~415); pin a
-# fresh dir for this section so the assertions read where arm actually writes.
+# 15. Retiring the old separate watcher. There used to be a second launchd
+#     agent per repo, and `tick --auto` watching before the lock made it
+#     redundant. The way OUT is what has to keep working: a machine with the
+#     old agent still loaded lands on `quiet-tick` once, sheds it, and is
+#     done. Without that the stale agent would spin on a usage error every
+#     60s with nothing able to unload it. (Paid for: 2026-08-02 — 26 zombie
+#     launchd agents from earlier suite runs.)
 export ORCH_PLIST_DIR="$T/plists15"
-# 15a. Arm goes through the seam: plist lands in the sandbox dir, bootstrap
-#      reaches the stub, and real launchd is never touched.
+mkdir -p "$ORCH_PLIST_DIR"
 : > "$LCTL_CALLS"
-"$TICK" watcher-arm >/dev/null 2>&1
-WLABEL=$(ls "$ORCH_PLIST_DIR" 2>/dev/null | grep '\.watch\.plist$' | head -1)
-[ -n "$WLABEL" ] \
-    && ok "watcher: arm wrote its plist into ORCH_PLIST_DIR, not ~/Library" \
-    || bad "watcher: no plist in the sandbox plist dir after arm"
-grep -q '^bootstrap ' "$LCTL_CALLS" \
-    && ok "watcher: arm bootstrapped via the LAUNCHCTL_CMD seam" \
-    || bad "watcher: arm never reached the launchctl stub"
-# 15b. Planted violation: with the seam removed the arm would hit real
-#      launchd — prove the stub is what contained it by pointing the seam at
-#      a recorder that fails, and observing arm fail rather than fall back.
-out=$(LAUNCHCTL_CMD="/usr/bin/false" "$TICK" watcher-arm 2>&1)
-case "$out" in *ARMED*) bad "watcher-violation: arm claimed success with launchctl failing";; \
-    *) ok "watcher-violation: arm does not claim success when launchctl fails";; esac
-# 15c. Orphan self-heal: a watcher armed for a repo that then vanishes must
-#      disarm itself (bootout via seam + its own plist removed) and exit 0.
-#      The label derives from the repo path, so arm and quiet-tick must share
-#      ORCH_REPO for the disarm to target the right plist.
-ORPHAN="$T/orphan-repo"; mkdir -p "$ORPHAN"
-ORCH_REPO="$ORPHAN" "$TICK" watcher-arm >/dev/null 2>&1
-OPLIST=$(ls "$ORCH_PLIST_DIR" 2>/dev/null | grep 'orphan-repo.*\.watch\.plist$' | head -1)
-rm -rf "$ORPHAN"
+out=$("$TICK" quiet-tick 2>&1); rc=$?
+[ "$rc" = 0 ] && case "$out" in *retired*) true ;; *) false ;; esac \
+    && ok "watcher: the old entry point retires itself and exits clean" \
+    || bad "watcher: quiet-tick rc=$rc, said: $out"
+grep -q '^bootout ' "$LCTL_CALLS" \
+    && ok "watcher: retirement booted the old agent out through the seam" \
+    || bad "watcher: retirement never reached the launchctl stub"
+# Planted violation: arming is GONE, not merely discouraged. A verb still able
+# to write a watcher plist would let the retired agent come back.
 : > "$LCTL_CALLS"
-ORCH_REPO="$ORPHAN" "$TICK" quiet-tick >/dev/null 2>&1
-rc=$?
-grep -q '^bootout ' "$LCTL_CALLS" && [ "$rc" = 0 ] \
-    && ok "watcher: quiet-tick with a deleted repo disarms itself" \
-    || bad "watcher: orphan quiet-tick did not self-disarm (rc=$rc)"
-[ -n "$OPLIST" ] && [ ! -f "$ORCH_PLIST_DIR/$OPLIST" ] \
-    && ok "watcher: orphan self-disarm removed its own plist" \
-    || bad "watcher: orphan self-disarm left its plist behind ($OPLIST)"
+"$TICK" watcher-arm >/dev/null 2>&1 \
+    && bad "watcher: watcher-arm still exists — the second agent can be resurrected" \
+    || ok "watcher: no verb can arm a second agent any more"
+ls "$ORCH_PLIST_DIR" 2>/dev/null | grep -q '\.watch\.plist$' \
+    && bad "watcher: a .watch plist was written after arm was removed" \
+    || ok "watcher: arming wrote no plist, because there is nothing left to arm"
 
 # 16. The build ticker (2026-08-02): lane.sh verbs feed the event stream,
 #     render-events turns it into timestamped human lines, and a corrupt

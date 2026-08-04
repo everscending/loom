@@ -102,9 +102,7 @@ notifies once per state change — **before anything touches the lock**, and onl
 then considers a wave. That order is the whole design: the old scheduler bailed
 at the lock, so during a wave — the exact window in which a lane wedges —
 nothing was looking, and a second 60s watcher process had to exist to cover it.
-Watching first makes that process unnecessary. (`quiet-tick` and `watcher-arm`
-remain as verbs so repos still running the old split agent keep working;
-`install` retires that agent for the repo it touches.)
+Watching first makes that process unnecessary — `install` retires the old one.
 
 Spending is paced by **`min_wave_gap_minutes` (default 10)**, not by the timer,
 so a 60s tick costs nothing: a wave starts only when the gap has elapsed. Three
