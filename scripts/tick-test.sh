@@ -45,6 +45,22 @@ echo "\$@" >> "$LCTL_CALLS"
 exit 0
 STUBEOF
 chmod +x "$LAUNCHCTL_CMD"
+# The pane opener, stubbed GLOBALLY for the same reason and by the same
+# lesson. `install` now raises the viewer, so every test path through it opens
+# real herdr panes whenever the suite runs from inside the multiplexer — which
+# is where it is always run, since HERDR_ENV is inherited. (Paid for:
+# 2026-08-04 — four suite runs left four orphan viewers polling deleted mktemp
+# dirs and eight stacked panes on the human's screen.) Belt and braces:
+# HERDR_ENV is cleared too, so _raise_viewer returns before it reaches the
+# stub. Tests that exercise the raise set both deliberately and RESTORE these
+# afterwards — never `unset`, which would disarm the guard for every test after
+# them.
+export WATCH_PANES_CMD="$T/watch-panes-stub.sh"
+WP_GLOBAL_CALLS="$T/watch-panes-calls"
+printf '#!/bin/sh\necho "$@" >> "%s"\n' "$WP_GLOBAL_CALLS" > "$WATCH_PANES_CMD"
+chmod +x "$WATCH_PANES_CMD"
+WP_GLOBAL_STUB="$WATCH_PANES_CMD"
+export HERDR_ENV=
 PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
@@ -704,7 +720,9 @@ MENV "$TICK" install --dry-run >/dev/null 2>&1
     && ok "start --dry-run: no viewer, no switch cleared" \
     || bad "start --dry-run: had side effects"
 rm -f "$MT/home/ticker-off"
-unset WATCH_PANES_CMD HERDR_ENV
+# RESTORE, never unset: unsetting would hand every later test the real pane
+# opener, which is exactly the accident this block is testing the fix for.
+export WATCH_PANES_CMD="$WP_GLOBAL_STUB"; export HERDR_ENV=
 
 # THE property the whole merge rests on: watching happens even while a wave
 # holds the lock. The old scheduler bailed at the lock BEFORE it stamped or
@@ -3710,6 +3728,17 @@ if [ "$rc_tr3" = 0 ] && grep -q 'add_labels=merge-queue' "$SR/c5"; then
     ok "transition: an open ticket still advances normally"
 else
     bad "transition: guard broke the normal path (rc=$rc_tr3)"
+fi
+
+# Whole-suite guard, checked last because it is a property of every test above
+# it: nothing in this file may reach the pane opener. The global stub catches a
+# test that sets HERDR_ENV=1 without its own stub; a test that `unset`s the
+# seam instead of restoring it escapes to the real script, which is why the two
+# blocks that touch it restore. (Paid for: 2026-08-04, eight orphan panes.)
+if [ ! -s "$WP_GLOBAL_CALLS" ]; then
+    ok "suite: no test reached the pane opener — a run opens no real panes"
+else
+    bad "suite: $(wc -l < "$WP_GLOBAL_CALLS" | tr -d ' ') call(s) escaped to the pane opener"
 fi
 
 echo; echo "== $PASS passed, $FAIL failed =="
