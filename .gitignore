@@ -1,0 +1,6 @@
+# Run state lives in ~/.orchestrator/<repo>/, never here — but a stray copy
+# from a mis-set ORCH_HOME should never be committed.
+logs/
+lanes/
+*.pid
+*.progress

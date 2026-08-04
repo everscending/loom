@@ -1,0 +1,620 @@
+---
+name: orchestrate
+description: "Orchestrate a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over GitLab-tracked state. Verbs: plan, epics, tickets, build, tick, watch, unblock, replan, qa, retro."
+disable-model-invocation: true
+---
+
+# Orchestrate
+
+Six-phase state machine from PRD to merged, verified product requirements.
+Design record: the "orchestrator-plan" blueprint (2026-07-20); spec is
+tracker issue #85. This skill **routes** to other skills and the tracker —
+it teaches no technique of its own.
+
+## Constitution (violations are bugs)
+
+1. **No shadow state.** The GitLab tracker is the only mutable **build**
+   state — every decision about a ticket. Config is read-only input. If a
+   fresh session can't reconstruct the *build* by querying `glab`, it's a
+   bug. Scoped deliberately: the run directory (`~/.orchestrator/<repo>/`)
+   holds locks, pid files and pause markers, which are plumbing for the
+   machine, not decisions, and are not reconstructible by design.
+2. **Route, don't teach.** Technique lives in `/grilling`, `/lavish`,
+   `/to-tickets`, `/implement`, `/code-review`. This file holds only phase
+   order, gate criteria, scheduling, and failure policy.
+3. **Every rule is paid for by a failure.** Add a rule only after a real
+   build failure, as one checklist line, citing the failure.
+4. **Every artifact has a consumer.** Name the consumer or don't produce it.
+
+## Tracker vocabulary
+
+- **Epic** = GitLab epic if the instance tier has them, else one milestone
+  per epic. Epic completeness is always derived (all member tickets
+  closed), never stored.
+- **Build** = a `Build N` issue listing the selected epics, plus a
+  `build-N` label on every member ticket. The scheduler's universe is
+  exactly "open issues labeled `build-N`".
+- **Ticket states** (labels; every transition is a label change):
+  `ready-for-agent` → `in-progress` → `review` → `merge-queue` → closed.
+  Escape hatch: `blocked` (see failure policy). Sequence is derived from
+  blocking edges each wave — never stored.
+- Blocking edges: native `blocks` links where the tier allows; otherwise
+  the ticket body's `## Blocked by` list plus `relates_to` links.
+
+## Verbs
+
+| Verb | Phase | Does |
+|------|-------|------|
+| `plan <PRD>` | 1–2 | Architecture + UX grilling → ADRs, ARCHITECTURE.md, UX spec |
+| `epics` | 3 | Epic breakdown, adjusted on a surface, created in tracker |
+| `tickets` | 4 | Tickets per epic with contracts, tiers, PRD IDs, edges |
+| `build` | 5 | Define a new build (epic selection) or adjust an existing one — **never starts it** |
+| `start` | 5→6 | The trigger: kick the unattended loop (`tick.sh install`); also resumes a halted build |
+| `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
+| `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
+| `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
+| `stop` | 6 | Abort an unattended build: unload the agent (`tick.sh uninstall`) |
+| `replan` | any | Diff amended PRD, regenerate only affected tickets |
+| `qa` | any | Review this skill's own files; report defects, never fix |
+| `optimize` | any | Compact this SKILL.md without changing behaviour |
+| `retro` | after 6 | Explain a finished build's timings; write proposals |
+
+**Verb boundaries are hard stops.** A verb ends at its own output and
+returns to the human — never auto-advance to the next verb, and never
+implement by hand under any verb. Deadline pressure does not change a
+verb's scope; surface the tension and let the human choose. *(Paid for:
+crucible plan run 2026-07-21 chained plan → epics → hand-coding under an
+"MVP tonight" deadline.)*
+
+**Manual-drive is a supported mode, not a violation.** The tick loop is
+just one scheduler over the tickets; a human in a session may work the
+frontier instead — `/implement` one ready ticket at a time, gate included
+— with the same tracker state throughout. When the deadline is tighter
+than the bootstrap, this is the sanctioned fast path; freestyle coding
+outside tickets never is.
+
+*One manual session is serial* — it holds one branch at a time, so it
+cannot exploit a parallel frontier. To parallelize under manual-drive,
+give each concurrent ticket its own worktree and its own session
+(`git worktree add ../<repo>-wt-<n> -b <branch> <base>`); a lone blocking
+ticket needs none. The tick loop does this for you (fill-lanes creates a
+worktree per lane) — parallelism is the reason to prefer it once the
+frontier widens. *(Paid for: crucible manual-drive 2026-07-21 ran the
+sole-blocker bootstrap in-place, then hit a 2-wide frontier with no
+worktrees.)*
+
+## Phase 1–2 · `plan <PRD>`
+
+1. Read the PRD fully. Explore the repo (respect `CONTEXT.md`, existing
+   ADRs). Facts are looked up; only *decisions* go to the human.
+2. Split open architectural questions: **dependent chains** → `/grilling`
+   one at a time with a recommendation each; **independent batches** →
+   one `/lavish` decision surface (options, tradeoffs, recommendation
+   badged — the orchestrator-plan blueprint page is the reference shape).
+3. Record each closed decision as an ADR (`docs/adr/`, via
+   `/domain-modeling` conventions) and fold the whole into
+   `ARCHITECTURE.md`. No open question survives this phase.
+4. Repeat for UI/UX: grill to closure, mockup options side-by-side on a
+   `/lavish` surface (`/prototype` for anything worth clicking). Output:
+   a **written UX spec with annotated mockups** — the source of truth the
+   build's UI verification checks against. Store beside the PRD.
+
+Exit criterion: a ticket-writer with no access to the human could answer
+every "which way?" from the ADRs + UX spec alone.
+
+## Phase 3 · `epics`
+
+Best-guess epic breakdown + dependency sketch, presented on a `/lavish`
+surface for merge/split/reorder annotation. On approval, create the
+epics/milestones in the tracker. Nothing else — epics are grouping, not
+state.
+
+## Phase 4 · `tickets`
+
+Route to `/to-tickets` (tracer-bullet slices, blocking edges, publish in
+dependency order) **plus** the additions in
+[references/ticket-template.md](references/ticket-template.md):
+
+- **Design decisions — implement, do not relitigate** (one line each,
+  `Decision — reason`), closing every point two engineers could disagree on.
+- **Pinned interfaces**: when tickets share a seam, the exact signature
+  goes verbatim into *every* affected ticket.
+- **Mandatory adversarial tests**: inputs that must be *rejected*, with
+  the sentence "fix the rule, not my examples."
+- **Risk tier**: `docs | logic | api | ui` — selects the gate suite from
+  `.orchestrator.yml`.
+- **PRD requirement**: the requirement ID this ticket satisfies; the gate
+  verifies faithfulness against it.
+
+Ambiguity found while writing a ticket is a phase-1 escape: close the
+decision in the ADR/UX spec *first*, then write the ticket.
+
+**Width is a ticket-writing output, not an afterthought.** Correct blocking
+edges are not enough — a graph that opens one ticket wide idles every lane
+however well the loop runs (build 2 peaked at 2 of 4, its first hour at 0–1
+startable). While writing the edges, ask how many tickets can start at once.
+Where a heavy blocker gates several dependents, split it with **Pinned
+interfaces**: a tiny `interface + stub` ticket that merges fast, the
+implementation behind it — the dependents need the signature, not the merged
+body. Phase 5 measures the result; this phase is where it is decided.
+
+## Phase 5 · `build` — define or adjust the build (never starts it)
+
+`build` shapes the build plan and spends nothing. Two modes, auto-detected:
+
+1. **No build defined** → the `/lavish` epic-selection surface (complete
+   epics ✓ unselectable, partial with progress — selecting includes only
+   remaining open tickets — untouched selectable, size estimates). On
+   submit: create the `Build N` issue (selected epics, config snapshot
+   quoted) and label member tickets `build-N`. **Only now** does the build
+   exist to measure, so report its shape alongside `max_lanes` —
+   `tick.sh snapshot | tick.sh graph` — and surface a `CHAIN-SHAPED` or
+   `NARROW START` verdict as a reason to go back to phase 4 and split a
+   blocker, not a fact to discover at wave 1. Then **stop** — tell the human
+   the trigger is `/orchestrate start`.
+2. **A build already defined** → the same surface, pre-filled with the
+   current selection, for adjustment: add an epic (label its open tickets
+   `build-N`), remove one (unlabel its *not-yet-started* tickets only —
+   never touch in-flight or merged), update the `Build N` issue body.
+   Adjusting a *running* build is allowed — the next wave simply schedules
+   the new ready set. Still starts nothing.
+
+`build` never loads the agent and never spends; the deliberate trigger is a
+separate verb.
+
+## `start` — the trigger (and resume)
+
+`start` kicks the unattended loop: `tick.sh install` generates this repo's
+launchd agent (label + state dir + logs all derived from the repo path →
+unique per repo) and loads it; `RunAtLoad` fires wave 1, and the heartbeat
++ lane self-triggers carry it from there. This is the *only* thing the
+human runs to go unattended — no `launchctl`, no plist, no cron.
+
+Idempotent, so it doubles as **resume**: a halted build (a `blocked` ticket
+cleared, or a `stop`ped one) restarts with `start` — no re-planning.
+Multi-repo: each repo's `start` installs its own independent agent, run
+concurrently. The build **auto-unloads its own agent on completion**
+(phase 6 step 8), so a finished build leaves nothing behind.
+
+## Phase 6 · the build loop
+
+Plumbing is [scripts/tick.sh](scripts/tick.sh) (lock, detach, liveness,
+snapshot, notify — deterministic; test suite `scripts/tick-test.sh`). A scheduler
+entry (launchd/cron) runs `tick.sh tick`, which takes the lock and
+launches one headless wave session running `/orchestrate tick`. **A wave
+is stateless**: it must work from tracker + lane state alone, and end by
+writing back.
+
+**Event-driven, timer as backstop.** Lanes are spawned with
+`tick.sh spawn-lane <id> --cwd <worktree> -- <cmd>`, whose `<id>` is
+`impl-<ticket>`, `gate-<ticket>[-r<round>]`, `merge-<ticket>` or
+`probe-<epic-slug>` — the scheduler reads a lane's kind off its name, and
+`spawn-lane` refuses anything else, so **slugify the epic**: an id with a
+space corrupts every reader of lane state. A finishing lane fires the next
+wave immediately — the loop advances at the speed of work, not a fixed
+cadence, with near-zero idle. The scheduler timer is only a slow
+heartbeat (~15 min) for the two things completion can't signal: the
+initial kick and resuming after a full stall (e.g. a human removed a
+`blocked` label). Prefer launchd on macOS (reboot-survival, native
+logging) over cron. Redundant fires are safe — a tick landing mid-wave is
+remembered and replayed once when that wave exits. A loop kicked by manual
+`tick` without `start` has **no** backstop — one fizzled wave stalls the
+build silently; `tick.sh` warns on every un-armed tick, and the warning is
+a to-do, not noise. *(Paid for: build-1 2026-08-02 — a self-triggered wave
+misread a permission denial as "never bootstrapped", exited without
+harvesting, and nothing fired again for hours.)* **The heartbeat doubles as
+the quiescence watcher**: every tick first classifies quiet deterministically
+(no lanes + no wave + settle window + one tracker read → `stalled` /
+`halted` / `complete`), notifies once per state change (ntfy, or a local
+macOS banner when no topic is set), skips the wave when nothing is
+schedulable, and honors `stall_action: resume | notify_only`. Detection
+cannot live in the waves — the events that most need a notification are
+the ones where no wave is alive to send it. *(Paid for: same stall; made
+essential by the human, 2026-08-02.)*
+
+**Chaining is a fast path, never the only path.** Neither the hop out of
+`review` nor the hop out of a passing gate decides anything, so a lane hands
+its successor off directly: give each session the exact `spawn-lane` line for
+the next stage and have it run that as its last act. A ticket then goes
+implement → gate → merge without bouncing off the scheduler twice. Every
+handoff is allowed to fail — merge lock held, session died, a cap reached —
+and nothing depends on one: the numbered steps below do the same work on the
+next wave regardless. Briefs travel as files, never inline prompts:
+`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies the brief
+into the worktree and swaps the placeholder for a pointer prompt; inline
+arguments past ~1000 chars are refused. *(Paid for: build-1 2026-08-01 —
+eight dead spawns in four minutes at the prompt boundary before a wave
+hand-invented the brief file.)*
+
+**Headless permissions.** Every spawned session — the wave, implementers,
+verifiers — runs `claude -p ... --permission-mode <permission_mode>`, a
+config key (default `dontAsk`). Before composing any spawn line, read the
+mode **and the models** from `resolve-config` at their real paths —
+`.scalars.permission_mode.value`, `.scalars.lane_model.value`,
+`.scalars.wave_model.value` (empty model = inherit the session default) —
+and treat a jq `null` as "wrong query path", never as "unset, use the
+skill default". *(Paid for: build-3 wave 1 2026-08-02 — a guessed
+top-level path returned null, was read as unconfigured, and nearly
+spawned four `dontAsk` lanes on the top-tier model against a global
+config saying `auto`/`sonnet`.)* **An implementation lane takes its model
+from the snapshot, not from `lane_model` directly**: `snapshot` resolves
+the escalation chain per ticket into `.model` — `{effective, source}`,
+where `source` is `label` (a human's `model::<tier>` on the ticket),
+`rework_model` (round 2 and later, i.e. after a rejection), `lane_model`,
+or `session-default`. Spawn with `--model <effective>` unless it is
+`null`, and pass nothing else through: **implementation lanes only** —
+gates, merges and probes keep `lane_model`, because escalating the
+reviewer because the implementer struggled is a different decision, and
+one mechanism must not mean two things. *(P31, asked for 2026-08-03,
+watching a rejection where one escalated round would likely have beaten
+another same-tier retry.)* `dontAsk` is deterministic: allowlist or
+immediate denial, never a hang. `auto` sends the long tail to the
+classifier instead of hard-denying it; denials still return to the model.
+Both honor the repo's `permissions.allow`, and the deny guardrails bind in
+every mode. `dontAsk`'s brittleness is now paid for three ways in one
+morning *(build-1 2026-08-02: a compound exploration command denied
+wholesale and misread as "never bootstrapped"; `$VAR` defeating prefix
+match; worktree-frozen allowlists going stale)* — prefer `auto` where the
+machine's global config says so, and treat "auto aborts after repeated
+classifier blocks" as a claim to re-verify per Claude Code version, not
+settled fact. The durable fix for a denial is never a longer allowlist:
+models judge, scripts plumb — grow `lane.sh` (below) until lanes barely
+need open shell. The repo's allowlist and denylist (hard guardrails:
+force-push, `reset --hard`, `rm -rf`) are a bootstrap-epic artifact,
+committed so every worktree and CI inherit them. Never spawn a loop
+session with `bypassPermissions` (no guardrails — legitimate only inside
+a real sandbox/container) or `acceptEdits` (hangs on bash).
+
+**Every tracker write in a lane goes through `scripts/lane.sh`** — `claim`,
+`transition`, `note`, `mr-note`, `verdict`, `scratch`; long bodies via stdin
+or `--file`. Never hand-roll a `glab` mutation in a lane: an inline `-m`
+body is denied on length alone, and any `$VAR` or `$(...)` anywhere in a
+command defeats allowlist prefix-matching outright — so the old pattern
+(`--field body=@$ORCH_SCRATCH/…`) is undeliverable exactly when it matters.
+*(Paid for: build-1 2026-08-02 — gate-1-r3 finished a correct review, then
+burned 40+ turns unable to post it; the next wave hand-built chain scripts
+to dodge the same wall.)* A lane that needs a mutation `lane.sh` lacks has
+found a missing verb — add it there, never a new allow rule. `lane.sh
+scratch` prints a literal scratch path, replacing `$ORCH_SCRATCH` in
+commands. `spawn-lane` enforces the rest: it starts each lane in its own
+worktree (so nothing needs `cd`) and refuses an untrusted one.
+
+**Base sync.** The remote is canonical; nothing depends on a local base
+branch. Always `git fetch origin` and branch from / rebase onto
+`origin/<base>` — a blocker's code is present there the instant its MR
+merges (which is also when the blocker issue closes and dependents become
+ready). Keeping a local `<base>` current is optional convenience only
+(`git fetch origin && git branch -f <base> origin/<base>` while it is not
+checked out); never let scheduling read from it.
+
+### `tick` — one wave
+
+**Narrate intent the ticker cannot derive.** The human follows the build
+through `render-events`; deterministic events cover every start and outcome,
+but a wave's own long silences read as stalls. Before any step that will run
+quietly for more than ~a minute — probe/worktree setup, conflict surgery,
+composing a blocked report — emit one line:
+`tick.sh event wave_note note "<what, for which ticket/epic>"`. One line per
+stretch, not a running commentary. *(Paid for: 2026-08-02 — six silent
+minutes of probe prep read as a wedge to the human watching the ticker.)*
+
+**A manual tick inside herdr also raises the viewer** (`$HERDR_ENV` is `1`):
+after firing the tick, launch `scripts/watch-panes.sh` detached unless it is
+already up — it is a singleton per repo (a second launch exits quietly), so
+doing this on every manual tick is safe and the human gets the ticker and
+lane panes without asking. Headless waves have no herdr and skip this;
+watch-panes refuses outside herdr anyway. *(Asked for by the human,
+2026-08-02.)*
+
+1. **Read**: `tick.sh snapshot` — one JSON document: open `build-N` tickets
+   (labels, assignees, tier, blocking edges + closed flags), epic rollup,
+   lane states, lessons tail. Derived and disposable; after your own writes
+   (claims, merges, verdicts) re-run it, never query piecemeal.
+2. **Harvest lanes**: lane `rc` 7 = its pregate rejected the branch, not a
+   crash — post the rejection straight from the lane log, no verifier. Other
+   `dead` before reaching `review` → crash (resume from the surviving
+   worktree; `crash_cap` crashes → blocked). `stale` → **`tick.sh
+   kill-lane`** (never a bare `kill`: that orphans the agent session inside,
+   which keeps pushing — #29 merged through a human hold that way,
+   2026-08-02), then treat as crash: an alive-but-silent lane still holds
+   its ticket, so until its pid file is gone the ticket cannot be gated again.
+   Staleness counts *progress*, not log bytes — the watcher stamps
+   `<id>.progress` from the filtered event count (retry/rate-limit chatter
+   excluded) and `lane-status` clocks off the stamp, so both wedge shapes
+   (silent API gaps and retry storms) read as `stale`; the watcher notifies
+   `lane_stale`/`wave_stale`, and killing stays here, in the harvest. *(Paid
+   for: build-1 2026-08-02 — retry chatter kept a zero-progress gate "fresh"
+   2h40m, and waves had no staleness signal at all.)*
+   A gate lane `dead` with rc 0 whose ticket is still `gate.eligible` ended
+   **without a verdict** — clear-lane and respawn `-r<n+1>`, and read its log
+   tail before counting caps: an API stream stall is neither a crash nor a
+   rejection. *(Paid for: build-1 2026-08-02 — gate-1-r2's review subagent
+   stalled 600s, the session exited 0, and #1 sat in `review` with no lane.)*
+   Finished (label moved) → `tick.sh clear-lane`.
+3. **Gate** — for each ticket where `gate.eligible`, never merely "in
+   `review`" (the snapshot already dropped tickets whose MR merged underneath
+   and HEADs an existing verdict covers; `gate.reason` says which): spawn
+   `spawn-lane gate-<ticket>[-r<round>] --pregate <tier> --cwd <worktree> -- <cmd>`.
+   `--pregate` runs the repo's own gate runner in shell first, so a
+   mechanically red branch exits 7 in seconds having spent no model time;
+   never reimplement gate-running in the skill, CI runs the same runner. Past
+   it the session does the ticket's **single** independent `/code-review` +
+   PRD-faithfulness check against its `PRD requirement`. Verdict is a label
+   change: pass → `merge-queue`; fail → `in-progress` with a rejection
+   comment (`rejection_cap` → blocked). End every verdict comment with
+   `<!-- orch-verdict PASS|FAIL <head-sha> -->`: that trailer is how the next
+   wave knows this HEAD is judged. A FAIL also names its defect class —
+   `lane.sh verdict <iid> fail <sha> --class <kebab-slug>` folds
+   `class=<slug>` into the trailer; reuse the previous rejection's slug when
+   it is the same class, because that match is what stops round 3 (P30). Hand the session its merge spawn line
+   (step 5) and have it run that on a PASS, so a passing gate reaches the
+   merge queue with no wave in between. The chained lane merges **the oldest
+   `merge-queue` ticket**, exactly as step 5 does — not necessarily the one
+   that just passed. The handoff removes a scheduler hop; it does not grant
+   its own ticket cutting rights.
+4. **Fill lanes — rework before new work.** `summary.stranded` lists
+   claimed `in-progress` tickets with no alive lane: where every gate
+   rejection lands (verdict fail → `in-progress`, assignee kept) and no
+   other step looks — harvest reads lanes, gate needs `review`, the fill
+   below needs *unclaimed*. For each, spend an impl slot first: respawn
+   `impl-<ticket>` in its surviving worktree with the latest rejection
+   comment injected, **on the ticket's `.model.effective`** — a rework
+   round is exactly where the escalation chain differs from `lane_model`,
+   so a respawn that ignores it silently spends the round on the tier that
+   just failed. Rework outranks the backlog — the ticket is closest
+   to done and its rejection cap is already counting. *(Paid for: build-3
+   2026-08-02 — #11/#12 gate-FAILed into `in-progress` and stranded while
+   fresh backlog tickets took the slots; the human had to ask why.)*
+   **Except: two same-class rejections mean stop, not respawn.** When a
+   stranded ticket's `rejections.same_class_tail` ≥ 2, block it for a
+   design decision — report citing both rejections and the single call
+   needed — instead of a third same-tier guess; the cap stays for
+   *different* failures. *(Paid for: #39 burned round 3 on a class the
+   round-2 verdict had already named, 2026-08-02.)*
+   Then, while `summary.impl_slots_free` > 0 (implementers alone
+   fill `max_lanes`; gates, merges and probes share `max_aux_lanes`) and
+   ready tickets exist — **`fix: true` tickets before the rest of the ready
+   set**: every open fix ticket holds an epic's re-probe hostage and widens
+   the defect window for lanes building on that epic (asked for by the
+   human, 2026-08-02) —
+   (**unblocked = every blocker issue closed / its MR merged**, not merely
+   opened — auto-merge is async; unclaimed; `build-N`): claim (assignee +
+   `in-progress`, the first write), `git fetch origin`, create the lane
+   worktree from the **freshly-fetched remote base** (`origin/<base>`, so
+   it contains every already-merged blocker) **with the repo's own
+   mechanism** — `openemr-cmd worktree add <branch> -b --base develop
+   --env copilot --start` in openemr; `git worktree add <path> -b <branch>
+   origin/<base>` plus the repo's documented setup elsewhere — **copy the
+   repo root's untracked `.env` into the new worktree when present** (keys
+   are canonical at root; worktrees stay disposable — a hand-filled `.env`
+   trapped in one worktree became hostage state, build-1 2026-08-02) — then
+   `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` (with the ticket's
+   `.model.effective`, above) a
+   headless `/implement <ticket>` session whose prompt: injects the
+   ticket body + lessons thread, **skips `/implement`'s trailing
+   self-review** (the gate owns review), runs its own tier gate and fixes
+   what it reports **before** pushing (so a verifier rarely meets a
+   mechanical failure), commits with the `Assisted-by` trailer, pushes,
+   opens the MR, moves the label to `review`, and as its final act runs the
+   gate spawn line (step 3) the wave handed it.
+5. **Merge queue** — never inline: `spawn-lane merge-<ticket> --merge-lock
+   --cwd <worktree> -- <cmd>`, which holds the single-writer merge lock for
+   that lane alone, so
+   scheduling continues while it runs and a second merge is refused (skip this
+   step when `summary.merge_in_flight`). It comes *after* filling lanes: a
+   ticket ready at wave start must not wait out a whole merge before its
+   worktree exists, and the merge lane fires its own tick when it lands, which
+   picks up whatever it newly unblocked.
+   The lane does, for the oldest `merge-queue` ticket only:
+   `lane.sh reconcile` — fetch + **merge** `origin/<base>` into the branch,
+   never rebase: this skill's own guardrails deny force-push, so rebased
+   history can never be pushed, and the verb exists because two lanes chose
+   rebase off this very step and dead-ended at the denial *(build-1
+   2026-08-02; merge-21 build-3 2026-08-02 — which then asked a headless
+   void for permission, twice)*. The verb picks the **integration base**
+   itself (`develop` if it exists, else `main`, always the remote ref).
+   `rc 3` = a real conflict: resolve trivial ones and commit; otherwise
+   `git merge --abort`, post a blocked report, exit — **never ask a
+   question; no one is there**. Then re-run its tier gates → merge → close
+   ticket (`lane.sh close`, which also strips the state labels). **Worktree teardown belongs
+   to `tick.sh sweep`, never the merge lane** — a lane cannot remove the
+   worktree it stands in *(paid for: build-1 2026-08-02, wt-1)*, and the
+   human must never inherit cleanup chores *(paid for: same day — two
+   merged worktrees' artifact dirs became standing `rm -rf` to-dos)*. The
+   sweeper runs automatically inside every tick: deterministic plumbing,
+   provably scoped to this skill's own `<repo>-wt-<n>` naming and merged
+   branches, backing up `.env` to the state dir first, never touching a
+   live lane's cwd or modified tracked files. Repos with a non-git
+   `worktree_cmd` (openemr) still tear down via their own mechanism in the
+   wave. Plain GitLab auto-merge is **not** this queue — with parallel
+   lanes it merges MRs that were never gate-tested together; use merge
+   trains or let this step own merging.
+6. **Epic acceptance**: when an epic's last ticket closes, spawn a probe
+   lane (`spawn-lane probe-<epic-slug> --cwd <worktree> -- <cmd>`)
+   that exercises the epic the way a *user* would, against a really-running
+   stack — not the test suite again. Each failure files a fix ticket
+   (labeled `build-N` **and `fix`**, tier assigned, **and in the defective
+   epic's milestone** — completeness and the re-probe derive from
+   membership, so a milestone-less fix ticket lets an epic close over an
+   open defect: E4 closed over #41, 2026-08-02) entering at ready; the
+   `fix` label is what makes the fill step's fix-first ordering work, so a
+   lane filing a defect mid-build applies it too.
+
+   **The probe prompt is the failure surface** — put these in it every
+   time. *Every step blocks*: a headless session gets no notifications or
+   wake-ups, so "I've backgrounded it and will be notified" never wakes
+   (it killed one probe outright). *Poll, never await*: run the stack as a
+   background shell and poll it (`BashOutput`, or a `curl` + `sleep` loop)
+   under a hard attempt cap, where hitting the cap is a failure to report.
+   *Kill the stack before exiting* (`KillShell`); ephemeral files go in
+   `$ORCH_SCRATCH` and are never cleaned up by hand. *Report last*: fix
+   tickets, then the epic result via
+   `lane.sh probe-result <build-iid> <epic-slug> pass|fail --file <report>`
+   — one verb posts the report on the Build issue, feeds the outcome to
+   the build ticker, and on PASS closes the epic's milestone (a combined
+   probe calls it once per epic); a probe that only writes prose leaves
+   the ticker saying "probe ended (rc 0)" with no verdict (human,
+   2026-08-02). Clean runs say so and file nothing.
+
+   **Probe FAIL → judge the blast radius:** in-flight tickets downstream of
+   the epic keep running (note the risk on each) — unless a fix ticket
+   touches a pinned seam: then kill and requeue behind the fix.
+7. **Notify + write back**: `tick.sh notify` for `ticket_blocked` /
+   `build_halted` (no progress past staleness, or all remaining blocked) /
+   `build_complete` (ready set empty, no lanes; post the completion
+   report — each PRD requirement → evidence links — then the digest, then
+   **close the `Build N` issue itself** via `lane.sh close`: snapshot
+   defines the *current* build as the highest open `Build N` issue, so a
+   finished one left open is ambiguity every later snapshot re-warns about
+   — Builds 1–2 both left theirs open, 2026-08-02).
+   Append wave learnings to ticket threads / the Build issue.
+8. **Auto-teardown on completion**: on `build_complete`, *after* the report
+   and ntfy are posted, unload this repo's own agent — but **detached**, so
+   the bootout can't SIGTERM the wave mid-write:
+   `( sleep 3; "<skill>/scripts/tick.sh" uninstall ) &`. A finished build
+   leaves no running agent behind (the tdd-dash-leftover trap, closed by
+   design). `build_halted` does **not** teardown — a stalled build stays
+   armed so resolving a `blocked` ticket lets the heartbeat resume it.
+   Then exit.
+
+### `stop`
+
+`tick.sh uninstall` — unload this repo's agent and remove its plist. For
+aborting a build before completion; completion tears down on its own.
+
+### `watch [--no-panes]`
+
+From any session: read `tick.sh lane-status` and tracker state, then narrate
+per lane — what it's doing, why, what's next — plus merge-queue depth and
+blocked list. Read-only.
+
+Then give the human eyes on the work: inside herdr (`$HERDR_ENV` is `1`),
+launch `scripts/watch-panes.sh` **detached** — a pane per live lane running
+`tick.sh render-log <id> --follow`, plus a build-ticker strip running
+`tick.sh render-events --follow` (one timestamped line per step: claimed,
+→ review, gate verdict, merged — deterministic, zero model time; narrating
+mechanical events with a session is the wrong tool). The viewer keeps the
+ticker alive every poll, so closing its pane is futile — the human gesture
+is `watch-panes.sh ticker off|on` (2026-08-02). Detached, so the panes
+outlive this session. Outside herdr, name those commands instead.
+`--no-panes` for the summary alone. Never hand the human a command to paste
+when it can just be run.
+
+### `unblock <n> [--to-review]`
+
+Post the human's decision as a comment; remove `blocked`. Default →
+`ready-for-agent` **and unassign** — the ready set requires *unclaimed*, so a
+ticket left holding the assignee its lane wrote is invisible to step 4, and a
+build with nothing else outstanding reports `build_complete` and tears itself
+down with that ticket still open. `--to-review` → `review` (human completed the
+work; it takes the same gate as agent work — no bypass), assignee kept.
+
+### `replan`
+
+Diff the amended PRD against the spec issue. For each changed
+requirement: affected open tickets are regenerated (phase-4 rules);
+affected *closed* tickets spawn delta tickets; untouched tickets are
+never rewritten. The PRD stays frozen otherwise.
+
+### `retro`
+
+Explain where a finished build's time went and write the findings up as
+proposals — human-run, never invoked by a wave, and it proposes rather than
+fixes. `tick.sh retro [--build <l>] [--vs <l>]` computes the numbers; reading
+them, and the report format:
+[references/retro.md](references/retro.md).
+
+### `qa`
+
+Review this skill's own files and report what is broken — human-run, never
+invoked by a wave, and it reports rather than fixes. Per-file reviewer briefs,
+the confirm step and the report format:
+[references/qa.md](references/qa.md).
+
+### `optimize`
+
+Compact this file — every session that invokes the skill loads it in full, so
+its words are paid for on every tick — **without changing what it makes an
+agent do**. Human-run, never invoked by a wave. It is surgery, not editing:
+this file is also the only place a wave learns to drive the scripts, and the
+damage from a careless cut is mostly silent. The procedure, the untouchable
+machine contracts, and the mechanical check that catches the silent class:
+[references/optimize.md](references/optimize.md).
+
+## Failure policy
+
+- `blocked` = rejection cap exhausted (`rejection_cap`), a product
+  decision only the human can make is missing, or an external dependency.
+  Crashes are counted separately (`crash_cap`) and are not rejections.
+- Blocking writes a **blocked report** comment: category, what each
+  attempt tried, branch/MR links, and *the single decision or action
+  needed* — then fires the `ticket_blocked` ntfy push and moves on.
+- Unblock = decision posted + `blocked` label removed + **assignee
+  cleared** (the `unblock` verb, or by hand in GitLab). Next wave
+  auto-requeues; the attempt resumes from the surviving worktree/branch.
+  Leaving the assignee is how an unblocked ticket silently misses the
+  ready set.
+- Human hand-fixes: always commit, never leave a worktree dirty. Partial
+  fix → `unblock`. Complete fix → push + `unblock --to-review`; it takes
+  the same gate as agent work.
+- **A human hold = the `blocked` label, applied sticky.** `lane.sh` refuses
+  to advance a blocked ticket (only the unblock direction may touch it), so
+  a hold placed mid-flight wins the race against in-flight lanes; and stop
+  a lane only with `tick.sh kill-lane`. Both halves paid for at once: a
+  `ready-for-agent` hold was stomped by an orphaned lane's transition and
+  #29 merged through it (2026-08-02).
+- **A human escalation = a `model::<tier>` label on the ticket** (P31),
+  added while reading the rejection that motivates it — sidebar click, or
+  ask the driving session. It survives every round until removed, is
+  tracker-resident like every other decision, and only ever changes that
+  ticket's *implementation* lane. Removing it drops the ticket back to the
+  config chain.
+
+## Config
+
+All tunables in `.orchestrator.yml` at the repo root (lanes, caps,
+staleness window, usage-limit policy, ntfy, gate tiers — enum options
+documented in-file). There is deliberately **no tick-interval key**: the
+heartbeat is a fixed backstop and lane self-triggers set the pace. The
+orchestrator never writes it.
+
+**New repo bootstrap.** Most of it is now derived, not authored (P22), and it
+runs itself. The **first `tick` in a repo** invokes `scripts/bootstrap.sh all`
+— seed `~/.orchestrator/config.yml`, write `.claude/settings.json`, create the
+five missing ticket-state labels — then proceeds with the wave. A sentinel in
+the repo's state dir makes every later tick skip it; a *failed* bootstrap
+writes no sentinel, so the next tick retries, and it never blocks the wave.
+It is hooked to `tick`, not `start`, because `tick` is the verb that always
+runs. Run it by hand any time: `bootstrap.sh all` is idempotent.
+
+Underneath, `tick.sh resolve-config` detects the stack and emits the effective
+config — `base`, the gate tiers as literal commands, the runner path, and the
+whole permission surface — resolving repo → derived → global → default. Run it
+*before* writing bootstrap tickets and only ticket what it could not derive.
+Because the allowlist is generated from the same commands the gates and probes
+run, it cannot drift from them.
+
+What still needs a repo-bootstrap epic: tracker labels, the CI pipeline, the
+**repo-resident gate runner** (`scripts/gate.sh <tier>`, which reads those
+commands and runs them fail-fast — it is the repo's own definition of done,
+so CI and bare-clone contributors run it without the skill), and any
+`.orchestrator.yml` line no detector can infer (an env var the gates need, a
+live target URL, a non-git `worktree_cmd`). Everything else blocks on that
+epic. Never copy another repo's gate suites verbatim — derive them.
+
+**Read half vs. write half.** `tick.sh` is **read-only against the tracker** —
+the wave re-runs it constantly, so a mutating call there would be unsafe to
+repeat, and `tick-test.sh` enforces it by scanning captured argv for mutating
+verbs. Setup genuinely must write, so it lives in `scripts/bootstrap.sh`
+instead of eroding that guarantee. Nothing in bootstrap ever deletes, and
+nothing already present is overwritten without `--force`.
+
+**Skill vs. repo boundary.** `tick.sh` (orchestration mechanism) lives in
+the skill: only the orchestrator-driver runs it, never CI or a bare
+clone. The gate runner lives in the *repo*: it is the repo's own
+definition of done — CI, contributors, and the wave all run it without
+the skill installed, and its commands are repo-specific. One source of
+truth for the tier→command map (`.orchestrator.yml`), one runner both CI
+and the wave invoke. **Use the canonical key names from**
+[references/orchestrator-config.md](references/orchestrator-config.md) —
+only the values are repo-specific; renaming keys per repo is a bug.
