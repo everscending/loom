@@ -38,6 +38,7 @@ writing a new proposal that touches the same machinery.
 | P23 | Make the evidence for the next round fall out of running a build | implemented 2026-08-01 (`events.jsonl` written by the machinery; `tick.sh report` and `report --ticket <n>`) |
 | P25 | Give the skill a maintenance verb that does not trust its own tests | implemented 2026-08-01 (`references/qa.md`; `qa` verb routes to it) |
 | P26 | Turn a finished build into next round's proposals | implemented 2026-08-01 (`tick.sh retro`; `references/retro.md`; snapshot event carries deps/ready/impl_free) |
+| P37 | Let a re-scoped ticket retire the rejection history of its old scope | implemented 2026-08-04 (`lane.sh rescope` writes an `orch-scope-reset` marker, refused for lanes and waves; `rejections_of` stops its scan there) |
 
 ## Independent review round (2026-08-01)
 
@@ -1414,3 +1415,35 @@ and the next tick after accepting trust completes it. Suite: 324 passed, 0 faile
 **Verified against the real machine.** Replaying build-1's exact trust state against
 the live `seat-reservations-wt-5` worktree, `spawn-lane` refuses and spawns nothing;
 under the real (now trusted) trust file, the same spawn succeeds — no false refusal.
+
+## P37 · Let a re-scoped ticket retire the rejection history of its old scope
+
+**Evidence.** build-3, 2026-08-04. #67 was rejected three times, every one class
+`fifo-tiebreak-still-races`, against browser-side arrival-order pairing. A human decision then
+narrowed the ticket to a bounded give-up and moved the general race to #48. #48 merged and deleted
+the pairing code entirely, so the old rejections were about machinery that no longer exists. The
+ticket was rewritten — new title, new body, new branch, MR !63 closed — and came back to the board
+carrying `rejections.total: 3` against `rejection_cap: 3`. Its first gate rejection would have
+blocked it on the spot, and `same_class_tail: 3` would have skipped even the rework round. The
+implementation passed, so it did not bite this time. Nothing stops it biting next time.
+
+**Root cause.** `rejections_of` (`scripts/tick.sh:1893`) derives the whole history by scanning
+every `<!-- orch-verdict FAIL … class=… -->` trailer in a ticket's comment thread. That scan is
+deliberately un-losable — the thread fetch was widened twice so a ticket could not shed its history
+by passing through `blocked` — and there is no way to say "this ticket is now different work". The
+cap is attached to the issue number, not to the scope.
+
+**Fix.** A tracker-resident marker, so the constitution's no-shadow-state rule holds and a fresh
+session sees the same history any wave does:
+
+- `lane.sh rescope <iid> [--file F]` posts the comment explaining what changed and ends it with
+  `<!-- orch-scope-reset <iso8601> -->`. One verb, like every other tracker write.
+- `rejections_of` stops its scan at the newest reset marker: trailers older than it count toward
+  neither `total` nor `same_class_tail`. Keep them visible in the thread — this retires the cap,
+  it does not hide the history.
+- Refuse the verb from an automated caller, exactly as P36 refuses `--release-hold`. Re-scoping is
+  a human decision about what a ticket *is*; a lane that could reset its own cap has no cap.
+
+**Tests.** A ticket with three FAIL trailers and a newer reset marker reads `total: 0`; the same
+ticket with the marker older than one of the FAILs still counts that one; a lane calling `rescope`
+is refused and writes nothing.

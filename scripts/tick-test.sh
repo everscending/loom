@@ -1345,6 +1345,31 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(q '.tickets[] | select(.iid==10) | .rejections | "\(.total)/\(.same_class_tail)"')" = "0/0" ] \
     && ok "snapshot: no verdicts means zero rejections" \
     || bad "snapshot: phantom rejections on a clean ticket"
+# 7a5b. P37: the cap belongs to the SCOPE, not the issue number. A ticket
+#      rewritten into different work carries an `orch-scope-reset` marker
+#      (lane.sh rescope), and verdicts older than the newest one stop counting.
+#      #67 came back to the board with 3 of 3 rejections against code #48 had
+#      deleted; its first gate FAIL would have blocked it (build-3, 2026-08-04).
+cat > "$FX/notes-12-rescoped.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Re-scoped: the pairing race moved to #48, which deleted this code.\n\n<!-- orch-scope-reset 2026-07-28T10:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"r3\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"}]
+EOF
+cp "$FX/notes-12-rescoped.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-rescope" "$TICK" snapshot > "$T/snap-rescope.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.same_class_tail)"' "$T/snap-rescope.json")" = "0/0" ] \
+    && ok "snapshot: a scope reset retires every rejection older than it" \
+    || bad "snapshot: re-scoped ticket still carries its old cap ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-rescope.json"))"
+# Planted violation: the marker must not eat history NEWER than itself, or a
+# single rescope would make the cap permanently unreachable. Same fixture, the
+# marker moved back between r2 and r3 — r3 still counts.
+sed 's/2026-07-28T10:00:00Z/2026-07-28T09:25:00Z/g' "$FX/notes-12-rescoped.json" > "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-rescope-mid" "$TICK" snapshot > "$T/snap-rescope-mid.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-rescope-mid.json")" = "1/marks-attribution/1" ] \
+    && ok "snapshot: rejections newer than the reset marker still count" \
+    || bad "snapshot: the reset swallowed a later rejection ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-rescope-mid.json"))"
 # 7a6. P31: the model escalation chain is RESOLVED in the snapshot, not
 #      reasoned about per wave — ticket `model::` label > rework_model (a
 #      round following a rejection) > lane_model > the session default.
@@ -3517,6 +3542,36 @@ fi
 grep -q "issues/8/notes" "$ACAP2" \
     && ok "merge-failed: posted the attempt on the ticket thread" \
     || bad "merge-failed: no note call ($(cat "$ACAP2" | tr '\n' ';'))"
+
+# 16a4b. P37: `rescope` retires the rejections of a ticket's OLD scope. It is a
+#       human's judgement about what the ticket now IS, so — like
+#       `--release-hold` — it is refused outright inside a lane or a wave: a
+#       lane that can reset its own cap has no cap. (#67, build-3 2026-08-04.)
+VCAP4="$T/rescope-bodies"; : > "$VCAP4"
+echo "Re-scoped: the race moved to #48" | ORCH_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" "$LANE" rescope 8 >/dev/null 2>&1
+grep -qE "orch-scope-reset [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAP4" \
+    && grep -q "the race moved to #48" "$VCAP4" \
+    && ok "rescope: a human posts the reason and the marker together" \
+    || bad "rescope: marker or reason missing ($(tail -3 "$VCAP4" 2>/dev/null))"
+echo "no body, no record" | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" \
+    "$LANE" rescope notanumber >/dev/null 2>&1 \
+    && bad "rescope: accepted a non-numeric iid" \
+    || ok "rescope: bad iid refused"
+# Planted violation: the two automated callers, each with a body ready to post.
+# Captured from real argv, so "it wrote nothing" is proven rather than assumed.
+ACAP4="$T/rescope-calls"; : > "$ACAP4"
+echo "the ticket changed, honest" | ORCH_LANE_ID=impl-8 ORCH_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 >/dev/null 2>&1 \
+    && bad "rescope: a lane retired its own rejection history" \
+    || ok "rescope: a lane cannot reset its own cap"
+echo "the ticket changed, honest" | ORCH_WAVE_PROMPT="/orchestrate tick" ORCH_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 >/dev/null 2>&1 \
+    && bad "rescope: a wave retired a ticket's rejection history" \
+    || ok "rescope: a wave cannot reset a ticket's cap"
+[ -s "$ACAP4" ] \
+    && bad "rescope: an automated caller still reached the tracker ($(head -1 "$ACAP4"))" \
+    || ok "rescope: no automated reset write reached the tracker"
 ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed abc </dev/null >/dev/null 2>&1 \
     && bad "merge-failed: accepted a non-numeric iid" \

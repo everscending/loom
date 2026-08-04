@@ -1890,12 +1890,30 @@ cmd_snapshot() {
     # decision, not a third same-tier guess (#39 burned round 3 on a class
     # the round-2 verdict had already named, 2026-08-02). A FAIL without a
     # class, or a PASS, breaks the run — conservative by design.
+    # P37: a `<!-- orch-scope-reset … -->` marker (lane.sh rescope) says the
+    # ticket became different work, so the cap is attached to the SCOPE and not
+    # to the issue number: verdicts older than the newest marker count toward
+    # neither `total` nor `same_class_tail`. #67 was rewritten into a bounded
+    # give-up after the race it was rejected over moved to #48 and #48 deleted
+    # the code — and it returned to the board with 3 of 3 rejections against
+    # machinery that no longer existed (build-3, 2026-08-04). Ordering uses the
+    # created_at of the marker note itself, with the same tiebreak as the
+    # verdicts it is compared against — one clock, the one the tracker stamps.
+    # The iso8601 inside the marker is the human-readable record, never the
+    # comparison key. (No apostrophes in this comment: the whole jq program is a
+    # single-quoted shell string, and one would end it mid-word.)
     def rejections_of($notes):
-        ([$notes | to_entries[] | .key as $i | .value as $note
+        ([$notes | to_entries[]
+          | select((.value.body // "") | test("orch-scope-reset"))
+          | {at: (.value.created_at // ""), i: .key}]
+         | sort_by([.at, -.i]) | last) as $reset
+      | ([$notes | to_entries[] | .key as $i | .value as $note
           | ($note.body // "")
           | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})(?:\\s+class=([a-z0-9-]+))?")
           | {verdict: .[0], class: .[2], at: ($note.created_at // ""), i: $i}]
-         | sort_by([.at, -.i])) as $vs
+         | sort_by([.at, -.i])
+         | if $reset == null then .
+           else map(select([.at, -.i] > [$reset.at, -$reset.i])) end) as $vs
       | ($vs | reverse
              | reduce .[] as $v ({run: 0, cls: null, stop: false};
                  if .stop then .

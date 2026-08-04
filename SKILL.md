@@ -568,7 +568,10 @@ Resolution, layer order, the test bar and the archive step:
 
 - `blocked` = rejection cap exhausted (`rejection_cap`), a product decision
   only the human can make is missing, or an external dependency. Crashes are
-  counted separately (`crash_cap`) and are not rejections.
+  counted separately (`crash_cap`) and are not rejections. A ticket **rewritten
+  into different work** keeps the old scope's rejections until a human retires
+  them with `lane.sh rescope <n>` — refused inside a lane or a wave, like
+  `--release-hold`. *(paid: a spent cap against deleted code.)*
 - Blocking writes a **blocked report** comment: category, what each attempt
   tried, branch/MR links, and *the single decision or action needed* — then
   fires the `ticket_blocked` ntfy push and moves on.

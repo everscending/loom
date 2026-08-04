@@ -57,7 +57,6 @@ evidence, and implementation notes belong in this file, not there.
 | ID | Proposal | Status |
 |----|----------|--------|
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — proposed 2026-08-03; 4 of 5 gate rejections in one build |
-| P37 | Let a re-scoped ticket retire the rejection history of its old scope | open — proposed 2026-08-04; #67 was rewritten into different work and still carried a spent cap |
 | P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
 | P3 | Actually arm the safety-net timer, and check that it worked | open — re-opened 2026-08-02; build-1 paid 2h08m for the unarmed backstop, and the shipped warning cried wolf after arming |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
@@ -200,38 +199,6 @@ worse. Do not tighten slug matching on this evidence.
 **What would falsify it.** A build where re-gate lane count does not drop, or where the pregate
 check exits 7 on a branch the review gate would have passed — a false rc 7 is more expensive than
 the round it saves.
-
-## P37 · Let a re-scoped ticket retire the rejection history of its old scope
-
-**Evidence.** build-3, 2026-08-04. #67 was rejected three times, every one class
-`fifo-tiebreak-still-races`, against browser-side arrival-order pairing. A human decision then
-narrowed the ticket to a bounded give-up and moved the general race to #48. #48 merged and deleted
-the pairing code entirely, so the old rejections were about machinery that no longer exists. The
-ticket was rewritten — new title, new body, new branch, MR !63 closed — and came back to the board
-carrying `rejections.total: 3` against `rejection_cap: 3`. Its first gate rejection would have
-blocked it on the spot, and `same_class_tail: 3` would have skipped even the rework round. The
-implementation passed, so it did not bite this time. Nothing stops it biting next time.
-
-**Root cause.** `rejections_of` (`scripts/tick.sh:1893`) derives the whole history by scanning
-every `<!-- orch-verdict FAIL … class=… -->` trailer in a ticket's comment thread. That scan is
-deliberately un-losable — the thread fetch was widened twice so a ticket could not shed its history
-by passing through `blocked` — and there is no way to say "this ticket is now different work". The
-cap is attached to the issue number, not to the scope.
-
-**Fix.** A tracker-resident marker, so the constitution's no-shadow-state rule holds and a fresh
-session sees the same history any wave does:
-
-- `lane.sh rescope <iid> [--file F]` posts the comment explaining what changed and ends it with
-  `<!-- orch-scope-reset <iso8601> -->`. One verb, like every other tracker write.
-- `rejections_of` stops its scan at the newest reset marker: trailers older than it count toward
-  neither `total` nor `same_class_tail`. Keep them visible in the thread — this retires the cap,
-  it does not hide the history.
-- Refuse the verb from an automated caller, exactly as P36 refuses `--release-hold`. Re-scoping is
-  a human decision about what a ticket *is*; a lane that could reset its own cap has no cap.
-
-**Tests.** A ticket with three FAIL trailers and a newer reset marker reads `total: 0`; the same
-ticket with the marker older than one of the FAILs still counts that one; a lane calling `rescope`
-is refused and writes nothing.
 
 ## P38 · One way for a lane to fire the next wave, not two
 

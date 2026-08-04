@@ -39,6 +39,11 @@
 #                                            label; the count is what lets the
 #                                            queue stop retrying one poisoned
 #                                            ticket and advance to the next
+#   lane.sh rescope <iid> [--file F]          this ticket is now DIFFERENT work:
+#                                            post what changed and retire the
+#                                            rejections recorded before it. A
+#                                            human's call only — refused inside
+#                                            a lane or a wave
 #   lane.sh fix-ticket --title <t> --tier <t> --milestone <m> [--file F]
 #                                            file a fix ticket a wave can
 #                                            actually schedule: applies all
@@ -222,6 +227,45 @@ cmd_merge_failed() { # <iid> [--file F]
     _post_note issues "$iid" "$f"
     _lane_ev merge_failed ticket "$iid"
     echo "lane.sh: issue $iid — merge attempt recorded"
+}
+
+cmd_rescope() { # <iid> [--file F]
+    # P37: retire the rejection cap when a ticket becomes DIFFERENT WORK.
+    # `rejections_of` (tick.sh) derives the whole history by scanning every
+    # `orch-verdict FAIL` trailer in the thread, and that scan is deliberately
+    # un-losable — the fetch was widened twice so a ticket could not shed its
+    # history by passing through `blocked`. So there was no way to say "this is
+    # not the same ticket any more": #67 was rejected three times over
+    # browser-side arrival-order pairing, a human then narrowed it to a bounded
+    # give-up and moved the race to #48, #48 merged and deleted the pairing code
+    # outright — and the rewritten ticket came back to the board carrying 3 of 3
+    # rejections against machinery that no longer existed. Its first gate FAIL
+    # would have blocked it on the spot, and same_class_tail 3 would have
+    # skipped even the rework round. It passed, so it did not bite that time.
+    # (build-3, 2026-08-04.)
+    #
+    # The marker is a tracker comment, not run state: the cap decides whether a
+    # ticket gets blocked, and decisions are tracker-state (constitution rule
+    # 1), so a fresh session reads the same history any wave does. The old
+    # trailers stay in the thread — this retires the cap, it does not hide it.
+    local iid="${1:-}"
+    _check_iid "$iid"
+    # Refused for automated callers, exactly as `--release-hold` is, and for the
+    # same reason: re-scoping is a human's judgement about what a ticket IS. A
+    # lane that could reset its own cap has no cap — and the ticket prose that
+    # would talk it into doing so is the same prose the hold guard already
+    # refuses to obey.
+    if _automated_caller; then
+        die "rescope is refused in an automated session (${ORCH_LANE_ID:-wave}): retiring a ticket's rejection history is a human's decision about what the ticket now IS, never a lane's or a wave's."
+    fi
+    # A body is mandatory (_stage_body refuses an empty one): the comment IS the
+    # record of what changed, and a bare marker retires a cap while explaining
+    # nothing to the next reader.
+    local f; f=$(_stage_body "${@:2}")
+    printf '\n\n<!-- orch-scope-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issues "$iid" "$f"
+    _lane_ev ticket_rescope ticket "$iid"
+    echo "lane.sh: issue $iid re-scoped — rejections recorded before this note no longer count"
 }
 
 cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F]
@@ -490,11 +534,12 @@ case "${1:-}" in
     verdict)    shift; cmd_verdict "$@" ;;
     merge-failed) shift; cmd_merge_failed "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
+    rescope)    shift; cmd_rescope "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;
     merge)      shift; cmd_merge "$@" ;;
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--file F] | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac
