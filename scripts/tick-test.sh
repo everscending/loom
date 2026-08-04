@@ -2916,6 +2916,60 @@ else
 fi
 rm -f "$T/wp13k-home/lanes"/impl-9*.pid
 
+# 13l. The viewer needs its OWN off-switch, not just the ticker's. Until now,
+#      closing everything meant killing the process by its pidfile from a
+#      command someone had to be told — and the header's "Ctrl-C to stop" is
+#      true only of a foreground run, while the skill launches this detached
+#      on purpose. So in normal use there was no way to stop it. (Asked for by
+#      the human, 2026-08-04.)
+VH="$T/viewer-off-home"; mkdir -p "$VH/lanes"
+out=$(ORCH_HOME="$VH" bash "$WP" off 2>&1)
+[ -f "$VH/viewer-off" ] && ok "watch-panes: 'off' plants the viewer switch from any terminal" \
+                        || bad "watch-panes: off did not plant the switch ($out)"
+# The switch outranks every launch path — including the opportunistic launch a
+# manual tick does, which would otherwise undo the human on the next tick.
+: > "$T/herdr-calls"
+out=$(HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    ORCH_HOME="$VH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" 2>&1)
+if [ ! -s "$T/herdr-calls" ] && printf '%s' "$out" | grep -q "switched off"; then
+    ok "watch-panes: a switched-off viewer refuses to launch and opens no panes"
+else
+    bad "watch-panes: off-switch did not stop a launch ($(head -c 120 "$T/herdr-calls"))"
+fi
+ORCH_HOME="$VH" bash "$WP" on >/dev/null 2>&1
+[ ! -f "$VH/viewer-off" ] && ok "watch-panes: 'on' clears the viewer switch" \
+                          || bad "watch-panes: on left the switch behind"
+# Mid-run: a viewer already polling must notice the switch and close its panes
+# on the way out, since it can outlive the session that started it.
+mkdir -p "$VH/lanes"; echo $$ > "$VH/lanes/impl-77.pid"
+: > "$T/herdr-calls"
+# Wait for the viewer to be genuinely up (pidfile written) before switching
+# it off — startup reads config and can outlast a fixed sleep, and planting
+# the marker first would test the startup path instead of the mid-run one.
+( for _ in $(seq 1 40); do
+      [ -f "$VH/watch-panes.pid" ] && break; sleep 0.25
+  done
+  ORCH_HOME="$VH" bash "$WP" off >/dev/null 2>&1 ) &
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 ORCH_HOME="$VH" WATCH_POLLS=10 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+wait 2>/dev/null || :
+grep -q "^pane close " "$T/herdr-calls" \
+    && ok "watch-panes: a mid-run 'off' closes the panes it owns and exits" \
+    || bad "watch-panes: mid-run off left panes open ($(grep -c . "$T/herdr-calls") calls)"
+rm -f "$VH/lanes/impl-77.pid" "$VH/viewer-off"
+
+# 13m. The ticker advertises its own quit key, and the words for both the hint
+#      and the reopen come from HERE — tick.sh must never learn this viewer
+#      exists (13-violation enforces that), so it prints what it is handed.
+grep -q "ORCH_TICKER_QUIT_HINT" "$WP" && grep -q "ORCH_TICKER_REOPEN_HINT" "$WP" \
+    && ok "watch-panes: supplies the ticker's quit hint and reopen wording" \
+    || bad "watch-panes: ticker hints are not passed to the follow command"
+# And the quit key must leave the SAME durable marker the off-switch uses, or
+# the viewer would simply reopen the pane on its next poll.
+grep -q 'ticker-off' "$TICK" \
+    && ok "ticker: quitting leaves the durable marker, so it stays closed" \
+    || bad "ticker: quit does not persist — the viewer would reopen the pane"
+
 # 13j. A finished STORY closes its pane (2026-08-02): probe pane closes when
 #      its lane ends; a merge pane closes only if the ticket really closed —
 #      merge lanes exit cleanly without merging (merge-21, twice), so a

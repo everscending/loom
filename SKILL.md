@@ -492,8 +492,11 @@ launch `scripts/watch-panes.sh` **detached** — a pane per live lane running
 `tick.sh render-events --follow` (one timestamped line per step: claimed, →
 review, gate verdict, merged — deterministic, zero model time; narrating
 mechanical events with a session is the wrong tool). The viewer keeps the
-ticker alive every poll, so closing its pane is futile — the human gesture is
-`watch-panes.sh ticker off|on`. Detached, so the panes outlive this session.
+ticker alive every poll, so Ctrl-C and closing the pane is futile — the
+gestures that stick are **`q` inside the ticker pane**, `watch-panes.sh ticker
+off|on` for that strip, and `watch-panes.sh off|on` for the whole viewer
+(closes every pane it owns and exits, honored mid-run and at launch, so the
+next tick cannot undo it). Detached, so the panes outlive this session.
 Outside herdr, name those commands instead. `--no-panes` for the summary
 alone. Never hand the human a command to paste when it can just be run.
 

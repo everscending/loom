@@ -17,6 +17,9 @@
 # landed in two different panes and read as two unrelated streams.)
 #
 # Usage: watch-panes.sh            (foreground; Ctrl-C to stop)
+#        watch-panes.sh off        close every pane and stop the viewer
+#        watch-panes.sh on         allow it again, and relaunch it here
+#        watch-panes.sh ticker off|on   just the build-ticker strip
 #        WATCH_MAX_PANES=6 watch-panes.sh
 
 set -euo pipefail
@@ -60,6 +63,37 @@ if [ "${1:-}" = "ticker" ]; then
     exit 0
 fi
 
+# The whole viewer, same shape as the ticker switch above. Until now only the
+# ticker had an off-switch: closing everything meant killing the process by
+# its pidfile, by hand, from a command someone had to be told. The script's
+# own header said "Ctrl-C to stop", which is true only of a foreground run —
+# and the skill deliberately launches this detached so the panes outlive the
+# session that opened them. So in normal use there was no way to stop it.
+# (Asked for by the human, 2026-08-04.)
+if [ "${1:-}" = "off" ] || [ "${1:-}" = "on" ]; then
+    _dir="$("$TICK" orch-home 2>/dev/null)"
+    if [ "$1" = off ]; then
+        touch "$_dir/viewer-off"
+        if [ -f "$_dir/watch-panes.pid" ] && kill -0 "$(cat "$_dir/watch-panes.pid" 2>/dev/null)" 2>/dev/null; then
+            echo "watch-panes: off — the running viewer closes its panes and exits within one poll."
+        else
+            echo "watch-panes: off — no viewer running; it will stay closed until \`watch-panes.sh on\`."
+        fi
+    else
+        rm -f "$_dir/viewer-off"
+        echo "watch-panes: on."
+        # Raise it again rather than describing how. Only inside the
+        # multiplexer, and only when one is not already running — the pidfile
+        # check below would exit quietly anyway, but saying so is clearer.
+        if [ "${HERDR_ENV:-}" = 1 ] \
+           && ! { [ -f "$_dir/watch-panes.pid" ] && kill -0 "$(cat "$_dir/watch-panes.pid" 2>/dev/null)" 2>/dev/null; }; then
+            nohup "$0" >/dev/null 2>&1 &
+            echo "watch-panes: viewer relaunched."
+        fi
+    fi
+    exit 0
+fi
+
 # Singleton per repo: `/orchestrate tick` launches this opportunistically on
 # every manual tick, so a second launch must exit quietly instead of opening
 # a duplicate pane per lane. The pidfile lives in the repo's state dir (one
@@ -67,6 +101,13 @@ fi
 # overwritten.
 WP_PID="$("$TICK" orch-home 2>/dev/null)/watch-panes.pid"
 TICKER_OFF="${WP_PID%/*}/ticker-off"
+VIEWER_OFF="${WP_PID%/*}/viewer-off"
+# A deliberate `off` outranks every launch path, including the opportunistic
+# one on each manual tick — otherwise the next tick would undo the human.
+if [ -f "$VIEWER_OFF" ]; then
+    echo "watch-panes: viewer is switched off (\`watch-panes.sh on\` to bring it back)."
+    exit 0
+fi
 if [ -f "$WP_PID" ] && kill -0 "$(cat "$WP_PID" 2>/dev/null)" 2>/dev/null; then
     echo "watch-panes: already running (pid $(cat "$WP_PID")) — nothing to do."
     exit 0
@@ -161,7 +202,14 @@ ensure_ticker() {
         return 0
     fi
     local tp; tp=$(new_pane down "$HERDR_PANE_ID" 0.75)
-    if [ -n "$tp" ] && "$HERDR" pane run "$tp" "$TICK render-events --follow" >/dev/null 2>&1; then
+    # The hints travel as environment, not as knowledge inside tick.sh: the
+    # ticker offers the quit key, this script owns the words for turning it
+    # back on. tick.sh must never learn that this viewer exists (enforced by
+    # the suite), so it prints whatever it is handed and nothing more.
+    local tcmd="ORCH_TICKER_QUIT_HINT='  (press q to close this ticker)'"
+    tcmd="$tcmd ORCH_TICKER_REOPEN_HINT='Reopen with: watch-panes.sh ticker on'"
+    tcmd="$tcmd $TICK render-events --follow"
+    if [ -n "$tp" ] && "$HERDR" pane run "$tp" "$tcmd" >/dev/null 2>&1; then
         "$HERDR" pane rename "$tp" "build ticker" >/dev/null 2>&1 || :
         TICKER_PANE="$tp"
         echo "watch-panes: build ticker → $tp"
@@ -173,6 +221,19 @@ ensure_ticker() {
 ensure_ticker
 
 while :; do
+    # Checked every poll, like the ticker switch: a viewer is a singleton that
+    # can outlive the session that started it, so the off-switch has to reach
+    # a viewer nobody has a terminal for any more.
+    if [ -f "$VIEWER_OFF" ]; then
+        echo "watch-panes: switched off — closing panes and exiting."
+        [ -n "$TICKER_PANE" ] && "$HERDR" pane close "$TICKER_PANE" >/dev/null 2>&1 || :
+        if [ -s "$MAP" ]; then
+            while read -r pane _ _; do
+                [ -n "$pane" ] && "$HERDR" pane close "$pane" >/dev/null 2>&1 || :
+            done < "$MAP"
+        fi
+        exit 0
+    fi
     ensure_ticker
     running=$("$TICK" lane-status 2>/dev/null | awk '$3 == "running" { print $1 }') || running=""
 

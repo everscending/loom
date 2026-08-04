@@ -1443,7 +1443,31 @@ fromjson? // empty | . as $e
         tail -n 100 -F "$EVENTS" 2>/dev/null | jq -R --unbuffered -r \
             --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
             "$prog" &   # render-events: display-only reader
-        wait $! || :
+        local _pipe=$!
+        # `q` quits, when there is a keyboard attached. Ctrl-C could always
+        # stop this process, but a viewer that reopens a dead ticker every
+        # poll made that gesture futile — the pane simply came back, and the
+        # human had no way to say "I meant it" from inside the pane itself.
+        # Quitting therefore leaves the same durable marker the off-switch
+        # uses, so the intent survives the next poll. Piped or redirected
+        # (tests, a file, another program) there is no keyboard, so the reader
+        # is skipped entirely and the old blocking wait is used.
+        if [ -t 0 ]; then
+            [ -n "${ORCH_TICKER_QUIT_HINT:-}" ] && printf '%s\n' "$ORCH_TICKER_QUIT_HINT"
+            local _k
+            while kill -0 "$_pipe" 2>/dev/null; do
+                if IFS= read -rsn1 -t 1 _k 2>/dev/null; then
+                    case "$_k" in
+                        q|Q) : > "$ORCH_HOME/ticker-off"
+                             pkill -P $$ 2>/dev/null || :
+                             printf '%s\n' "ticker: closed.${ORCH_TICKER_REOPEN_HINT:+ $ORCH_TICKER_REOPEN_HINT}"
+                             return 0 ;;
+                    esac
+                fi
+            done
+        else
+            wait "$_pipe" || :
+        fi
         pkill -P $$ 2>/dev/null || :
     else
         [ -s "$EVENTS" ] || { echo "render-events: no events yet at $EVENTS"; return 0; }
