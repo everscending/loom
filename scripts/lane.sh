@@ -365,11 +365,21 @@ cmd_reconcile() { # [<base>] — fetch and MERGE origin/<base> into the branch
     # rebase if the reconcile step is a script. Never rewrites history: a
     # merge pushes without force, always.
     local base="${1:-}"
+    git fetch origin >/dev/null 2>&1 || die "reconcile: git fetch failed"
     if [ -z "$base" ]; then
         if git show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null
         then base=develop; else base=main; fi
+    elif ! git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then
+        # Every other verb in this file takes <iid> first (verdict, merge,
+        # merge-failed, claim, transition, ...) — reconcile is the one
+        # exception, taking an optional BASE BRANCH. A brief following that
+        # surrounding convention naturally writes `reconcile <iid>`, and
+        # origin/<iid> silently not existing must never look like the rc=3
+        # conflict path: that sends a lane into conflict-resolution over
+        # nothing (merge-71 did exactly this, build-4 2026-08-04). Caught
+        # here, before the merge attempt, with a message that names the fix.
+        die "reconcile: origin/$base does not exist — reconcile takes an optional BASE BRANCH name (e.g. main), not a ticket number; omit the argument to auto-detect main/develop"
     fi
-    git fetch origin >/dev/null 2>&1 || die "reconcile: git fetch failed"
     local _before; _before=$(git rev-parse HEAD 2>/dev/null || echo "")
     if git merge --no-edit "origin/$base" >/dev/null 2>&1; then
         echo "lane.sh: reconciled with origin/$base (merge — no history rewrite, no force-push)"
