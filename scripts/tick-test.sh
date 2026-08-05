@@ -1113,6 +1113,30 @@ qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qb" = halted ] \
     && ok "quiet-check: the watcher's own tick_skipped events do not read as activity" \
     || bad "quiet-check: self-refresh — classified '$qb' (want halted) from a file of pure no-ops"
+# The watcher's OWN notification must not feed its activity signal either. The
+# first cut of this fix excluded only `tick_skipped`, so: classify halted ->
+# notify -> the `notify` event lands in this same file -> the firing 60s later
+# reads it as activity -> `active` deletes the once-per-state sentinel -> the
+# firing after that classifies halted with no memory and notifies again. A
+# 2-minute oscillation that re-pushed "Build halted" forever and let a wave
+# through at each gap boundary, so the spend never stopped. (Paid for: build-3
+# 2026-08-05, spotted by the human as a repeating banner in the ticker.)
+rm -f "$QB/home/quiet.state"
+: > "$QB/home/events.jsonl"
+printf '{"t":"2026-08-05T12:00:01Z","ts":%s,"ev":"notify","build":"build-3"}\n' \
+    "$(( $(date +%s) - 5 ))" >> "$QB/home/events.jsonl"
+PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qb" = halted ] \
+    && ok "quiet-check: the watcher's own notify does not read as activity" \
+    || bad "quiet-check: notify self-refresh — classified '$qb' (want halted), the halted banner repeats forever"
+# And the dedupe survives consecutive firings: the second one says nothing.
+: > "$QBCAP"
+PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+[ ! -s "$QBCAP" ] \
+    && ok "quiet-check: a second firing in an unchanged state pushes nothing" \
+    || bad "quiet-check: re-notified in an unchanged state ($(tr '\n' ';' < "$QBCAP" | tail -c 80))"
+
 # Planted violation: a REAL event just now must still read as activity, or the
 # settle window stops doing the job it exists for (a chained handoff's few-second
 # gap must not read as a stall).

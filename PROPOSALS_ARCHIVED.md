@@ -1597,9 +1597,18 @@ every 60s firing. 60 < 120, so the check answered `active` on every tick, never 
 `blocked == count -> halted` test below it, and the halted gate in `cmd_tick` was unreachable code.
 The watcher kept itself looking busy.
 
-**Fix.** `_last_activity_ts` returns the timestamp of the newest event that is not `tick_skipped`,
-and the settle window measures from that instead of file mtime. Everything the build actually does
-still counts; only the watcher's own bookkeeping is excluded.
+**Fix.** `_last_activity_ts` returns the timestamp of the newest event that is neither
+`tick_skipped` nor `notify`, and the settle window measures from that instead of file mtime.
+Everything the build actually does still counts; only the watcher's own bookkeeping is excluded.
+
+**It took two rounds, and the second is the lesson.** The first cut excluded `tick_skipped`
+alone. That left `notify` — which the watcher itself emits — feeding the same signal: classify
+`halted`, notify, and the notification lands in `events.jsonl`; the firing 60s later reads it as
+activity and answers `active`, which deletes the once-per-state-change sentinel; the firing after
+that classifies `halted` with no memory and notifies again. A 2-minute oscillation that re-pushed
+the halted banner forever AND let a wave through at each gap boundary, so the spend never actually
+stopped. The human spotted it in the ticker within the hour. **The rule to keep: if the watcher
+emits an event kind, that kind must never be able to feed the watcher's own activity signal.**
 
 **Why the suite missed it.** Every existing quiet test passed `ORCH_QUIET_SETTLE=0`, disabling the
 window under test. The new tests leave it at its real default — one asserting a file of pure

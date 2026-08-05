@@ -240,8 +240,16 @@ _epics_unaccepted() { # <build-label>
 }
 
 # P43: the timestamp of the newest event that means the BUILD did something.
-# `tick_skipped` is excluded because it is the watcher writing down that it
-# did nothing — and the settle window below used to read this file's mtime,
+# `tick_skipped` and `notify` are both excluded: each is the watcher writing
+# about ITSELF, not the build doing work. **If the watcher emits an event kind,
+# that kind must never be able to feed the watcher's own activity signal** —
+# missing `notify` cost a second round. The first fix classified `halted`,
+# notified, and the notification landed in this same file; the firing 60s later
+# read it as activity, answered `active`, and deleted the
+# once-per-state-change sentinel; the firing after that classified `halted`
+# with no memory and notified again. A 2-minute oscillation that re-pushed
+# "Build halted" forever and let a wave through at each gap boundary, so the
+# spend never stopped. The settle window used to read this file's mtime,
 # which every 60s firing refreshed with exactly such a no-op. 60s < the 120s
 # window, so `_quiet_check` returned `active` on every firing, never reached
 # the halted test, and the halted gate in `cmd_tick` was unreachable code:
@@ -253,7 +261,7 @@ _epics_unaccepted() { # <build-label>
 _last_activity_ts() {
     [ -f "$EVENTS" ] || { echo 0; return 0; }
     tail -n 500 "$EVENTS" 2>/dev/null \
-        | jq -r 'select(.ev != "tick_skipped") | .ts // empty' 2>/dev/null \
+        | jq -r 'select(.ev != "tick_skipped" and .ev != "notify") | .ts // empty' 2>/dev/null \
         | tail -1 | grep -E '^[0-9]+$' || echo 0
 }
 
