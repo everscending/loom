@@ -1,4 +1,4 @@
-# Orchestrate ticket additions
+# Loom ticket additions
 
 Appended to `/to-tickets`' issue template for every orchestrated ticket.
 Write tickets as **specs a sub-agent parses, not essays**: fragments and
@@ -35,7 +35,7 @@ Inputs that must be **rejected**, one per line, ending with:
 ## Risk tier
 
 `docs | logic | api | ui` — one word. Selects the gate suite from
-`.orchestrator.yml`. When in doubt between two tiers, take the higher.
+`.loom.yml`. When in doubt between two tiers, take the higher.
 
 ## PRD requirement
 

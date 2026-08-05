@@ -5,19 +5,19 @@ wave never needs any of it — bootstrap runs itself.
 
 ## Config
 
-All tunables in `.orchestrator.yml` at the repo root (lanes, caps, staleness
+All tunables in `.loom.yml` at the repo root (lanes, caps, staleness
 window, usage-limit policy, ntfy, gate tiers — enum options documented
-in-file). Canonical key names: [orchestrator-config.md](orchestrator-config.md).
+in-file). Canonical key names: [loom-config.md](loom-config.md).
 Only values are repo-specific; renaming keys per repo is a bug.
 
 There is deliberately **no tick-interval key**: the heartbeat is a fixed
-backstop and lane self-triggers set the pace. The orchestrator never writes
-`.orchestrator.yml`.
+backstop and lane self-triggers set the pace. The loom never writes
+`.loom.yml`.
 
 ## New repo bootstrap
 
 Mostly derived, not authored, and it runs itself. The **first `tick` in a
-repo** invokes `scripts/bootstrap.sh all` — seed `~/.orchestrator/config.yml`,
+repo** invokes `scripts/bootstrap.sh all` — seed `~/.loom/config.yml`,
 write `.claude/settings.json`, create the missing ticket-state labels — then
 proceeds with the wave. A sentinel in the repo's state dir makes every later
 tick skip it; a *failed* bootstrap writes no sentinel, so the next tick
@@ -35,7 +35,7 @@ run, it cannot drift from them.
 **What still needs a repo-bootstrap epic**: tracker labels, the CI pipeline,
 the **repo-resident gate runner** (`scripts/gate.sh <tier>`, which reads those
 commands and runs them fail-fast — the repo's own definition of done, so CI and
-bare-clone contributors run it without the skill), and any `.orchestrator.yml`
+bare-clone contributors run it without the skill), and any `.loom.yml`
 line no detector can infer (an env var the gates need, a live target URL, a
 non-git `worktree_cmd`). Everything else blocks on that epic. Never copy
 another repo's gate suites verbatim — derive them.
@@ -51,9 +51,9 @@ is overwritten without `--force`.
 
 ## Skill vs. repo boundary
 
-`tick.sh` (orchestration mechanism) lives in the skill: only the
-orchestrator-driver runs it, never CI or a bare clone. The gate runner lives in
+`tick.sh` (loom mechanism) lives in the skill: only the
+loom driver runs it, never CI or a bare clone. The gate runner lives in
 the *repo*: it is the repo's own definition of done — CI, contributors, and the
 wave all run it without the skill installed, and its commands are
 repo-specific. One source of truth for the tier→command map
-(`.orchestrator.yml`), one runner both CI and the wave invoke.
+(`.loom.yml`), one runner both CI and the wave invoke.

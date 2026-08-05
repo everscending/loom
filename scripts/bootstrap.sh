@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Orchestrate one-time setup (P22).
+# Loom one-time setup (P22).
 #
 # The WRITE half of the skill's plumbing, deliberately split from tick.sh.
 # tick.sh is read-only by charter — the wave re-runs it constantly and a
@@ -11,16 +11,16 @@
 # deleted, and nothing already present is overwritten without --force.
 #
 # Subcommands:
-#   global-config       seed ~/.orchestrator/config.yml if absent
+#   global-config       seed ~/.loom/config.yml if absent
 #   labels              create the five missing ticket-state labels
 #   settings            write .claude/settings.json (delegates to tick.sh)
 #   all                 all three, in dependency order
 #
-# Test seams (env): ORCH_REPO, ORCH_GLOBAL_CONFIG, GLAB_CMD.
+# Test seams (env): LOOM_REPO, LOOM_GLOBAL_CONFIG, GLAB_CMD.
 set -euo pipefail
 
-REPO_ROOT="${ORCH_REPO:-$PWD}"
-GLOBAL_CONFIG="${ORCH_GLOBAL_CONFIG:-$HOME/.orchestrator/config.yml}"
+REPO_ROOT="${LOOM_REPO:-$PWD}"
+GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 GLAB_CMD="${GLAB_CMD:-glab}"
 TICK="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/tick.sh"
 
@@ -34,7 +34,7 @@ die() { echo "bootstrap.sh: $*" >&2; exit 1; }
 _require_repo() { # <what>
     git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
         || die "$1: '$REPO_ROOT' is not a git repository. Run this from the repo,
-  or set ORCH_REPO. Refusing to write repo files into a directory that is not
+  or set LOOM_REPO. Refusing to write repo files into a directory that is not
   one (from \$HOME this would target your personal ~/.claude/settings.json)."
 }
 
@@ -63,9 +63,9 @@ cmd_global_config() { # global-config [--force]
     fi
     mkdir -p "$(dirname "$GLOBAL_CONFIG")"
     cat > "$GLOBAL_CONFIG" <<'EOF'
-# Orchestrate global preferences — machine- and person-level, shared by every
-# repo. Read-only input, never build state. A repo's .orchestrator.yml
-# overrides anything here; see references/orchestrator-config.md for the full
+# Loom global preferences — machine- and person-level, shared by every
+# repo. Read-only input, never build state. A repo's .loom.yml
+# overrides anything here; see references/loom-config.md for the full
 # repo > derived > global > default chain, and `tick.sh resolve-config` to see
 # what any repo actually resolves to.
 
@@ -153,7 +153,7 @@ EOF
 # picks this up the moment the human accepts. (P30)
 _check_trust() { # → 0 trusted or unknowable; 1 untrusted
     [ -x "$TICK" ] || return 0
-    ORCH_REPO="$REPO_ROOT" "$TICK" trust-check --notify "$REPO_ROOT" >/dev/null || return 1
+    LOOM_REPO="$REPO_ROOT" "$TICK" trust-check --notify "$REPO_ROOT" >/dev/null || return 1
     return 0
 }
 
@@ -161,7 +161,7 @@ cmd_settings() { # settings [--force]
     [ -x "$TICK" ] || die "settings: tick.sh not found beside this script"
     _require_repo settings
     local rc=0
-    ORCH_REPO="$REPO_ROOT" "$TICK" install-settings "$@" || rc=$?
+    LOOM_REPO="$REPO_ROOT" "$TICK" install-settings "$@" || rc=$?
     # A lane's worktree is created from origin/<base>, so an UNCOMMITTED
     # allowlist reaches no lane at all — the file exists in the base clone and
     # nowhere the work actually happens. Committing is the human's call (it is

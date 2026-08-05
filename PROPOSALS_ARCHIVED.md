@@ -1,4 +1,4 @@
-# Orchestrate — archived proposals
+# Loom — archived proposals
 
 Proposals that are done. Kept out of [PROPOSALS.md](PROPOSALS.md) so that file only ever answers
 "what is left to do", and kept at all because the reasoning is the evidence for the next round —
@@ -26,7 +26,7 @@ writing a new proposal that touches the same machinery.
 | P14 | Handle usage limits deliberately instead of waiting them out | implemented 2026-08-01 (pause read from the stream's `resetsAt`, auto-resume, `usage_pause`/`usage_resume` pushes, `tick.sh resume`, `--fallback-model` under `downshift_model`) |
 | P15 | Give crashed waves diagnostics and one retry | implemented 2026-08-01 (separate `.err.log`, one retry with backoff, consecutive-failure count → `build_halted`) |
 | P16 | Fix the probes so they actually probe | implemented 2026-08-01 (trust asserted at `spawn-lane`; probe-prompt contract in SKILL.md step 6; poll/kill tools allowlisted) |
-| P17 | Give each wave its own scratch files | implemented 2026-08-01 (`$ORCH_SCRATCH` per wave and per lane, `mkdir`-atomic naming, pruned after 7 days) |
+| P17 | Give each wave its own scratch files | implemented 2026-08-01 (`$LOOM_SCRATCH` per wave and per lane, `mkdir`-atomic naming, pruned after 7 days) |
 | P21 | Delete or implement the config keys nothing reads | implemented 2026-08-01 (`tick_interval_minutes` deleted; `downshift_model` kept, handed to P14) |
 | P24 (part A) | Let a human watch a lane while it runs | part A implemented 2026-08-01 (`render-log --follow`, `scripts/watch-panes.sh`, `watch` opens panes; part B `--supervised` still open in PROPOSALS.md) |
 | P27 | Wedge detection counts progress, not bytes | implemented 2026-08-02 (progress stamps + watcher stale alerts; wall-clock caps rejected) |
@@ -120,7 +120,7 @@ again** — leaving #14 sitting in `merge-queue`, unmerged. Two further signals 
 log line at all (`lane-15` at 20:56:07, `lane-17` at 21:39:03, the latter producing a 25m02s
 stall with no lock contention to explain it).
 
-**Fix.** On skip, leave a note — `touch "$ORCH_HOME/tick.pending"`. The lock holder checks the
+**Fix.** On skip, leave a note — `touch "$LOOM_HOME/tick.pending"`. The lock holder checks the
 flag on exit and re-execs one tick if set. Coalescing, so a burst of finishing lanes costs one
 extra wave rather than one per lane.
 
@@ -143,13 +143,13 @@ note and replays it. The cost is one spurious wave, never a lost signal.
 The test that states the proposal counts waves: the wave command appends a line, so the file
 length is the number of waves that ran. Three mid-wave kicks → exactly 2. Its planted violation
 points the skipped ticks' note at a path the holder never reads — the old drop-on-the-floor
-path, reached through the existing `ORCH_PENDING_FILE` seam rather than by editing the script —
+path, reached through the existing `LOOM_PENDING_FILE` seam rather than by editing the script —
 and shows the loop dying after a single wave, which is how build 2 actually ended.
 
 **Two things this shook out of the test suite.** With self-trigger on by default, every lane in
 `tick-test.sh` now fires a tick when it exits, so the file needs a harmless default
-`ORCH_WAVE_CMD` or those ticks launch real `claude` sessions. It also needs bootstrap off by
-default (`ORCH_SKIP_BOOTSTRAP`), now that many more ticks pay for it — section 9, which tests
+`LOOM_WAVE_CMD` or those ticks launch real `claude` sessions. It also needs bootstrap off by
+default (`LOOM_SKIP_BOOTSTRAP`), now that many more ticks pay for it — section 9, which tests
 bootstrap itself, switches it back on through `BOOTENV`. Both are the kind of blast radius a
 default change has and an opt-in flag does not.
 
@@ -176,7 +176,7 @@ and now the machinery makes that unconditionally true.
 The `api` gate tier cannot run unattended as configured, and the mismatch is mechanical. The
 same mismatch silently disabled the E4 acceptance probe (see P16).
 
-**Evidence.** `.orchestrator.yml` specifies `CRUCIBLE_LIVE=1 uv run pytest -q
+**Evidence.** `.loom.yml` specifies `CRUCIBLE_LIVE=1 uv run pytest -q
 tests/test_target_live.py`; `.claude/settings.json` allows `Bash(uv *)`, which does not match a
 command beginning with an environment-variable assignment. The cost: `lane-13.log:42-54` shows
 a gate session that completed its full review and 230 tests, then issued **no verdict at all**
@@ -214,7 +214,7 @@ generated allowlist and a test now asserts its absence — if it reappears, the 
 bypassed. SKILL.md's three spawn call sites carry `--cwd <worktree>`.
 
 *Long notes.* The `glab issue note` block is command *length*, not a missing rule, so no allow
-entry can fix it. Lanes now write the body to a file in `$ORCH_SCRATCH` (a per-session directory
+entry can fix it. Lanes now write the body to a file in `$LOOM_SCRATCH` (a per-session directory
 `tick.sh` creates and exports, because no spawned session may run `mkdir`; it began as a
 per-repo `$ORCH_NOTES` and was folded into P17's scratch when that landed) and post it with
 `glab api ".../notes" --field body=@<file>` — verified against glab 1.107.0, which reads the
@@ -552,7 +552,7 @@ three states, so nothing a wave must *decide* changed — the machinery carried 
 
 **Evidence.** `wave-20260721-210534.log` is one line — *"You've hit your session limit · resets
 10pm (America/Chicago)"* — and the next wave starts 22:04:05. **57m35s dead, a quarter of the
-run.** `usage_limit: downshift_model` is documented in `references/orchestrator-config.md` but
+run.** `usage_limit: downshift_model` is documented in `references/loom-config.md` but
 nothing implements it, though `claude --fallback-model` is exactly that primitive.
 
 **Fix.** Wire up the downshift, and since the wave is told the reset time, have it install a
@@ -579,7 +579,7 @@ this, because it is the failure mode that would be worst and quietest.
 **What the three policies now do.** `pause_and_resume` (default) pauses until the reset and lifts
 itself; `stop_and_wait` pauses and stays paused until `tick.sh resume`; `downshift_model` passes
 `--fallback-model` to waves *and* lanes. The `usage_pause` / `usage_resume` ntfy events were
-already named in `references/orchestrator-config.md` and had nothing emitting them — they do now,
+already named in `references/loom-config.md` and had nothing emitting them — they do now,
 carrying the reset time, which is the whole of the human-facing fix.
 
 **Correction to this proposal's premise.** `claude --fallback-model` is *not* documented as a
@@ -621,7 +621,7 @@ count and, at `crash_cap`, pushes `build_halted` with the head of the error. A g
 the count.
 
 No new config key: `crash_cap` already means "how many crashes before escalating", and P21's rule
-says a key must earn its place. The backoff is a constant with an `ORCH_RETRY_BACKOFF_SECONDS`
+says a key must earn its place. The backoff is a constant with an `LOOM_RETRY_BACKOFF_SECONDS`
 test seam.
 
 **A test-design note worth keeping.** The first version of P13's liveness test used a
@@ -667,7 +667,7 @@ don't blindly write: the parent entry usually already covers it.
 lives in `spawn-lane`, not bootstrap: bootstrap runs once in the repo root before any worktree
 exists, and worktrees are *siblings* of the repo, so a repo trusted only by its own entry says
 nothing about them. At spawn time the lane's directory is already in hand. `_nearest_trust`
-walks it upward through `~/.claude.json` (seam: `ORCH_TRUST_FILE`) and the **nearest** entry
+walks it upward through `~/.claude.json` (seam: `LOOM_TRUST_FILE`) and the **nearest** entry
 wins either way — a directory whose own entry is `false` is refused even under a trusted parent,
 since someone declined that dialog deliberately. Whether Claude Code itself resolves that case
 the same way is unverified; this is the conservative reading, and it fails loudly rather than
@@ -711,8 +711,8 @@ comment had to be posted.
 
 **Fix.** Per-wave unique scratch paths.
 
-**Implemented 2026-08-01.** Every session — wave *and* lane — is handed `$ORCH_SCRATCH`, a fresh
-empty directory under `$ORCH_HOME/scratch`. Uniqueness is `mkdir` itself, not a clever name:
+**Implemented 2026-08-01.** Every session — wave *and* lane — is handed `$LOOM_SCRATCH`, a fresh
+empty directory under `$LOOM_HOME/scratch`. Uniqueness is `mkdir` itself, not a clever name:
 `mkdir` fails if the path exists, so the helper retries with a suffix until it wins, and two
 sessions starting in the same second cannot collide. Re-running a lane id gets a new directory
 too — the test that matters is the planted violation, a second run under the same id seeing an
@@ -725,13 +725,13 @@ it is the one line here that could delete a home directory if it ever went wrong
 
 This also closed the two referrals from today's work: P4's long-note file (which briefly had its
 own `$ORCH_NOTES` directory, now folded in — one variable, not two) and the probe contract's
-ephemeral files, which now go to `$ORCH_SCRATCH` and are simply left there.
+ephemeral files, which now go to `$LOOM_SCRATCH` and are simply left there.
 
 ## P21 · Delete or implement the config keys nothing reads
 
-**Evidence.** `tick_interval_minutes` is canonical in `references/orchestrator-config.md` but
+**Evidence.** `tick_interval_minutes` is canonical in `references/loom-config.md` but
 `cmd_install` hardcodes `${1:-900}` and never consults the config — and crucible's own
-`.orchestrator.yml` omits the key entirely. `usage_limit: downshift_model` has no implementation
+`.loom.yml` omits the key entirely. `usage_limit: downshift_model` has no implementation
 (see P14).
 
 **Fix.** Wire them up or remove them. A setting that silently does nothing is worse than no
@@ -771,17 +771,17 @@ trigger makes the timer a true backstop.
 Adopting the skill on a new repo is a project before the project. Every artifact it needs is
 hand-authored, and the build cannot start until all of them exist.
 
-**Evidence.** SKILL.md's "New repo bootstrap" requires, before wave 1: `.orchestrator.yml`,
+**Evidence.** SKILL.md's "New repo bootstrap" requires, before wave 1: `.loom.yml`,
 `scripts/gate.sh`, a committed `.claude/settings.json`, six tracker labels, and a CI pipeline —
 emitted as a repo-bootstrap epic "and everything else blocks on it." Crucible's own
-`.orchestrator.yml` is 55 lines, 26 of them settings. Two of those artifacts have already
+`.loom.yml` is 55 lines, 26 of them settings. Two of those artifacts have already
 failed in the field: the hand-written allowlist broke the `api` gate (P4) and is a live
 candidate for the probe denial (P16), and workspace trust cost a probe attempt outright.
 Nothing about that setup is interesting work, and none of it delivers a requirement.
 
 **Fix.** Three layers, and the human writes only the third.
 
-**Layer 1 — global preference, `~/.orchestrator/config.yml`.** Machine- and person-level, not
+**Layer 1 — global preference, `~/.loom/config.yml`.** Machine- and person-level, not
 repo-level; identical across every repo. `max_lanes`, `crash_cap`, `rejection_cap`,
 `heartbeat_stale_minutes`, `usage_limit`, the ntfy push-event list and topic prefix, and the
 per-lane-type model map (P18, currently specified nowhere). Written once, ever. `usage_limit`
@@ -802,9 +802,9 @@ is not on this list because P21 deleted it.
 | workspace trust | assert an entry for the worktree *or any ancestor* (P16); the parent usually covers it — implemented at `spawn-lane`, not bootstrap, because worktrees are created later and are siblings of the repo |
 
 Stack packs emit **literal commands**, never abstract tokens — that is the openemr lesson
-already recorded in `references/orchestrator-config.md`.
+already recorded in `references/loom-config.md`.
 
-**Layer 3 — repo-specific, `.orchestrator.yml`.** Only facts about the world outside the repo,
+**Layer 3 — repo-specific, `.loom.yml`.** Only facts about the world outside the repo,
 or about intent, which no detector can infer: environment variables the gates need
 (`CRUCIBLE_LIVE=1`), a live target URL, out-of-band services. For crucible this is roughly three
 lines instead of fifty-five. The file becomes optional — its absence is a valid, complete
@@ -836,7 +836,7 @@ whose absence cost a completed gate review its verdict.
 
 **Implementation notes — bootstrap.** `scripts/bootstrap.sh` is the write half, split from
 `tick.sh` rather than eroding its read-only charter (which `tick-test.sh` enforces by scanning
-argv). It seeds `~/.orchestrator/config.yml`, writes the settings surface, and creates the five
+argv). It seeds `~/.loom/config.yml`, writes the settings surface, and creates the five
 missing ticket-state labels — all idempotent, nothing ever deleted. It is wired to **`tick`, not
 `start`** (operator preference: `tick` is the verb actually used, and tracker writes should not
 be a side effect of starting a build): the first tick in a repo runs it behind a sentinel in the
@@ -845,7 +845,7 @@ the wave. The ntfy topic now derives as `<global topic_prefix><repo name>`, laye
 other key. 64 tests passing.
 
 **Acceptance test passed 2026-08-01** against `jordanphillips/orchestrate-test`, a real GitLab
-project with zero labels. A bare uv repo — source, tests, a PRD, and no `.orchestrator.yml`, no
+project with zero labels. A bare uv repo — source, tests, a PRD, and no `.loom.yml`, no
 `.claude/settings.json`, no `scripts/gate.sh` — went from clone to a running wave with nothing
 hand-authored. `resolve-config` derived stack `uv`, `base: main` (no `develop` on the remote, so
 the fallback was exercised for real), and the four gate tiers; the first tick wrote the settings
@@ -946,7 +946,7 @@ is not done until a test fails without it.
 
 **Fan out per file, with a brief.** One agent reading 4,212 lines skims. Every finding on 2026-08-01
 came from a reader with one file and a narrow question. Keep that shape, and give
-`references/orchestrator-config.md` and `references/ticket-template.md` their first reader.
+`references/loom-config.md` and `references/ticket-template.md` their first reader.
 
 **Confirm before reporting.** Reviewers produce claims, not findings. Each one is reproduced against
 the real code or dropped before it reaches a human — an unverified list spends the reader's
@@ -1100,7 +1100,7 @@ when nobody is, which is the normal case.
 *Panes do not scale to a wave.* Several implementers plus gates plus a merge is an ordinary wave.
 Splitting a terminal that many ways produces columns nobody can read.
 
-*It costs portability.* `/orchestrate` would only work when driven from inside a herdr session on a
+*It costs portability.* `/loom` would only work when driven from inside a herdr session on a
 machine with herdr installed.
 
 **Fix, part A — a follow mode for the renderer.** Lanes already stream to `lane-<id>.jsonl` live;
@@ -1238,7 +1238,7 @@ repeating the burst.
 **Fix (implemented 2026-08-02).** `spawn-lane --brief <file>` copies the brief into the lane
 worktree as an untracked `.lane-brief-<id>.md`; the caller writes `-p @brief` and spawn-lane
 swaps the placeholder for a fixed one-line pointer prompt. Inline arguments over **1000**
-characters (`ORCH_MAX_INLINE_ARG`) are refused with a message naming `--brief` — 1000, not the
+characters (`LOOM_MAX_INLINE_ARG`) are refused with a message naming `--brief` — 1000, not the
 drafted 200, because the working short-prompt pattern ("fetch the ticket yourself") runs 400–600
 characters and has never been denied; the cap sits near the observed failure boundary, not under
 the observed success boundary. The sweep already treats untracked briefs as disposable
@@ -1342,7 +1342,7 @@ self-reported flag, so it can only ever show what actually ran. Two things
 fell out: the bootstrap label table had to move from `:` to `|` separators
 (a scoped label's name *contains* a colon, and all four would have been
 created mangled), and the test suite turned out to read the developer's own
-`~/.orchestrator/config.yml` for every `cfg` lookup — now a fixture.
+`~/.loom/config.yml` for every `cfg` lookup — now a fixture.
 
 ## P30 (trust guard) · The trust guard walks the wrong ancestry for a lane worktree
 
@@ -1471,8 +1471,8 @@ nothing.
 
 **Fix.** Treat a failed split off the anchor as fatal, not as a skip. On the first failure,
 re-resolve the anchor against a live pane; if that also fails, print the reason and exit non-zero
-so the singleton is released and the next `/orchestrate watch` or manual tick starts a working
-viewer. Separately, launch it with its output going to `$ORCH_HOME/watch-panes.log` rather than
+so the singleton is released and the next `/loom watch` or manual tick starts a working
+viewer. Separately, launch it with its output going to `$LOOM_HOME/watch-panes.log` rather than
 `/dev/null` — a silent diagnostic is not a diagnostic. Depends on P40: exiting is only safe once
 the pidfile is owned correctly.
 
@@ -1483,7 +1483,7 @@ unchanged.
 ## P40 · The viewer singleton guard deletes a pidfile it does not own
 
 **Evidence.** build-3, 2026-08-04. Found live: `watch-panes.sh` running as pid 1805 with
-`$ORCH_HOME/watch-panes.pid` absent. The likely sequence is an older viewer still shutting down
+`$LOOM_HOME/watch-panes.pid` absent. The likely sequence is an older viewer still shutting down
 when 1805 started — 1805 found no pidfile, wrote its own, and the older one's `EXIT` trap then
 deleted it.
 
@@ -1494,7 +1494,7 @@ removes the pidfile unconditionally, without checking it still contains this pro
 next manual tick opens a **duplicate** viewer — two panes per lane, two tickers. With the pidfile
 present but belonging to a viewer that can no longer open panes (P39), the guard does the opposite:
 it reports "already running — nothing to do" and refuses to start a healthy one. The guard is
-load-bearing precisely because `/orchestrate tick` launches the viewer opportunistically on every
+load-bearing precisely because `/loom tick` launches the viewer opportunistically on every
 manual tick.
 
 **Fix.** Remove the pidfile only when it still holds this process's own pid — read it back in the
@@ -1610,7 +1610,7 @@ the halted banner forever AND let a wave through at each gap boundary, so the sp
 stopped. The human spotted it in the ticker within the hour. **The rule to keep: if the watcher
 emits an event kind, that kind must never be able to feed the watcher's own activity signal.**
 
-**Why the suite missed it.** Every existing quiet test passed `ORCH_QUIET_SETTLE=0`, disabling the
+**Why the suite missed it.** Every existing quiet test passed `LOOM_QUIET_SETTLE=0`, disabling the
 window under test. The new tests leave it at its real default — one asserting a file of pure
 `tick_skipped` events classifies `halted`, one asserting a real event inside the window still
 reads `active` so a chained handoff's few-second gap is still protected.

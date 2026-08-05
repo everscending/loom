@@ -172,5 +172,5 @@ silent-damage class, which is why it is not optional.
 - the two grep diffs from step 7
 - anything you were unsure whether to cut — **flag it, do not guess**
 
-Do not run `/orchestrate qa` yourself. The human runs it separately as an
+Do not run `/loom qa` yourself. The human runs it separately as an
 independent read of the result.

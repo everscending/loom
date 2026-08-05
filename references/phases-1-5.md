@@ -17,7 +17,7 @@ hand-coding under a deadline.)*
 2. Split open architectural questions: **dependent chains** → `/grilling` one
    at a time with a recommendation each; **independent batches** → one
    `/lavish` decision surface (options, tradeoffs, recommendation badged — the
-   orchestrator-plan blueprint page is the reference shape).
+   loom-plan blueprint page is the reference shape).
 3. Record each closed decision as an ADR (`docs/adr/`, via `/domain-modeling`
    conventions) and fold the whole into `ARCHITECTURE.md`. No open question
    survives this phase.
@@ -64,7 +64,7 @@ dependency order) **plus** the additions in
 - **Mandatory adversarial tests**: inputs that must be *rejected*, with the
   sentence "fix the rule, not my examples."
 - **Risk tier**: `docs | logic | api | ui` — selects the gate suite from
-  `.orchestrator.yml`.
+  `.loom.yml`.
 - **PRD requirement**: the requirement ID this ticket satisfies; the gate
   verifies faithfulness against it.
 
@@ -92,7 +92,7 @@ body. Phase 5 measures the result; this phase is where it is decided.
    its shape alongside `max_lanes` — `tick.sh snapshot | tick.sh graph` — and
    surface a `CHAIN-SHAPED` or `NARROW START` verdict as a reason to go back to
    phase 4 and split a blocker, not a fact to discover at wave 1. Then **stop**
-   — tell the human the trigger is `/orchestrate start`.
+   — tell the human the trigger is `/loom start`.
 2. **A build already defined** → the same surface, pre-filled with the current
    selection, for adjustment: add an epic (label its open tickets `build-N`),
    remove one (unlabel its *not-yet-started* tickets only — never touch
@@ -122,7 +122,7 @@ Outside herdr, and when a viewer is already up, it does nothing.
 
 **`start` is now what makes a build autonomous, not a side effect of ticking.**
 Without it, a lane cannot chain and an automatic tick does nothing; a manual
-`/orchestrate tick` still runs exactly one wave. *(paid: a single manual tick
+`/loom tick` still runs exactly one wave. *(paid: a single manual tick
 once produced a 92-wave overnight build the human never armed — so it ran with
 no backstop, and a separate notification bug meant it reported nothing.)*
 

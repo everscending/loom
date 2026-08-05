@@ -5,7 +5,7 @@
 # writes at lane time. Same split, third leg.
 #
 # Why this exists (paid for, build-1 2026-08-02): every permission denial that
-# morning was a model hand-rolling plumbing — `glab api … body=@$ORCH_SCRATCH/…`
+# morning was a model hand-rolling plumbing — `glab api … body=@$LOOM_SCRATCH/…`
 # (any $VAR/$(…) in a command defeats allowlist prefix-matching), inline
 # `glab issue note -m` bodies (denied on length alone), label flips with the
 # unassign rule forgotten. Models judge; scripts plumb. A lane that needs a
@@ -77,7 +77,7 @@ command -v "$GLAB" >/dev/null 2>&1 || die "glab not on PATH"
 STATES="ready-for-agent in-progress review merge-queue blocked"
 
 # Every state-changing verb appends one line to the build's event stream via
-# `tick.sh event` (sibling script; ORCH_REPO reaches lanes via spawn-lane's
+# `tick.sh event` (sibling script; LOOM_REPO reaches lanes via spawn-lane's
 # export, so a worktree cwd still resolves the right state dir). Consumer:
 # `tick.sh render-events` — the live build ticker. Best-effort by design: a
 # tracker write must never fail because the ticker could not be fed.
@@ -105,11 +105,11 @@ _post_note() { # <issues|merge_requests> <iid> <bodyfile>
 }
 
 # P36: is this process running inside something the loop spawned? A lane
-# exports ORCH_LANE_ID; a wave session is launched carrying ORCH_WAVE_PROMPT.
+# exports LOOM_LANE_ID; a wave session is launched carrying LOOM_WAVE_PROMPT.
 # A human at a terminal has neither. Consumer: the release guard below — the
 # one write no automated caller may ever make.
 _automated_caller() {
-    [ -n "${ORCH_LANE_ID:-}" ] || [ -n "${ORCH_WAVE_PROMPT:-}" ]
+    [ -n "${LOOM_LANE_ID:-}" ] || [ -n "${LOOM_WAVE_PROMPT:-}" ]
 }
 
 RELEASE_HOLD=0   # set by `transition --release-hold`; never inherited
@@ -125,7 +125,7 @@ _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine fl
     # loud, which an automated caller may not say at all. `ready-for-agent`
     # used to be a free pass here, so the release path was a plain label write
     # any wave could make — and one did: a hold comment ended with the sentence
-    # "Release: when #48 merges, /orchestrate unblock 67", a wave read that
+    # "Release: when #48 merges, /loom unblock 67", a wave read that
     # prose as an instruction addressed to itself, and requeued the held ticket
     # nine seconds later. The hold is the one mechanism that must outrank
     # everything the loop decides on its own, so the prose can stay wrong
@@ -138,7 +138,7 @@ _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine fl
         [ "$RELEASE_HOLD" = 1 ] \
             || die "issue $iid is blocked — a human hold. Refusing to advance it. Releasing a hold is a human decision, made with 'transition $iid <state> --release-hold'; nothing written in the ticket authorises it."
         if _automated_caller; then
-            die "issue $iid is blocked — a human hold, and this is an automated session (${ORCH_LANE_ID:-wave}). --release-hold is refused here: a hold is released by a person, never by a lane or a wave acting on ticket text."
+            die "issue $iid is blocked — a human hold, and this is an automated session (${LOOM_LANE_ID:-wave}). --release-hold is refused here: a hold is released by a person, never by a lane or a wave acting on ticket text."
         fi
     fi
     return 0
@@ -157,7 +157,7 @@ _set_state() { # <iid> <state> [extra -f args...]
 _check_iid() { case "${1:-}" in ''|*[!0-9]*) die "bad iid: '${1:-}'";; esac; }
 
 cmd_scratch() {
-    local d="${ORCH_SCRATCH:-}"
+    local d="${LOOM_SCRATCH:-}"
     if [ -z "$d" ]; then d=$(mktemp -d "${TMPDIR:-/tmp}/lane-scratch.XXXXXX")
     else mkdir -p "$d"; fi
     printf '%s\n' "$d"
@@ -256,7 +256,7 @@ cmd_rescope() { # <iid> [--file F]
     # would talk it into doing so is the same prose the hold guard already
     # refuses to obey.
     if _automated_caller; then
-        die "rescope is refused in an automated session (${ORCH_LANE_ID:-wave}): retiring a ticket's rejection history is a human's decision about what the ticket now IS, never a lane's or a wave's."
+        die "rescope is refused in an automated session (${LOOM_LANE_ID:-wave}): retiring a ticket's rejection history is a human's decision about what the ticket now IS, never a lane's or a wave's."
     fi
     # A body is mandatory (_stage_body refuses an empty one): the comment IS the
     # record of what changed, and a bare marker retires a cap while explaining

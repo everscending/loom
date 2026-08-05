@@ -6,37 +6,37 @@ set -uo pipefail
 
 TICK="$(cd "$(dirname "$0")" && pwd)/tick.sh"
 T=$(mktemp -d)
-export ORCH_HOME="$T/home" ORCH_REPO="$T/repo"
-mkdir -p "$ORCH_REPO"
+export LOOM_HOME="$T/home" LOOM_REPO="$T/repo"
+mkdir -p "$LOOM_REPO"
 # Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
 # lane below it spawns without an entry of its own, exactly as a real worktree
 # relies on its parent directory.
-export ORCH_TRUST_FILE="$T/claude.json"
-printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$T" > "$ORCH_TRUST_FILE"
+export LOOM_TRUST_FILE="$T/claude.json"
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$T" > "$LOOM_TRUST_FILE"
 # The GLOBAL config layer is a fixture too, and an empty one by default.
 # Without this the suite fell through to the developer's own
-# ~/.orchestrator/config.yml: every `cfg` lookup in every section resolved
+# ~/.loom/config.yml: every `cfg` lookup in every section resolved
 # against whatever that machine happened to say, so a run could pass here and
 # fail on another laptop. Found by P31's chain test, which asserts the
 # unconfigured case and got the human's `lane_model: sonnet` instead.
 # Sections that need a global layer still point at their own file.
-export ORCH_GLOBAL_CONFIG="$T/global.yml"
-: > "$ORCH_GLOBAL_CONFIG"
+export LOOM_GLOBAL_CONFIG="$T/global.yml"
+: > "$LOOM_GLOBAL_CONFIG"
 # Self-trigger is the DEFAULT now (P2), so every lane below fires a tick when it
 # exits. Two consequences this file must own rather than discover:
 #   * a harmless default wave command, or those ticks would launch real `claude`
 #     sessions — tests that care about the wave still override it inline;
 #   * bootstrap off by default, since it is now paid on many more ticks. Section
 #     9 tests bootstrap itself and switches it back on via BOOTENV.
-export ORCH_WAVE_CMD="true"
-export ORCH_SKIP_BOOTSTRAP=1
+export LOOM_WAVE_CMD="true"
+export LOOM_SKIP_BOOTSTRAP=1
 # launchd is stubbed GLOBALLY, like glab: any test path that reaches
 # watcher-arm or install must capture argv, never mutate real launchd.
 # (Paid for: 2026-08-02 — the suite armed a real watcher agent per run;
 # 26 zombie agents accumulated, firing exit-78 every 60s against deleted
 # mktemp dirs.) `print` exits 1 (= not armed) so arm paths proceed to the
 # stubbed bootstrap instead of short-circuiting on the idempotence check.
-export LAUNCHCTL_CMD="$T/launchctl-stub.sh" ORCH_PLIST_DIR="$T/plists"
+export LAUNCHCTL_CMD="$T/launchctl-stub.sh" LOOM_PLIST_DIR="$T/plists"
 LCTL_CALLS="$T/launchctl-calls"
 cat > "$LAUNCHCTL_CMD" <<STUBEOF
 #!/bin/sh
@@ -65,7 +65,7 @@ PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
-cat > "$ORCH_REPO/.orchestrator.yml" <<'EOF'
+cat > "$LOOM_REPO/.loom.yml" <<'EOF'
 heartbeat_stale_minutes: 30
 ntfy:
   topic: "test-topic"
@@ -76,27 +76,27 @@ EOF
 #     and the kick it could not run is REMEMBERED rather than dropped (P1).
 #     The note is cleared before the holder exits so this test does not also
 #     trigger a re-tick — 1d owns that half.
-ORCH_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
+LOOM_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
 first=$!; sleep 0.7
-out=$(ORCH_WAVE_CMD="echo second-wave-ran" "$TICK" tick 2>&1)
+out=$(LOOM_WAVE_CMD="echo second-wave-ran" "$TICK" tick 2>&1)
 case "$out" in *"wave already running"*) ok "lock: concurrent tick skipped";; *) bad "lock: concurrent tick ran ($out)";; esac
-[ -f "$ORCH_HOME/tick.pending" ] \
+[ -f "$LOOM_HOME/tick.pending" ] \
     && ok "lock: the skipped kick left a pending note" \
     || bad "lock: the skipped kick vanished with no note"
-rm -f "$ORCH_HOME/tick.pending"
+rm -f "$LOOM_HOME/tick.pending"
 wait "$first"
 
 # 1b. Planted violation: with a DIFFERENT lock dir the exclusion must fail
 #     (two waves overlap) — proving the shared lock is the guard.
-ORCH_WAVE_CMD="sleep 2" ORCH_LOCK_DIR="$T/lockA" "$TICK" tick >/dev/null 2>&1 &
+LOOM_WAVE_CMD="sleep 2" LOOM_LOCK_DIR="$T/lockA" "$TICK" tick >/dev/null 2>&1 &
 pa=$!; sleep 0.5
-out=$(ORCH_WAVE_CMD="echo overlapped" ORCH_LOCK_DIR="$T/lockB" "$TICK" tick 2>&1)
+out=$(LOOM_WAVE_CMD="echo overlapped" LOOM_LOCK_DIR="$T/lockB" "$TICK" tick 2>&1)
 case "$out" in *"wave already running"*) bad "lock-violation: still excluded without shared lock";; *) ok "lock-violation: overlap observed when lock removed";; esac
 wait "$pa"
 
 # 1c. Stale lock broken: dead-owner lock does not wedge future ticks.
-mkdir -p "$ORCH_HOME/tick.lock.d"; echo 999999 > "$ORCH_HOME/tick.lock.d/pid"
-out=$(ORCH_WAVE_CMD="echo revived" "$TICK" tick 2>&1)
+mkdir -p "$LOOM_HOME/tick.lock.d"; echo 999999 > "$LOOM_HOME/tick.lock.d/pid"
+out=$(LOOM_WAVE_CMD="echo revived" "$TICK" tick 2>&1)
 case "$out" in *"running wave"*) ok "lock: stale (dead-owner) lock broken";; *) bad "lock: stale lock wedged the tick ($out)";; esac
 
 # 1d. P1: kicks that land mid-wave are replayed, and COALESCED. Build 2 ended on
@@ -111,11 +111,11 @@ _wait_waves() { # <file> <n> — poll until the file has n lines, or give up
         [ "$(wc -l < "$1" | tr -d ' ')" -ge "$2" ] && return 0; sleep 0.1
     done; return 1
 }
-rm -rf "$ORCH_HOME/tick.lock.d"; rm -f "$ORCH_HOME/tick.pending"
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 WAVES="$T/waves.txt"; : > "$WAVES"
 # The prefix form exports for the holder AND its children, so the re-tick the
 # holder fires on exit inherits the same counting command.
-ORCH_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
 holder=$!; sleep 0.4
 for _ in 1 2 3; do "$TICK" tick >/dev/null 2>&1; done
 wait "$holder"
@@ -129,22 +129,22 @@ n=$(wc -l < "$WAVES" | tr -d ' ')
 # 1e. Planted violation: point the skipped ticks' note somewhere the holder never
 #     looks. That is precisely the old drop-on-the-floor path, and the loop must
 #     be seen dying after a single wave — no replay, no second line.
-rm -rf "$ORCH_HOME/tick.lock.d"; rm -f "$ORCH_HOME/tick.pending"
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 : > "$WAVES"
-ORCH_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
 holder=$!; sleep 0.4
-for _ in 1 2 3; do ORCH_PENDING_FILE="$T/note-nobody-reads" "$TICK" tick >/dev/null 2>&1; done
+for _ in 1 2 3; do LOOM_PENDING_FILE="$T/note-nobody-reads" "$TICK" tick >/dev/null 2>&1; done
 wait "$holder"; sleep 1.5
 n=$(wc -l < "$WAVES" | tr -d ' ')
 [ "$n" = "1" ] \
     && ok "pending-violation: an unrecorded kick stops the loop dead after one wave" \
     || bad "pending-violation: loop advanced anyway ($n waves) — the note is not the guard"
-rm -rf "$ORCH_HOME/tick.lock.d"; rm -f "$ORCH_HOME/tick.pending"
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 
 # 2. Detach: spawn-lane returns while the child persists; pid file + log exist.
 "$TICK" spawn-lane impl-1 -- sleep 5 >/dev/null
-pid=$(cat "$ORCH_HOME/lanes/impl-1.pid" 2>/dev/null || echo "")
-if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$ORCH_HOME/logs/lane-impl-1.log" ]; then
+pid=$(cat "$LOOM_HOME/lanes/impl-1.pid" 2>/dev/null || echo "")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$LOOM_HOME/logs/lane-impl-1.log" ]; then
     ok "detach: child alive after spawn returns, pid file + log present"
 else
     bad "detach: child/pid/log missing"
@@ -162,53 +162,53 @@ st=$("$TICK" lane-status | awk '$1=="impl-2"{print $3}')
 "$TICK" spawn-lane impl-3 -- sleep 20 >/dev/null
 st=$("$TICK" lane-status | awk '$1=="impl-3"{print $3}')
 [ "$st" = "running" ] && ok "staleness: fresh-output lane is running" || bad "staleness: fresh lane reported '$st'"
-sed -i.bak 's/heartbeat_stale_minutes: 30/heartbeat_stale_minutes: 0/' "$ORCH_REPO/.orchestrator.yml"
-touch -t 202001010000 "$ORCH_HOME/logs/lane-impl-3.log"
+sed -i.bak 's/heartbeat_stale_minutes: 30/heartbeat_stale_minutes: 0/' "$LOOM_REPO/.loom.yml"
+touch -t 202001010000 "$LOOM_HOME/logs/lane-impl-3.log"
 st=$("$TICK" lane-status | awk '$1=="impl-3"{print $3}')
 [ "$st" = "stale" ] && ok "staleness-violation: silent-but-alive lane goes stale" || bad "staleness: silent lane reported '$st'"
-sed -i.bak 's/heartbeat_stale_minutes: 0/heartbeat_stale_minutes: 30/' "$ORCH_REPO/.orchestrator.yml"
-kill "$(cat "$ORCH_HOME/lanes/impl-3.pid")" 2>/dev/null
+sed -i.bak 's/heartbeat_stale_minutes: 0/heartbeat_stale_minutes: 30/' "$LOOM_REPO/.loom.yml"
+kill "$(cat "$LOOM_HOME/lanes/impl-3.pid")" 2>/dev/null
 
 # 4b. Self-trigger is the DEFAULT (P2), so a plain spawn advances the loop with
 #     no flag at all. It used to be opt-in, and W4 of build 2 said what that
 #     cost: "I spawned both without --on-done-tick… So nothing advances on its
 #     own" — 12m44s of dead build until a human ticked it by hand.
-#     ORCH_WAVE_CMD is a marker so no real claude session is invoked; the lock
+#     LOOM_WAVE_CMD is a marker so no real claude session is invoked; the lock
 #     dir is cleared so the triggered tick can acquire it.
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 MARK="$T/self-trigger-fired"
-ORCH_WAVE_CMD="touch $MARK" "$TICK" spawn-lane impl-11 -- true >/dev/null
+LOOM_WAVE_CMD="touch $MARK" "$TICK" spawn-lane impl-11 -- true >/dev/null
 for _ in $(seq 1 40); do [ -f "$MARK" ] && break; sleep 0.1; done
 [ -f "$MARK" ] && ok "self-trigger: a plain lane fires the next wave, no flag needed" || bad "self-trigger: no wave fired after lane exit"
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4b2. Planted violation: --no-tick is the deliberate opt-out, and it must
 #      actually suppress the trigger — otherwise the default has no off switch
 #      and 4b would pass for a lane that always ticks regardless of its flags.
 MARK_NO="$T/no-tick-fired"
-ORCH_WAVE_CMD="touch $MARK_NO" "$TICK" spawn-lane impl-16 --no-tick -- true >/dev/null
+LOOM_WAVE_CMD="touch $MARK_NO" "$TICK" spawn-lane impl-16 --no-tick -- true >/dev/null
 sleep 1.5
 [ -f "$MARK_NO" ] && bad "no-tick: the opt-out did not suppress the trigger" \
                   || ok "no-tick-violation: --no-tick lane exits without advancing the loop"
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4b3. --on-done-tick still parses (now a no-op), so a caller written against the
 #      old opt-in contract is not silently broken.
 MARK_LEGACY="$T/legacy-flag-fired"
-ORCH_WAVE_CMD="touch $MARK_LEGACY" "$TICK" spawn-lane impl-17 --on-done-tick -- true >/dev/null
+LOOM_WAVE_CMD="touch $MARK_LEGACY" "$TICK" spawn-lane impl-17 --on-done-tick -- true >/dev/null
 for _ in $(seq 1 40); do [ -f "$MARK_LEGACY" ] && break; sleep 0.1; done
 [ -f "$MARK_LEGACY" ] && ok "self-trigger: the legacy --on-done-tick flag still works" \
                       || bad "self-trigger: --on-done-tick broke when the default flipped"
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4c. Order-tolerance: --on-done-tick BEFORE the id (the build-2 wave-1 form)
 #     must now work, not be swallowed as the id.
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 MARK2="$T/self-trigger-fired-2"
-ORCH_WAVE_CMD="touch $MARK2" "$TICK" spawn-lane --on-done-tick impl-12 -- true >/dev/null 2>&1
+LOOM_WAVE_CMD="touch $MARK2" "$TICK" spawn-lane --on-done-tick impl-12 -- true >/dev/null 2>&1
 for _ in $(seq 1 40); do [ -f "$MARK2" ] && break; sleep 0.1; done
 [ -f "$MARK2" ] && ok "spawn-lane: flag-before-id order works" || bad "spawn-lane: flag-before-id was swallowed (regression)"
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4d. Loud failures: missing id and missing command must abort non-zero, not spawn.
 if "$TICK" spawn-lane --on-done-tick -- true >/dev/null 2>&1; then bad "spawn-lane: missing id did NOT fail"; else ok "spawn-lane: missing id fails loudly"; fi
@@ -223,7 +223,7 @@ for bad_id in 12 gate12 lane_14 impl impl- xyz-1; do
         bad "lane-id: ad hoc id '$bad_id' was accepted"; break
     fi
 done
-[ -n "${bad_id:-}" ] && ! [ -f "$ORCH_HOME/lanes/12.pid" ] \
+[ -n "${bad_id:-}" ] && ! [ -f "$LOOM_HOME/lanes/12.pid" ] \
     && ok "lane-id: ad hoc ids are refused, so type is always derivable" \
     || bad "lane-id: an ad hoc id got through"
 # A lane id with a SPACE is the dangerous shape, and the type globs end in `*`
@@ -236,7 +236,7 @@ if "$TICK" spawn-lane "probe-Ledger core" --no-tick -- true >/dev/null 2>&1; the
 else
     ok "lane-id: an id containing a space is refused at spawn"
 fi
-[ -e "$ORCH_HOME/lanes/probe-Ledger core.pid" ] \
+[ -e "$LOOM_HOME/lanes/probe-Ledger core.pid" ] \
     && bad "lane-id-violation: the spaced id still produced a pid file" \
     || ok "lane-id-violation: no lane state was written for the spaced id"
 "$TICK" spawn-lane probe-ledger-core --no-tick -- true >/dev/null 2>&1 \
@@ -261,31 +261,31 @@ for g in impl-7 gate-7 gate-7-r2 merge-7 probe-e11; do "$TICK" clear-lane "$g" >
 #      semantics; it used to borrow the tick lock, so harvest/gate/fill queued
 #      behind every rebase-and-merge. Its own lock means one merge at a time
 #      AND waves that keep scheduling around it.
-rm -rf "$ORCH_HOME/tick.lock.d" "$ORCH_HOME/merge.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d" "$LOOM_HOME/merge.lock.d"
 "$TICK" spawn-lane merge-71 --merge-lock -- sleep 20 >/dev/null
 if "$TICK" spawn-lane merge-72 --merge-lock -- true >/dev/null 2>&1; then
     bad "merge-lock: a second merge lane started while one held the lock"
 else
-    [ -f "$ORCH_HOME/lanes/merge-72.pid" ] \
+    [ -f "$LOOM_HOME/lanes/merge-72.pid" ] \
         && bad "merge-lock: refused but left a pid file" \
         || ok "merge-lock: a second merge waits, and leaves no lane behind"
 fi
 # THE point of the split: the tick lock is free, so scheduling continues.
-out=$(ORCH_WAVE_CMD="echo scheduled-during-merge" "$TICK" tick 2>&1)
+out=$(LOOM_WAVE_CMD="echo scheduled-during-merge" "$TICK" tick 2>&1)
 case "$out" in *"running wave"*) ok "merge-lock: a wave still ticks while a merge holds its lock";;
     *) bad "merge-lock: merge blocked the whole scheduler ($out)";; esac
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 # Planted violation: sharing one lock is what the old code did — prove it stalls.
-ORCH_LOCK_DIR="$ORCH_HOME/merge.lock.d" ORCH_WAVE_CMD="echo shared-lock-wave" \
+LOOM_LOCK_DIR="$LOOM_HOME/merge.lock.d" LOOM_WAVE_CMD="echo shared-lock-wave" \
     "$TICK" tick >"$T/shared.out" 2>&1 || true
 case "$(cat "$T/shared.out")" in *"wave already running"*) ok "merge-lock-violation: one shared lock stalls the wave (the old behaviour)";;
     *) bad "merge-lock-violation: shared lock did not stall ($(cat "$T/shared.out"))";; esac
 # That stalled tick left a pending note (P1); drop it so no later test inherits
 # a re-tick it did not ask for.
-rm -f "$ORCH_HOME/tick.pending"
+rm -f "$LOOM_HOME/tick.pending"
 # The lane releases on exit, and a merge lane that is killed outright leaves a
 # breakable lock rather than a permanent one.
-kill "$(cat "$ORCH_HOME/lanes/merge-71.pid")" 2>/dev/null; sleep 0.3
+kill "$(cat "$LOOM_HOME/lanes/merge-71.pid")" 2>/dev/null; sleep 0.3
 "$TICK" clear-lane merge-71 >/dev/null
 if "$TICK" spawn-lane merge-73 --merge-lock -- true >/dev/null 2>&1; then
     ok "merge-lock: a killed merge lane's lock is broken by the next merge"
@@ -293,43 +293,43 @@ else
     bad "merge-lock: dead owner's lock wedged the queue permanently"
 fi
 sleep 0.3
-[ -d "$ORCH_HOME/merge.lock.d" ] \
+[ -d "$LOOM_HOME/merge.lock.d" ] \
     && bad "merge-lock: lock outlived the lane that finished" \
     || ok "merge-lock: released when the lane's command exits"
 "$TICK" clear-lane merge-73 >/dev/null
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4f. A lane runs where its work is: --cwd puts it in the worktree, which is
 #     what removes the need for a `cd` allow rule (P4). Planted violation:
 #     the same spawn WITHOUT the flag must land in the repo root instead.
 WT="$T/worktree-a"; mkdir -p "$WT"
 "$TICK" spawn-lane gate-21 --cwd "$WT" -- pwd >/dev/null; sleep 0.5
-grep -q "^$WT$" "$ORCH_HOME/logs/lane-gate-21.log" \
+grep -q "^$WT$" "$LOOM_HOME/logs/lane-gate-21.log" \
     && ok "spawn-lane: --cwd starts the lane inside its worktree" \
-    || bad "spawn-lane: --cwd ignored (log: $(cat "$ORCH_HOME/logs/lane-gate-21.log"))"
+    || bad "spawn-lane: --cwd ignored (log: $(cat "$LOOM_HOME/logs/lane-gate-21.log"))"
 "$TICK" spawn-lane gate-22 -- pwd >/dev/null; sleep 0.5
-grep -q "^$ORCH_REPO$" "$ORCH_HOME/logs/lane-gate-22.log" \
+grep -q "^$LOOM_REPO$" "$LOOM_HOME/logs/lane-gate-22.log" \
     && ok "spawn-lane-violation: without --cwd the lane is in the repo root" \
     || bad "spawn-lane: default cwd is not the repo root"
 
 # 4g. Flag order-tolerance extends to --cwd, and it composes with self-trigger.
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 MARK3="$T/self-trigger-fired-3"
-ORCH_WAVE_CMD="touch $MARK3" "$TICK" spawn-lane --cwd "$WT" gate-23 --on-done-tick -- pwd >/dev/null
+LOOM_WAVE_CMD="touch $MARK3" "$TICK" spawn-lane --cwd "$WT" gate-23 --on-done-tick -- pwd >/dev/null
 for _ in $(seq 1 40); do [ -f "$MARK3" ] && break; sleep 0.1; done
-if [ -f "$MARK3" ] && grep -q "^$WT$" "$ORCH_HOME/logs/lane-gate-23.log"; then
+if [ -f "$MARK3" ] && grep -q "^$WT$" "$LOOM_HOME/logs/lane-gate-23.log"; then
     ok "spawn-lane: --cwd before the id composes with --on-done-tick"
 else
     bad "spawn-lane: --cwd + --on-done-tick lost the cwd or the trigger"
 fi
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4h. A bad worktree path must abort at spawn — never become a lane that dies
 #     on its first command and reads as an ordinary crash.
 if "$TICK" spawn-lane gate-24 --cwd "$T/no-such-worktree" -- true >/dev/null 2>&1; then
     bad "spawn-lane: nonexistent --cwd did NOT fail"
 else
-    [ -f "$ORCH_HOME/lanes/gate-24.pid" ] \
+    [ -f "$LOOM_HOME/lanes/gate-24.pid" ] \
         && bad "spawn-lane: nonexistent --cwd failed but left a pid file" \
         || ok "spawn-lane: nonexistent --cwd fails loudly, spawns nothing"
 fi
@@ -337,13 +337,13 @@ if "$TICK" spawn-lane gate-25 --cwd >/dev/null 2>&1; then bad "spawn-lane: --cwd
 
 # 4i. Scratch (P17). Every session is handed its own fresh, empty, writable
 #     directory — no session may run `mkdir`, so tick.sh must create it.
-"$TICK" spawn-lane probe-e1 --cwd "$WT" -- sh -c 'echo "$ORCH_SCRATCH" > "$ORCH_SCRATCH/where"' >/dev/null
+"$TICK" spawn-lane probe-e1 --cwd "$WT" -- sh -c 'echo "$LOOM_SCRATCH" > "$LOOM_SCRATCH/where"' >/dev/null
 sleep 0.5
-SC1=$(cat "$ORCH_HOME"/scratch/lane-probe-e1-*/where 2>/dev/null | head -1)
+SC1=$(cat "$LOOM_HOME"/scratch/lane-probe-e1-*/where 2>/dev/null | head -1)
 if [ -n "$SC1" ] && [ -d "$SC1" ]; then
-    ok "scratch: a lane gets a writable \$ORCH_SCRATCH of its own"
+    ok "scratch: a lane gets a writable \$LOOM_SCRATCH of its own"
 else
-    bad "scratch: lane had no usable \$ORCH_SCRATCH"
+    bad "scratch: lane had no usable \$LOOM_SCRATCH"
 fi
 
 # 4i2. The P17 bug itself: a second run under the same lane id must NOT see the
@@ -351,9 +351,9 @@ fi
 #      wrong ticket, so re-running an id has to land somewhere new and empty.
 # The listing is written OUTSIDE the scratch dir: a redirect into it would
 # create the very file the check is looking for.
-"$TICK" spawn-lane probe-e1 --cwd "$WT" -- sh -c 'ls "$ORCH_SCRATCH" > sc-listing; echo "$ORCH_SCRATCH" > "$ORCH_SCRATCH/where2"' >/dev/null
+"$TICK" spawn-lane probe-e1 --cwd "$WT" -- sh -c 'ls "$LOOM_SCRATCH" > sc-listing; echo "$LOOM_SCRATCH" > "$LOOM_SCRATCH/where2"' >/dev/null
 sleep 0.5
-SC2=$(cat "$ORCH_HOME"/scratch/lane-probe-e1-*/where2 2>/dev/null | head -1)
+SC2=$(cat "$LOOM_HOME"/scratch/lane-probe-e1-*/where2 2>/dev/null | head -1)
 if [ -n "$SC2" ] && [ "$SC2" != "$SC1" ]; then
     ok "scratch: re-running a lane id gets a different directory"
 else
@@ -366,32 +366,32 @@ else
 fi
 
 # 4i3. Waves get the same treatment, and two waves never share a directory.
-rm -rf "$ORCH_HOME/tick.lock.d"
-ORCH_WAVE_CMD='sh -c "echo $ORCH_SCRATCH > $ORCH_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
-rm -rf "$ORCH_HOME/tick.lock.d"
-ORCH_WAVE_CMD='sh -c "echo $ORCH_SCRATCH > $ORCH_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
-rm -rf "$ORCH_HOME/tick.lock.d"
-WAVES=$(cat "$ORCH_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
+rm -rf "$LOOM_HOME/tick.lock.d"
+LOOM_WAVE_CMD='sh -c "echo $LOOM_SCRATCH > $LOOM_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
+rm -rf "$LOOM_HOME/tick.lock.d"
+LOOM_WAVE_CMD='sh -c "echo $LOOM_SCRATCH > $LOOM_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
+rm -rf "$LOOM_HOME/tick.lock.d"
+WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ "$WAVES" -ge 2 ] && ok "scratch: consecutive waves get separate directories" \
     || bad "scratch: two waves shared a scratch directory"
 
 # 4i4. Unique-per-session grows without bound and no session may run `rm`, so
 #      the scheduler prunes. Old goes, current stays.
-mkdir -p "$ORCH_HOME/scratch/wave-ancient"
-touch -t 202001010000 "$ORCH_HOME/scratch/wave-ancient"
-FRESH=$(ls -d "$ORCH_HOME"/scratch/wave-2* 2>/dev/null | head -1)
-rm -rf "$ORCH_HOME/tick.lock.d"
-ORCH_WAVE_CMD="true" "$TICK" tick >/dev/null 2>&1
-rm -rf "$ORCH_HOME/tick.lock.d"
-if [ ! -d "$ORCH_HOME/scratch/wave-ancient" ] && [ -d "$FRESH" ]; then
+mkdir -p "$LOOM_HOME/scratch/wave-ancient"
+touch -t 202001010000 "$LOOM_HOME/scratch/wave-ancient"
+FRESH=$(ls -d "$LOOM_HOME"/scratch/wave-2* 2>/dev/null | head -1)
+rm -rf "$LOOM_HOME/tick.lock.d"
+LOOM_WAVE_CMD="true" "$TICK" tick >/dev/null 2>&1
+rm -rf "$LOOM_HOME/tick.lock.d"
+if [ ! -d "$LOOM_HOME/scratch/wave-ancient" ] && [ -d "$FRESH" ]; then
     ok "scratch: prune removes stale directories, keeps recent ones"
 else
-    bad "scratch: prune removed the wrong thing (ancient gone? $([ -d "$ORCH_HOME/scratch/wave-ancient" ] && echo no || echo yes); fresh kept? $([ -d "$FRESH" ] && echo yes || echo no))"
+    bad "scratch: prune removed the wrong thing (ancient gone? $([ -d "$LOOM_HOME/scratch/wave-ancient" ] && echo no || echo yes); fresh kept? $([ -d "$FRESH" ] && echo yes || echo no))"
 fi
 
 # 4i5. Planted violation: a guarded root must delete nothing. With the guard
 #      removed this is the line that would wipe a home directory.
-GUARD=$(SCRATCH_ROOT="" ORCH_HOME="$ORCH_HOME" bash -c '
+GUARD=$(SCRATCH_ROOT="" LOOM_HOME="$LOOM_HOME" bash -c '
     SCRATCH_ROOT=""; case "$SCRATCH_ROOT" in ""|"/"|"$HOME") echo guarded ;; *) echo unguarded ;; esac')
 [ "$GUARD" = "guarded" ] && ok "scratch: empty/root scratch root is refused by the prune guard" \
     || bad "scratch: prune guard does not cover an empty root"
@@ -402,26 +402,26 @@ GUARD=$(SCRATCH_ROOT="" ORCH_HOME="$ORCH_HOME" bash -c '
 #     before creating a lane, rather than producing one that is denied
 #     everything and reads as a normal crash.
 printf '{"projects":{}}\n' > "$T/untrusted.json"
-if ORCH_TRUST_FILE="$T/untrusted.json" "$TICK" spawn-lane impl-41 --cwd "$WT" -- true >/dev/null 2>&1; then
+if LOOM_TRUST_FILE="$T/untrusted.json" "$TICK" spawn-lane impl-41 --cwd "$WT" -- true >/dev/null 2>&1; then
     bad "trust-violation: untrusted workspace still spawned a lane"
 else
-    [ -f "$ORCH_HOME/lanes/impl-41.pid" ] \
+    [ -f "$LOOM_HOME/lanes/impl-41.pid" ] \
         && bad "trust: spawn failed but left a pid file" \
         || ok "trust-violation: untrusted workspace aborts the spawn, spawns nothing"
 fi
 # The refusal must be actionable: name the ancestor that would fix it.
-out=$(ORCH_TRUST_FILE="$T/untrusted.json" "$TICK" spawn-lane impl-42 --cwd "$WT" -- true 2>&1 || true)
+out=$(LOOM_TRUST_FILE="$T/untrusted.json" "$TICK" spawn-lane impl-42 --cwd "$WT" -- true 2>&1 || true)
 case "$out" in *"$T"*trust*|*trust*"$T"*) ok "trust: refusal names the ancestor to trust";;
     *) bad "trust: refusal is not actionable ($out)";; esac
 # A missing trust file is not tacit permission.
-if ORCH_TRUST_FILE="$T/no-such-file.json" "$TICK" spawn-lane impl-43 --cwd "$WT" -- true >/dev/null 2>&1; then
+if LOOM_TRUST_FILE="$T/no-such-file.json" "$TICK" spawn-lane impl-43 --cwd "$WT" -- true >/dev/null 2>&1; then
     bad "trust: missing trust file was treated as trusted"
 else
     ok "trust: missing trust file is not tacit permission"
 fi
 # Trust is explicit: an entry set to false must not pass as an entry.
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":false}}}\n' "$T" > "$T/denied.json"
-if ORCH_TRUST_FILE="$T/denied.json" "$TICK" spawn-lane impl-44 --cwd "$WT" -- true >/dev/null 2>&1; then
+if LOOM_TRUST_FILE="$T/denied.json" "$TICK" spawn-lane impl-44 --cwd "$WT" -- true >/dev/null 2>&1; then
     bad "trust: hasTrustDialogAccepted=false was accepted"
 else
     ok "trust: an explicitly untrusted entry is refused"
@@ -430,7 +430,7 @@ fi
 # parent — someone answered that dialog `no` on purpose.
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":false}}}\n' \
     "$T" "$WT" > "$T/leaf-denied.json"
-if ORCH_TRUST_FILE="$T/leaf-denied.json" "$TICK" spawn-lane impl-45 --cwd "$WT" -- true >/dev/null 2>&1; then
+if LOOM_TRUST_FILE="$T/leaf-denied.json" "$TICK" spawn-lane impl-45 --cwd "$WT" -- true >/dev/null 2>&1; then
     bad "trust: a declined worktree was rescued by its trusted parent"
 else
     ok "trust: nearest entry wins — declined worktree refused under a trusted parent"
@@ -459,16 +459,16 @@ if [ -d "$TR/repo-wt-1" ]; then
         "$TR" "$TR/repo" > "$TR/root-denied.json"
     # The worktree itself has no entry and a trusted parent — the OLD guard passed
     # here, which is exactly the bug.
-    if ORCH_TRUST_FILE="$TR/root-denied.json" "$TICK" spawn-lane impl-46 --cwd "$TR/repo-wt-1" -- true >/dev/null 2>&1; then
+    if LOOM_TRUST_FILE="$TR/root-denied.json" "$TICK" spawn-lane impl-46 --cwd "$TR/repo-wt-1" -- true >/dev/null 2>&1; then
         bad "trust-violation (P30): sibling worktree of an untrusted repo still spawned a lane"
     else
-        [ -f "$ORCH_HOME/lanes/impl-46.pid" ] \
+        [ -f "$LOOM_HOME/lanes/impl-46.pid" ] \
             && bad "trust (P30): spawn failed but left a pid file" \
             || ok "trust-violation (P30): untrusted REPO ROOT refuses the lane, not the 77th minute"
     fi
     # Actionable means naming the repo root — the worktree path is not what the
     # human must accept, and the old message named only the cwd.
-    out=$(ORCH_TRUST_FILE="$TR/root-denied.json" "$TICK" spawn-lane impl-47 --cwd "$TR/repo-wt-1" -- true 2>&1 || true)
+    out=$(LOOM_TRUST_FILE="$TR/root-denied.json" "$TICK" spawn-lane impl-47 --cwd "$TR/repo-wt-1" -- true 2>&1 || true)
     case "$out" in *"$TR/repo'"*|*"$TR/repo "*)
         ok "trust (P30): refusal names the repo root, the path the human must accept" ;;
         *) bad "trust (P30): refusal does not name the repo root ($out)" ;; esac
@@ -476,7 +476,7 @@ if [ -d "$TR/repo-wt-1" ]; then
     # lanes which would have worked is worse than the gap it closes. A repo root
     # with NO entry of its own must still cascade from its trusted parent.
     printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$TR" > "$TR/root-absent.json"
-    if ORCH_TRUST_FILE="$TR/root-absent.json" "$TICK" spawn-lane impl-48 --cwd "$TR/repo-wt-1" --no-tick -- true >/dev/null 2>&1; then
+    if LOOM_TRUST_FILE="$TR/root-absent.json" "$TICK" spawn-lane impl-48 --cwd "$TR/repo-wt-1" --no-tick -- true >/dev/null 2>&1; then
         ok "trust (P30): a repo root with no entry still cascades — no false refusal"
     else
         bad "trust (P30): FALSE REFUSAL — repo root without its own entry was refused"
@@ -484,10 +484,10 @@ if [ -d "$TR/repo-wt-1" ]; then
     "$TICK" clear-lane impl-48 >/dev/null 2>&1 || true
     # The verb answers the same question, and never writes the trust file.
     before=$(shasum "$TR/root-denied.json" | cut -d' ' -f1)
-    ORCH_TRUST_FILE="$TR/root-denied.json" ORCH_REPO="$TR/repo" "$TICK" trust-check >/dev/null 2>&1 \
+    LOOM_TRUST_FILE="$TR/root-denied.json" LOOM_REPO="$TR/repo" "$TICK" trust-check >/dev/null 2>&1 \
         && bad "trust-check: reported an untrusted repo as trusted" \
         || ok "trust-check: reports the untrusted repo root"
-    ORCH_TRUST_FILE="$TR/root-absent.json" ORCH_REPO="$TR/repo" "$TICK" trust-check >/dev/null 2>&1 \
+    LOOM_TRUST_FILE="$TR/root-absent.json" LOOM_REPO="$TR/repo" "$TICK" trust-check >/dev/null 2>&1 \
         && ok "trust-check: reports a cascaded repo as trusted" \
         || bad "trust-check: refused a repo covered by a trusted ancestor"
     [ "$(shasum "$TR/root-denied.json" | cut -d' ' -f1)" = "$before" ] \
@@ -508,7 +508,7 @@ if [ -d "$TR/repo-wt-1" ]; then
     git -C "$TR/hidden/repo" commit -qm init >/dev/null 2>&1
     git -C "$TR/hidden/repo" worktree add -q "$TR/wt-home/repo-wt-1" -b wt1 >/dev/null 2>&1
     printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$TR/wt-home" > "$TR/unknown-root.json"
-    if ORCH_TRUST_FILE="$TR/unknown-root.json" "$TICK" spawn-lane impl-49 --cwd "$TR/wt-home/repo-wt-1" --no-tick -- true >/dev/null 2>&1; then
+    if LOOM_TRUST_FILE="$TR/unknown-root.json" "$TICK" spawn-lane impl-49 --cwd "$TR/wt-home/repo-wt-1" --no-tick -- true >/dev/null 2>&1; then
         ok "trust (P30): an unrecorded repo root is 'cannot tell', not a refusal"
     else
         bad "trust (P30): FALSE REFUSAL — an unrecorded repo root was treated as declined"
@@ -519,7 +519,7 @@ if [ -d "$TR/repo-wt-1" ]; then
     # machinery, opposite answer, decided only by the explicit decline.
     printf '{"projects":{"%s":{"hasTrustDialogAccepted":true},"%s":{"hasTrustDialogAccepted":false}}}\n' \
         "$TR/wt-home" "$TR/hidden/repo" > "$TR/known-denied.json"
-    if ORCH_TRUST_FILE="$TR/known-denied.json" "$TICK" spawn-lane impl-50 --cwd "$TR/wt-home/repo-wt-1" -- true >/dev/null 2>&1; then
+    if LOOM_TRUST_FILE="$TR/known-denied.json" "$TICK" spawn-lane impl-50 --cwd "$TR/wt-home/repo-wt-1" -- true >/dev/null 2>&1; then
         bad "trust (P30): an explicit decline on the repo root was ignored"
     else
         ok "trust (P30): explicit decline still refuses — 'cannot tell' is not 'trusted'"
@@ -528,10 +528,10 @@ if [ -d "$TR/repo-wt-1" ]; then
     # (Paid for by P3: fifteen identical stderr lines into a log nobody read.)
     TN="$T/p30-notify"; mkdir -p "$TN"
     printf 'ntfy:\n  push: [workspace_untrusted]\n' > "$TN/global.yml"
-    n1=$(ORCH_HOME="$TN" ORCH_GLOBAL_CONFIG="$TN/global.yml" ORCH_TRUST_FILE="$TR/root-denied.json" \
-         ORCH_REPO="$TR/repo" NTFY_CMD="true" "$TICK" trust-check --notify 2>&1 || true)
-    n2=$(ORCH_HOME="$TN" ORCH_GLOBAL_CONFIG="$TN/global.yml" ORCH_TRUST_FILE="$TR/root-denied.json" \
-         ORCH_REPO="$TR/repo" NTFY_CMD="true" "$TICK" trust-check --notify 2>&1 || true)
+    n1=$(LOOM_HOME="$TN" LOOM_GLOBAL_CONFIG="$TN/global.yml" LOOM_TRUST_FILE="$TR/root-denied.json" \
+         LOOM_REPO="$TR/repo" NTFY_CMD="true" "$TICK" trust-check --notify 2>&1 || true)
+    n2=$(LOOM_HOME="$TN" LOOM_GLOBAL_CONFIG="$TN/global.yml" LOOM_TRUST_FILE="$TR/root-denied.json" \
+         LOOM_REPO="$TR/repo" NTFY_CMD="true" "$TICK" trust-check --notify 2>&1 || true)
     if [ -f "$TN/trust.state" ]; then
         case "$n2" in *"not a trusted"*) : ;; *) bad "trust-check: second call lost the stderr report";; esac
         ok "trust-check --notify: state recorded once, warning still printed every call"
@@ -543,13 +543,13 @@ else
 fi
 
 # 4e. install --dry-run generates a valid, correctly-targeted plist without loading.
-export ORCH_PLIST_DIR="$T/agents"
-out=$(ORCH_REPO="$ORCH_REPO" "$TICK" install --dry-run 300 2>&1)
+export LOOM_PLIST_DIR="$T/agents"
+out=$(LOOM_REPO="$LOOM_REPO" "$TICK" install --dry-run 300 2>&1)
 plist=$(echo "$out" | sed -n 's/^generated (dry-run): //p')
 if [ -n "$plist" ] && [ -f "$plist" ]; then
     lint_ok=1; command -v plutil >/dev/null 2>&1 && { plutil -lint "$plist" >/dev/null 2>&1 || lint_ok=0; }
-    if [ "$lint_ok" = 1 ] && grep -q "com.orchestrate.$(basename "$ORCH_REPO")-" "$plist" \
-       && grep -q "<string>$ORCH_REPO</string>" "$plist" && grep -q "<integer>300</integer>" "$plist"; then
+    if [ "$lint_ok" = 1 ] && grep -q "com.loom.$(basename "$LOOM_REPO")-" "$plist" \
+       && grep -q "<string>$LOOM_REPO</string>" "$plist" && grep -q "<integer>300</integer>" "$plist"; then
         ok "install: dry-run generated a valid per-repo plist (label+repo+interval), not loaded"
     else
         bad "install: generated plist malformed or mistargeted"
@@ -565,8 +565,8 @@ fi
 #     first makes the second program unnecessary. (Designed with the human,
 #     2026-08-04.)
 MT="$T/merged"; mkdir -p "$MT/repo" "$MT/home" "$MT/agents"
-MENV() { ORCH_REPO="$MT/repo" ORCH_HOME="$MT/home" ORCH_PLIST_DIR="$MT/agents" \
-         ORCH_GLOBAL_CONFIG="$T/none.yml" ORCH_SKIP_BOOTSTRAP=1 "$@"; }
+MENV() { LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" LOOM_PLIST_DIR="$MT/agents" \
+         LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 
 # The default timer is 60s and the agent runs the AUTO mode, not a bare tick:
 # a bare tick means "a human typed it" and would ignore both the switch and
@@ -594,9 +594,9 @@ MWAVES="$MT/waves"
 # NOTE: env must be EXPORTED, not prefixed onto a shell function — a prefix on
 # a function call is not passed through to the command the function runs.
 MTICK() { : > "$MWAVES"
-          export ORCH_WAVE_CMD="sh -c 'echo w >> $MWAVES'"
+          export LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'"
           MENV "$TICK" "$@" >/dev/null 2>&1
-          export ORCH_WAVE_CMD="true"; }
+          export LOOM_WAVE_CMD="true"; }
 _mwaves() { [ -f "$MWAVES" ] && wc -l < "$MWAVES" | tr -d ' ' || echo 0; }
 
 : > "$MT/home/loop.stopped"
@@ -640,9 +640,9 @@ MTICK tick --auto
 # lanes, so blocking waves alone would carry a ticket all the way to merged
 # after the human asked it to stop.
 : > "$MT/home/loop.stopped"
-export ORCH_LANE_ID=impl-9
+export LOOM_LANE_ID=impl-9
 out=$(MENV "$TICK" spawn-lane gate-9 -- true 2>&1); rc_ch=$?
-unset ORCH_LANE_ID
+unset LOOM_LANE_ID
 if [ "$rc_ch" = 0 ] && printf '%s' "$out" | grep -q "not chaining" \
    && [ ! -f "$MT/home/lanes/gate-9.pid" ]; then
     ok "stop: a lane cannot chain to its successor while the loop is stopped"
@@ -775,26 +775,26 @@ chmod +x "$GWT/scripts/gate.sh"
 RAN="$T/review-session-ran"
 
 # 4i1. Green branch: the pregate passes and the review session runs as normal.
-rm -f "$RAN" "$GWT/RED" "$ORCH_HOME/lanes/gate-41.rc"
+rm -f "$RAN" "$GWT/RED" "$LOOM_HOME/lanes/gate-41.rc"
 "$TICK" spawn-lane gate-41 --no-tick --pregate api --cwd "$GWT" -- touch "$RAN" >/dev/null
-for _ in $(seq 1 60); do [ -f "$ORCH_HOME/lanes/gate-41.rc" ] && break; sleep 0.1; done
-if [ -f "$RAN" ] && [ "$(cat "$ORCH_HOME/lanes/gate-41.rc" 2>/dev/null)" = "0" ]; then
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-41.rc" ] && break; sleep 0.1; done
+if [ -f "$RAN" ] && [ "$(cat "$LOOM_HOME/lanes/gate-41.rc" 2>/dev/null)" = "0" ]; then
     ok "pregate: a green branch runs the review session and exits 0"
 else
-    bad "pregate: green branch did not reach the session (rc=$(cat "$ORCH_HOME/lanes/gate-41.rc" 2>/dev/null))"
+    bad "pregate: green branch did not reach the session (rc=$(cat "$LOOM_HOME/lanes/gate-41.rc" 2>/dev/null))"
 fi
 
 # 4i2. Red branch: the session is NEVER started, and the lane says why in a way
 #      the wave can act on without reading prose.
 rm -f "$RAN"; touch "$GWT/RED"
-rm -f "$ORCH_HOME/lanes/gate-42.rc"
+rm -f "$LOOM_HOME/lanes/gate-42.rc"
 "$TICK" spawn-lane gate-42 --no-tick --pregate api --cwd "$GWT" -- touch "$RAN" >/dev/null
-for _ in $(seq 1 60); do [ -f "$ORCH_HOME/lanes/gate-42.rc" ] && break; sleep 0.1; done
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-42.rc" ] && break; sleep 0.1; done
 [ -f "$RAN" ] && bad "pregate: a red branch still spent a review session" \
               || ok "pregate: a red branch never starts the review session"
-[ "$(cat "$ORCH_HOME/lanes/gate-42.rc" 2>/dev/null)" = "7" ] \
+[ "$(cat "$LOOM_HOME/lanes/gate-42.rc" 2>/dev/null)" = "7" ] \
     && ok "pregate: a mechanical failure is reported as rc 7, not as a crash" \
-    || bad "pregate: red branch rc was '$(cat "$ORCH_HOME/lanes/gate-42.rc" 2>/dev/null)', expected 7"
+    || bad "pregate: red branch rc was '$(cat "$LOOM_HOME/lanes/gate-42.rc" 2>/dev/null)', expected 7"
 "$TICK" lane-status | awk '$1=="gate-42"{print $5}' | grep -q '^7$' \
     && ok "pregate: lane-status carries the exit code for the wave to harvest" \
     || bad "pregate: exit code missing from lane-status"
@@ -802,12 +802,12 @@ for _ in $(seq 1 60); do [ -f "$ORCH_HOME/lanes/gate-42.rc" ] && break; sleep 0.
 # 4i3. The rejection path must not swallow the epilogue. Skipping the session is
 #      the point; skipping the completion tick would halt the build, which is the
 #      P1/P2 failure re-entering through a side door.
-rm -rf "$ORCH_HOME/tick.lock.d"; MARKP="$T/pregate-still-ticked"
-ORCH_WAVE_CMD="touch $MARKP" "$TICK" spawn-lane gate-43 --pregate api --cwd "$GWT" -- true >/dev/null
+rm -rf "$LOOM_HOME/tick.lock.d"; MARKP="$T/pregate-still-ticked"
+LOOM_WAVE_CMD="touch $MARKP" "$TICK" spawn-lane gate-43 --pregate api --cwd "$GWT" -- true >/dev/null
 for _ in $(seq 1 60); do [ -f "$MARKP" ] && break; sleep 0.1; done
 [ -f "$MARKP" ] && ok "pregate: a rejected lane still fires the next wave" \
                 || bad "pregate: rejection swallowed the completion tick — the build would halt"
-rm -rf "$ORCH_HOME/tick.lock.d"
+rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4i4. Planted violation: drop the pregate and the identical red branch spends
 #      the session anyway — the behaviour this proposal exists to remove.
@@ -820,10 +820,10 @@ for _ in $(seq 1 60); do [ -f "$RAN" ] && break; sleep 0.1; done
 # 4i5. A repo with no gate runner SKIPS the pregate rather than failing it. A
 #      false rejection costs far more than a wasted session, and a missing
 #      script is not evidence about the branch.
-rm -f "$RAN"; rm -f "$ORCH_HOME/lanes/gate-45.rc"
+rm -f "$RAN"; rm -f "$LOOM_HOME/lanes/gate-45.rc"
 "$TICK" spawn-lane gate-45 --no-tick --pregate api --cwd "$WT" -- touch "$RAN" >/dev/null
-for _ in $(seq 1 60); do [ -f "$ORCH_HOME/lanes/gate-45.rc" ] && break; sleep 0.1; done
-if [ -f "$RAN" ] && [ "$(cat "$ORCH_HOME/lanes/gate-45.rc" 2>/dev/null)" = "0" ]; then
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-45.rc" ] && break; sleep 0.1; done
+if [ -f "$RAN" ] && [ "$(cat "$LOOM_HOME/lanes/gate-45.rc" 2>/dev/null)" = "0" ]; then
     ok "pregate: a repo with no gate runner is not rejected for lacking one"
 else
     bad "pregate: missing runner produced a false rejection"
@@ -837,8 +837,8 @@ rm -f "$GWT/RED"
 #      (Found by an independent review, 2026-08-01.)
 touch "$GWT/RED"
 "$TICK" spawn-lane impl-46 --no-tick --pregate api --cwd "$GWT" -- true >/dev/null
-for _ in $(seq 1 60); do [ -f "$ORCH_HOME/lanes/impl-46.rc" ] && break; sleep 0.1; done
-[ "$(cat "$ORCH_HOME/lanes/impl-46.rc" 2>/dev/null)" = "7" ] \
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/impl-46.rc" ] && break; sleep 0.1; done
+[ "$(cat "$LOOM_HOME/lanes/impl-46.rc" 2>/dev/null)" = "7" ] \
     || bad "rc-reset: setup failed, first run did not record rc 7"
 rm -f "$GWT/RED"
 "$TICK" spawn-lane impl-46 --no-tick -- sleep 10 >/dev/null; sleep 0.4
@@ -846,7 +846,7 @@ rc_now=$("$TICK" lane-status | awk '$1=="impl-46"{print $5}')
 [ "$rc_now" = "-" ] \
     && ok "rc-reset: a respawned lane reports no exit code while it is working" \
     || bad "rc-reset: respawned lane still reports rc '$rc_now' from its previous run"
-kill "$(cat "$ORCH_HOME/lanes/impl-46.pid")" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/impl-46.pid")" 2>/dev/null
 "$TICK" clear-lane impl-46 >/dev/null
 
 # 4i7. The pregate tier reaches the lane through the environment, never spliced
@@ -878,11 +878,11 @@ done
 # and hardcoding the four built-ins broke pregating them. Validation follows the
 # repo's declared set, falling back to the built-ins when it declares none.
 CTR="$T/custom-tier"; mkdir -p "$CTR"
-printf 'gates:\n  security:\n    - "echo sec"\n' > "$CTR/.orchestrator.yml"
-ORCH_REPO="$CTR" "$TICK" spawn-lane gate-96 --no-tick --pregate security --cwd "$WT" -- true >/dev/null 2>&1 \
+printf 'gates:\n  security:\n    - "echo sec"\n' > "$CTR/.loom.yml"
+LOOM_REPO="$CTR" "$TICK" spawn-lane gate-96 --no-tick --pregate security --cwd "$WT" -- true >/dev/null 2>&1 \
     && ok "pregate: a repo's own declared tier can be pregated" \
     || bad "pregate: a declared custom tier was refused"
-ORCH_REPO="$CTR" "$TICK" spawn-lane gate-97 --no-tick --pregate api --cwd "$WT" -- true >/dev/null 2>&1 \
+LOOM_REPO="$CTR" "$TICK" spawn-lane gate-97 --no-tick --pregate api --cwd "$WT" -- true >/dev/null 2>&1 \
     && bad "pregate-violation: a tier this repo does not declare was accepted" \
     || ok "pregate-violation: a tier outside the repo's declared set is refused"
 
@@ -891,13 +891,13 @@ ORCH_REPO="$CTR" "$TICK" spawn-lane gate-97 --no-tick --pregate api --cwd "$WT" 
 #      `gate.eligible` guard cannot cover it because that only sees lanes in
 #      state `running`. (Found by an independent review, 2026-08-01.)
 "$TICK" spawn-lane impl-48 --no-tick -- sleep 20 >/dev/null
-livepid=$(cat "$ORCH_HOME/lanes/impl-48.pid")
+livepid=$(cat "$LOOM_HOME/lanes/impl-48.pid")
 if "$TICK" spawn-lane impl-48 --no-tick -- sleep 20 >/dev/null 2>&1; then
     bad "live-lane: a second lane was spawned over a running one"
 else
     ok "live-lane: reusing the id of a running lane is refused"
 fi
-[ "$(cat "$ORCH_HOME/lanes/impl-48.pid")" = "$livepid" ] \
+[ "$(cat "$LOOM_HOME/lanes/impl-48.pid")" = "$livepid" ] \
     && ok "live-lane-violation: the working lane keeps its pid file" \
     || bad "live-lane-violation: the running lane's pid file was overwritten"
 kill "$livepid" 2>/dev/null; "$TICK" clear-lane impl-48 >/dev/null
@@ -932,7 +932,7 @@ grep -q -- "--output-format stream-json --verbose" "$ARGV" \
     && ok "stream: spawn-lane injects the streaming flags into a claude lane" \
     || bad "stream: claude lane spawned unstreamed ($(cat "$ARGV" 2>/dev/null))"
 "$TICK" spawn-lane impl-32 --no-tick -- true >/dev/null; sleep 0.4
-[ -f "$ORCH_HOME/logs/lane-impl-32.jsonl" ] \
+[ -f "$LOOM_HOME/logs/lane-impl-32.jsonl" ] \
     && bad "stream: a non-claude lane was given a stream file" \
     || ok "stream: a non-claude command is spawned unchanged"
 # An explicit --output-format is the caller's decision and must survive.
@@ -945,7 +945,7 @@ grep -q -- "stream-json" "$ARGV" \
 # ...and `--output-format json` is NOT a stream, so no stream file is created
 # for it: one blob at exit is the pre-P13 shape, and a .jsonl that never gets
 # a second line would be a liveness signal that is always stale.
-[ -f "$ORCH_HOME/logs/lane-gate-35.jsonl" ] \
+[ -f "$LOOM_HOME/logs/lane-gate-35.jsonl" ] \
     && bad "stream: non-stream --output-format json still got a stream file" \
     || ok "stream: --output-format json gets no stream file"
 # The bug this pair exists for: `inject` and `stream` are DIFFERENT questions.
@@ -959,7 +959,7 @@ rm -f "$ARGV"
 STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-36 --no-tick -- \
     "$FAKE" -p "x" --output-format stream-json --verbose >/dev/null
 for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-[ -f "$ORCH_HOME/logs/lane-gate-36.jsonl" ] \
+[ -f "$LOOM_HOME/logs/lane-gate-36.jsonl" ] \
     && ok "stream: an explicitly-streaming lane still gets its stream file" \
     || bad "stream: caller-supplied stream-json lost the .jsonl (blank viewer pane)"
 [ "$(grep -o -- "--output-format" "$ARGV" | wc -l | tr -d ' ')" = "1" ] \
@@ -973,9 +973,9 @@ for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
 #      sub-second timing; the scenario it is modelling is a lane 40 minutes into
 #      real work, so the real window is also the honest one.)
 STUB_SLEEP=6 "$TICK" spawn-lane gate-33 --no-tick -- "$FAKE" -p "/code-review" >/dev/null
-for _ in $(seq 1 80); do [ -s "$ORCH_HOME/logs/lane-gate-33.jsonl" ] && break; sleep 0.1; done
-touch -t 202001010000 "$ORCH_HOME/logs/lane-gate-33.log"   # the buffered .log, frozen
-if [ ! -s "$ORCH_HOME/logs/lane-gate-33.jsonl" ]; then
+for _ in $(seq 1 80); do [ -s "$LOOM_HOME/logs/lane-gate-33.jsonl" ] && break; sleep 0.1; done
+touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-33.log"   # the buffered .log, frozen
+if [ ! -s "$LOOM_HOME/logs/lane-gate-33.jsonl" ]; then
     bad "stream: the lane never produced a stream to judge by (spawn failed?)"
 else
     st=$("$TICK" lane-status | awk '$1=="gate-33"{print $3}')
@@ -984,13 +984,13 @@ else
     # 4h3. Planted violation: take the stream away and liveness falls back to
     #      the frozen .log — the old behaviour, a healthy lane condemned wedged
     #      and killed with all its work.
-    mv "$ORCH_HOME/logs/lane-gate-33.jsonl" "$T/stream-hidden"
+    mv "$LOOM_HOME/logs/lane-gate-33.jsonl" "$T/stream-hidden"
     st=$("$TICK" lane-status | awk '$1=="gate-33"{print $3}')
     [ "$st" = "stale" ] && ok "stream-violation: without the stream the same live lane reads stale" \
                         || bad "stream-violation: lane reported '$st' with no stream to judge by"
-    mv "$T/stream-hidden" "$ORCH_HOME/logs/lane-gate-33.jsonl"
+    mv "$T/stream-hidden" "$LOOM_HOME/logs/lane-gate-33.jsonl"
 fi
-kill "$(cat "$ORCH_HOME/lanes/gate-33.pid")" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/gate-33.pid")" 2>/dev/null
 
 # 4h4. P32: the third wedge shape. A lane whose long command the harness
 #      auto-backgrounds blocks on a polling tool, and the poll emits
@@ -1004,9 +1004,9 @@ kill "$(cat "$ORCH_HOME/lanes/gate-33.pid")" 2>/dev/null
 # nothing. These tests drive that — the production path — rather than a verb
 # that would exist only to be tested. (The old separate watcher had its own
 # `quiet-tick` entry point; retiring it took the entry point with it.)
-WATCH() { : > "$ORCH_HOME/loop.stopped"; "$TICK" tick --auto >/dev/null 2>&1; rm -f "$ORCH_HOME/loop.stopped"; }
+WATCH() { : > "$LOOM_HOME/loop.stopped"; "$TICK" tick --auto >/dev/null 2>&1; rm -f "$LOOM_HOME/loop.stopped"; }
 "$TICK" spawn-lane gate-34 --no-tick -- sleep 30 >/dev/null
-PJ="$ORCH_HOME/logs/lane-gate-34.jsonl"; PS="$ORCH_HOME/lanes/gate-34.progress"
+PJ="$LOOM_HOME/logs/lane-gate-34.jsonl"; PS="$LOOM_HOME/lanes/gate-34.progress"
 printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bash scripts/gate.sh logic"}}]}}' > "$PJ"
 WATCH
 p0=$(cat "$PS" 2>/dev/null || echo missing)
@@ -1024,7 +1024,7 @@ p2=$(cat "$PS" 2>/dev/null || echo missing)
 [ "$p2" != "$p1" ] \
     && ok "staleness: a model turn still counts as progress" \
     || bad "staleness: the stamp froze on a live lane ($p1 -> $p2)"
-kill "$(cat "$ORCH_HOME/lanes/gate-34.pid")" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/gate-34.pid")" 2>/dev/null
 "$TICK" clear-lane gate-34 >/dev/null 2>&1
 
 # 4h5. The quiescence watcher must not call an UNACCEPTED build complete.
@@ -1054,8 +1054,8 @@ printf '#!/bin/sh\necho "$@" >> "%s"\n' "$QCAP" > "$QSTUB"; chmod +x "$QSTUB"
 # (a) the epic's milestone is still open → not complete.
 printf '%s\n' '[{"id":9,"title":"Reporting surface"}]' > "$QH/ms-open.json"
 : > "$QCAP"
-PATH="$QH/bin:$PATH" ORCH_HOME="$QH/home" ORCH_QUIET_SETTLE=0 \
-    NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-open.json" ORCH_NTFY_TOPIC=test-topic \
+PATH="$QH/bin:$PATH" LOOM_HOME="$QH/home" LOOM_QUIET_SETTLE=0 \
+    NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-open.json" LOOM_NTFY_TOPIC=test-topic \
     WATCH
 # Assert on the state sentinel, not the push: whether a given event reaches
 # ntfy depends on the push allowlist, but the CLASSIFICATION is the thing
@@ -1069,8 +1069,8 @@ fi
 # (b) its probe passed and closed the milestone → genuinely complete.
 rm -f "$QH/home/quiet.state"; : > "$QCAP"
 printf '[]\n' > "$QH/ms-closed.json"
-PATH="$QH/bin:$PATH" ORCH_HOME="$QH/home" ORCH_QUIET_SETTLE=0 \
-    NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-closed.json" ORCH_NTFY_TOPIC=test-topic \
+PATH="$QH/bin:$PATH" LOOM_HOME="$QH/home" LOOM_QUIET_SETTLE=0 \
+    NTFY_CMD="$QSTUB" QSTUB_MS="$QH/ms-closed.json" LOOM_NTFY_TOPIC=test-topic \
     WATCH
 qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qs" = complete ] \
@@ -1086,7 +1086,7 @@ qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
 #       a model session every `min_wave_gap_minutes`. (Paid for: build-3
 #       2026-08-05 — 44 idle overnight waves, ~9 USD, one blocked ticket.)
 #       NOTE the settle window is left at its real default here on purpose: the
-#       tests above pass ORCH_QUIET_SETTLE=0, which is exactly what let this
+#       tests above pass LOOM_QUIET_SETTLE=0, which is exactly what let this
 #       bug live.
 QB="$T/quiet-selfrefresh"; mkdir -p "$QB/bin" "$QB/home"
 cat > "$QB/bin/glab" <<'EOF'
@@ -1108,7 +1108,7 @@ for i in 1 2 3; do
     "$i" "$(( now - i ))" >> "$QB/home/events.jsonl"
 done
 rm -f "$QB/home/quiet.state"
-PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+PATH="$QB/bin:$PATH" LOOM_HOME="$QB/home" NTFY_CMD="$QBS" LOOM_NTFY_TOPIC=test-topic WATCH
 qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qb" = halted ] \
     && ok "quiet-check: the watcher's own tick_skipped events do not read as activity" \
@@ -1125,14 +1125,14 @@ rm -f "$QB/home/quiet.state"
 : > "$QB/home/events.jsonl"
 printf '{"t":"2026-08-05T12:00:01Z","ts":%s,"ev":"notify","build":"build-3"}\n' \
     "$(( $(date +%s) - 5 ))" >> "$QB/home/events.jsonl"
-PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+PATH="$QB/bin:$PATH" LOOM_HOME="$QB/home" NTFY_CMD="$QBS" LOOM_NTFY_TOPIC=test-topic WATCH
 qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qb" = halted ] \
     && ok "quiet-check: the watcher's own notify does not read as activity" \
     || bad "quiet-check: notify self-refresh — classified '$qb' (want halted), the halted banner repeats forever"
 # And the dedupe survives consecutive firings: the second one says nothing.
 : > "$QBCAP"
-PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+PATH="$QB/bin:$PATH" LOOM_HOME="$QB/home" NTFY_CMD="$QBS" LOOM_NTFY_TOPIC=test-topic WATCH
 [ ! -s "$QBCAP" ] \
     && ok "quiet-check: a second firing in an unchanged state pushes nothing" \
     || bad "quiet-check: re-notified in an unchanged state ($(tr '\n' ';' < "$QBCAP" | tail -c 80))"
@@ -1143,7 +1143,7 @@ PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-t
 rm -f "$QB/home/quiet.state"
 printf '{"t":"2026-08-05T12:00:09Z","ts":%s,"ev":"ticket_close","build":"build-3","ticket":"73"}\n' \
     "$(date +%s)" >> "$QB/home/events.jsonl"
-PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+PATH="$QB/bin:$PATH" LOOM_HOME="$QB/home" NTFY_CMD="$QBS" LOOM_NTFY_TOPIC=test-topic WATCH
 qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
 [ "$qb" = missing ] \
     && ok "quiet-check: a real event inside the settle window still reads as active" \
@@ -1152,14 +1152,14 @@ qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
 # 4h4. The log stays human shaped: the stream is rendered back to prose and the
 #      commands it ran, because waves and humans read these files for verdicts
 #      and crash triage.
-rm -f "$ORCH_HOME/logs/lane-gate-34.log" "$ORCH_HOME/logs/lane-gate-34.jsonl"
+rm -f "$LOOM_HOME/logs/lane-gate-34.log" "$LOOM_HOME/logs/lane-gate-34.jsonl"
 "$TICK" spawn-lane gate-34 --no-tick -- "$FAKE" -p "/code-review" >/dev/null
-for _ in $(seq 1 40); do grep -q "reviewing the diff" "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
-if grep -q "reviewing the diff" "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null \
-   && grep -q "uv run pytest -q" "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null; then
+for _ in $(seq 1 40); do grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
+if grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null \
+   && grep -q "uv run pytest -q" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null; then
     ok "stream: the .log still reads as prose plus the commands the lane ran"
 else
-    bad "stream: .log did not render ($(head -3 "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null))"
+    bad "stream: .log did not render ($(head -3 "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null))"
 fi
 
 # 4h5. A reused lane id gets a FRESH log — an inherited mtime alone can read as
@@ -1169,13 +1169,13 @@ fi
 sleep 1                                    # distinct rotation timestamp
 "$TICK" spawn-lane gate-34 --no-tick -- "$FAKE" -p "/code-review round 2" >/dev/null
 sleep 0.6
-if ls "$ORCH_HOME/logs"/lane-gate-34-*.log >/dev/null 2>&1 \
-   && grep -ql "reviewing the diff" "$ORCH_HOME/logs"/lane-gate-34-*.log 2>/dev/null; then
+if ls "$LOOM_HOME/logs"/lane-gate-34-*.log >/dev/null 2>&1 \
+   && grep -ql "reviewing the diff" "$LOOM_HOME/logs"/lane-gate-34-*.log 2>/dev/null; then
     ok "rotate: the previous session's transcript is preserved under its own name"
 else
     bad "rotate: previous transcript lost on respawn"
 fi
-n=$(grep -c "reviewing the diff" "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null || echo 0)
+n=$(grep -c "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null || echo 0)
 [ "$n" = "1" ] && ok "rotate: the live log holds this session only, not a stack of them" \
                || bad "rotate: live log holds $n sessions — boundaries are unrecoverable again"
 
@@ -1186,13 +1186,13 @@ n=$(grep -c "reviewing the diff" "$ORCH_HOME/logs/lane-gate-34.log" 2>/dev/null 
 #      not the rotation, is what the liveness check depends on.
 "$TICK" spawn-lane gate-36 --no-tick -- true >/dev/null; sleep 0.4
 "$TICK" clear-lane gate-36 >/dev/null
-touch -t 202001010000 "$ORCH_HOME/logs/lane-gate-36.log" 2>/dev/null   # empty, ancient
+touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-36.log" 2>/dev/null   # empty, ancient
 "$TICK" spawn-lane gate-36 --no-tick -- sleep 10 >/dev/null; sleep 0.4
 st=$("$TICK" lane-status | awk '$1=="gate-36"{print $3}')
 [ "$st" = "running" ] \
     && ok "rotate: a lane reusing an id whose old log was empty still starts fresh" \
     || bad "rotate: respawned lane reported '$st' — it inherited an empty file's old mtime"
-kill "$(cat "$ORCH_HOME/lanes/gate-36.pid" 2>/dev/null)" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/gate-36.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-36 >/dev/null
 
 # 5. clear-lane forgets a harvested lane.
@@ -1228,13 +1228,13 @@ ntfy:
   push: [build_complete, ticket_blocked]
 EOF
 : > "$CAP"
-ORCH_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" "$TICK" notify build_complete "done" "b" >/dev/null 2>&1
+LOOM_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" "$TICK" notify build_complete "done" "b" >/dev/null 2>&1
 grep -q "X-Orch-Event: build_complete" "$CAP" \
     && ok "ntfy: a comment mentioning push: does not shadow the real key" \
     || bad "ntfy: push list misparsed — a commented mention won over the key"
 # The gate itself must still work off that correctly-read list.
 : > "$CAP"
-ORCH_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" "$TICK" notify lane_stale "t" "b" >/dev/null 2>&1
+LOOM_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" "$TICK" notify lane_stale "t" "b" >/dev/null 2>&1
 [ -s "$CAP" ] && bad "ntfy-violation: event outside the parsed list still pushed" \
               || ok "ntfy: an event outside the parsed list is still suppressed"
 
@@ -1244,9 +1244,9 @@ ORCH_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" "$TICK" notify lane_stale "t" "b" >/
 #     allowlist gate, the only trace of a finished build was its absence —
 #     which is exactly how the miss above stayed invisible for a night.
 EVH2="$T/ntfy-ev-home"; mkdir -p "$EVH2"
-ORCH_HOME="$EVH2" ORCH_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" \
+LOOM_HOME="$EVH2" LOOM_GLOBAL_CONFIG="$NCFG" NTFY_CMD="$STUB" \
     "$TICK" notify lane_stale "wedged" "b" >/dev/null 2>&1
-if ORCH_HOME="$EVH2" "$TICK" render-events 2>/dev/null | grep -q "wedged"; then
+if LOOM_HOME="$EVH2" "$TICK" render-events 2>/dev/null | grep -q "wedged"; then
     ok "ticker: a notification suppressed by the push list is still shown locally"
 else
     bad "ticker: suppressed notification left no local trace ($(cat "$EVH2/events.jsonl" 2>/dev/null | tail -1))"
@@ -1477,10 +1477,10 @@ cat > "$FX/open-model.json" <<'EOF'
 ]
 EOF
 cp "$FX/notes-12.json" "$FX/notes-13.json"
-printf 'lane_model: sonnet\nrework_model: opus\n' >> "$ORCH_REPO/.orchestrator.yml"
+printf 'lane_model: sonnet\nrework_model: opus\n' >> "$LOOM_REPO/.loom.yml"
 GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-model.json" STUB_LOG="$T/calls-model" \
     "$TICK" snapshot > "$T/snap-model.json" 2>/dev/null
-sed -i.bak '/^lane_model: sonnet$/d;/^rework_model: opus$/d' "$ORCH_REPO/.orchestrator.yml"
+sed -i.bak '/^lane_model: sonnet$/d;/^rework_model: opus$/d' "$LOOM_REPO/.loom.yml"
 rm -f "$FX/notes-13.json"
 m() { jq -r ".tickets[] | select(.iid==$1) | .model | \"\(.effective)/\(.source)\"" "$T/snap-model.json"; }
 [ "$(m 10)" = "sonnet/lane_model" ] \
@@ -1599,10 +1599,10 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-lanes" "$TICK" snapshot > "$T/sna
 [ "$(jq -r '.summary.merge_in_flight' "$T/snap-merge.json")" = "true" ] \
     && ok "snapshot: a merge in flight is visible to the wave" \
     || bad "snapshot: merge_in_flight did not reflect the held lock"
-kill "$(cat "$ORCH_HOME/lanes/merge-63.pid" 2>/dev/null)" 2>/dev/null
-"$TICK" clear-lane merge-63 >/dev/null; rm -rf "$ORCH_HOME/merge.lock.d"
+kill "$(cat "$LOOM_HOME/lanes/merge-63.pid" 2>/dev/null)" 2>/dev/null
+"$TICK" clear-lane merge-63 >/dev/null; rm -rf "$LOOM_HOME/merge.lock.d"
 for l in gate-61 gate-62 probe-e61; do
-    kill "$(cat "$ORCH_HOME/lanes/$l.pid" 2>/dev/null)" 2>/dev/null
+    kill "$(cat "$LOOM_HOME/lanes/$l.pid" 2>/dev/null)" 2>/dev/null
     "$TICK" clear-lane "$l" >/dev/null
 done
 
@@ -1913,7 +1913,7 @@ if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (cr
 else
     ok "snapshot: every call was a read — no mutating verb in the captured argv"
 fi
-kill "$(cat "$ORCH_HOME/lanes/merge-51.pid" 2>/dev/null)" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/merge-51.pid" 2>/dev/null)" 2>/dev/null
 
 # 7f. P11: gate eligibility is DERIVED, not left to the wave to work out.
 #     Build 2 spawned a 12m53s verifier on a ticket whose code had merged 95
@@ -2009,8 +2009,8 @@ rm -f "$FX/notes-12.json"
 #      let a second verifier be dispatched onto a lane that was merely quiet.
 #      (Found by an independent review, 2026-08-01.)
 "$TICK" spawn-lane gate-12 --no-tick -- sleep 20 >/dev/null
-for _ in $(seq 1 40); do [ -f "$ORCH_HOME/logs/lane-gate-12.log" ] && break; sleep 0.1; done
-touch -t 202001010000 "$ORCH_HOME/logs/lane-gate-12.log"   # alive, silent since 2020
+for _ in $(seq 1 40); do [ -f "$LOOM_HOME/logs/lane-gate-12.log" ] && break; sleep 0.1; done
+touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-12.log"   # alive, silent since 2020
 st=$("$TICK" lane-status | awk '$1=="gate-12"{print $3}')
 PSNAP > "$T/p11i.json"
 if [ "$st" = "stale" ] \
@@ -2019,7 +2019,7 @@ if [ "$st" = "stale" ] \
 else
     bad "gate: stale lane state '$st' left the ticket gateable — a duplicate would spawn"
 fi
-kill "$(cat "$ORCH_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-12 >/dev/null
 
 # 7f5. P6 makes this one load-bearing. A lane may now spawn its own gate, and it
@@ -2035,7 +2035,7 @@ if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11e.json")" 
 else
     bad "gate: running gate lane did not suppress a second one ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p11e.json"))"
 fi
-kill "$(cat "$ORCH_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
+kill "$(cat "$LOOM_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-12 >/dev/null
 # And it must free up again once that lane is gone, or a ticket gated once could
 # never be re-gated after a rejection.
@@ -2143,7 +2143,7 @@ out=$(printf '{"config":{"max_lanes":4},"tickets":[]}' | "$TICK" graph)
 
 # --- 8. P22 layered config: repo > derived > global > built-in -------------
 RC="$T/rc"; mkdir -p "$RC"
-rc() { ORCH_REPO="$1" ORCH_GLOBAL_CONFIG="${2:-$RC/none.yml}" "$TICK" resolve-config; }
+rc() { LOOM_REPO="$1" LOOM_GLOBAL_CONFIG="${2:-$RC/none.yml}" "$TICK" resolve-config; }
 
 # 8a. Stack detection drives the gate pack, and tiers escalate.
 mkdir -p "$RC/uv"; touch "$RC/uv/uv.lock"
@@ -2182,7 +2182,7 @@ printf 'max_lanes: 9\n' > "$RC/global.yml"
     && ok "precedence: built-in default when neither layer sets it" || bad "precedence: default layer wrong"
 [ "$(rc "$RC/bare" "$RC/global.yml" | jq -r '.scalars.max_lanes.value')" = "9" ] \
     && ok "precedence: global layer supplies the value" || bad "precedence: global layer ignored"
-printf 'max_lanes: 2\n' > "$RC/bare/.orchestrator.yml"
+printf 'max_lanes: 2\n' > "$RC/bare/.loom.yml"
 [ "$(rc "$RC/bare" "$RC/global.yml" | jq -r '.scalars.max_lanes.value')" = "2" ] \
     && ok "precedence: repo overrides global" || bad "precedence: repo did not win"
 
@@ -2231,7 +2231,7 @@ sed -i.bak '/^stall_action: notify_only$/d;/^max_aux_lanes: 2$/d' "$RC/global.ym
     || bad "resolve-config: default disagrees with the code ($(rc "$RC/bare" | jq -c '.scalars | {stall_action, max_aux_lanes}'))"
 
 # 8e. A repo `gates:` block overrides the derived pack wholesale.
-cat > "$RC/uv/.orchestrator.yml" <<'EOF'
+cat > "$RC/uv/.loom.yml" <<'EOF'
 gates:
   docs:
     - "custom lint"
@@ -2293,7 +2293,7 @@ echo "$out" | jq -e '.settings.permissions.allow | index("BashOutput") and index
 echo "$out" | jq -e '[.settings.permissions.allow[] | select(startswith("Bash(openemr-cmd"))] | length == 0' >/dev/null \
     && ok "resolve-config: undeclared worktree helper stays out of the allowlist" \
     || bad "resolve-config: machine PATH leaked into the allowlist"
-printf 'worktree_cmd: openemr-cmd\n' >> "$RC/uv/.orchestrator.yml"
+printf 'worktree_cmd: openemr-cmd\n' >> "$RC/uv/.loom.yml"
 rc "$RC/uv" | jq -e '.settings.permissions.allow | index("Bash(openemr-cmd *)")' >/dev/null \
     && ok "resolve-config: declared worktree_cmd is allowlisted" || bad "resolve-config: declared worktree_cmd ignored"
 
@@ -2303,16 +2303,16 @@ rc "$RC/uv" | jq -e '.settings.permissions.deny | index("Bash(git push --force*)
 
 # 8k. install-settings never silently discards a hand-edited allowlist.
 mkdir -p "$RC/uv/.claude"; printf '{"permissions":{"allow":["Bash(handwritten *)"],"deny":[]}}\n' > "$RC/uv/.claude/settings.json"
-out=$(ORCH_REPO="$RC/uv" "$TICK" install-settings 2>&1); rc_code=$?
+out=$(LOOM_REPO="$RC/uv" "$TICK" install-settings 2>&1); rc_code=$?
 if [ "$rc_code" -ne 0 ] && case "$out" in *"--force"*) true;; *) false;; esac; then
     ok "install-settings: differing hand-edited settings refused without --force"
 else
     bad "install-settings: clobbered or accepted a hand-edited file (rc=$rc_code)"
 fi
-ORCH_REPO="$RC/uv" "$TICK" install-settings --force >/dev/null 2>&1
+LOOM_REPO="$RC/uv" "$TICK" install-settings --force >/dev/null 2>&1
 grep -q "CRUCIBLE_LIVE=1 uv" "$RC/uv/.claude/settings.json" \
     && ok "install-settings: --force writes the generated surface" || bad "install-settings: --force did not write"
-out=$(ORCH_REPO="$RC/uv" "$TICK" install-settings 2>&1)
+out=$(LOOM_REPO="$RC/uv" "$TICK" install-settings 2>&1)
 case "$out" in *"already current"*) ok "install-settings: idempotent on an unchanged repo";; *) bad "install-settings: not idempotent ($out)";; esac
 
 # --- 9. P22 bootstrap: the WRITE half, split from tick.sh's read-only charter
@@ -2342,11 +2342,11 @@ esac
 EOF
 chmod +x "$BT/fx/glab"
 BCALLS="$BT/calls.log"; : > "$BCALLS"
-# ORCH_SKIP_BOOTSTRAP is emptied here — this section is the one that tests
+# LOOM_SKIP_BOOTSTRAP is emptied here — this section is the one that tests
 # bootstrap, and the file-wide default switches it off everywhere else.
-BOOTENV() { ORCH_REPO="$BT/repo" ORCH_HOME="$BT/home" ORCH_GLOBAL_CONFIG="$BT/g.yml" \
-            GLAB_CMD="$BT/fx/glab" STUB_LOG="$BCALLS" ORCH_SKIP_BOOTSTRAP= \
-            ORCH_WAVE_CMD="${WAVE_CMD:-echo wave-ran}" "$@"; }
+BOOTENV() { LOOM_REPO="$BT/repo" LOOM_HOME="$BT/home" LOOM_GLOBAL_CONFIG="$BT/g.yml" \
+            GLAB_CMD="$BT/fx/glab" STUB_LOG="$BCALLS" LOOM_SKIP_BOOTSTRAP= \
+            LOOM_WAVE_CMD="${WAVE_CMD:-echo wave-ran}" "$@"; }
 
 # 9a. Seeds the global layer once, then leaves it alone.
 BOOTENV "$BOOT" global-config >/dev/null
@@ -2427,7 +2427,7 @@ BOOTENV "$BOOT" all --bogus-flag >/dev/null 2>&1 \
 #      be refused. From $HOME this targeted the human's own
 #      ~/.claude/settings.json — the git check ran after the write and warned.
 NOTREPO="$BT/not-a-repo"; mkdir -p "$NOTREPO"
-if ORCH_REPO="$NOTREPO" ORCH_GLOBAL_CONFIG="$BT/g.yml" GLAB_CMD="$BT/fx/glab" \
+if LOOM_REPO="$NOTREPO" LOOM_GLOBAL_CONFIG="$BT/g.yml" GLAB_CMD="$BT/fx/glab" \
    "$BOOT" settings >/dev/null 2>&1; then
     bad "bootstrap: wrote settings into a directory that is not a repo"
 else
@@ -2469,7 +2469,7 @@ fi
 #     retry must be the existing sentinel machinery, not a new mechanism.
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":false}}}\n' "$BT/repo" > "$BT/untrusted-root.json"
 rm -rf "$BT/home"
-out=$(ORCH_TRUST_FILE="$BT/untrusted-root.json" BOOTENV "$TICK" tick 2>&1) || true
+out=$(LOOM_TRUST_FILE="$BT/untrusted-root.json" BOOTENV "$TICK" tick 2>&1) || true
 [ -f "$BT/home/.bootstrapped" ] && bad "bootstrap-violation (P30): untrusted repo recorded as bootstrapped" \
     || ok "bootstrap-violation (P30): an untrusted repo leaves no sentinel, so it retries"
 case "$out" in *"not a trusted"*|*"incomplete"*) ok "bootstrap (P30): says plainly that trust is what is missing";;
@@ -2481,7 +2481,7 @@ else
 fi
 # And it clears itself: once the human accepts, the very next tick completes.
 printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$BT/repo" > "$BT/untrusted-root.json"
-out=$(ORCH_TRUST_FILE="$BT/untrusted-root.json" BOOTENV "$TICK" tick 2>&1) || true
+out=$(LOOM_TRUST_FILE="$BT/untrusted-root.json" BOOTENV "$TICK" tick 2>&1) || true
 [ -f "$BT/home/.bootstrapped" ] \
     && ok "bootstrap (P30): the next tick after accepting trust completes the bootstrap" \
     || bad "bootstrap (P30): bootstrap never completed after trust was granted ($out)"
@@ -2495,7 +2495,7 @@ for a in "$@"; do case "$a" in http*) echo "$a" >> "$STUB_URL";; esac; done
 EOF
 chmod +x "$NT/curl"
 printf 'ntfy:\n  topic_prefix: "pre-fix-"\n  push: [build_complete]\n' > "$NT/g.yml"
-NTFY() { ORCH_REPO="$NT/repo" ORCH_HOME="$NT/home" ORCH_GLOBAL_CONFIG="$NT/g.yml" \
+NTFY() { LOOM_REPO="$NT/repo" LOOM_HOME="$NT/home" LOOM_GLOBAL_CONFIG="$NT/g.yml" \
          NTFY_CMD="$NT/curl" NTFY_BASE="https://n" STUB_URL="$NT/calls" \
          "$TICK" notify build_complete t b >/dev/null 2>&1; }
 # Both branches used to call `ok`, so this assertion could not fail — and its
@@ -2514,7 +2514,7 @@ grep -q "https://n/pre-fix-$" "$NT/calls" \
     && bad "ntfy: topic_prefix was matched as topic" \
     || ok "ntfy-violation: topic_prefix is not mistaken for topic"
 : > "$NT/calls"
-printf 'ntfy:\n  topic: "repo-wins"\n  push: [build_complete]\n' > "$NT/repo/.orchestrator.yml"
+printf 'ntfy:\n  topic: "repo-wins"\n  push: [build_complete]\n' > "$NT/repo/.loom.yml"
 NTFY; grep -q "https://n/repo-wins" "$NT/calls" \
     && ok "ntfy: repo topic overrides the derived one" || bad "ntfy: repo topic ignored"
 
@@ -2527,7 +2527,7 @@ NTFY; grep -q "https://n/repo-wins" "$NT/calls" \
 # should inherit.
 UT="$T/usage"; mkdir -p "$UT/repo" "$UT/home" "$UT/fx"
 : > "$UT/g.yml"
-cat > "$UT/repo/.orchestrator.yml" <<'EOF'
+cat > "$UT/repo/.loom.yml" <<'EOF'
 crash_cap: 2
 ntfy:
   topic: "usage-topic"
@@ -2564,10 +2564,10 @@ case "${WAVE_MODE:-ok}" in
 esac
 STUBEOF
 chmod +x "$UT/fx/claude"
-UENV() { ORCH_REPO="$UT/repo" ORCH_HOME="$UT/home" ORCH_GLOBAL_CONFIG="$UT/g.yml" \
+UENV() { LOOM_REPO="$UT/repo" LOOM_HOME="$UT/home" LOOM_GLOBAL_CONFIG="$UT/g.yml" \
          NTFY_CMD="$USTUB" WAVE_COUNT="$UT/count" WAVE_ARGV="$UT/argv" \
-         ORCH_WAVE_CMD="$UT/fx/claude -p wave" ORCH_RETRY_BACKOFF_SECONDS=0 \
-         ORCH_SKIP_BOOTSTRAP=1 "$@"; }
+         LOOM_WAVE_CMD="$UT/fx/claude -p wave" LOOM_RETRY_BACKOFF_SECONDS=0 \
+         LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 _ureset() { rm -rf "$UT/home/tick.lock.d"; rm -f "$UT/home/usage.pause" "$UT/home/tick.pending"; \
             echo 0 > "$UT/count"; : > "$UT/argv"; : > "$UCAP"; }
 
@@ -2698,7 +2698,7 @@ at=$(cat "$UT/home/usage.pause" 2>/dev/null || echo 0)
 # 10j. `stop_and_wait` is for someone who wants to decide when to spend capacity
 #      again: the pause never lifts on its own, and `resume` is the one step.
 _ureset
-printf 'usage_limit: stop_and_wait\n' >> "$UT/repo/.orchestrator.yml"
+printf 'usage_limit: stop_and_wait\n' >> "$UT/repo/.loom.yml"
 printf '%s\n' "$(( $(date +%s) - 10 ))" > "$UT/home/usage.pause"   # long past due
 WAVE_MODE=ok UENV "$TICK" tick >/dev/null 2>&1
 n=$(cat "$UT/count" 2>/dev/null || echo 0)
@@ -2710,7 +2710,7 @@ WAVE_MODE=ok UENV "$TICK" tick >/dev/null 2>&1
 n=$(cat "$UT/count" 2>/dev/null || echo 0)
 [ "$n" = "1" ] && ok "usage: \`resume\` clears a stop_and_wait pause by hand" \
                || bad "usage: resume did not release the build ($n waves)"
-sed -i.bak '/usage_limit: stop_and_wait/d' "$UT/repo/.orchestrator.yml"
+sed -i.bak '/usage_limit: stop_and_wait/d' "$UT/repo/.loom.yml"
 
 # 10k. `downshift_model` is the third policy: hand the session a cheaper model to
 #      fall back to rather than stopping. Asserted on the argv the wave actually
@@ -2721,12 +2721,12 @@ grep -q -- "--fallback-model" "$UT/argv" 2>/dev/null \
     && bad "downshift: fallback model passed under the default policy" \
     || ok "downshift: the default policy passes no fallback model"
 _ureset
-printf 'usage_limit: downshift_model\nfallback_model: sonnet\n' >> "$UT/repo/.orchestrator.yml"
+printf 'usage_limit: downshift_model\nfallback_model: sonnet\n' >> "$UT/repo/.loom.yml"
 WAVE_MODE=ok UENV "$TICK" tick >/dev/null 2>&1
 grep -q -- "--fallback-model sonnet" "$UT/argv" 2>/dev/null \
     && ok "downshift: the configured fallback model reaches the wave's argv" \
     || bad "downshift: no --fallback-model in '$(cat "$UT/argv" 2>/dev/null)'"
-sed -i.bak '/^usage_limit: downshift_model/d;/^fallback_model: sonnet/d' "$UT/repo/.orchestrator.yml"
+sed -i.bak '/^usage_limit: downshift_model/d;/^fallback_model: sonnet/d' "$UT/repo/.loom.yml"
 
 # --- 11. P23: the diagnostic record ---------------------------------------
 # Every number behind P1–P22 was reconstructed by hand from 31 transcripts plus
@@ -2734,15 +2734,15 @@ sed -i.bak '/^usage_limit: downshift_model/d;/^fallback_model: sonnet/d' "$UT/re
 # are written by the MACHINERY, so they exist even when a wave dies.
 ET="$T/ev"; mkdir -p "$ET/repo"
 git -C "$ET/repo" init -q 2>/dev/null || git init -q "$ET/repo" 2>/dev/null || :
-EVENV() { ORCH_REPO="$ET/repo" ORCH_HOME="$ET/home" ORCH_GLOBAL_CONFIG="$ET/g.yml" \
-          ORCH_TRUST_FILE="$ORCH_TRUST_FILE" ORCH_RETRY_BACKOFF_SECONDS=0 \
-          ORCH_SKIP_BOOTSTRAP=1 "$@"; }
+EVENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$ET/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
+          LOOM_TRUST_FILE="$LOOM_TRUST_FILE" LOOM_RETRY_BACKOFF_SECONDS=0 \
+          LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 mkdir -p "$ET/home"; echo "build-9" > "$ET/home/.build-label"
 EVF="$ET/home/events.jsonl"
 
 # 11a. A crashed wave still leaves its record — the case a model-written log
 #      would have missed, which is exactly when the record is needed.
-ORCH_WAVE_CMD='sh -c "exit 1"' EVENV "$TICK" tick >/dev/null 2>&1
+LOOM_WAVE_CMD='sh -c "exit 1"' EVENV "$TICK" tick >/dev/null 2>&1
 if [ -s "$EVF" ] && jq -e 'select(.ev=="wave_end" and .rc==1)' "$EVF" >/dev/null 2>&1; then
     ok "events: a wave that died still recorded its start, end and exit code"
 else
@@ -2754,7 +2754,7 @@ fi
 
 # 11b. Lane events carry type, exit code and a measured duration — not a
 #      duration inferred from file mtimes, which is what build 2 forced.
-ORCH_WAVE_CMD=true EVENV "$TICK" spawn-lane gate-77 --no-tick --cwd "$ET/repo" -- sh -c 'exit 7' >/dev/null 2>&1
+LOOM_WAVE_CMD=true EVENV "$TICK" spawn-lane gate-77 --no-tick --cwd "$ET/repo" -- sh -c 'exit 7' >/dev/null 2>&1
 for _ in $(seq 1 40); do jq -e 'select(.ev=="lane_exit")' "$EVF" >/dev/null 2>&1 && break; sleep 0.1; done
 if jq -e 'select(.ev=="lane_exit" and .id=="gate-77" and .type=="gate" and .rc==7 and (.secs|type=="number"))' \
        "$EVF" >/dev/null 2>&1; then
@@ -2778,7 +2778,7 @@ esac
 # P31: the per-ticket trace names the model each round ran on — otherwise an
 # escalation cannot be priced against its outcome, which is the whole test of
 # whether escalating was worth it.
-ORCH_WAVE_CMD=true EVENV "$TICK" spawn-lane impl-77 --no-tick --cwd "$ET/repo" -- /bin/echo --model opus >/dev/null 2>&1
+LOOM_WAVE_CMD=true EVENV "$TICK" spawn-lane impl-77 --no-tick --cwd "$ET/repo" -- /bin/echo --model opus >/dev/null 2>&1
 out=$(EVENV "$TICK" report --ticket 77 2>&1)
 case "$out" in *"impl-77"*"on opus"*) ok "report: a lane's model appears in the per-ticket trace" ;;
                *) bad "report: model missing from the ticket trace ($(printf '%s' "$out" | tr '\n' '|'))" ;;
@@ -2815,8 +2815,8 @@ EVENV "$TICK" spawn-lane merge-79 --merge-lock --no-tick --cwd "$ET/repo" -- tru
 RT="$T/retro"; mkdir -p "$RT/home"
 RTF="$RT/home/events.jsonl"
 echo "build-r" > "$RT/home/.build-label"
-RTENV() { ORCH_REPO="$ET/repo" ORCH_HOME="$RT/home" ORCH_GLOBAL_CONFIG="$ET/g.yml" \
-          ORCH_SKIP_BOOTSTRAP=1 "$@"; }
+RTENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$RT/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
+          LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 _snap() { # _snap <ts> <tickets> <deps> <ready> <free>
     printf '{"ts":%s,"ev":"snapshot","build":"build-r","tickets":%s,"deps":%s,"ready":%s,"impl_free":%s,"max_lanes":4}\n' \
         "$1" "$2" "$3" "$4" "$5" >> "$RTF"
@@ -2895,8 +2895,8 @@ RTENV "$TICK" retro --nonsense >/dev/null 2>&1 \
 # for a person. The .log is written in one go at exit, so mid-run there is
 # nothing readable to watch. --follow renders the stream instead.
 WT="$T/follow"; mkdir -p "$WT/home/lanes" "$WT/home/logs"
-FENV() { ORCH_REPO="$ET/repo" ORCH_HOME="$WT/home" ORCH_GLOBAL_CONFIG="$ET/g.yml" \
-         ORCH_SKIP_BOOTSTRAP=1 ORCH_FOLLOW_POLL=0.2 "$@"; }
+FENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$WT/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
+         LOOM_SKIP_BOOTSTRAP=1 LOOM_FOLLOW_POLL=0.2 "$@"; }
 FJ="$WT/home/logs/lane-impl-5.jsonl"
 _say() { printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$1" >> "$FJ"; }
 sleep 30 & FAKEPID=$!
@@ -2992,9 +2992,9 @@ printf '#!/bin/sh\necho called >> "%s"\n' "$WPCALLS" > "$WPT/stub"; chmod +x "$W
 : > "$WPCALLS"
 # HERDR_ENV=1 throughout: a lane inherits its parent's environment, so the
 # multiplexer variable IS set in the unattended paths. Only the caller decides.
-(  export HERDR_ENV=1 WATCH_PANES_CMD="$WPT/stub" ORCH_WAVE_CMD=true
-   export ORCH_REPO="$WPT/repo" ORCH_HOME="$WPT/home" ORCH_PLIST_DIR="$WPT/agents"
-   export ORCH_GLOBAL_CONFIG="$T/none.yml" ORCH_SKIP_BOOTSTRAP=1
+(  export HERDR_ENV=1 WATCH_PANES_CMD="$WPT/stub" LOOM_WAVE_CMD=true
+   export LOOM_REPO="$WPT/repo" LOOM_HOME="$WPT/home" LOOM_PLIST_DIR="$WPT/agents"
+   export LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1
    "$TICK" tick --auto      >/dev/null 2>&1 || :
    "$TICK" tick --from-lane >/dev/null 2>&1 || :
    "$TICK" snapshot         >/dev/null 2>&1 || :
@@ -3006,8 +3006,8 @@ else
     bad "watch-panes-violation: the unattended machinery opened panes ($(wc -l < "$WPCALLS") calls)"
 fi
 # And what launchd actually runs must carry no trace of the multiplexer.
-out=$(ORCH_REPO="$WPT/repo" ORCH_HOME="$WPT/home" ORCH_PLIST_DIR="$WPT/agents" \
-      ORCH_GLOBAL_CONFIG="$T/none.yml" ORCH_SKIP_BOOTSTRAP=1 \
+out=$(LOOM_REPO="$WPT/repo" LOOM_HOME="$WPT/home" LOOM_PLIST_DIR="$WPT/agents" \
+      LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 \
       "$TICK" install --dry-run 2>&1)
 wplist=$(echo "$out" | sed -n 's/^generated (dry-run): //p')
 if [ -n "$wplist" ] && ! grep -qiE 'herdr|watch-panes' "$wplist"; then
@@ -3016,21 +3016,21 @@ else
     bad "watch-panes-violation: the launchd agent references the multiplexer"
 fi
 
-# 13e. Singleton: `/orchestrate tick` launches the viewer opportunistically on
+# 13e. Singleton: `/loom tick` launches the viewer opportunistically on
 #      every manual tick, so a second launch must exit 0 quietly instead of
 #      opening a duplicate pane per lane (2026-08-02). A live pid in the
 #      state-dir pidfile short-circuits before the herdr checks; a stale one
 #      does not.
-echo $$ > "$ORCH_HOME/watch-panes.pid"
+echo $$ > "$LOOM_HOME/watch-panes.pid"
 out=$(HERDR_ENV= bash "$(dirname "$TICK")/watch-panes.sh" 2>&1); rc_wp=$?
 case "$rc_wp:$out" in 0:*"already running"*) \
     ok "watch-panes: second launch exits quietly when one is live";; \
     *) bad "watch-panes: singleton failed (rc=$rc_wp: $out)";; esac
-echo 999999 > "$ORCH_HOME/watch-panes.pid"
+echo 999999 > "$LOOM_HOME/watch-panes.pid"
 HERDR_ENV= bash "$(dirname "$TICK")/watch-panes.sh" >/dev/null 2>&1 \
     && bad "watch-panes-violation: stale pidfile still short-circuited" \
     || ok "watch-panes: a stale pidfile does not block a fresh launch"
-rm -f "$ORCH_HOME/watch-panes.pid"
+rm -f "$LOOM_HOME/watch-panes.pid"
 
 # 13f. The ticker is kept alive every poll, not opened once at startup: the
 #      viewer is a singleton that can outlive its panes, and launch-on-tick
@@ -3067,7 +3067,7 @@ EOF
 chmod +x "$T/herdr-stub"
 mkdir -p "$T/wp13f-home"; : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    ORCH_HOME="$T/wp13f-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0 \
+    LOOM_HOME="$T/wp13f-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0 \
     bash "$(dirname "$TICK")/watch-panes.sh" >/dev/null 2>&1 || :
 tn=$(grep -c "render-events --follow" "$T/herdr-calls" || :)
 if [ "$tn" -ge 2 ]; then
@@ -3082,19 +3082,19 @@ fi
 #      keeps it closed; on brings it back. (Asked for by the human,
 #      2026-08-02.) The verb needs no herdr and no running viewer.
 WP="$(dirname "$TICK")/watch-panes.sh"
-out=$(ORCH_HOME="$T/wp13f-home" bash "$WP" ticker off 2>&1) \
+out=$(LOOM_HOME="$T/wp13f-home" bash "$WP" ticker off 2>&1) \
     && [ -f "$T/wp13f-home/ticker-off" ] \
     && ok "watch-panes: 'ticker off' plants the marker from any terminal" \
     || bad "watch-panes: ticker off failed ($out)"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    ORCH_HOME="$T/wp13f-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0 \
+    LOOM_HOME="$T/wp13f-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0 \
     bash "$WP" >/dev/null 2>&1 || :
 tn=$(grep -c "render-events --follow" "$T/herdr-calls" || :)
 [ "$tn" -eq 0 ] \
     && ok "watch-panes: the off-marker suppresses the ticker across polls" \
     || bad "watch-panes: ticker opened $tn time(s) despite the off-marker"
-ORCH_HOME="$T/wp13f-home" bash "$WP" ticker on >/dev/null 2>&1 \
+LOOM_HOME="$T/wp13f-home" bash "$WP" ticker on >/dev/null 2>&1 \
     && [ ! -f "$T/wp13f-home/ticker-off" ] \
     && ok "watch-panes: 'ticker on' clears the marker" \
     || bad "watch-panes: ticker on left the marker behind"
@@ -3104,7 +3104,7 @@ ORCH_HOME="$T/wp13f-home" bash "$WP" ticker on >/dev/null 2>&1 \
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     HERDR_TOUCH_ON_RUN="$T/wp13f-home/ticker-off" \
-    ORCH_HOME="$T/wp13f-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    LOOM_HOME="$T/wp13f-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
     bash "$WP" >/dev/null 2>&1 || :
 rm -f "$T/wp13f-home/ticker-off"
 grep -q "^pane close " "$T/herdr-calls" \
@@ -3119,10 +3119,10 @@ grep -q "^pane close " "$T/herdr-calls" \
 #      the human had to ask). Cap default = max_lanes + 2; WATCH_MAX_PANES
 #      still overrides.
 mkdir -p "$T/wp-cap-repo" "$T/wp-cap-home"
-printf 'max_lanes: 7\n' > "$T/wp-cap-repo/.orchestrator.yml"
+printf 'max_lanes: 7\n' > "$T/wp-cap-repo/.loom.yml"
 : > "$T/herdr-calls"
 out=$(HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    ORCH_REPO="$T/wp-cap-repo" ORCH_HOME="$T/wp-cap-home" ORCH_GLOBAL_CONFIG="$T/none.yml" \
+    LOOM_REPO="$T/wp-cap-repo" LOOM_HOME="$T/wp-cap-home" LOOM_GLOBAL_CONFIG="$T/none.yml" \
     WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" 2>/dev/null || :)
 case "$out" in *"up to 9 panes"*) ok "watch-panes: pane cap derives from max_lanes (+2 aux)";; \
     *) bad "watch-panes: cap did not derive from max_lanes ($(echo "$out" | head -1))";; esac
@@ -3133,12 +3133,12 @@ echo $$ > "$T/wp-cap-home/lanes/impl-91.pid"
 echo $$ > "$T/wp-cap-home/lanes/impl-92.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    ORCH_REPO="$T/wp-cap-repo" ORCH_HOME="$T/wp-cap-home" \
+    LOOM_REPO="$T/wp-cap-repo" LOOM_HOME="$T/wp-cap-home" \
     WATCH_MAX_PANES=1 WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1 || :
 grep -q '"viewer_note"' "$T/wp-cap-home/events.jsonl" 2>/dev/null \
     && ok "watch-panes: a lane at the pane cap writes a viewer_note event" \
     || bad "watch-panes: lane waited at the cap with no trace in the event stream"
-ORCH_HOME="$T/wp-cap-home" "$TICK" render-events 2>/dev/null | grep -q "viewer: impl-9[12] waiting for a pane (cap 1)" \
+LOOM_HOME="$T/wp-cap-home" "$TICK" render-events 2>/dev/null | grep -q "viewer: impl-9[12] waiting for a pane (cap 1)" \
     && ok "ticker: a cap-waiting lane renders as a viewer line" \
     || bad "ticker: viewer_note did not render"
 rm -f "$T/wp-cap-home/lanes"/impl-9*.pid
@@ -3155,7 +3155,7 @@ for n in 91 92 93; do echo $$ > "$T/wp13i-home/lanes/impl-$n.pid"; done
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     HERDR_DEAD="stub:p6" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    ORCH_HOME="$T/wp13i-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    LOOM_HOME="$T/wp13i-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
     bash "$WP" >/dev/null 2>&1 || :
 rights=$(grep -c -- "--direction right" "$T/herdr-calls" || :)
 if [ "$rights" = 1 ] && grep -q -- "split --pane stub:p1 --direction down" "$T/herdr-calls"; then
@@ -3178,7 +3178,7 @@ for n in 91 92; do echo $$ > "$T/wp13k-home/lanes/impl-$n.pid"; done
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     HERDR_DEAD="stub:p1" WATCH_MAX_PANES=9 \
-    ORCH_HOME="$T/wp13k-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    LOOM_HOME="$T/wp13k-home" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
     bash "$WP" >/dev/null 2>&1 || :
 close_ln=$(grep -n "^pane close " "$T/herdr-calls" | head -1 | cut -d: -f1)
 right_ln=$(grep -n -- "--direction right" "$T/herdr-calls" | tail -1 | cut -d: -f1)
@@ -3199,20 +3199,20 @@ rm -f "$T/wp13k-home/lanes"/impl-9*.pid
 #      on purpose. So in normal use there was no way to stop it. (Asked for by
 #      the human, 2026-08-04.)
 VH="$T/viewer-off-home"; mkdir -p "$VH/lanes"
-out=$(ORCH_HOME="$VH" bash "$WP" off 2>&1)
+out=$(LOOM_HOME="$VH" bash "$WP" off 2>&1)
 [ -f "$VH/viewer-off" ] && ok "watch-panes: 'off' plants the viewer switch from any terminal" \
                         || bad "watch-panes: off did not plant the switch ($out)"
 # The switch outranks every launch path — including the opportunistic launch a
 # manual tick does, which would otherwise undo the human on the next tick.
 : > "$T/herdr-calls"
 out=$(HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    ORCH_HOME="$VH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" 2>&1)
+    LOOM_HOME="$VH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" 2>&1)
 if [ ! -s "$T/herdr-calls" ] && printf '%s' "$out" | grep -q "switched off"; then
     ok "watch-panes: a switched-off viewer refuses to launch and opens no panes"
 else
     bad "watch-panes: off-switch did not stop a launch ($(head -c 120 "$T/herdr-calls"))"
 fi
-ORCH_HOME="$VH" bash "$WP" on >/dev/null 2>&1
+LOOM_HOME="$VH" bash "$WP" on >/dev/null 2>&1
 [ ! -f "$VH/viewer-off" ] && ok "watch-panes: 'on' clears the viewer switch" \
                           || bad "watch-panes: on left the switch behind"
 # Mid-run: a viewer already polling must notice the switch and close its panes
@@ -3225,9 +3225,9 @@ mkdir -p "$VH/lanes"; echo $$ > "$VH/lanes/impl-77.pid"
 ( for _ in $(seq 1 40); do
       [ -f "$VH/watch-panes.pid" ] && break; sleep 0.25
   done
-  ORCH_HOME="$VH" bash "$WP" off >/dev/null 2>&1 ) &
+  LOOM_HOME="$VH" bash "$WP" off >/dev/null 2>&1 ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 ORCH_HOME="$VH" WATCH_POLLS=10 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+    WATCH_TICKER=0 LOOM_HOME="$VH" WATCH_POLLS=10 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 grep -q "^pane close " "$T/herdr-calls" \
     && ok "watch-panes: a mid-run 'off' closes the panes it owns and exits" \
@@ -3237,7 +3237,7 @@ rm -f "$VH/lanes/impl-77.pid" "$VH/viewer-off"
 # 13m. The ticker advertises its own quit key, and the words for both the hint
 #      and the reopen come from HERE — tick.sh must never learn this viewer
 #      exists (13-violation enforces that), so it prints what it is handed.
-grep -q "ORCH_TICKER_QUIT_HINT" "$WP" && grep -q "ORCH_TICKER_REOPEN_HINT" "$WP" \
+grep -q "LOOM_TICKER_QUIT_HINT" "$WP" && grep -q "LOOM_TICKER_REOPEN_HINT" "$WP" \
     && ok "watch-panes: supplies the ticker's quit hint and reopen wording" \
     || bad "watch-panes: ticker hints are not passed to the follow command"
 # And the quit key must leave the SAME durable marker the off-switch uses, or
@@ -3269,7 +3269,7 @@ sleep 1 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    ORCH_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
     bash "$WP" >/dev/null 2>&1 || :
 [ "$(grep -c "^pane close " "$T/herdr-calls" || :)" = 1 ] \
     && ok "watch-panes: a gate lane whose ticket closed takes its pane with it" \
@@ -3293,7 +3293,7 @@ sleep 1 & echo $! > "$T/wp13p2-home/lanes/gate-95.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    ORCH_HOME="$T/wp13p2-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13p2-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
     bash "$T/wpmod/wp-mergeonly.sh" >/dev/null 2>&1 || :
 grep -q "^pane close " "$T/herdr-calls" \
     && bad "watch-panes-violation: the merge-only check still closed the pane" \
@@ -3309,7 +3309,7 @@ rm -f "$T/wp13p2-home/lanes"/*.pid
 #      ticker, no lane panes — while two lanes ran unseen.
 NH="$T/wp13n-home"; mkdir -p "$NH/lanes"; : > "$T/herdr-calls"
 out=$(HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    HERDR_DEAD="stub:p0" WATCH_TICKER=0 ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    HERDR_DEAD="stub:p0" WATCH_TICKER=0 LOOM_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
     bash "$WP" 2>&1); rc_n=$?
 if [ "$rc_n" != 0 ] && printf '%s' "$out" | grep -q "stub:p0" && printf '%s' "$out" | grep -q "exiting"; then
     ok "watch-panes: a viewer with a dead anchor exits non-zero and names it"
@@ -3327,7 +3327,7 @@ fi
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     HERDR_DEAD="stub:p0" HERDR_PANE_LIST="stub:p0 stub:p9" WATCH_TICKER=0 \
-    ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1; rc_n=$?
+    LOOM_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1; rc_n=$?
 if [ "$rc_n" = 0 ] && grep -q -- "split --pane stub:p9 --direction right" "$T/herdr-calls"; then
     ok "watch-panes: a dead anchor re-anchors on a live pane instead of dying"
 else
@@ -3343,7 +3343,7 @@ mkdir -p "$T/wpmod"; ln -sf "$TICK" "$T/wpmod/tick.sh"
 sed 's/wp_blind /: /' "$WP" > "$T/wpmod/wp-noblind.sh"; chmod +x "$T/wpmod/wp-noblind.sh"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    HERDR_DEAD="stub:p0" WATCH_TICKER=0 ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    HERDR_DEAD="stub:p0" WATCH_TICKER=0 LOOM_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
     bash "$T/wpmod/wp-noblind.sh" >/dev/null 2>&1; rc_n=$?
 [ "$rc_n" = 0 ] \
     && ok "watch-panes-violation: without the fatal exit the blind viewer runs on" \
@@ -3361,7 +3361,7 @@ PH="$T/wp13o-home"; mkdir -p "$PH/lanes"; : > "$T/herdr-calls"
   done
   echo 999999 > "$PH/watch-panes.pid" ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 [ "$(cat "$PH/watch-panes.pid" 2>/dev/null)" = 999999 ] \
     && ok "watch-panes: an exiting viewer keeps a pidfile it no longer owns" \
@@ -3370,7 +3370,7 @@ wait 2>/dev/null || :
 # viewer would block the next launch forever.
 rm -f "$PH/watch-panes.pid"; : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1 || :
+    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1 || :
 [ ! -f "$PH/watch-panes.pid" ] \
     && ok "watch-panes: a viewer that owns its pidfile removes it on exit" \
     || bad "watch-panes: pidfile survived its own viewer — the next launch is blocked"
@@ -3382,7 +3382,7 @@ sed 's/_owns_pidfile &&/: \&\&/' "$WP" > "$T/wpmod/wp-noown.sh"; chmod +x "$T/wp
   done
   echo 999999 > "$PH/watch-panes.pid" ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 \
+    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 \
     bash "$T/wpmod/wp-noown.sh" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 [ ! -f "$PH/watch-panes.pid" ] \
@@ -3410,7 +3410,7 @@ sleep 1 & echo $! > "$T/wp13j-home/lanes/probe-e9.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-close-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    ORCH_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
     bash "$WP" >/dev/null 2>&1 || :
 closes=$(grep -c "^pane close " "$T/herdr-calls" || :)
 [ "$closes" = 2 ] \
@@ -3450,8 +3450,8 @@ fi
 #     done. Without that the stale agent would spin on a usage error every
 #     60s with nothing able to unload it. (Paid for: 2026-08-02 — 26 zombie
 #     launchd agents from earlier suite runs.)
-export ORCH_PLIST_DIR="$T/plists15"
-mkdir -p "$ORCH_PLIST_DIR"
+export LOOM_PLIST_DIR="$T/plists15"
+mkdir -p "$LOOM_PLIST_DIR"
 : > "$LCTL_CALLS"
 out=$("$TICK" quiet-tick 2>&1); rc=$?
 [ "$rc" = 0 ] && case "$out" in *retired*) true ;; *) false ;; esac \
@@ -3466,7 +3466,7 @@ grep -q '^bootout ' "$LCTL_CALLS" \
 "$TICK" watcher-arm >/dev/null 2>&1 \
     && bad "watcher: watcher-arm still exists — the second agent can be resurrected" \
     || ok "watcher: no verb can arm a second agent any more"
-ls "$ORCH_PLIST_DIR" 2>/dev/null | grep -q '\.watch\.plist$' \
+ls "$LOOM_PLIST_DIR" 2>/dev/null | grep -q '\.watch\.plist$' \
     && bad "watcher: a .watch plist was written after arm was removed" \
     || ok "watcher: arming wrote no plist, because there is nothing left to arm"
 
@@ -3476,12 +3476,12 @@ ls "$ORCH_PLIST_DIR" 2>/dev/null | grep -q '\.watch\.plist$' \
 LANE="$(dirname "$TICK")/lane.sh"
 EVH="$T/ev-home"; mkdir -p "$EVH"
 GSTUB="$T/glab-ok.sh"; printf '#!/bin/sh\nexit 0\n' > "$GSTUB"; chmod +x "$GSTUB"
-ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 4 review >/dev/null 2>&1
-echo "gate looks good" | ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 4 pass abcd1234 >/dev/null 2>&1
+LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 4 review >/dev/null 2>&1
+echo "gate looks good" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 4 pass abcd1234 >/dev/null 2>&1
 grep -q '"ev":"ticket_transition"' "$EVH/events.jsonl" 2>/dev/null \
     && ok "ticker: lane.sh transition appended its event" \
     || bad "ticker: lane.sh transition wrote no event"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"#4 → review (implementation complete, awaiting gate)"*) \
     ok "ticker: transition renders as a human line";; \
     *) bad "ticker: transition rendered wrong ($out)";; esac
@@ -3494,18 +3494,18 @@ printf '%s\n' "$out" | grep -Ev '^[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}  
 # Planted violation: raw jq dies on a corrupt line; fromjson? is the guard.
 # Later events must still render after garbage lands mid-stream.
 echo 'not json at all' >> "$EVH/events.jsonl"
-ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" close 4 >/dev/null 2>&1
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" close 4 >/dev/null 2>&1
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"#4 merged and closed"*) \
     ok "ticker: a corrupt line does not kill the stream";; \
     *) bad "ticker: corrupt line broke rendering ($out)";; esac
 # Clean exits are suppressed (their outcome event tells the story; chained
 # handoffs stamp them after the successor spawned, which rendered backwards) —
 # but failures and probe results must still show.
-ORCH_HOME="$EVH" "$TICK" event lane_exit id impl-4 type impl rc 0 secs 5
-ORCH_HOME="$EVH" "$TICK" event lane_exit id gate-4 type gate rc 7 secs 5
-ORCH_HOME="$EVH" "$TICK" event lane_exit id probe-audio type probe rc 0 secs 5
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" "$TICK" event lane_exit id impl-4 type impl rc 0 secs 5
+LOOM_HOME="$EVH" "$TICK" event lane_exit id gate-4 type gate rc 7 secs 5
+LOOM_HOME="$EVH" "$TICK" event lane_exit id probe-audio type probe rc 0 secs 5
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"implementation ended"*) \
     bad "ticker: clean impl exit rendered (reads backwards after a chained spawn)";; \
     *) ok "ticker: clean impl exit suppressed — outcome events tell the story";; esac
@@ -3518,17 +3518,17 @@ case "$out" in *"epic audio — acceptance probe ended (rc 0"*) \
 # A wave's intent line (long silent setup) renders verbatim with the
 # "wave:" prefix — the human watching a quiet ticker during probe prep
 # read the silence as a stall (2026-08-02).
-ORCH_HOME="$EVH" "$TICK" event wave_note note "preparing probe worktrees for E2, E3"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" "$TICK" event wave_note note "preparing probe worktrees for E2, E3"
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"wave: preparing probe worktrees for E2, E3"*) \
     ok "ticker: a wave_note intent line renders";; \
     *) bad "ticker: wave_note missing ($out)";; esac
 # The renderer owns the prefix, so a note that writes its own is deduped, not
 # doubled ("wave: wave: only #47 is ready" — human, 2026-08-03). Case and
 # spacing vary because a model types it, so the strip must too.
-ORCH_HOME="$EVH" "$TICK" event wave_note note "wave: only #47 is ready"
-ORCH_HOME="$EVH" "$TICK" event wave_note note "Wave:  spinning up the E5 probe"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" "$TICK" event wave_note note "wave: only #47 is ready"
+LOOM_HOME="$EVH" "$TICK" event wave_note note "Wave:  spinning up the E5 probe"
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"wave: wave:"*|*"wave: Wave:"*) \
     bad "ticker: a self-prefixed wave_note rendered doubled ($(printf '%s' "$out" | grep -c 'wave: [Ww]ave:') line(s))";; \
     *) ok "ticker: a note that writes its own 'wave:' prefix is deduped";; esac
@@ -3540,27 +3540,27 @@ case "$out" in *"wave: spinning up the E5 probe"*) \
     *) bad "ticker: mixed-case self-prefix survived ($out)";; esac
 # Planted violation: a note that merely MENTIONS a wave mid-sentence must not
 # be truncated — the strip is anchored to the start, not a search-and-replace.
-ORCH_HOME="$EVH" "$TICK" event wave_note note "requeued after the wave: see #12"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" "$TICK" event wave_note note "requeued after the wave: see #12"
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"wave: requeued after the wave: see #12"*) \
     ok "ticker: 'wave:' inside a note is left alone";; \
     *) bad "ticker: the strip is not anchored to the start ($out)";; esac
 # Notifications land in the ticker too — a banner is transient, a push may
 # be missed; the pane must carry the same stalled/wedged/complete facts.
-NTFY_CMD=/usr/bin/true ORCH_HOME="$EVH" "$TICK" notify ticket_blocked "T9 blocked — decision needed" "b" >/dev/null 2>&1
+NTFY_CMD=/usr/bin/true LOOM_HOME="$EVH" "$TICK" notify ticket_blocked "T9 blocked — decision needed" "b" >/dev/null 2>&1
 grep -q '"ev":"notify"' "$EVH/events.jsonl" 2>/dev/null \
     && ok "ticker: a delivered notification writes its event" \
     || bad "ticker: notify left no event line"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"⚑ T9 blocked — decision needed"*) \
     ok "ticker: a notification renders with its title";; \
     *) bad "ticker: notification missing from render ($out)";; esac
 # Failure lines stand out (asked for by the human, 2026-08-02): a glyph in
-# the plain bytes always, ANSI color only on a tty or under ORCH_COLOR=1 —
+# the plain bytes always, ANSI color only on a tty or under LOOM_COLOR=1 —
 # so pipes, greps and these very assertions see stable bytes by default.
-echo "regression in error handling" | ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 5 fail beef1234 >/dev/null 2>&1
-ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 6 blocked >/dev/null 2>&1
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+echo "regression in error handling" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 5 fail beef1234 >/dev/null 2>&1
+LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 6 blocked >/dev/null 2>&1
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"✗ #5 gate verdict: FAIL @ beef1234"*) \
     ok "ticker: a FAIL verdict wears the failure glyph";; \
     *) bad "ticker: FAIL verdict not glyphed ($out)";; esac
@@ -3570,22 +3570,22 @@ case "$out" in *"⚠ #6 → blocked — a human decision is needed"*) \
 printf '%s\n' "$out" | grep -q $'\033' \
     && bad "ticker: escape codes leaked into non-tty output" \
     || ok "ticker: plain bytes when output is not a terminal"
-cout=$(ORCH_COLOR=1 ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+cout=$(LOOM_COLOR=1 LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 printf '%s\n' "$cout" | grep -q $'\033\[1;31m' \
-    && ok "ticker: ORCH_COLOR=1 paints failure lines red" \
+    && ok "ticker: LOOM_COLOR=1 paints failure lines red" \
     || bad "ticker: forced color produced no red escape"
 # Probe outcomes reach the ticker through one verb (asked for by the human,
 # 2026-08-02): probe-result posts the report on the Build issue AND emits the
 # event — before this, the outcome lived only in prose and the ticker ended
 # at "probe ended (rc 0)" with no verdict.
-echo "epic exercised end to end, no defects" | ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" \
+echo "epic exercised end to end, no defects" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" \
     "$LANE" probe-result 36 e4 pass >/dev/null 2>&1
-echo "2 fix tickets filed" | ORCH_HOME="$EVH" GLAB_CMD="$GSTUB" \
+echo "2 fix tickets filed" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" \
     "$LANE" probe-result 36 e5 fail >/dev/null 2>&1
 grep -q '"ev":"probe_result"' "$EVH/events.jsonl" 2>/dev/null \
     && ok "ticker: probe-result appended its event" \
     || bad "ticker: probe-result wrote no event"
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"✓ epic e4 — acceptance probe PASSED"*) \
     ok "ticker: probe PASS renders highlighted";; \
     *) bad "ticker: probe pass rendered wrong ($out)";; esac
@@ -3595,16 +3595,16 @@ case "$out" in *"✗ epic e5 — acceptance probe FAILED (fix tickets filed)"*) 
 # P31: an escalation the human paid for must be visibly TAKEN. The model is
 # read off the spawned command line, not self-reported, and the default case
 # (no --model, the lane inherits the session model) stays quiet.
-ORCH_HOME="$EVH" "$TICK" spawn-lane impl-46 -- /bin/echo --model opus >/dev/null 2>&1
-ORCH_HOME="$EVH" "$TICK" spawn-lane impl-47 -- /bin/echo plain >/dev/null 2>&1
-out=$(ORCH_HOME="$EVH" "$TICK" render-events 2>&1)
+LOOM_HOME="$EVH" "$TICK" spawn-lane impl-46 -- /bin/echo --model opus >/dev/null 2>&1
+LOOM_HOME="$EVH" "$TICK" spawn-lane impl-47 -- /bin/echo plain >/dev/null 2>&1
+out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"#46 — implementation started (opus)"*) \
     ok "ticker: an escalated lane names its model";; \
     *) bad "ticker: escalation not shown ($(printf '%s' "$out" | grep '#4[67]'))";; esac
 case "$out" in *"#47 — implementation started ("*) \
     bad "ticker: an unescalated lane invented a model suffix";; \
     *) ok "ticker: the default model stays quiet";; esac
-for l in impl-46 impl-47; do ORCH_HOME="$EVH" "$TICK" clear-lane "$l" >/dev/null 2>&1; done
+for l in impl-46 impl-47; do LOOM_HOME="$EVH" "$TICK" clear-lane "$l" >/dev/null 2>&1; done
 
 # 16n. The ticker stops announcing a replay that is not going to happen (P42).
 #      `tick_skipped` fires for three unrelated reasons and the renderer
@@ -3615,14 +3615,14 @@ for l in impl-46 impl-47; do ORCH_HOME="$EVH" "$TICK" clear-lane "$l" >/dev/null
 #      no replay follows. wave_gap now stays in the log for `retro` and never
 #      renders; lock_held renders once per wave; loop_stopped keeps its own.
 SKH="$T/skip-home"; mkdir -p "$SKH"
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 1
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason loop_stopped
-ORCH_HOME="$SKH" "$TICK" event tick_replayed
-out=$(ORCH_HOME="$SKH" "$TICK" render-events 2>&1)
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 1
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason loop_stopped
+LOOM_HOME="$SKH" "$TICK" event tick_replayed
+out=$(LOOM_HOME="$SKH" "$TICK" render-events 2>&1)
 printf '%s\n' "$out" | grep -qi "wave_gap\|under .*m ago" \
     && bad "ticker: a wave_gap skip still reached the ticker ($out)" \
     || ok "ticker: a timer declining to spend renders nothing at all"
@@ -3643,17 +3643,17 @@ printf '%s\n' "$out" | grep -q "pending tick replayed" \
     || bad "ticker: wave_gap events went missing from events.jsonl"
 # A log written before P42 has no "first" field; those lines must still read
 # the way they did, or replaying old history rewrites it.
-ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held
-ORCH_HOME="$SKH" "$TICK" render-events 2>&1 | grep -c "a tick landed during a wave" | grep -qx 2 \
+LOOM_HOME="$SKH" "$TICK" event tick_skipped reason lock_held
+LOOM_HOME="$SKH" "$TICK" render-events 2>&1 | grep -c "a tick landed during a wave" | grep -qx 2 \
     && ok "ticker: a pre-P42 lock_held event still renders" \
     || bad "ticker: an event with no 'first' field vanished from an old log"
 # The emitter half, against the real lock: only the tick that RAISES the
 # pending flag is marked, however many bounce off afterwards.
 LKH="$T/skip-lock-home"; mkdir -p "$LKH"
-ORCH_HOME="$LKH" ORCH_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
+LOOM_HOME="$LKH" LOOM_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
 skpid=$!; sleep 0.7
-ORCH_HOME="$LKH" ORCH_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
-ORCH_HOME="$LKH" ORCH_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
+LOOM_HOME="$LKH" LOOM_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
+LOOM_HOME="$LKH" LOOM_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
 wait "$skpid" 2>/dev/null || :
 f1=$(grep -cE '"reason":"lock_held","first":"?1"?' "$LKH/events.jsonl" || :)
 f0=$(grep -cE '"reason":"lock_held","first":"?0"?' "$LKH/events.jsonl" || :)
@@ -3666,7 +3666,7 @@ f0=$(grep -cE '"reason":"lock_held","first":"?0"?' "$LKH/events.jsonl" || :)
 mkdir -p "$T/tickmod"; ln -sf "$(dirname "$TICK")/snapshot.jq" "$T/tickmod/snapshot.jq"
 sed '/elif $e.ev == "tick_skipped"/,/elif $e.ev == "tick_replayed"/s/else empty end)/else "tick landed mid-wave — remembered for replay" end)/g' \
     "$TICK" > "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
-ORCH_HOME="$SKH" "$T/tickmod/tick.sh" render-events 2>&1 | grep -q "tick landed mid-wave" \
+LOOM_HOME="$SKH" "$T/tickmod/tick.sh" render-events 2>&1 | grep -q "tick landed mid-wave" \
     && ok "ticker-violation: with one sentence for all three, the false line is back" \
     || bad "ticker-violation: the collapsed renderer printed nothing — the test proves nothing"
 
@@ -3685,13 +3685,13 @@ case "$*" in
 esac
 EOF
 chmod +x "$T/glab-milestones.sh"
-echo "clean run" | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-milestones.sh" MCAP="$MCAP" \
+echo "clean run" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-milestones.sh" MCAP="$MCAP" \
     "$LANE" probe-result 36 e5 pass >/dev/null 2>&1
 grep -q "milestones/55" "$MCAP" && ! grep -q "milestones/56" "$MCAP" \
     && ok "probe-result: PASS closes the matching milestone and only that one" \
     || bad "probe-result: milestone close calls wrong ($(grep milestones/ "$MCAP" | head -2))"
 : > "$MCAP"
-echo "defects found" | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-milestones.sh" MCAP="$MCAP" \
+echo "defects found" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-milestones.sh" MCAP="$MCAP" \
     "$LANE" probe-result 36 e5 fail >/dev/null 2>&1
 grep -q "state_event=close" "$MCAP" \
     && bad "probe-result: FAIL closed a milestone — fix tickets land there" \
@@ -3703,18 +3703,18 @@ grep -q "state_event=close" "$MCAP" \
 #       chained a gate, and #29 merged through a human hold (2026-08-02).
 "$TICK" spawn-lane impl-88 -- bash -c 'sleep 60 & wait' >/dev/null
 sleep 1
-wpid=$(cat "$ORCH_HOME/lanes/impl-88.pid" 2>/dev/null || echo "")
+wpid=$(cat "$LOOM_HOME/lanes/impl-88.pid" 2>/dev/null || echo "")
 kpids="$wpid $(pgrep -P "$wpid" 2>/dev/null | tr '\n' ' ')"
 "$TICK" kill-lane impl-88 >/dev/null 2>&1
 sleep 1
 survivors=0
 for p in $kpids; do kill -0 "$p" 2>/dev/null && survivors=$((survivors+1)); done
-if [ "$survivors" = 0 ] && [ ! -f "$ORCH_HOME/lanes/impl-88.pid" ]; then
+if [ "$survivors" = 0 ] && [ ! -f "$LOOM_HOME/lanes/impl-88.pid" ]; then
     ok "kill-lane: wrapper AND descendants dead, lane cleared"
 else
     bad "kill-lane: $survivors survivor(s) of [$kpids] or pid file left"
 fi
-out=$(ORCH_HOME="$ORCH_HOME" "$TICK" render-events 2>/dev/null | grep "impl-88\|#88" | tail -1)
+out=$(LOOM_HOME="$LOOM_HOME" "$TICK" render-events 2>/dev/null | grep "impl-88\|#88" | tail -1)
 case "$out" in *"⚠ #88 — implementation killed (whole tree)"*) \
     ok "ticker: a killed lane renders with the warning glyph";; \
     *) bad "ticker: lane_kill rendered wrong ($out)";; esac
@@ -3734,7 +3734,7 @@ esac
 EOF
 chmod +x "$T/glab-blocked-stub.sh"
 BCAP2="$T/blocked-writes"; : > "$BCAP2"
-GB() { ORCH_HOME="$EVH" GLAB_CMD="$T/glab-blocked-stub.sh" BCAP="$BCAP2" "$LANE" "$@"; }
+GB() { LOOM_HOME="$EVH" GLAB_CMD="$T/glab-blocked-stub.sh" BCAP="$BCAP2" "$LANE" "$@"; }
 GB transition 50 review >/dev/null 2>&1 && bad "sticky-blocked: transition advanced a blocked ticket" \
     || ok "sticky-blocked: transition to review bounces off a hold"
 echo r | GB verdict 50 pass abcd1234 >/dev/null 2>&1 && bad "sticky-blocked: verdict advanced a blocked ticket" \
@@ -3747,7 +3747,7 @@ grep -q "add_labels\|state_event=close" "$BCAP2" \
 # P36: the unblock direction is no longer a free pass. It was — `ready-for-agent`
 # skipped the guard entirely — so releasing a hold was a plain label write any
 # automated caller could make, and one did: a hold comment ended with the
-# sentence "Release: when #48 merges, /orchestrate unblock 67", and a wave read
+# sentence "Release: when #48 merges, /loom unblock 67", and a wave read
 # that prose as an instruction addressed to itself and requeued the held ticket
 # nine seconds later. (Paid for: #67, build-3 2026-08-04.)
 GB transition 50 ready-for-agent >/dev/null 2>&1 \
@@ -3761,10 +3761,10 @@ GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
 # are the only two callers that can act on ticket prose, and the env markers
 # are set by the loop itself, not by the caller asking nicely.
 : > "$BCAP2"
-ORCH_LANE_ID=impl-50 GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
+LOOM_LANE_ID=impl-50 GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
     && bad "sticky-blocked: a lane released a human hold" \
     || ok "sticky-blocked: a lane cannot release a human hold, even with the flag"
-ORCH_WAVE_PROMPT="/orchestrate tick" GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
+LOOM_WAVE_PROMPT="/loom tick" GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
     && bad "sticky-blocked: a wave released a human hold" \
     || ok "sticky-blocked: a wave cannot release a human hold, even with the flag"
 grep -q "add_labels" "$BCAP2" \
@@ -3790,16 +3790,16 @@ echo '{}'
 EOF
 chmod +x "$T/glab-body-stub.sh"
 VCAP2="$T/verdict-bodies"; : > "$VCAP2"
-echo "same trap" | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
+echo "same trap" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
     "$LANE" verdict 8 fail beef5678 --class marks-attribution >/dev/null 2>&1
 grep -q "orch-verdict FAIL beef5678 class=marks-attribution" "$VCAP2" \
     && ok "verdict: --class folds the defect class into the trailer" \
     || bad "verdict: class missing from trailer ($(tail -2 "$VCAP2" 2>/dev/null))"
-echo x | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
+echo x | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
     "$LANE" verdict 8 fail beef5678 --class "Bad Slug" >/dev/null 2>&1 \
     && bad "verdict: accepted a non-kebab class slug" \
     || ok "verdict: a non-kebab class slug is refused"
-echo y | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
+echo y | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
     "$LANE" verdict 8 pass beef5678 >/dev/null 2>&1 \
     && ok "verdict: class stays optional" \
     || bad "verdict: classless verdict refused"
@@ -3811,7 +3811,7 @@ echo y | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
 #      (build-3, 2026-08-03). The trailer keeps the count in the TRACKER,
 #      because blocking the ticket is a decision, not plumbing.
 VCAP3="$T/merge-attempt-bodies"; : > "$VCAP3"
-echo "combined gate deadlocked in pytest" | ORCH_HOME="$EVH" \
+echo "combined gate deadlocked in pytest" | LOOM_HOME="$EVH" \
     GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed 8 >/dev/null 2>&1
 grep -q "orch-merge-attempt 8" "$VCAP3" \
@@ -3829,7 +3829,7 @@ echo '{}'
 EOF
 chmod +x "$T/glab-argv-stub.sh"
 ACAP2="$T/merge-attempt-calls"; : > "$ACAP2"
-echo "second attempt, same wall" | ORCH_HOME="$EVH" \
+echo "second attempt, same wall" | LOOM_HOME="$EVH" \
     GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP2" \
     "$LANE" merge-failed 8 >/dev/null 2>&1
 if grep -qE "add_labels|remove_labels|state_event" "$ACAP2"; then
@@ -3846,31 +3846,31 @@ grep -q "issues/8/notes" "$ACAP2" \
 #       `--release-hold` — it is refused outright inside a lane or a wave: a
 #       lane that can reset its own cap has no cap. (#67, build-3 2026-08-04.)
 VCAP4="$T/rescope-bodies"; : > "$VCAP4"
-echo "Re-scoped: the race moved to #48" | ORCH_HOME="$EVH" \
+echo "Re-scoped: the race moved to #48" | LOOM_HOME="$EVH" \
     GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" "$LANE" rescope 8 >/dev/null 2>&1
 grep -qE "orch-scope-reset [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAP4" \
     && grep -q "the race moved to #48" "$VCAP4" \
     && ok "rescope: a human posts the reason and the marker together" \
     || bad "rescope: marker or reason missing ($(tail -3 "$VCAP4" 2>/dev/null))"
-echo "no body, no record" | ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" \
+echo "no body, no record" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" \
     "$LANE" rescope notanumber >/dev/null 2>&1 \
     && bad "rescope: accepted a non-numeric iid" \
     || ok "rescope: bad iid refused"
 # Planted violation: the two automated callers, each with a body ready to post.
 # Captured from real argv, so "it wrote nothing" is proven rather than assumed.
 ACAP4="$T/rescope-calls"; : > "$ACAP4"
-echo "the ticket changed, honest" | ORCH_LANE_ID=impl-8 ORCH_HOME="$EVH" \
+echo "the ticket changed, honest" | LOOM_LANE_ID=impl-8 LOOM_HOME="$EVH" \
     GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 >/dev/null 2>&1 \
     && bad "rescope: a lane retired its own rejection history" \
     || ok "rescope: a lane cannot reset its own cap"
-echo "the ticket changed, honest" | ORCH_WAVE_PROMPT="/orchestrate tick" ORCH_HOME="$EVH" \
+echo "the ticket changed, honest" | LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" \
     GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 >/dev/null 2>&1 \
     && bad "rescope: a wave retired a ticket's rejection history" \
     || ok "rescope: a wave cannot reset a ticket's cap"
 [ -s "$ACAP4" ] \
     && bad "rescope: an automated caller still reached the tracker ($(head -1 "$ACAP4"))" \
     || ok "rescope: no automated reset write reached the tracker"
-ORCH_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed abc </dev/null >/dev/null 2>&1 \
     && bad "merge-failed: accepted a non-numeric iid" \
     || ok "merge-failed: a bad iid is refused"
@@ -3893,7 +3893,7 @@ esac
 EOF
 chmod +x "$FX/fixtkt-stub.sh"
 FCAP="$T/fixtkt-calls"; : > "$FCAP"
-echo "turns after the first never complete" | ORCH_HOME="$EVH" \
+echo "turns after the first never complete" | LOOM_HOME="$EVH" \
     GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title "realtime turns stall" --tier logic \
         --milestone "E4 · Realtime mode" >/dev/null 2>&1
@@ -3914,15 +3914,15 @@ case "$lbl" in *build-3*) ok "fix-ticket: derives the build label, highest Build
                *) bad "fix-ticket: wrong build label in '$lbl' (want build-3, not build-2)" ;; esac
 # Planted violations: the two flags whose absence is silent damage rather than
 # a loud error must be REFUSED, not defaulted.
-echo x | ORCH_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
+echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title t --milestone "E4 · Realtime mode" >/dev/null 2>&1 \
     && bad "fix-ticket: accepted a ticket with no tier — no gate lane could pick a suite" \
     || ok "fix-ticket: a missing --tier is refused"
-echo x | ORCH_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
+echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title t --tier logic >/dev/null 2>&1 \
     && bad "fix-ticket: accepted a milestone-less ticket — its epic could close over the defect" \
     || ok "fix-ticket: a missing --milestone is refused"
-echo x | ORCH_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
+echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title t --tier bogus --milestone "E4 · Realtime mode" >/dev/null 2>&1 \
     && bad "fix-ticket: accepted a tier outside docs|logic|api|ui" \
     || ok "fix-ticket: an unknown tier is refused"
@@ -4011,7 +4011,7 @@ fi
 # orphaned pipeline kept writing to the pane after its wrapper was killed,
 # so every new event rendered once per ghost — duplicate lines that
 # survived a restart and grew over time (2026-08-02).
-ORCH_HOME="$EVH" "$TICK" render-events --follow >/dev/null 2>&1 &
+LOOM_HOME="$EVH" "$TICK" render-events --follow >/dev/null 2>&1 &
 TKPID=$!
 sleep 1
 kill "$TKPID" 2>/dev/null; sleep 1
@@ -4042,7 +4042,7 @@ git -C "$SW/repo" merge -q --no-edit done-work; git -C "$SW/repo" push -q origin
 git -C "$SW/repo" worktree add -q "$SW/repo-wt-7" done-work 2>/dev/null
 # The trigger: leftovers that are ALL untracked (build artifacts, node_modules).
 mkdir -p "$SW/repo-wt-7/dist"; echo junk > "$SW/repo-wt-7/dist/out.js"
-ORCH_REPO="$SW/repo" ORCH_HOME="$SW/home" "$TICK" sweep >"$SW/out" 2>&1; rc_sw=$?
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >"$SW/out" 2>&1; rc_sw=$?
 if [ "$rc_sw" = 0 ] && [ ! -e "$SW/repo-wt-7" ]; then
     ok "sweep: removes a merged worktree whose only leftovers are untracked"
 else
@@ -4055,7 +4055,7 @@ git -C "$SW/repo" worktree add -q "$SW/repo-wt-8" -b wip origin/main 2>/dev/null
 echo wip > "$SW/repo-wt-8/new.txt"
 git -C "$SW/repo-wt-8" add new.txt
 git -C "$SW/repo-wt-8" -c user.email=t@t -c user.name=t commit -qm wip
-ORCH_REPO="$SW/repo" ORCH_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
 if [ -e "$SW/repo-wt-8" ]; then
     ok "sweep: keeps a worktree holding unmerged commits"
 else
@@ -4160,6 +4160,28 @@ if [ "$rc_tr3" = 0 ] && grep -q 'add_labels=merge-queue' "$SR/c5"; then
     ok "transition: an open ticket still advances normally"
 else
     bad "transition: guard broke the normal path (rc=$rc_tr3)"
+fi
+
+# 22. Hard cut from the pre-rename config name. A repo carrying only
+#     `.orchestrator.yml` must STOP, naming the rename — never fall through to
+#     derived + global defaults, which would silently ignore every setting the
+#     human wrote. Shown failing too: add `.loom.yml` and the same repo runs.
+HC="$T/hardcut"; mkdir -p "$HC/repo" "$HC/home"
+printf 'max_lanes: 2\n' > "$HC/repo/.orchestrator.yml"
+LOOM_REPO="$HC/repo" LOOM_HOME="$HC/home" "$TICK" tick >"$HC/out" 2>&1; rc_hc=$?
+if [ "$rc_hc" != 0 ] && grep -q 'old config name' "$HC/out" \
+   && grep -q 'mv .orchestrator.yml .loom.yml' "$HC/out"; then
+    ok "hard cut: a repo on the old config name stops and names the rename"
+else
+    bad "hard cut: old-name repo did not stop with the rename message (rc=$rc_hc)"
+fi
+# Planted violation: with the new name present the guard must NOT fire.
+printf 'max_lanes: 2\n' > "$HC/repo/.loom.yml"
+LOOM_REPO="$HC/repo" LOOM_HOME="$HC/home" "$TICK" tick >"$HC/out2" 2>&1
+if grep -q 'old config name' "$HC/out2"; then
+    bad "hard cut: guard fired even though .loom.yml exists"
+else
+    ok "hard cut: a repo carrying both names runs on the new one"
 fi
 
 # Whole-suite guard, checked last because it is a property of every test above

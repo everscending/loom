@@ -1,6 +1,6 @@
 # Canonical config schema
 
-Config is read-only to the orchestrator (the human sets it; it is never build
+Config is read-only to the loom (the human sets it; it is never build
 state). **Do not reinvent key names per repo** — a bootstrap that renames keys
 makes two repos read differently for no gain. The keys below are fixed; only
 the *values* are repo-specific.
@@ -12,7 +12,7 @@ Every key resolves as **repo → derived → global → built-in default**, and
 so the effective config is one command away rather than something to reason
 about.
 
-1. **Global — `~/.orchestrator/config.yml`** (override with `ORCH_GLOBAL_CONFIG`).
+1. **Global — `~/.loom/config.yml`** (override with `LOOM_GLOBAL_CONFIG`).
    Machine- and person-level preference, identical across every repo:
    `max_lanes`, `crash_cap`, `rejection_cap`, `heartbeat_stale_minutes`,
    `usage_limit`, the ntfy block. Written once, ever.
@@ -22,7 +22,7 @@ about.
    `.claude/settings.json` permission surface. `tick.sh install-settings`
    writes that surface; it is idempotent and refuses to overwrite a differing
    hand-edited file without `--force`.
-3. **Repo — `.orchestrator.yml`, optional.** Only facts no detector can infer.
+3. **Repo — `.loom.yml`, optional.** Only facts no detector can infer.
    Its absence is a valid, complete configuration.
 
 A repo `gates:` block overrides the derived pack wholesale. The one extra repo
@@ -116,8 +116,8 @@ The only thing that reads `gates` is the repo's own gate runner (e.g.
 agree on the key. `tick.sh` reads no gate key. **The gate runner lives in
 the repo, not the skill**: CI and bare-clone contributors run it without
 the skill installed, and its commands are repo-specific — it is the repo's
-definition of done. `tick.sh` (orchestration mechanism) is the opposite:
-skill-resident, run only by the orchestrator-driver. Values are literal commands
+definition of done. `tick.sh` (loom mechanism) is the opposite:
+skill-resident, run only by the loom driver. Values are literal commands
 by design (decided 2026-07-21, crucible): the abstract-token form the first
 openemr config used (`[unit, phpstan]`) needs a token→command map that was
 never built, so literal commands are canonical.

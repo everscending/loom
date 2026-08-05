@@ -97,7 +97,7 @@ if [ "${1:-}" = "off" ] || [ "${1:-}" = "on" ]; then
     exit 0
 fi
 
-# Singleton per repo: `/orchestrate tick` launches this opportunistically on
+# Singleton per repo: `/loom tick` launches this opportunistically on
 # every manual tick, so a second launch must exit quietly instead of opening
 # a duplicate pane per lane. The pidfile lives in the repo's state dir (one
 # viewer per repo, not per machine); a stale file from a dead viewer is
@@ -154,7 +154,7 @@ tkey() {
 }
 
 # Layout contract (asked for by the human, 2026-08-02): the pane this viewer
-# is launched from (the orchestration session) and the ticker form the LEFT
+# is launched from (the loom session) and the ticker form the LEFT
 # column — ticker as a 25% strip under the session. Lane panes form the RIGHT
 # column, stacked top to bottom. Split ORDER makes the columns: the right
 # anchor splits off the session while it is still full width, THEN the ticker
@@ -222,7 +222,7 @@ anchor_split() {
 # the next tick starts a working one.
 wp_blind() {
     echo "watch-panes: $1" >&2
-    echo "watch-panes: exiting so the next \`/orchestrate tick\` or \`watch-panes.sh on\` starts a working viewer." >&2
+    echo "watch-panes: exiting so the next \`/loom tick\` or \`watch-panes.sh on\` starts a working viewer." >&2
     exit 1
 }
 
@@ -274,8 +274,8 @@ ensure_ticker() {
     # ticker offers the quit key, this script owns the words for turning it
     # back on. tick.sh must never learn that this viewer exists (enforced by
     # the suite), so it prints whatever it is handed and nothing more.
-    local tcmd="ORCH_TICKER_QUIT_HINT='  (press q to close this ticker)'"
-    tcmd="$tcmd ORCH_TICKER_REOPEN_HINT='Reopen with: watch-panes.sh ticker on'"
+    local tcmd="LOOM_TICKER_QUIT_HINT='  (press q to close this ticker)'"
+    tcmd="$tcmd LOOM_TICKER_REOPEN_HINT='Reopen with: watch-panes.sh ticker on'"
     tcmd="$tcmd $TICK render-events --follow"
     if [ -n "$tp" ] && "$HERDR" pane run "$tp" "$tcmd" >/dev/null 2>&1; then
         "$HERDR" pane rename "$tp" "build ticker" >/dev/null 2>&1 || :

@@ -1,14 +1,14 @@
-# Orchestrate — open proposals
+# Loom — open proposals
 
-Live proposals for making `/orchestrate` faster and more reliable, ordered by impact. Implemented
+Live proposals for making `/loom` faster and more reliable, ordered by impact. Implemented
 ones move to [PROPOSALS_ARCHIVED.md](PROPOSALS_ARCHIVED.md), which also holds the review-round
 findings and the ranking rationale for work already done.
 
 Everything here is derived from a review of `SKILL.md`, `scripts/tick.sh`, `scripts/tick-test.sh`
 and `references/`, checked against the two real unattended runs on disk (crucible Build 2,
-2026-07-21 19:55–23:45, 31 logs in `~/.orchestrator/crucible-2014258785/logs/`; boostlingo
+2026-07-21 19:55–23:45, 31 logs in `~/.loom/crucible-2014258785/logs/`; boostlingo
 build-1, 2026-08-01 23:24 → 2026-08-02 12:28, logs in
-`~/.orchestrator/boostlingo-ai-interpreter-workbench-2061292512/logs/`) and against fresh
+`~/.loom/boostlingo-ai-interpreter-workbench-2061292512/logs/`) and against fresh
 benchmarks of the crucible gate suite.
 
 ## Tracking
@@ -31,10 +31,10 @@ Only `open`, `in progress` and `deferred` proposals live here. A `deferred` one 
 still a live decision that could be revisited; a `dropped` one is archived like an implemented one,
 with its reason.
 
-**Stay inside this skill.** Every proposal here is implemented using only the `/orchestrate`
+**Stay inside this skill.** Every proposal here is implemented using only the `/loom`
 skill's own files — `SKILL.md`, `scripts/`, `references/`. The sibling skills this one routes to
 (`/to-tickets`, `/implement`, `/code-review`, `/grilling`, `/lavish`, `/prototype`) are **off
-limits**: they are shared by other work, and `/orchestrate` is a consumer of them, not their
+limits**: they are shared by other work, and `/loom` is a consumer of them, not their
 owner. Constitution rule 2 — *route, do not teach* — cuts both ways.
 
 If a fix looks like it needs a change in one of them, re-scope it into this skill's own layer
@@ -44,7 +44,7 @@ every session prompt itself. Anything that cannot be re-scoped that way is dropp
 
 One boundary worth stating, because it looks like an exception and is not: the machinery writes
 files into the *target repo* (`.claude/settings.json`, `scripts/gate.sh`) and the machine
-(`~/.orchestrator/config.yml`). That is this skill doing its job on its subject, not a change to
+(`~/.loom/config.yml`). That is this skill doing its job on its subject, not a change to
 another skill.
 
 **Keep SKILL.md small.** SKILL.md is loaded into every wave, so every line it grows is a tax on
@@ -110,7 +110,7 @@ None of those blocks were caused by the tickets' own code. They came from two to
 worktrees). Every later ready→spawn was 1–3 minutes, because a wave was usually already running.
 The residue is the cost of a wave itself — **2m28s average, 36 of them** — which is P18's number.
 
-**P3 was never armed, and this time it did not matter.** `/orchestrate start` was never run; the
+**P3 was never armed, and this time it did not matter.** `/loom start` was never run; the
 build survived entirely on lane self-triggers, and not one of 36 waves fizzled. One build does not
 retire P3 — its claim is that the backstop matters exactly once, when it is the only thing left
 alive — but this is the first measured build where the chain held end to end unaided.
@@ -178,7 +178,7 @@ and 5 impl lanes of it.
 
 **Fix, in two halves.** *Ticket side* (`references/ticket-template.md`, this skill's own layer):
 the section stops being prose and states the three conditions the implementer must satisfy — the
-test is committed, it is **named in the tier's command list in `.orchestrator.yml`**, and it is
+test is committed, it is **named in the tier's command list in `.loom.yml`**, and it is
 demonstrated to fail when its subject is broken. *Pregate side* (`tick.sh --pregate`): when the
 ticket body carries a non-empty adversarial-test section, check mechanically that the branch's diff
 adds or modifies at least one file named in that tier's command list, and exit 7 if not.
@@ -215,11 +215,11 @@ ignores switch and gap), where a lane handoff is `tick --from-lane` (respects th
 the gap). Foreground, wrong contract, wrong pacing.
 
 **Fix.** Make the wrong call impossible rather than discouraged: `cmd_tick` refuses when
-`ORCH_LANE_ID` is set, naming `--from-lane` and the epilogue in the error. Then delete the sentence
+`LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error. Then delete the sentence
 in step 5 that invites it — the epilogue already does this work, and a rule the scripts enforce
 does not need restating in prose (this file's own "Keep SKILL.md small").
 
-**Tests.** `ORCH_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
+**Tests.** `LOOM_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
 `tick --from-lane` from the same environment still runs.
 
 ## P3 · Actually arm the safety-net timer, and check that it worked
@@ -227,7 +227,7 @@ does not need restating in prose (this file's own "Keep SKILL.md small").
 A slow background timer exists to restart a stalled loop. It was never running.
 
 **Evidence.** Eight of thirteen waves report `agent-status: not loaded` and spend a paragraph
-advising the operator to run `/orchestrate start` (W1, W2, W4, W5, W9, W10, W12, W13). The
+advising the operator to run `/loom start` (W1, W2, W4, W5, W9, W10, W12, W13). The
 entire run therefore depended on the self-trigger chain — precisely the mechanism dropping
 signals in P1.
 
@@ -244,7 +244,7 @@ additions to the fix:
   produce one push, not fifteen stderr lines.
 - **The armed-check is wrong from detached contexts.** After the agent was armed at 09:54
   (launchd demonstrably fired wave-095403; `uninstall` at 12:28 unloaded it), every later
-  self-triggered tick *still* warned "not installed": `launchctl print gui/$(id -u)/$ORCH_LABEL`
+  self-triggered tick *still* warned "not installed": `launchctl print gui/$(id -u)/$LOOM_LABEL`
   fails from a nohup'd lane context. Probe the installed plist file first, with `launchctl list`
   as fallback.
 
@@ -322,7 +322,7 @@ repeated it because the model keys weren't surfaced by `resolve-config`;
 transcript; (c) the staleness watcher *infers* retry storms from filtered log
 chatter — traces would carry them as first-class spans.
 
-**Fix sketch.** One seam: `spawn-lane`. When `~/.orchestrator/config.yml`
+**Fix sketch.** One seam: `spawn-lane`. When `~/.loom/config.yml`
 carries a `langfuse:` block (OTLP endpoint + key env refs), `spawn-lane`
 exports the Claude Code telemetry env (`CLAUDE_CODE_ENABLE_TELEMETRY=1`,
 `OTEL_EXPORTER_OTLP_*` — verify the exact env surface per Claude Code

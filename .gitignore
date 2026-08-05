@@ -1,5 +1,5 @@
-# Run state lives in ~/.orchestrator/<repo>/, never here — but a stray copy
-# from a mis-set ORCH_HOME should never be committed.
+# Run state lives in ~/.loom/<repo>/, never here — but a stray copy
+# from a mis-set LOOM_HOME should never be committed.
 logs/
 lanes/
 *.pid

@@ -48,7 +48,7 @@ Herdr panes are a fine way to watch them work, and are not required.
 Ordering and fallback, not logic. Four of the five defects introduced on 2026-08-01 were of this
 shape. Look for: destructive work (log rotation, clearing `<id>.rc`) placed **above** a guard that
 can still refuse; a sort whose tiebreak silently restores the original bug when a field is absent;
-validation hardcoded to a value set that `.orchestrator.yml` can extend; a jq pipe that rebinds `.`
+validation hardcoded to a value set that `.loom.yml` can extend; a jq pipe that rebinds `.`
 so a `//` fallback evaluates against the wrong value — that one shipped twice in one day; any path
 that assumes a lane is alive or dead without reading its state; and any window between reserving
 something and stamping ownership of it.

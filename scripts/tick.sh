@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Orchestrate tick plumbing (spec #85, ticket #88).
+# Loom tick plumbing (spec #85, ticket #88).
 #
 # Deterministic machinery only: lock, detach, liveness, snapshot, notify.
 # Scheduling decisions (what to claim, merge, block) belong to the wave
@@ -32,7 +32,7 @@
 #                                allowlist? Asks both the filesystem walk and
 #                                the git repo root (P30). Never writes trust.
 #
-# Test seams (env): ORCH_HOME, ORCH_REPO, ORCH_LOCK_DIR, ORCH_WAVE_CMD,
+# Test seams (env): LOOM_HOME, LOOM_REPO, LOOM_LOCK_DIR, LOOM_WAVE_CMD,
 # GLAB_CMD, SNAP_BATCH, NTFY_CMD, NTFY_BASE, WATCH_PANES_CMD. macOS has no flock(1), so the
 # lock is an atomic mkdir holding the owner PID — exit-if-held, and a lock
 # whose owner PID is dead is broken on the next tick (same semantics,
@@ -40,33 +40,45 @@
 # instead of using `wait -n`.
 set -euo pipefail
 
-REPO_ROOT="${ORCH_REPO:-$PWD}"
+REPO_ROOT="${LOOM_REPO:-$PWD}"
 # Stable per-repo key (basename + path hash). Drives the state dir AND the
 # launchd label, so every repo is isolated and a repo's plist / manual runs
 # resolve to the same lock. Two repos never collide.
 REPO_KEY="$(basename "$REPO_ROOT")-$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)"
-ORCH_HOME="${ORCH_HOME:-$HOME/.orchestrator/$REPO_KEY}"
-CONFIG="$REPO_ROOT/.orchestrator.yml"
-LOCK_DIR="${ORCH_LOCK_DIR:-$ORCH_HOME/tick.lock.d}"
+LOOM_HOME="${LOOM_HOME:-$HOME/.loom/$REPO_KEY}"
+CONFIG="$REPO_ROOT/.loom.yml"
+# Hard cut from the pre-rename name. A repo still carrying `.orchestrator.yml`
+# with no `.loom.yml` would otherwise run silently on derived + global defaults,
+# quietly ignoring every setting the human wrote. Refuse instead, and say the
+# exact rename. No fallback path: one name, or a stop.
+if [ ! -f "$CONFIG" ] && [ -f "$REPO_ROOT/.orchestrator.yml" ]; then
+    printf '%s\n' \
+        "loom: this repo still uses the old config name." \
+        "  found:    $REPO_ROOT/.orchestrator.yml" \
+        "  expected: $CONFIG" \
+        "Rename it:  git -C \"$REPO_ROOT\" mv .orchestrator.yml .loom.yml" >&2
+    exit 1
+fi
+LOCK_DIR="${LOOM_LOCK_DIR:-$LOOM_HOME/tick.lock.d}"
 # Merging is the only step that genuinely needs single-writer semantics, and it
 # used to borrow the tick lock for it — so harvest, gate and fill all queued
 # behind a rebase-and-merge (P5). Its own lock lets a merge run in a lane while
 # waves keep scheduling. Same mkdir-atomic, dead-owner-breakable semantics.
-MERGE_LOCK_DIR="${ORCH_MERGE_LOCK_DIR:-$ORCH_HOME/merge.lock.d}"
+MERGE_LOCK_DIR="${LOOM_MERGE_LOCK_DIR:-$LOOM_HOME/merge.lock.d}"
 # A tick that arrives while a wave holds the lock used to be discarded outright,
 # and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
 # was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
 # unmerged. The skipped tick now leaves this note instead, and the lock holder
 # re-ticks once on its way out (P1). It is a single flag, not a queue, so a burst
 # of finishing lanes costs one extra wave rather than one per lane.
-PENDING_FILE="${ORCH_PENDING_FILE:-$ORCH_HOME/tick.pending}"
-LANES_DIR="$ORCH_HOME/lanes"
-LOGS_DIR="$ORCH_HOME/logs"
+PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
+LANES_DIR="$LOOM_HOME/lanes"
+LOGS_DIR="$LOOM_HOME/logs"
 # Every session gets its own scratch directory here (P17). Fixed paths were the
 # bug: a wave wrote /tmp/wave-note-16.md, a stale file of that name from an
 # earlier wave won, and its content was posted as a comment on the wrong ticket.
-SCRATCH_ROOT="$ORCH_HOME/scratch"
-SCRATCH_KEEP_DAYS="${ORCH_SCRATCH_KEEP_DAYS:-7}"
+SCRATCH_ROOT="$LOOM_HOME/scratch"
+SCRATCH_KEEP_DAYS="${LOOM_SCRATCH_KEEP_DAYS:-7}"
 NTFY_BASE="${NTFY_BASE:-https://ntfy.sh}"
 NTFY_CMD="${NTFY_CMD:-curl}"
 GLAB_CMD="${GLAB_CMD:-glab}"
@@ -84,14 +96,14 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 # pane.
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 
-mkdir -p "$ORCH_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
+mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
 
-TRUST_FILE="${ORCH_TRUST_FILE:-$HOME/.claude.json}"
+TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
 die() { echo "tick.sh: $*" >&2; exit 1; }
 
 # A fresh, empty, uniquely-named directory for one session to write in, handed
-# over as $ORCH_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
+# over as $LOOM_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
 # fails if the directory exists, so two sessions starting in the same second
 # cannot land on the same path. Created here because no spawned session may run
 # `mkdir` itself, and never reused — a reused directory is the P17 bug.
@@ -128,7 +140,7 @@ _prune_scratch() {
 # two merged worktrees' artifact dirs became standing human chores the
 # guardrails wouldn't let a lane clear.)
 _sweep_env_backup() {
-    local d="$1" dst="$ORCH_HOME/env-backups"
+    local d="$1" dst="$LOOM_HOME/env-backups"
     [ -f "$d/.env" ] || return 0
     mkdir -p "$dst"
     cp "$d/.env" "$dst/$(basename "$d").env" 2>/dev/null || true
@@ -267,14 +279,14 @@ _last_activity_ts() {
 
 _quiet_check() { # prints: active | stalled | halted | complete | unknown
     local label age open count blocked
-    [ -f "$ORCH_HOME/.build-label" ] || { echo unknown; return 0; }
-    label=$(cat "$ORCH_HOME/.build-label" 2>/dev/null)
+    [ -f "$LOOM_HOME/.build-label" ] || { echo unknown; return 0; }
+    label=$(cat "$LOOM_HOME/.build-label" 2>/dev/null)
     [ -n "$label" ] || { echo unknown; return 0; }
     if cmd_lane_status 2>/dev/null | awk '$3=="running"{f=1} END{exit !f}'; then
         echo active; return 0
     fi
     age=$(( $(date +%s) - $(_last_activity_ts) ))
-    [ "$age" -lt "${ORCH_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
+    [ "$age" -lt "${LOOM_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
     open=$(glab api "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
         || { echo unknown; return 0; }
     count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unknown; return 0; }
@@ -298,7 +310,7 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown
 }
 
 _notify_quiet() { # <state> — notify once per state change; activity re-arms
-    local state="$1" sentinel="$ORCH_HOME/quiet.state" prev=""
+    local state="$1" sentinel="$LOOM_HOME/quiet.state" prev=""
     [ -f "$sentinel" ] && prev=$(cat "$sentinel" 2>/dev/null)
     if [ "$state" = active ] || [ "$state" = unknown ]; then rm -f "$sentinel"; return 0; fi
     [ "$state" = "$prev" ] && return 0
@@ -398,11 +410,11 @@ _trust_check_dir() { # <absolute-dir> → 0 trusted; else 1, printing the path t
 # Once per state change, like _notify_quiet — a per-tick warning becomes P3's
 # fifteen stderr lines into a log nobody reads.
 _notify_trust() { # <untrusted-path> | "" (empty = trusted, re-arms)
-    local bad="${1:-}" sentinel="$ORCH_HOME/trust.state" prev=""
+    local bad="${1:-}" sentinel="$LOOM_HOME/trust.state" prev=""
     [ -f "$sentinel" ] && prev=$(cat "$sentinel" 2>/dev/null)
     if [ -z "$bad" ]; then rm -f "$sentinel"; return 0; fi
     [ "$bad" = "$prev" ] && return 0
-    mkdir -p "$ORCH_HOME"
+    mkdir -p "$LOOM_HOME"
     printf '%s\n' "$bad" > "$sentinel"
     cmd_notify workspace_untrusted "Workspace not trusted — lanes will ignore the allowlist" \
         "$bad has not been trusted, so .claude/settings.json is ignored there and lane commands fall to the classifier. Run \`claude\` in it once and accept the trust prompt." >/dev/null 2>&1 || :
@@ -520,7 +532,7 @@ _merge_lock_owner() { # prints the live owner pid, or nothing
 # The signal is machine-readable, and P13 is what put it within reach: a streamed
 # session emits `rate_limit_event` carrying `resetsAt` as an epoch. No parsing of
 # "resets 10pm (America/Chicago)" out of prose, and no timezone guessing.
-USAGE_PAUSE="${ORCH_USAGE_PAUSE:-$ORCH_HOME/usage.pause}"
+USAGE_PAUSE="${LOOM_USAGE_PAUSE:-$LOOM_HOME/usage.pause}"
 # The loop's on/off switch, and the whole reason one program can do the work of
 # the two it replaces. `stop` writes it, `start` removes it. It gates AUTOMATIC
 # continuation only — the timer, and a lane chaining to its own successor —
@@ -528,9 +540,9 @@ USAGE_PAUSE="${ORCH_USAGE_PAUSE:-$ORCH_HOME/usage.pause}"
 # carve-out), and deliberately a file rather than a launchd fact: a lane that
 # was spawned before `stop` has its follow-on command already baked in, so the
 # only place the decision can be read is when that command runs.
-LOOP_STOPPED="${ORCH_LOOP_STOPPED:-$ORCH_HOME/loop.stopped}"
-WAVE_FAILS="${ORCH_WAVE_FAILS:-$ORCH_HOME/wave-failures}"
-RETRY_BACKOFF="${ORCH_RETRY_BACKOFF_SECONDS:-30}"
+LOOP_STOPPED="${LOOM_LOOP_STOPPED:-$LOOM_HOME/loop.stopped}"
+WAVE_FAILS="${LOOM_WAVE_FAILS:-$LOOM_HOME/wave-failures}"
+RETRY_BACKOFF="${LOOM_RETRY_BACKOFF_SECONDS:-30}"
 
 # --- events (P23): the diagnostic record --------------------------------
 # Every number behind proposals P1–P22 was reconstructed BY HAND from 31 raw
@@ -546,13 +558,13 @@ RETRY_BACKOFF="${ORCH_RETRY_BACKOFF_SECONDS:-30}"
 #     and break constitution rule 1. It is for humans and for `report`.
 #   * It SURVIVES builds. Every line carries the build label, so build 3 can be
 #     measured against build 2 instead of replacing it.
-EVENTS="${ORCH_EVENTS_FILE:-$ORCH_HOME/events.jsonl}"
+EVENTS="${LOOM_EVENTS_FILE:-$LOOM_HOME/events.jsonl}"
 # The build label is cached when a snapshot resolves it, purely to TAG these
 # records. It is never read to decide anything — see the write-only rule above.
-BUILD_LABEL_CACHE="$ORCH_HOME/.build-label"
+BUILD_LABEL_CACHE="$LOOM_HOME/.build-label"
 
 _ev() { # _ev <event> [key value]...  — one JSON line, appended
-    [ -z "${ORCH_NO_EVENTS:-}" ] || return 0
+    [ -z "${LOOM_NO_EVENTS:-}" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
     local build; build=$(cat "$BUILD_LABEL_CACHE" 2>/dev/null || echo "")
     local ev="$1"; shift
@@ -652,13 +664,13 @@ cmd_resume() {
 # tracker is not reachable yet must not be recorded as bootstrapped, and the
 # next tick simply retries. Never fatal — a wave must still run.
 _bootstrap_once() {
-    local sentinel="$ORCH_HOME/.bootstrapped" boot
-    [ -n "${ORCH_SKIP_BOOTSTRAP:-}" ] && return 0
+    local sentinel="$LOOM_HOME/.bootstrapped" boot
+    [ -n "${LOOM_SKIP_BOOTSTRAP:-}" ] && return 0
     [ -f "$sentinel" ] && return 0
     boot="$(dirname "$SELF_PATH")/bootstrap.sh"
     [ -x "$boot" ] || return 0
     echo "tick: first tick for this repo — running one-time bootstrap"
-    if ORCH_REPO="$REPO_ROOT" ORCH_HOME="$ORCH_HOME" "$boot" all; then
+    if LOOM_REPO="$REPO_ROOT" LOOM_HOME="$LOOM_HOME" "$boot" all; then
         : > "$sentinel"
     else
         echo "tick: bootstrap incomplete — retrying next tick" >&2
@@ -727,7 +739,7 @@ cmd_tick() {
     # A tick fired from a lane's epilogue inherits that lane's environment, but
     # the wave it launches is the scheduler, not a lane — and must not have its
     # own spawns read as chained handoffs.
-    unset ORCH_LANE_ID
+    unset LOOM_LANE_ID
     local mode="manual"
     case "${1:-}" in
         --auto) mode="auto"; shift ;;
@@ -737,7 +749,7 @@ cmd_tick() {
     # spends, and it must happen even on the firings that do nothing else.
     local quiet; quiet=$(_watch_pass)
     if [ "$mode" != manual ] && _loop_stopped; then
-        echo "tick: the loop is stopped (\`/orchestrate start\` resumes it) — watched, no wave"
+        echo "tick: the loop is stopped (\`/loom start\` resumes it) — watched, no wave"
         _ev tick_skipped reason loop_stopped
         return 0
     fi
@@ -782,12 +794,12 @@ cmd_tick() {
     # A manual or self-triggered loop with no launchd agent has no backstop:
     # when a wave fizzles, nothing ever fires again (build-1 2026-08-02 sat
     # stalled for hours after one bad wave). Warn every tick until it is armed.
-    if ! "$LAUNCHCTL_CMD" print "gui/$(id -u)/$ORCH_LABEL" >/dev/null 2>&1; then
-        echo "tick: warning — heartbeat agent not installed; if a wave fizzles the build stalls silently (arm it with /orchestrate start)" >&2
+    if ! "$LAUNCHCTL_CMD" print "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
+        echo "tick: warning — heartbeat agent not installed; if a wave fizzles the build stalls silently (arm it with /loom start)" >&2
     fi
-    ORCH_SCRATCH=$(_new_scratch wave); export ORCH_SCRATCH
+    LOOM_SCRATCH=$(_new_scratch wave); export LOOM_SCRATCH
     # Sessions run under cfg permission_mode (see SKILL.md "Headless
-    # permissions" and references/orchestrator-config.md). Both values honor
+    # permissions" and references/loom-config.md). Both values honor
     # the repo's allow/deny rules; the deny guardrails bind in every mode.
     # User-approved change 2026-08-02 after three dontAsk failures in one
     # morning; this machine's global config selects auto.
@@ -806,19 +818,19 @@ cmd_tick() {
     # "repo was never bootstrapped" (build-1 2026-08-02: the recovery wave
     # concluded exactly that, asked two questions to nobody, and exited having
     # harvested nothing — stalling the build).
-    ORCH_WAVE_PROMPT="/orchestrate tick
+    LOOM_WAVE_PROMPT="/loom tick
 
 Wave context from tick.sh — trust it over rediscovery:
-- repo root: $REPO_ROOT (this repo IS orchestrator-managed; bootstrap already ran)
+- repo root: $REPO_ROOT (this repo IS loom-managed; bootstrap already ran)
 - tick.sh: $SELF_PATH
-- state dir: $ORCH_HOME
-- FIRST action: run \"$SELF_PATH\" snapshot — it is the entire read step. Absence of .orchestrator.yml is normal (config resolves from derived/global layers).
+- state dir: $LOOM_HOME
+- FIRST action: run \"$SELF_PATH\" snapshot — it is the entire read step. Absence of .loom.yml is normal (config resolves from derived/global layers).
 - Spawn every lane with: --permission-mode $perm_mode$lane_model_line
 - Lanes make EVERY tracker write through the verb script $(dirname "$SELF_PATH")/lane.sh (verbs: claim, transition, note, mr-note, verdict, close, scratch; long bodies via stdin or --file; run it bare for usage). Merge lanes close tickets with 'lane.sh close <iid>' — it strips the state labels too.
 - Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree and swaps @brief for a pointer prompt. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
-    export ORCH_WAVE_PROMPT
-    local wave_cmd="${ORCH_WAVE_CMD:-claude -p \"\$ORCH_WAVE_PROMPT\" --permission-mode $perm_mode$wm_flag}"
+    export LOOM_WAVE_PROMPT
+    local wave_cmd="${LOOM_WAVE_CMD:-claude -p \"\$LOOM_WAVE_PROMPT\" --permission-mode $perm_mode$wm_flag}"
     local stem="wave-$(date +%Y%m%d-%H%M%S)" stream=0 fb="" rc=0
     if _is_claude_cmd "$wave_cmd"; then
         # The wave gets the same streaming treatment as a lane (P13): it is what
@@ -962,12 +974,12 @@ cmd_spawn_lane() {
     # flight finishes its CURRENT worker and nothing follows it. The chain
     # (implementer -> gate -> merge) is spawned by the lanes themselves, not by
     # a wave, so blocking waves alone would let a stopped build carry a ticket
-    # all the way to merged. ORCH_LANE_ID is set only inside a lane, which is
+    # all the way to merged. LOOM_LANE_ID is set only inside a lane, which is
     # exactly what distinguishes a chained handoff from a wave doing its job.
-    if [ -n "${ORCH_LANE_ID:-}" ] && _loop_stopped; then
-        echo "spawn-lane: loop stopped — not chaining '$id' from lane '$ORCH_LANE_ID'."
-        echo "  The current worker finishes; nothing follows it. \`/orchestrate start\` picks this ticket back up."
-        _ev lane_chain_skipped id "$id" from "$ORCH_LANE_ID"
+    if [ -n "${LOOM_LANE_ID:-}" ] && _loop_stopped; then
+        echo "spawn-lane: loop stopped — not chaining '$id' from lane '$LOOM_LANE_ID'."
+        echo "  The current worker finishes; nothing follows it. \`/loom start\` picks this ticket back up."
+        _ev lane_chain_skipped id "$id" from "$LOOM_LANE_ID"
         return 0
     fi
     # A lane runs where its work is. Spawning in the worktree is what removes
@@ -992,7 +1004,7 @@ cmd_spawn_lane() {
     # The lane's own id, inherited by everything it runs — including the
     # `spawn-lane` it calls to hand off to its successor. That inheritance is
     # the seam the stopped-loop check above reads.
-    export ORCH_LANE_ID="$id"
+    export LOOM_LANE_ID="$id"
     # Never overwrite a LIVE lane. Reusing an id whose process is still running
     # replaces its pid file and rotates its log away, losing the lane that is
     # doing the work — and nothing else prevents it, because the `gate.eligible`
@@ -1035,7 +1047,7 @@ cmd_spawn_lane() {
     # Refuse inline arguments near the boundary where they actually die. The
     # cap is 1000, not lower: the working short-prompt pattern runs 400–600
     # chars and has never been denied.
-    local _maxlen="${ORCH_MAX_INLINE_ARG:-1000}"
+    local _maxlen="${LOOM_MAX_INLINE_ARG:-1000}"
     for _b in "$@"; do
         [ "${#_b}" -le "$_maxlen" ] || die "spawn-lane: an inline argument is ${#_b} chars (cap $_maxlen) —
   prompts this long die at the CLI/permission boundary (P28). Write the brief
@@ -1100,11 +1112,11 @@ cmd_spawn_lane() {
             --model=*) lane_model="${_a#--model=}"; break ;;
         esac
     done
-    # Carry the orchestrator's location to any child (the lane, and the
+    # Carry the loom's location to any child (the lane, and the
     # completion-triggered tick), so a self-trigger targets the right repo
     # even though the lane runs in a worktree cwd.
-    export ORCH_REPO="$REPO_ROOT" ORCH_HOME="$ORCH_HOME"
-    ORCH_SCRATCH=$(_new_scratch "lane-$id"); export ORCH_SCRATCH
+    export LOOM_REPO="$REPO_ROOT" LOOM_HOME="$LOOM_HOME"
+    LOOM_SCRATCH=$(_new_scratch "lane-$id"); export LOOM_SCRATCH
     # Reserve the merge lock BEFORE spawning: a refusal must leave no lane and
     # no pid file behind, exactly like the other spawn guards.
     if [ "$merge_lock" -eq 1 ]; then
@@ -1145,8 +1157,8 @@ cmd_spawn_lane() {
     # for verdicts and crash triage, and must not race the transcript.
     local epi="" redirect=""
     if [ "$stream" -eq 1 ]; then
-        export ORCH_LANE_JSONL="$jsonl"
-        redirect=' >"$ORCH_LANE_JSONL"'      # expanded inside the lane's shell
+        export LOOM_LANE_JSONL="$jsonl"
+        redirect=' >"$LOOM_LANE_JSONL"'      # expanded inside the lane's shell
         # The redirect above is unconditional for a streaming lane; only the
         # FLAGS are conditional. A caller who already asked for stream-json
         # gets the stream file like everyone else — it just does not get the
@@ -1218,15 +1230,15 @@ ui"
             || die "spawn-lane: --pregate '$pregate' is not one of this repo's gate
   tiers ($(printf '%s' "$tiers" | tr '\n' ' '))"
         runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
-        export ORCH_PREGATE_TIER="$pregate" ORCH_PREGATE_RUNNER="$runner"
-        pre='if [ -f "$ORCH_PREGATE_RUNNER" ]; then'
-        pre="$pre"' echo "--- pregate: $ORCH_PREGATE_RUNNER $ORCH_PREGATE_TIER ---";'
-        pre="$pre"' if ! bash "$ORCH_PREGATE_RUNNER" "$ORCH_PREGATE_TIER"; then'
+        export LOOM_PREGATE_TIER="$pregate" LOOM_PREGATE_RUNNER="$runner"
+        pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
+        pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
+        pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
         pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
-        pre="$pre"' else echo "--- pregate: no $ORCH_PREGATE_RUNNER here, skipping ---"; fi; '
+        pre="$pre"' else echo "--- pregate: no $LOOM_PREGATE_RUNNER here, skipping ---"; fi; '
     fi
     # The log redirect is attached to the subshell, so it resolves before the
-    # cd — a relative ORCH_HOME cannot send a lane's log somewhere else. With a
+    # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a
     # session that dies before emitting anything still leaves its error there.
     # The pregate writes to the .log, not the stream: it is not JSON.
@@ -1342,7 +1354,7 @@ _follow_stream() { # _follow_stream <id>
         [ "$gone" -eq 1 ] && break
         pid=$(cat "$pidfile" 2>/dev/null || echo "")
         if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then gone=1; fi
-        sleep "${ORCH_FOLLOW_POLL:-1}"
+        sleep "${LOOM_FOLLOW_POLL:-1}"
     done
     printf -- '── lane %s ended ──\n' "$id"
 }
@@ -1385,9 +1397,9 @@ cmd_render_events() { # render-events [--follow]
     # Failure lines wear a glyph always and color on a terminal (asked for by
     # the human, 2026-08-02: red/gate-fail and merge-conflict lines must stand
     # out in the strip). Glyphs are plain text so greps and tests see the same
-    # bytes everywhere; color is auto on a tty, forced with ORCH_COLOR=1|0.
+    # bytes everywhere; color is auto on a tty, forced with LOOM_COLOR=1|0.
     local bad="" warn="" good="" rst=""
-    local want_color="${ORCH_COLOR:-auto}"
+    local want_color="${LOOM_COLOR:-auto}"
     if [ "$want_color" = 1 ] || { [ "$want_color" = auto ] && [ -t 1 ]; }; then
         bad=$'\033[1;31m'; warn=$'\033[1;33m'; good=$'\033[1;32m'; rst=$'\033[0m'
     fi
@@ -1506,14 +1518,14 @@ fromjson? // empty | . as $e
         # (tests, a file, another program) there is no keyboard, so the reader
         # is skipped entirely and the old blocking wait is used.
         if [ -t 0 ]; then
-            [ -n "${ORCH_TICKER_QUIT_HINT:-}" ] && printf '%s\n' "$ORCH_TICKER_QUIT_HINT"
+            [ -n "${LOOM_TICKER_QUIT_HINT:-}" ] && printf '%s\n' "$LOOM_TICKER_QUIT_HINT"
             local _k
             while kill -0 "$_pipe" 2>/dev/null; do
                 if IFS= read -rsn1 -t 1 _k 2>/dev/null; then
                     case "$_k" in
-                        q|Q) : > "$ORCH_HOME/ticker-off"
+                        q|Q) : > "$LOOM_HOME/ticker-off"
                              pkill -P $$ 2>/dev/null || :
-                             printf '%s\n' "ticker: closed.${ORCH_TICKER_REOPEN_HINT:+ $ORCH_TICKER_REOPEN_HINT}"
+                             printf '%s\n' "ticker: closed.${LOOM_TICKER_REOPEN_HINT:+ $LOOM_TICKER_REOPEN_HINT}"
                              return 0 ;;
                     esac
                 fi
@@ -1623,7 +1635,7 @@ cmd_notify() {
         # ran with no topic — every push silently skipped, and stalls were
         # only noticed because a session happened to be watching.)
         if command -v osascript >/dev/null 2>&1; then
-            osascript -e "display notification \"${body//\"/}\" with title \"orchestrate: ${title//\"/}\"" \
+            osascript -e "display notification \"${body//\"/}\" with title \"loom: ${title//\"/}\"" \
                 >/dev/null 2>&1 || :
             echo "notify: no topic — posted local banner for $event"
         else
@@ -2246,8 +2258,8 @@ cmd_graph() { # graph [<snapshot.json>]  (default: stdin)
 }
 
 # --- launchd lifecycle (per-repo, self-installing) ------------------------
-ORCH_LABEL="com.orchestrate.$REPO_KEY"
-PLIST_DIR="${ORCH_PLIST_DIR:-$HOME/Library/LaunchAgents}"
+LOOM_LABEL="com.loom.$REPO_KEY"
+PLIST_DIR="${LOOM_PLIST_DIR:-$HOME/Library/LaunchAgents}"
 
 _write_plist() {  # _write_plist <path> <interval>
     local path="$1" interval="$2" b d toolpath=""
@@ -2263,13 +2275,13 @@ _write_plist() {  # _write_plist <path> <interval>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>Label</key><string>$ORCH_LABEL</string>
+    <key>Label</key><string>$LOOM_LABEL</string>
     <key>ProgramArguments</key>
     <array><string>$SELF_PATH</string><string>tick</string><string>--auto</string></array>
     <key>EnvironmentVariables</key>
     <dict>
-        <key>ORCH_REPO</key><string>$REPO_ROOT</string>
-        <key>ORCH_HOME</key><string>$ORCH_HOME</string>
+        <key>LOOM_REPO</key><string>$REPO_ROOT</string>
+        <key>LOOM_HOME</key><string>$LOOM_HOME</string>
         <key>HOME</key><string>$HOME</string>
         <key>PATH</key><string>$pathval</string>
     </dict>
@@ -2289,7 +2301,7 @@ EOF
 # either a machine-level preference (global) or a fact readable off the repo
 # (derived). Config at every scope stays read-only input — never build state.
 
-GLOBAL_CONFIG="${ORCH_GLOBAL_CONFIG:-$HOME/.orchestrator/config.yml}"
+GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 
 _yaml_scalar() { # _yaml_scalar <file> <key> -> value or empty
     local f="$1" k="$2" v=""
@@ -2327,7 +2339,7 @@ _has_npm_script() { # _has_npm_script <name>
 }
 
 # Gate packs emit LITERAL commands, never abstract tokens — a token needs a
-# resolver that does not exist (the openemr lesson, references/orchestrator-config.md).
+# resolver that does not exist (the openemr lesson, references/loom-config.md).
 # Tiers escalate: docs=lint, logic=+unit, api=+integration, ui=+e2e. The extra
 # suites are appended only when their conventional marker is actually present,
 # so a derived tier never promises a command the repo cannot run.
@@ -2562,9 +2574,9 @@ cmd_install_settings() { # install-settings [--force]
 _raise_viewer() {
     [ "${HERDR_ENV:-}" = 1 ] || return 0
     [ -x "$WATCH_PANES_CMD" ] || return 0
-    rm -f "$ORCH_HOME/ticker-off" "$ORCH_HOME/viewer-off"
-    nohup "$WATCH_PANES_CMD" >>"$ORCH_HOME/watch-panes.out" 2>&1 &
-    echo "orchestrate: viewer raised — a pane per live worker, plus the build ticker."
+    rm -f "$LOOM_HOME/ticker-off" "$LOOM_HOME/viewer-off"
+    nohup "$WATCH_PANES_CMD" >>"$LOOM_HOME/watch-panes.out" 2>&1 &
+    echo "loom: viewer raised — a pane per live worker, plus the build ticker."
 }
 
 cmd_install() {  # install [--dry-run] [interval-seconds]
@@ -2577,20 +2589,20 @@ cmd_install() {  # install [--dry-run] [interval-seconds]
     # program watching first needs neither. Spending is paced by the gap, not
     # by the timer, so the fast tick costs nothing.
     local interval="${1:-60}"
-    local plist="$PLIST_DIR/$ORCH_LABEL.plist"
+    local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     mkdir -p "$LOGS_DIR" "$PLIST_DIR"
     _write_plist "$plist" "$interval"
     if [ "$dry" -eq 1 ]; then echo "generated (dry-run): $plist"; return 0; fi
     # `start` is the switch going ON, and it must clear a previous `stop` or
     # the agent would tick forever refusing to do anything.
     rm -f "$LOOP_STOPPED"
-    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$ORCH_LABEL" 2>/dev/null || true   # idempotent
+    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true   # idempotent
     "$LAUNCHCTL_CMD" bootstrap "gui/$(id -u)" "$plist"
     # Retire this repo's old separate watcher, if one is still loaded from
     # before the merge. Left alone it would keep firing every 60s alongside
     # the new agent, doing the same work twice and notifying twice.
     _retire_watcher
-    echo "orchestrate: build agent LOADED ($ORCH_LABEL, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
+    echo "loom: build agent LOADED ($LOOM_LABEL, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
     _raise_viewer
 }
 
@@ -2602,8 +2614,8 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
-    local plist="$PLIST_DIR/$ORCH_LABEL.plist"
-    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$ORCH_LABEL" 2>/dev/null || true
+    local plist="$PLIST_DIR/$LOOM_LABEL.plist"
+    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"
     _retire_watcher
     if [ "$now" -eq 1 ]; then
@@ -2616,15 +2628,15 @@ cmd_uninstall() {  # uninstall [--now]
             cmd_kill_lane "$id" >/dev/null 2>&1 && killed=$((killed + 1))
         done
         _ev loop_stopped mode now killed "$killed"
-        echo "orchestrate: build STOPPED ($ORCH_LABEL) — killed $killed running worker(s)"
-        echo "  Their worktrees and part-finished files survive; \`/orchestrate start\` resumes each ticket from there."
+        echo "loom: build STOPPED ($LOOM_LABEL) — killed $killed running worker(s)"
+        echo "  Their worktrees and part-finished files survive; \`/loom start\` resumes each ticket from there."
         echo "  These kills are deliberate and do NOT count toward crash_cap."
         return 0
     fi
     _ev loop_stopped mode drain
-    echo "orchestrate: build STOPPED ($ORCH_LABEL) — repo $REPO_ROOT"
+    echo "loom: build STOPPED ($LOOM_LABEL) — repo $REPO_ROOT"
     echo "  Workers still running finish their current ticket, then nothing follows them."
-    echo "  Use \`stop --now\` to kill them instead. \`/orchestrate start\` resumes."
+    echo "  Use \`stop --now\` to kill them instead. \`/loom start\` resumes."
 }
 
 # --- the old separate watcher: retirement only ------------------------------
@@ -2634,7 +2646,7 @@ cmd_uninstall() {  # uninstall [--now]
 # firing, so the second agent has no job left — `cmd_tick` does the watching
 # and `install` uses one agent for both. What survives here is the way OUT:
 # a machine that still has the old agent loaded must be able to shed it.
-WATCH_LABEL="$ORCH_LABEL.watch"
+WATCH_LABEL="$LOOM_LABEL.watch"
 
 _retire_watcher() {  # unload the old watcher agent and forget it ever ran
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$WATCH_LABEL" 2>/dev/null || true
@@ -2642,7 +2654,7 @@ _retire_watcher() {  # unload the old watcher agent and forget it ever ran
     # A frozen progress stamp with nothing maintaining it would misread a
     # healthy long-running lane as stale — remove the stamps so lane-status
     # falls back to the stream-mtime clock until the next watch pass.
-    rm -f "$LANES_DIR"/*.progress "$ORCH_HOME/wave.progress" 2>/dev/null || true
+    rm -f "$LANES_DIR"/*.progress "$LOOM_HOME/wave.progress" 2>/dev/null || true
 }
 
 # P27: the progress stamp. Filtered event count = lines that are NOT
@@ -2680,11 +2692,11 @@ _stamp_progress() {
         local wj; wj=$(ls -t "$LOGS_DIR"/wave-*.jsonl 2>/dev/null | head -1)
         if [ -n "$wj" ]; then
             n=$(grep -cv '"subtype":"api_retry"\|"type":"rate_limit_event"\|"type":"tool_progress"' "$wj" 2>/dev/null || echo 0)
-            prev=$(cat "$ORCH_HOME/wave.progress" 2>/dev/null || echo -1)
-            [ "$n" = "$prev" ] || printf '%s\n' "$n" > "$ORCH_HOME/wave.progress"
+            prev=$(cat "$LOOM_HOME/wave.progress" 2>/dev/null || echo -1)
+            [ "$n" = "$prev" ] || printf '%s\n' "$n" > "$LOOM_HOME/wave.progress"
         fi
     else
-        rm -f "$ORCH_HOME/wave.progress" "$ORCH_HOME/wave.stale-notified"
+        rm -f "$LOOM_HOME/wave.progress" "$LOOM_HOME/wave.stale-notified"
     fi
 }
 
@@ -2703,10 +2715,10 @@ _notify_stale() {
             "Alive but no real progress for ${stale_min}+ min (retry chatter excluded). Unattended: the next heartbeat wave harvests it. Manual: investigate, then kill + clear-lane + tick." \
             >/dev/null 2>&1 || :
     done
-    if [ -d "$LOCK_DIR" ] && [ -f "$ORCH_HOME/wave.progress" ] \
-       && [ ! -f "$ORCH_HOME/wave.stale-notified" ] \
-       && [ -n "$(find "$ORCH_HOME/wave.progress" -mmin +"$stale_min" 2>/dev/null)" ]; then
-        : > "$ORCH_HOME/wave.stale-notified"
+    if [ -d "$LOCK_DIR" ] && [ -f "$LOOM_HOME/wave.progress" ] \
+       && [ ! -f "$LOOM_HOME/wave.stale-notified" ] \
+       && [ -n "$(find "$LOOM_HOME/wave.progress" -mmin +"$stale_min" 2>/dev/null)" ]; then
+        : > "$LOOM_HOME/wave.stale-notified"
         cmd_notify wave_stale "The scheduling wave is wedged" \
             "A wave holds the tick lock but has made no real progress for ${stale_min}+ min. It blocks all ticks until it exits or is killed." \
             >/dev/null 2>&1 || :
@@ -2721,7 +2733,7 @@ _notify_stale() {
 # 60s with nothing able to retire it.
 cmd_quiet_tick() {
     _retire_watcher
-    echo "orchestrate: the separate watcher is retired — tick --auto watches on every firing now"
+    echo "loom: the separate watcher is retired — tick --auto watches on every firing now"
     return 0
 }
 
@@ -2733,18 +2745,18 @@ cmd_agent_status() {
     # and the half it gave read as "no". (Paid for: 2026-08-04, exactly that
     # confusion.)
     local gap; gap=$(cfg min_wave_gap_minutes 10)
-    if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$ORCH_LABEL" >/dev/null 2>&1; then
-        echo "$ORCH_LABEL: loaded — watches every tick; starts a wave at most every ${gap}m"
+    if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
+        echo "$LOOM_LABEL: loaded — watches every tick; starts a wave at most every ${gap}m"
     else
-        echo "$ORCH_LABEL: not loaded — nothing is watching and no wave will start on its own"
+        echo "$LOOM_LABEL: not loaded — nothing is watching and no wave will start on its own"
     fi
     if _loop_stopped; then
-        echo "loop switch: STOPPED — lanes will not chain, automatic ticks do nothing (/orchestrate start resumes)"
+        echo "loop switch: STOPPED — lanes will not chain, automatic ticks do nothing (/loom start resumes)"
     else
         echo "loop switch: running — lanes chain to their successor and start the next wave"
     fi
     if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$WATCH_LABEL" >/dev/null 2>&1; then
-        echo "$WATCH_LABEL: loaded — the OLD separate watcher, now redundant; \`/orchestrate start\` retires it"
+        echo "$WATCH_LABEL: loaded — the OLD separate watcher, now redundant; \`/loom start\` retires it"
     fi
 }
 
@@ -2752,7 +2764,7 @@ case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
     lane-status)  shift; cmd_lane_status "$@" ;;
-    orch-home)    echo "$ORCH_HOME" ;;   # the repo's state dir — for viewer accessories that need a pidfile home
+    orch-home)    echo "$LOOM_HOME" ;;   # the repo's state dir — for viewer accessories that need a pidfile home
     render-log)   shift; cmd_render_log "$@" ;;
     render-events) shift; cmd_render_events "$@" ;;
     event)        shift; cmd_event "$@" ;;
