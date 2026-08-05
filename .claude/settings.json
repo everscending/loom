@@ -1,0 +1,44 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*lane.sh *)",
+      "Bash(*tick.sh *)",
+      "Bash(bash scripts/gate.sh *)",
+      "Bash(cat *)",
+      "Bash(curl *)",
+      "Bash(date*)",
+      "Bash(echo *)",
+      "Bash(find *)",
+      "Bash(git *)",
+      "Bash(glab *)",
+      "Bash(grep *)",
+      "Bash(head *)",
+      "Bash(jq *)",
+      "Bash(ls*)",
+      "Bash(mkdir *)",
+      "Bash(printenv *)",
+      "Bash(pwd)",
+      "Bash(scripts/gate.sh *)",
+      "Bash(sleep *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(which *)",
+      "BashOutput",
+      "Edit",
+      "Glob",
+      "Grep",
+      "KillBash",
+      "KillShell",
+      "Read",
+      "Write"
+    ],
+    "deny": [
+      "Bash(git clean -f*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(rm -fr *)",
+      "Bash(rm -rf *)"
+    ]
+  }
+}

@@ -3480,6 +3480,70 @@ case "$out" in *"#47 — implementation started ("*) \
     *) ok "ticker: the default model stays quiet";; esac
 for l in impl-46 impl-47; do ORCH_HOME="$EVH" "$TICK" clear-lane "$l" >/dev/null 2>&1; done
 
+# 16n. The ticker stops announcing a replay that is not going to happen (P42).
+#      `tick_skipped` fires for three unrelated reasons and the renderer
+#      collapsed all of them into one sentence. That was harmless while the
+#      timer was a 15-minute backstop; the merged 60s scheduler made wave_gap
+#      the routine outcome, so on 2026-08-04 the human watched 408 of those
+#      lines go by, 253 of them false — that path writes no pending file and
+#      no replay follows. wave_gap now stays in the log for `retro` and never
+#      renders; lock_held renders once per wave; loop_stopped keeps its own.
+SKH="$T/skip-home"; mkdir -p "$SKH"
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason wave_gap
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 1
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held first 0
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason loop_stopped
+ORCH_HOME="$SKH" "$TICK" event tick_replayed
+out=$(ORCH_HOME="$SKH" "$TICK" render-events 2>&1)
+printf '%s\n' "$out" | grep -qi "wave_gap\|under .*m ago" \
+    && bad "ticker: a wave_gap skip still reached the ticker ($out)" \
+    || ok "ticker: a timer declining to spend renders nothing at all"
+n=$(printf '%s\n' "$out" | grep -c "a tick landed during a wave" || :)
+[ "$n" = 1 ] \
+    && ok "ticker: three ticks bouncing off one wave render a single line" \
+    || bad "ticker: lock_held rendered $n time(s) for one wave, expected 1"
+printf '%s\n' "$out" | grep -q "the loop is stopped — this tick did nothing" \
+    && ok "ticker: a tick that found the loop stopped keeps its own line" \
+    || bad "ticker: loop_stopped lost its distinct line ($out)"
+printf '%s\n' "$out" | grep -q "pending tick replayed" \
+    && ok "ticker: an actual replay still renders" \
+    || bad "ticker: tick_replayed stopped rendering ($out)"
+# The skips are still IN the log — retro counts them, and this is the whole
+# reason wave_gap is dropped at the renderer rather than at the emitter.
+[ "$(grep -c '"reason":"wave_gap"' "$SKH/events.jsonl")" = 2 ] \
+    && ok "ticker: wave_gap is suppressed in the ticker, not lost from the log" \
+    || bad "ticker: wave_gap events went missing from events.jsonl"
+# A log written before P42 has no "first" field; those lines must still read
+# the way they did, or replaying old history rewrites it.
+ORCH_HOME="$SKH" "$TICK" event tick_skipped reason lock_held
+ORCH_HOME="$SKH" "$TICK" render-events 2>&1 | grep -c "a tick landed during a wave" | grep -qx 2 \
+    && ok "ticker: a pre-P42 lock_held event still renders" \
+    || bad "ticker: an event with no 'first' field vanished from an old log"
+# The emitter half, against the real lock: only the tick that RAISES the
+# pending flag is marked, however many bounce off afterwards.
+LKH="$T/skip-lock-home"; mkdir -p "$LKH"
+ORCH_HOME="$LKH" ORCH_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
+skpid=$!; sleep 0.7
+ORCH_HOME="$LKH" ORCH_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
+ORCH_HOME="$LKH" ORCH_WAVE_CMD="echo no" "$TICK" tick >/dev/null 2>&1
+wait "$skpid" 2>/dev/null || :
+f1=$(grep -cE '"reason":"lock_held","first":"?1"?' "$LKH/events.jsonl" || :)
+f0=$(grep -cE '"reason":"lock_held","first":"?0"?' "$LKH/events.jsonl" || :)
+{ [ "$f1" = 1 ] && [ "$f0" = 1 ]; } \
+    && ok "tick: the flag-raising bounce is marked, the repeat is not" \
+    || bad "tick: expected one first=1 and one first=0 lock_held, got $f1/$f0"
+# Planted violation: collapse the three reasons back into one sentence and the
+# false line returns — proving the branch, not the fixture, is what suppresses
+# it. The copy needs snapshot.jq beside it, as tick.sh ships with.
+mkdir -p "$T/tickmod"; ln -sf "$(dirname "$TICK")/snapshot.jq" "$T/tickmod/snapshot.jq"
+sed '/elif $e.ev == "tick_skipped"/,/elif $e.ev == "tick_replayed"/s/else empty end)/else "tick landed mid-wave — remembered for replay" end)/g' \
+    "$TICK" > "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
+ORCH_HOME="$SKH" "$T/tickmod/tick.sh" render-events 2>&1 | grep -q "tick landed mid-wave" \
+    && ok "ticker-violation: with one sentence for all three, the false line is back" \
+    || bad "ticker-violation: the collapsed renderer printed nothing — the test proves nothing"
+
 # 16a. probe-result PASS closes the epic's milestone; FAIL leaves it open
 #      (fix tickets land in that very milestone). Slug matching is on the
 #      normalized title, so bare "e5" and full "e5-cascade-mode" both close

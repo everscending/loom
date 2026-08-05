@@ -723,8 +723,15 @@ cmd_tick() {
         return 0
     fi
     if ! lock_acquire; then
+        # The pending file is a FLAG, not a counter: every tick after the first
+        # during one wave sets something already set, and only one replay
+        # follows however many arrive (155 lock_held ticks produced 79 replays
+        # in a day). Record which tick raised the flag so the ticker can show
+        # that one and stay quiet for the rest (P42). The event itself is still
+        # written every time — `retro` counts them.
+        local first=0; [ -f "$PENDING_FILE" ] || first=1
         : > "$PENDING_FILE"
-        _ev tick_skipped reason lock_held
+        _ev tick_skipped reason lock_held first "$first"
         echo "tick: wave already running — noted, the running wave will re-tick on exit"
         exit 0
     fi
@@ -1415,7 +1422,26 @@ fromjson? // empty | . as $e
      else $bad + "✗ epic \($e.epic) — acceptance probe FAILED (fix tickets filed)" + $rst end)
   elif $e.ev == "usage_pause" then "usage limit — paused (until \($e.until))"
   elif $e.ev == "usage_resume" then "usage limit cleared — resuming"
-  elif $e.ev == "tick_skipped" then "tick landed mid-wave — remembered for replay"
+  # Three unrelated outcomes shared one sentence (P42). Harmless while the
+  # timer was a 15-minute backstop and a skip nearly always meant lock_held;
+  # the merged 60s scheduler watches on every firing and spends on the gap, so
+  # wave_gap became the routine outcome and printed an exceptional-case line
+  # nine ticks in ten. Of 408 such lines in one day, 253 were wave_gap and
+  # false: that path writes no pending file and no replay follows it. So
+  # wave_gap stays in events.jsonl for retro and never reaches the ticker,
+  # lock_held renders once per wave on the tick that raised the flag, and
+  # loop_stopped keeps a line of its own because it is rare and specific.
+  # (No apostrophes in this comment: the whole program is a single-quoted
+  # shell string, and one would end it mid-word.)
+  elif $e.ev == "tick_skipped" then
+    (if $e.reason == "loop_stopped" then "the loop is stopped — this tick did nothing"
+     elif $e.reason == "lock_held" then
+       # Events written before P42 carry no "first" field; render those, so
+       # replaying an old log still reads the way it did.
+       (if (($e.first // "1") | tostring) == "1"
+        then "a tick landed during a wave — the wave will re-tick on exit"
+        else empty end)
+     else empty end)
   elif $e.ev == "tick_replayed" then "pending tick replayed"
   # The renderer owns the "wave:" prefix, so a note that writes its own gets
   # it stripped rather than doubled ("wave: wave: only #47 is ready" —

@@ -41,6 +41,7 @@ writing a new proposal that touches the same machinery.
 | P37 | Let a re-scoped ticket retire the rejection history of its old scope | implemented 2026-08-04 (`lane.sh rescope` writes an `orch-scope-reset` marker, refused for lanes and waves; `rejections_of` stops its scan there) |
 | P39 | A viewer that cannot open a pane must say so and exit | implemented 2026-08-04 (`anchor_split` re-resolves a dead anchor against a live pane via `herdr pane list`; `wp_blind` exits non-zero when none is left, releasing the singleton) |
 | P40 | The viewer singleton guard deletes a pidfile it does not own | implemented 2026-08-04 (`_owns_pidfile` gates the EXIT trap; the `on` relaunch logs to `watch-panes.out` instead of `/dev/null`) |
+| P42 | Stop the ticker announcing a replay that is not going to happen | implemented 2026-08-04 (`wave_gap` never renders, `lock_held` renders once per wave via a `first` field on the event, `loop_stopped` keeps its own line; all three still land in `events.jsonl` for `retro`) |
 
 ## Independent review round (2026-08-01)
 
@@ -1500,3 +1501,51 @@ by exiting rather than holding it forever.
 
 **Tests.** Two viewers started in sequence leave exactly one pidfile holding the surviving pid; a
 viewer whose pidfile was overwritten by a newer one does not delete it on exit.
+
+## P42 · Stop the ticker announcing a replay that is not going to happen
+
+**Evidence.** The human, watching build-3 on 2026-08-04: *"I see the 'tick landed mid-wave —
+remembered for replay' message appearing every minute. This adds more noise than its worth."* The
+event log for that day:
+
+| Event | Count | Actually replayed? |
+|---|---|---|
+| `tick_skipped reason=wave_gap` | 253 | no — nothing was remembered |
+| `tick_skipped reason=lock_held` | 155 | yes, but many collapse into one replay |
+| `tick_replayed` | 79 | — |
+
+All 408 `tick_skipped` events render as the same sentence, and 79 replays actually happened. The
+253 `wave_gap` lines are not merely noisy, they are **false**: no pending file is written on that
+path and no replay follows. The `lock_held` lines are true but repeat a flag that is already set —
+the pending file is a flag, not a counter, so every extra one during a wave changes nothing.
+
+**Root cause.** `tick_skipped` is emitted for three different reasons — `loop_stopped`
+(`scripts/tick.sh:717`), `wave_gap` (`:722`), `lock_held` (`:727`) — and the renderer collapses all
+three into one string (`:1418`). That was harmless when the timer was a slow ~15-minute backstop:
+`tick_skipped` was rare and usually meant `lock_held`. The merged-scheduler design fires every 60s
+and *watches* on every firing, spending only once `min_wave_gap_minutes` has elapsed — correct, and
+it makes `wave_gap` the routine outcome of nine ticks in ten. A line written for the exceptional
+case now prints for the normal one.
+
+**Fix.** Mostly deletion, all in the renderer plus one condition:
+
+- **Do not render `wave_gap` at all.** A timer declining to spend is the absence of an event. It
+  stays in `events.jsonl`, where `retro` already counts it — it just stops reaching the ticker.
+- **Render `lock_held` once per wave**, when the pending flag is newly set rather than every time a
+  tick bounces off the lock, and word it for what it is: a tick arrived during a wave and the wave
+  will re-tick on exit.
+- **Keep `loop_stopped` as its own line.** Rare, and it means something specific: the loop is off
+  and this tick did nothing. (Zero occurrences in the day above, which is the point — it would have
+  been worth seeing.)
+
+Roughly 408 ticker lines become roughly 79, and every survivor is true.
+
+**Why this is not just cosmetics.** The ticker is the human's only continuous view of the build, and
+its value is entirely in signal-to-noise. A line that appears every minute and means nothing trains
+the reader to skim the strip, which is where the real events — `ticket_blocked`, a gate FAIL, a
+merge conclusion — also live. P19 is the same complaint about wave advisories; this is its ticker
+half.
+
+**Tests.** `render-events` on a fixture log: a `wave_gap` event produces no line; consecutive
+`lock_held` events during one wave produce exactly one; `loop_stopped` produces its own distinct
+line; `tick_replayed` is unchanged.
