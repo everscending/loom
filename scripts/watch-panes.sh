@@ -316,17 +316,28 @@ while :; do
             [ -n "$pane" ] || continue
             if [ "$lane" != "-" ] && ! printf '%s\n' "$running" | grep -qxF "$lane"; then
                 # A finished STORY closes its pane (asked for by the human,
-                # 2026-08-02): a probe's story ends with its lane; a merge's
-                # ends only if the ticket actually closed — merge lanes exit
-                # cleanly without merging (merge-21 did, twice), and a blocked
-                # merge must keep its pane. One tracker read per merge
-                # conclusion; a failed read keeps the pane (safe default).
-                # The scrollback is not the record: `render-log <id>` replays
-                # any lane. Everything else idles for reuse as before.
+                # 2026-08-02): a probe's story ends with its lane; every other
+                # kind ends only if the ticket actually closed — merge lanes
+                # exit cleanly without merging (merge-21 did, twice), and a
+                # blocked merge must keep its pane. That read is why the check
+                # exists at all. One tracker read per lane conclusion; a failed
+                # read keeps the pane (safe default). The scrollback is not the
+                # record: `render-log <id>` replays any lane. A ticket still
+                # open idles for reuse as before.
+                #
+                # The check used to run for merge-* alone, so a ticket that
+                # concluded any OTHER way — closed by hand, killed mid-flight,
+                # closed by a human outside the loop — left its pane stamped
+                # forever: #72 was reclassified and closed on 2026-08-04 and
+                # its pane sat labelled "ticket 72 — idle" for work that would
+                # never come back, which is the exact confusion the idle stamp
+                # was introduced to prevent (P41).
                 story_done=""
                 case "$lane" in
                     probe-*) story_done=1 ;;
-                    merge-*) [ "$("$GLAB" api "projects/:fullpath/issues/$tkt" 2>/dev/null \
+                    *)  # P41: every kind, not merge-* alone
+                        [ "$tkt" != "-" ] \
+                            && [ "$("$GLAB" api "projects/:fullpath/issues/$tkt" 2>/dev/null \
                                  | jq -r '.state' 2>/dev/null)" = "closed" ] && story_done=1 ;;
                 esac
                 if [ -n "$story_done" ]; then

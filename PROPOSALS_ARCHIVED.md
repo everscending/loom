@@ -42,6 +42,7 @@ writing a new proposal that touches the same machinery.
 | P39 | A viewer that cannot open a pane must say so and exit | implemented 2026-08-04 (`anchor_split` re-resolves a dead anchor against a live pane via `herdr pane list`; `wp_blind` exits non-zero when none is left, releasing the singleton) |
 | P40 | The viewer singleton guard deletes a pidfile it does not own | implemented 2026-08-04 (`_owns_pidfile` gates the EXIT trap; the `on` relaunch logs to `watch-panes.out` instead of `/dev/null`) |
 | P42 | Stop the ticker announcing a replay that is not going to happen | implemented 2026-08-04 (`wave_gap` never renders, `lock_held` renders once per wave via a `first` field on the event, `loop_stopped` keeps its own line; all three still land in `events.jsonl` for `retro`) |
+| P41 | A concluded ticket should take its viewer pane with it, however it concluded | implemented 2026-08-04 (the ticket-closed read runs for every lane kind, not merge-* alone; probe panes and the failed-read default are unchanged) |
 
 ## Independent review round (2026-08-01)
 
@@ -1549,3 +1550,35 @@ half.
 **Tests.** `render-events` on a fixture log: a `wave_gap` event produces no line; consecutive
 `lock_held` events during one wave produce exactly one; `loop_stopped` produces its own distinct
 line; `tick_replayed` is unchanged.
+
+## P41 · A concluded ticket should take its viewer pane with it, however it concluded
+
+**Evidence.** build-3, 2026-08-04. #72 was reclassified from defect to finding and closed by hand;
+its three lanes were killed. Its pane stayed on screen labelled `ticket 72 — idle` for a ticket
+that will never have another lane. The human spotted it and asked whether closing the ticket should
+have closed the pane.
+
+**Root cause.** Panes are recycled on purpose — a finished lane keeps its ticket stamp so the next
+stage of the same ticket returns to the same pane, which is what makes implement → gate → merge
+read as one continuous transcript. The exception is the "finished story" rule
+(`scripts/watch-panes.sh:253-266`): a `probe-*` pane always closes when its lane ends, and a
+`merge-*` pane closes only if a tracker read says the ticket actually closed — that read exists
+because merge lanes sometimes exit cleanly without merging, and a blocked merge must keep its pane.
+Every other lane kind skips the check entirely. So a ticket that concludes any other way — closed by
+hand, killed mid-flight, closed by a human outside the loop — leaves its pane stamped forever.
+
+**Severity: cosmetic, and worth fixing anyway.** Nothing leaks. Reuse prefers a pane stamped with
+the incoming lane's own ticket but falls back to *any* idle pane, so a stale stamp is claimed by the
+next lane that needs one and never starves the cap. The cost is that a pane labelled with a closed
+ticket reads as work still pending, which is the exact confusion the idle stamp was introduced to
+prevent (build-1 2026-08-02: an idle pane read as a stall).
+
+**Fix.** Run the ticket-closed check for **every** lane kind, not only `merge-*`, at the moment the
+pane goes idle. That is the same single tracker read, at the same moment, already paid for on the
+merge path — it is not new polling, and the "a failed read keeps the pane" default stays. Keep the
+`probe-*` rule as is (a probe's story ends with its lane whatever the tracker says), and keep the
+merge rationale in the comment, since it explains why the read exists at all.
+
+**Tests.** With the tracker stub reporting a closed ticket, an idle `gate-*` pane closes on the next
+poll; with it reporting open, the pane idles and keeps its stamp; with the read failing, the pane is
+kept. Sibling viewer items: P39, P40.

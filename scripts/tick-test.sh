@@ -3174,6 +3174,60 @@ grep -q 'ticker-off' "$TICK" \
     && ok "ticker: quitting leaves the durable marker, so it stays closed" \
     || bad "ticker: quit does not persist — the viewer would reopen the pane"
 
+# 13p. A concluded ticket takes its pane with it however it concluded (P41).
+#      Panes are recycled on purpose, so a finished lane keeps its ticket
+#      stamp — but the "did the ticket actually close" read ran for merge-*
+#      alone, so a ticket closed any other way left its pane stamped forever.
+#      #72 was reclassified and closed by hand on 2026-08-04 and its pane sat
+#      labelled "ticket 72 — idle" for work that would never come back.
+cat > "$T/glab-p41-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+    *"issues/95"*) echo '{"state":"closed"}' ;;
+    *"issues/96"*) echo '{"state":"opened"}' ;;
+    *"issues/97"*) exit 1 ;;                      # tracker unreachable
+    *) echo '{}' ;;
+esac
+EOF
+chmod +x "$T/glab-p41-stub.sh"
+mkdir -p "$T/wp13p-home/lanes"
+sleep 1 & echo $! > "$T/wp13p-home/lanes/gate-95.pid"
+sleep 1 & echo $! > "$T/wp13p-home/lanes/impl-96.pid"
+sleep 1 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
+    ORCH_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    bash "$WP" >/dev/null 2>&1 || :
+[ "$(grep -c "^pane close " "$T/herdr-calls" || :)" = 1 ] \
+    && ok "watch-panes: a gate lane whose ticket closed takes its pane with it" \
+    || bad "watch-panes: expected exactly 1 close (the closed ticket), got $(grep -c '^pane close ' "$T/herdr-calls" || :)"
+grep -q "rename .* ticket 96 — idle" "$T/herdr-calls" \
+    && ok "watch-panes: an open ticket keeps its pane and its stamp" \
+    || bad "watch-panes: the open ticket lost its pane — reuse is broken"
+grep -q "rename .* ticket 97 — idle" "$T/herdr-calls" \
+    && ok "watch-panes: a failed tracker read keeps the pane, as before" \
+    || bad "watch-panes: an unreachable tracker closed a pane it could not judge"
+rm -f "$T/wp13p-home/lanes"/*.pid
+# Planted violation: put the read back behind merge-* and the closed ticket
+# keeps its pane — the stale stamp the human spotted.
+# The copy needs tick.sh beside it: the viewer finds tick.sh by its own
+# directory, so a copy alone in $T resolves nothing and dies before it can
+# prove anything.
+mkdir -p "$T/wpmod"; ln -sf "$TICK" "$T/wpmod/tick.sh"
+sed 's/\*)  # P41/merge-*)  # P41/' "$WP" > "$T/wpmod/wp-mergeonly.sh"; chmod +x "$T/wpmod/wp-mergeonly.sh"
+mkdir -p "$T/wp13p2-home/lanes"
+sleep 1 & echo $! > "$T/wp13p2-home/lanes/gate-95.pid"
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
+    ORCH_HOME="$T/wp13p2-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    bash "$T/wpmod/wp-mergeonly.sh" >/dev/null 2>&1 || :
+grep -q "^pane close " "$T/herdr-calls" \
+    && bad "watch-panes-violation: the merge-only check still closed the pane" \
+    || ok "watch-panes-violation: with merge-* alone, a closed ticket keeps its pane forever"
+rm -f "$T/wp13p2-home/lanes"/*.pid
+
 # 13n. A viewer that cannot open a pane says so and exits, instead of polling
 #      forever looking healthy (P39). Every split hangs off the pane the
 #      viewer was launched from; when that session is gone the id refers to
