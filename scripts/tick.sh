@@ -239,6 +239,24 @@ _epics_unaccepted() { # <build-label>
     ' >/dev/null 2>&1
 }
 
+# P43: the timestamp of the newest event that means the BUILD did something.
+# `tick_skipped` is excluded because it is the watcher writing down that it
+# did nothing — and the settle window below used to read this file's mtime,
+# which every 60s firing refreshed with exactly such a no-op. 60s < the 120s
+# window, so `_quiet_check` returned `active` on every firing, never reached
+# the halted test, and the halted gate in `cmd_tick` was unreachable code:
+# a build whose every open ticket was human-held still launched a model
+# session every `min_wave_gap_minutes` to be told so. (Paid for: build-3
+# 2026-08-05 — 44 idle waves overnight, ~9 USD, on a board holding one
+# blocked ticket.) An empty result reads as "no activity ever", which is the
+# honest answer and lets the classification below run.
+_last_activity_ts() {
+    [ -f "$EVENTS" ] || { echo 0; return 0; }
+    tail -n 500 "$EVENTS" 2>/dev/null \
+        | jq -r 'select(.ev != "tick_skipped") | .ts // empty' 2>/dev/null \
+        | tail -1 | grep -E '^[0-9]+$' || echo 0
+}
+
 _quiet_check() { # prints: active | stalled | halted | complete | unknown
     local label age open count blocked
     [ -f "$ORCH_HOME/.build-label" ] || { echo unknown; return 0; }
@@ -247,10 +265,8 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown
     if cmd_lane_status 2>/dev/null | awk '$3=="running"{f=1} END{exit !f}'; then
         echo active; return 0
     fi
-    if [ -f "$EVENTS" ]; then
-        age=$(( $(date +%s) - $(stat -f %m "$EVENTS" 2>/dev/null || echo 0) ))
-        [ "$age" -lt "${ORCH_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
-    fi
+    age=$(( $(date +%s) - $(_last_activity_ts) ))
+    [ "$age" -lt "${ORCH_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
     open=$(glab api "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
         || { echo unknown; return 0; }
     count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unknown; return 0; }

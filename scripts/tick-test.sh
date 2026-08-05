@@ -1077,6 +1077,54 @@ qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
     && ok "quiet-check: once every epic is accepted the build completes normally" \
     || bad "quiet-check: accepted build classified '$qs' (want complete)"
 
+# 4h3b. P43: the settle window must not be refreshed by the watcher's OWN
+#       no-op bookkeeping. `_quiet_check` used to read `events.jsonl`'s mtime as
+#       "did anything happen", but every 60s firing writes `tick_skipped` into
+#       that same file. 60s < the 120s window, so it answered `active` forever,
+#       never reached the halted test, and the halted gate in `cmd_tick` was
+#       unreachable: a board whose every open ticket was human-held still spent
+#       a model session every `min_wave_gap_minutes`. (Paid for: build-3
+#       2026-08-05 — 44 idle overnight waves, ~9 USD, one blocked ticket.)
+#       NOTE the settle window is left at its real default here on purpose: the
+#       tests above pass ORCH_QUIET_SETTLE=0, which is exactly what let this
+#       bug live.
+QB="$T/quiet-selfrefresh"; mkdir -p "$QB/bin" "$QB/home"
+cat > "$QB/bin/glab" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"state=opened"*) echo '[{"iid":32,"labels":["build-3","blocked","ready-for-agent"]}]' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$QB/bin/glab"
+printf 'build-3\n' > "$QB/home/.build-label"
+QBS="$QB/ntfy.sh"; QBCAP="$T/quiet-selfrefresh-ntfy"
+printf '#!/bin/sh\necho "$@" >> "%s"\n' "$QBCAP" > "$QBS"; chmod +x "$QBS"; : > "$QBCAP"
+# The file is ONLY the watcher's own no-ops, all stamped right now.
+now=$(date +%s)
+: > "$QB/home/events.jsonl"
+for i in 1 2 3; do
+  printf '{"t":"2026-08-05T12:00:0%sZ","ts":%s,"ev":"tick_skipped","build":"build-3","reason":"wave_gap"}\n' \
+    "$i" "$(( now - i ))" >> "$QB/home/events.jsonl"
+done
+rm -f "$QB/home/quiet.state"
+PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qb" = halted ] \
+    && ok "quiet-check: the watcher's own tick_skipped events do not read as activity" \
+    || bad "quiet-check: self-refresh — classified '$qb' (want halted) from a file of pure no-ops"
+# Planted violation: a REAL event just now must still read as activity, or the
+# settle window stops doing the job it exists for (a chained handoff's few-second
+# gap must not read as a stall).
+rm -f "$QB/home/quiet.state"
+printf '{"t":"2026-08-05T12:00:09Z","ts":%s,"ev":"ticket_close","build":"build-3","ticket":"73"}\n' \
+    "$(date +%s)" >> "$QB/home/events.jsonl"
+PATH="$QB/bin:$PATH" ORCH_HOME="$QB/home" NTFY_CMD="$QBS" ORCH_NTFY_TOPIC=test-topic WATCH
+qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qb" = missing ] \
+    && ok "quiet-check: a real event inside the settle window still reads as active" \
+    || bad "quiet-check: real activity misread as '$qb' — settle window no longer protects a handoff gap"
+
 # 4h4. The log stays human shaped: the stream is rendered back to prose and the
 #      commands it ran, because waves and humans read these files for verdicts
 #      and crash triage.

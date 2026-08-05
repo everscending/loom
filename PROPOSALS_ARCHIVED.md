@@ -42,6 +42,7 @@ writing a new proposal that touches the same machinery.
 | P39 | A viewer that cannot open a pane must say so and exit | implemented 2026-08-04 (`anchor_split` re-resolves a dead anchor against a live pane via `herdr pane list`; `wp_blind` exits non-zero when none is left, releasing the singleton) |
 | P40 | The viewer singleton guard deletes a pidfile it does not own | implemented 2026-08-04 (`_owns_pidfile` gates the EXIT trap; the `on` relaunch logs to `watch-panes.out` instead of `/dev/null`) |
 | P42 | Stop the ticker announcing a replay that is not going to happen | implemented 2026-08-04 (`wave_gap` never renders, `lock_held` renders once per wave via a `first` field on the event, `loop_stopped` keeps its own line; all three still land in `events.jsonl` for `retro`) |
+| P43 | Stop the watcher reading its own no-op events as build activity | implemented 2026-08-05 (`_last_activity_ts` scans for the newest non-`tick_skipped` event; the settle window no longer reads `events.jsonl` mtime) |
 | P41 | A concluded ticket should take its viewer pane with it, however it concluded | implemented 2026-08-04 (the ticket-closed read runs for every lane kind, not merge-* alone; probe panes and the failed-read default are unchanged) |
 
 ## Independent review round (2026-08-01)
@@ -1582,3 +1583,25 @@ merge rationale in the comment, since it explains why the read exists at all.
 **Tests.** With the tracker stub reporting a closed ticket, an idle `gate-*` pane closes on the next
 poll; with it reporting open, the pane idles and keeps its stamp; with the read failing, the pane is
 kept. Sibling viewer items: P39, P40.
+
+## P43 · Stop the watcher reading its own no-op events as build activity (archived 2026-08-05)
+
+**Evidence.** build-3, overnight 2026-08-05. The board held exactly one open ticket, #32, on a
+sticky human hold — nothing schedulable. The heartbeat launched a wave every 10 minutes anyway:
+**44 idle waves, ~9.22 USD**, each one a real headless session that read the tracker and wrote
+"no change, #32 still sticky-held, halted."
+
+**Root cause.** `_quiet_check` used `events.jsonl`'s mtime as its "did anything happen recently"
+signal, inside a 120s settle window. But the watcher writes `tick_skipped` into that same file on
+every 60s firing. 60 < 120, so the check answered `active` on every tick, never reached the
+`blocked == count -> halted` test below it, and the halted gate in `cmd_tick` was unreachable code.
+The watcher kept itself looking busy.
+
+**Fix.** `_last_activity_ts` returns the timestamp of the newest event that is not `tick_skipped`,
+and the settle window measures from that instead of file mtime. Everything the build actually does
+still counts; only the watcher's own bookkeeping is excluded.
+
+**Why the suite missed it.** Every existing quiet test passed `ORCH_QUIET_SETTLE=0`, disabling the
+window under test. The new tests leave it at its real default — one asserting a file of pure
+`tick_skipped` events classifies `halted`, one asserting a real event inside the window still
+reads `active` so a chained handoff's few-second gap is still protected.
