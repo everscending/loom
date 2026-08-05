@@ -87,7 +87,10 @@ if [ "${1:-}" = "off" ] || [ "${1:-}" = "on" ]; then
         # check below would exit quietly anyway, but saying so is clearer.
         if [ "${HERDR_ENV:-}" = 1 ] \
            && ! { [ -f "$_dir/watch-panes.pid" ] && kill -0 "$(cat "$_dir/watch-panes.pid" 2>/dev/null)" 2>/dev/null; }; then
-            nohup "$0" >/dev/null 2>&1 &
+            # Same log tick.sh's launcher appends to, never /dev/null: a
+            # viewer that dies explaining why (see wp_blind) is only useful if
+            # the words land somewhere a human can read them.
+            nohup "$0" >>"$_dir/watch-panes.out" 2>&1 &
             echo "watch-panes: viewer relaunched."
         fi
     fi
@@ -115,7 +118,22 @@ fi
 echo $$ > "$WP_PID" 2>/dev/null || :
 
 MAP="$(mktemp)"                     # lines: <pane_id> <lane_id|-> <ticket|->
-trap 'rm -f "$MAP" "$MAP.new" "$WP_PID"' EXIT
+# Drop the pidfile only while it still names THIS process. The trap used to
+# remove it unconditionally, so an older viewer still shutting down would
+# delete the file a newer one had just written — found live on 2026-08-04:
+# watch-panes.sh running as pid 1805 with no pidfile at all (P40). It breaks
+# the singleton in both directions: with the file missing, the next manual
+# tick opens a DUPLICATE viewer (two panes per lane, two tickers); with it
+# present but owned by a viewer that can no longer open panes, the guard above
+# reports "already running" and refuses to start a healthy one.
+_owns_pidfile() { [ "$(cat "$WP_PID" 2>/dev/null)" = "$$" ]; }
+_wp_cleanup() {
+    local rc=$?
+    rm -f "$MAP" "$MAP.new"
+    _owns_pidfile && rm -f "$WP_PID"
+    return $rc
+}
+trap _wp_cleanup EXIT
 
 if [ "${HERDR_ENV:-}" != 1 ]; then
     echo "watch-panes: not inside a herdr session — run this from a herdr pane." >&2
@@ -157,6 +175,57 @@ new_pane() { # <direction> [target-pane] [ratio] → new pane id
         | jq -r '.result.pane.pane_id // empty' 2>/dev/null || true
 }
 
+# Every right-column split hangs off the pane this viewer was launched from.
+# When that session is gone, the id refers to nothing and EVERY split fails —
+# and `new_pane` returns an empty string on failure, which the startup check
+# read as "skip this" rather than "I am broken". Result on 2026-08-04: the
+# viewer stayed alive for thirteen minutes and opened nothing at all — no
+# anchor, no ticker, no lane panes — while two lanes ran unseen, healthy in
+# `pgrep` the whole time, and the human noticed only by asking where the
+# ticker was (P39). So the anchor is now a variable that can be re-resolved,
+# and a split that fails even against a live anchor is fatal.
+ANCHOR="${HERDR_PANE_ID:-}"
+
+# Point ANCHOR at some other live pane. Prefers the old anchor's own
+# workspace, so a viewer whose launching pane was closed stays in the window
+# the human is watching; skips panes this viewer already owns, since a right
+# column split off one of its own lane panes is not a column.
+reanchor() {
+    local ws="${ANCHOR%%:*}" ids ordered cand
+    ids=$("$HERDR" pane list 2>/dev/null | jq -r '.result.panes[]?.pane_id // empty' 2>/dev/null) || ids=""
+    [ -n "$ids" ] || return 1
+    ordered=$( { printf '%s\n' "$ids" | grep "^$ws:" || :; printf '%s\n' "$ids" | grep -v "^$ws:" || :; } )
+    while read -r cand; do
+        [ -n "$cand" ] || continue
+        [ "$cand" = "$ANCHOR" ] && continue
+        [ "$cand" = "${TICKER_PANE:-}" ] && continue
+        grep -q "^$cand " "$MAP" 2>/dev/null && continue
+        echo "watch-panes: anchor pane ${ANCHOR:-<unset>} is gone — re-anchoring on $cand" >&2
+        ANCHOR="$cand"
+        return 0
+    done <<< "$ordered"
+    return 1
+}
+
+# Open a right column off the anchor, re-resolving the anchor once if the
+# first attempt fails. Empty means even a live anchor could not split.
+anchor_split() {
+    local p; p=$(new_pane right "$ANCHOR")
+    if [ -z "$p" ] && reanchor; then p=$(new_pane right "$ANCHOR"); fi
+    printf '%s' "$p"
+}
+
+# A viewer that cannot open a pane has no job left to do, and staying alive is
+# worse than dying: it holds the singleton, so every later launch path exits
+# with "already running — nothing to do" and the build runs unwatched. Exiting
+# releases the pidfile (see the trap above, which is why P40 lands first) and
+# the next tick starts a working one.
+wp_blind() {
+    echo "watch-panes: $1" >&2
+    echo "watch-panes: exiting so the next \`/orchestrate tick\` or \`watch-panes.sh on\` starts a working viewer." >&2
+    exit 1
+}
+
 echo "watch-panes: polling every ${POLL}s, up to ${MAX_PANES} panes, one pane per ticket. Ctrl-C to stop."
 
 # Right-column anchor first (see the layout contract above). It enters MAP as
@@ -165,13 +234,12 @@ echo "watch-panes: polling every ${POLL}s, up to ${MAX_PANES} panes, one pane pe
 # off it.
 STACK_LAST=""
 WAITED=""                            # lanes already ticker-noted as waiting at the cap
-anchor=$(new_pane right "$HERDR_PANE_ID")
-if [ -n "$anchor" ]; then
-    "$HERDR" pane run "$anchor" "echo '── watch-panes: waiting for lanes ──'" >/dev/null 2>&1 || :
-    "$HERDR" pane rename "$anchor" "waiting for lanes" >/dev/null 2>&1 || :
-    printf '%s - -\n' "$anchor" >> "$MAP"
-    STACK_LAST="$anchor"
-fi
+anchor=$(anchor_split)
+[ -n "$anchor" ] || wp_blind "cannot open a pane off anchor ${ANCHOR:-<unset>}, and no other live pane to re-anchor on — the session that launched this viewer is gone."
+"$HERDR" pane run "$anchor" "echo '── watch-panes: waiting for lanes ──'" >/dev/null 2>&1 || :
+"$HERDR" pane rename "$anchor" "waiting for lanes" >/dev/null 2>&1 || :
+printf '%s - -\n' "$anchor" >> "$MAP"
+STACK_LAST="$anchor"
 
 # The build ticker: a strip under the session pane streaming
 # `render-events --follow` — a timestamped line per step (claimed, → review,
@@ -201,7 +269,7 @@ ensure_ticker() {
     if [ -n "$TICKER_PANE" ] && "$HERDR" pane process-info --pane "$TICKER_PANE" >/dev/null 2>&1; then
         return 0
     fi
-    local tp; tp=$(new_pane down "$HERDR_PANE_ID" 0.75)
+    local tp; tp=$(new_pane down "$ANCHOR" 0.75)
     # The hints travel as environment, not as knowledge inside tick.sh: the
     # ticker offers the quit key, this script owns the words for turning it
     # back on. tick.sh must never learn that this viewer exists (enforced by
@@ -340,12 +408,16 @@ while :; do
                     TICKER_PANE=""
                     reopen_ticker=1
                 fi
-                pane=$(new_pane right "$HERDR_PANE_ID")
+                pane=$(anchor_split)
                 # Unconditionally, even if the split failed: the ticker is the
                 # human's only view of a build with no lane panes left.
                 [ -n "$reopen_ticker" ] && ensure_ticker
             fi
-            [ -n "$pane" ] || { echo "watch-panes: could not split a pane" >&2; continue; }
+            # Reaching here empty means every route is exhausted: the stack
+            # anchor is dead, no pane in MAP is live to re-anchor on, and the
+            # session anchor cannot split either. That is the P39 state —
+            # nothing on screen and no way to put anything there.
+            [ -n "$pane" ] || wp_blind "no pane could be opened for $lane — every anchor is gone."
             STACK_LAST="$pane"
         fi
         # A pane the user closed makes this fail; drop it and try again next poll

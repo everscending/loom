@@ -2984,6 +2984,11 @@ case "$1 $2" in
     "pane split")        if [ -n "${HERDR_DEAD+x}" ] && [ -n "$tgt" ] && dead "$tgt"; then exit 1; fi
                          n=$(wc -l < "$HERDR_CALLS" | tr -d ' '); echo "{\"result\":{\"pane\":{\"pane_id\":\"stub:p$n\"}}}" ;;
     "pane process-info") if dead "$tgt"; then exit 1; fi ;;
+    # What the viewer re-anchors against (13n). HERDR_PANE_LIST unset means a
+    # herdr with no panes left to offer, which is the fatal branch.
+    "pane list")         printf '{"result":{"panes":['; s=""
+                         for p in ${HERDR_PANE_LIST:-}; do printf '%s{"pane_id":"%s"}' "$s" "$p"; s=","; done
+                         printf ']}}\n' ;;
 esac
 exit 0
 EOF
@@ -3168,6 +3173,95 @@ grep -q "ORCH_TICKER_QUIT_HINT" "$WP" && grep -q "ORCH_TICKER_REOPEN_HINT" "$WP"
 grep -q 'ticker-off' "$TICK" \
     && ok "ticker: quitting leaves the durable marker, so it stays closed" \
     || bad "ticker: quit does not persist — the viewer would reopen the pane"
+
+# 13n. A viewer that cannot open a pane says so and exits, instead of polling
+#      forever looking healthy (P39). Every split hangs off the pane the
+#      viewer was launched from; when that session is gone the id refers to
+#      nothing, every split fails, and the empty string `new_pane` returns
+#      used to read as "skip this". build-3 2026-08-04, 12:46→12:59: the
+#      process was alive the whole time and opened nothing — no anchor, no
+#      ticker, no lane panes — while two lanes ran unseen.
+NH="$T/wp13n-home"; mkdir -p "$NH/lanes"; : > "$T/herdr-calls"
+out=$(HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    HERDR_DEAD="stub:p0" WATCH_TICKER=0 ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    bash "$WP" 2>&1); rc_n=$?
+if [ "$rc_n" != 0 ] && printf '%s' "$out" | grep -q "stub:p0" && printf '%s' "$out" | grep -q "exiting"; then
+    ok "watch-panes: a viewer with a dead anchor exits non-zero and names it"
+else
+    bad "watch-panes: blind viewer survived (rc=$rc_n: $(printf '%s' "$out" | tr '\n' ' ' | head -c 140))"
+fi
+# Exiting is only useful if it releases the singleton — otherwise every later
+# launch path still reports "already running" against a viewer showing nothing.
+[ ! -f "$NH/watch-panes.pid" ] \
+    && ok "watch-panes: a blind viewer leaves no pidfile holding the singleton" \
+    || bad "watch-panes: the dead viewer kept the pidfile — nothing can replace it"
+# The other direction: with a live pane to re-anchor on, the viewer recovers
+# and opens its column there rather than dying. stub:p0 is the dead launching
+# pane and is skipped; stub:p9 is what herdr still has.
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    HERDR_DEAD="stub:p0" HERDR_PANE_LIST="stub:p0 stub:p9" WATCH_TICKER=0 \
+    ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1; rc_n=$?
+if [ "$rc_n" = 0 ] && grep -q -- "split --pane stub:p9 --direction right" "$T/herdr-calls"; then
+    ok "watch-panes: a dead anchor re-anchors on a live pane instead of dying"
+else
+    bad "watch-panes: re-anchor failed (rc=$rc_n, calls: $(grep split "$T/herdr-calls" | tr '\n' ';'))"
+fi
+# Planted violation: strip the fatal call and the identical run polls on and
+# exits 0 — the exact 13-minute shape, a healthy-looking process showing
+# nothing. `wp_blind ` → `: ` leaves the function definition alone.
+# The copy needs tick.sh beside it — the viewer finds tick.sh by its own
+# directory, so a copy alone in $T resolves nothing and dies at 127 before it
+# can prove anything.
+mkdir -p "$T/wpmod"; ln -sf "$TICK" "$T/wpmod/tick.sh"
+sed 's/wp_blind /: /' "$WP" > "$T/wpmod/wp-noblind.sh"; chmod +x "$T/wpmod/wp-noblind.sh"
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    HERDR_DEAD="stub:p0" WATCH_TICKER=0 ORCH_HOME="$NH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    bash "$T/wpmod/wp-noblind.sh" >/dev/null 2>&1; rc_n=$?
+[ "$rc_n" = 0 ] \
+    && ok "watch-panes-violation: without the fatal exit the blind viewer runs on" \
+    || bad "watch-panes-violation: rc=$rc_n — something other than wp_blind ended the run"
+
+# 13o. The singleton pidfile is removed only while it still names this
+#      process (P40). The trap used to delete it unconditionally, so an older
+#      viewer shutting down took a newer one's file with it — found live on
+#      2026-08-04: pid 1805 running with no pidfile at all. Stand-in for the
+#      overlap: overwrite the file with a foreign pid once the viewer is up,
+#      the way a newer viewer would.
+PH="$T/wp13o-home"; mkdir -p "$PH/lanes"; : > "$T/herdr-calls"
+( for _ in $(seq 1 40); do
+      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.25
+  done
+  echo 999999 > "$PH/watch-panes.pid" ) &
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+wait 2>/dev/null || :
+[ "$(cat "$PH/watch-panes.pid" 2>/dev/null)" = 999999 ] \
+    && ok "watch-panes: an exiting viewer keeps a pidfile it no longer owns" \
+    || bad "watch-panes: the exiting viewer deleted another viewer's pidfile"
+# And it still cleans up after itself in the ordinary case, or every crashed
+# viewer would block the next launch forever.
+rm -f "$PH/watch-panes.pid"; : > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1 || :
+[ ! -f "$PH/watch-panes.pid" ] \
+    && ok "watch-panes: a viewer that owns its pidfile removes it on exit" \
+    || bad "watch-panes: pidfile survived its own viewer — the next launch is blocked"
+# Planted violation: remove the ownership test and the foreign pidfile goes
+# with it, which is how a live viewer ends up with none.
+sed 's/_owns_pidfile &&/: \&\&/' "$WP" > "$T/wpmod/wp-noown.sh"; chmod +x "$T/wpmod/wp-noown.sh"
+( for _ in $(seq 1 40); do
+      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.25
+  done
+  echo 999999 > "$PH/watch-panes.pid" ) &
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 ORCH_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 \
+    bash "$T/wpmod/wp-noown.sh" >/dev/null 2>&1 || :
+wait 2>/dev/null || :
+[ ! -f "$PH/watch-panes.pid" ] \
+    && ok "watch-panes-violation: without the check the foreign pidfile is deleted" \
+    || bad "watch-panes-violation: pidfile survived, so the ownership test proves nothing"
 
 # 13j. A finished STORY closes its pane (2026-08-02): probe pane closes when
 #      its lane ends; a merge pane closes only if the ticket really closed —

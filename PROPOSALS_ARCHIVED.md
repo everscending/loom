@@ -39,6 +39,8 @@ writing a new proposal that touches the same machinery.
 | P25 | Give the skill a maintenance verb that does not trust its own tests | implemented 2026-08-01 (`references/qa.md`; `qa` verb routes to it) |
 | P26 | Turn a finished build into next round's proposals | implemented 2026-08-01 (`tick.sh retro`; `references/retro.md`; snapshot event carries deps/ready/impl_free) |
 | P37 | Let a re-scoped ticket retire the rejection history of its old scope | implemented 2026-08-04 (`lane.sh rescope` writes an `orch-scope-reset` marker, refused for lanes and waves; `rejections_of` stops its scan there) |
+| P39 | A viewer that cannot open a pane must say so and exit | implemented 2026-08-04 (`anchor_split` re-resolves a dead anchor against a live pane via `herdr pane list`; `wp_blind` exits non-zero when none is left, releasing the singleton) |
+| P40 | The viewer singleton guard deletes a pidfile it does not own | implemented 2026-08-04 (`_owns_pidfile` gates the EXIT trap; the `on` relaunch logs to `watch-panes.out` instead of `/dev/null`) |
 
 ## Independent review round (2026-08-01)
 
@@ -1447,3 +1449,54 @@ session sees the same history any wave does:
 **Tests.** A ticket with three FAIL trailers and a newer reset marker reads `total: 0`; the same
 ticket with the marker older than one of the FAILs still counts that one; a lane calling `rescope`
 is refused and writes nothing.
+
+## P39 · A viewer that cannot open a pane must say so and exit
+
+**Evidence.** build-3, 2026-08-04, 12:46 → 12:59. `watch-panes.sh` was alive the whole time, and
+opened nothing: no anchor pane, no build ticker, no lane panes. The build ran two implementation
+lanes through it unseen, and the human noticed only by asking why the ticker was missing. Killing
+it and relaunching from a live pane opened all three panes in four seconds.
+
+**Root cause.** The viewer anchors every split to the pane it was launched from,
+`$HERDR_PANE_ID` (`scripts/watch-panes.sh:168`, and again at `:343`). When the launching session is
+gone, that pane id refers to nothing and every `herdr pane split` fails. `new_pane` swallows the
+failure — `2>/dev/null`, `|| true`, empty string on error (`:151`) — and the startup check is
+`if [ -n "$anchor" ]`, so an empty result reads as "skip this", not "I am broken". `ensure_ticker`
+does log its own failure, but the launcher redirects the viewer's output to `/dev/null`, so nothing
+reaches a human. The result is a process that looks healthy in `pgrep`, polls forever, and shows
+nothing.
+
+**Fix.** Treat a failed split off the anchor as fatal, not as a skip. On the first failure,
+re-resolve the anchor against a live pane; if that also fails, print the reason and exit non-zero
+so the singleton is released and the next `/orchestrate watch` or manual tick starts a working
+viewer. Separately, launch it with its output going to `$ORCH_HOME/watch-panes.log` rather than
+`/dev/null` — a silent diagnostic is not a diagnostic. Depends on P40: exiting is only safe once
+the pidfile is owned correctly.
+
+**Tests.** With the pane opener stubbed to fail, the viewer exits non-zero within one poll, prints
+a reason naming the dead anchor, and leaves no pidfile behind. With it succeeding, behaviour is
+unchanged.
+
+## P40 · The viewer singleton guard deletes a pidfile it does not own
+
+**Evidence.** build-3, 2026-08-04. Found live: `watch-panes.sh` running as pid 1805 with
+`$ORCH_HOME/watch-panes.pid` absent. The likely sequence is an older viewer still shutting down
+when 1805 started — 1805 found no pidfile, wrote its own, and the older one's `EXIT` trap then
+deleted it.
+
+**Root cause.** `trap 'rm -f "$MAP" "$MAP.new" "$WP_PID"' EXIT` (`scripts/watch-panes.sh:118`)
+removes the pidfile unconditionally, without checking it still contains this process's own pid.
+
+**Why it matters in both directions.** With the pidfile missing, the guard at `:112` passes and the
+next manual tick opens a **duplicate** viewer — two panes per lane, two tickers. With the pidfile
+present but belonging to a viewer that can no longer open panes (P39), the guard does the opposite:
+it reports "already running — nothing to do" and refuses to start a healthy one. The guard is
+load-bearing precisely because `/orchestrate tick` launches the viewer opportunistically on every
+manual tick.
+
+**Fix.** Remove the pidfile only when it still holds this process's own pid — read it back in the
+trap and compare against `$$` before deleting. Pair with P39 so a broken viewer releases the guard
+by exiting rather than holding it forever.
+
+**Tests.** Two viewers started in sequence leave exactly one pidfile holding the surviving pid; a
+viewer whose pidfile was overwritten by a newer one does not delete it on exit.
