@@ -343,3 +343,4 @@ bootstrap seeds nothing.
 **What would falsify it.** A lane or wave that errors or measurably slows
 with the collector down (seam built wrong), or dashboards nobody has opened
 after two instrumented builds (artifact without a consumer — drop it).
+

@@ -215,6 +215,92 @@ anchor_split() {
     printf '%s' "$p"
 }
 
+# The right column decays without this. Every lane pane is opened by splitting
+# the newest pane DOWN with no ratio, so herdr halves it: lane 1 gets half the
+# column, lane 2 a quarter, lane 3 an eighth — the newest lanes, which are the
+# ones the human is most likely to be reading, end up smallest. Measured
+# 2026-08-05 in a live session: a four-pane column at 24/21/10/10 rows in a
+# 65-row area, where equal is 16 (P44).
+#
+# Two facts this rests on, both measured against herdr 2026-08. `--amount` is a
+# signed delta on the ratio of the nearest ancestor split on that axis, and the
+# ratio is the TOP child's share: a split at 0.32258 resized `--direction up
+# --amount 0.1` became 0.22258. And in a column built by repeatedly splitting
+# the bottom pane downward, pane k is the top child of split k — so targeting
+# pane k moves the divider below it and nothing else.
+#
+# The column is the panes sharing the seed's x/width AND present in MAP. That
+# second condition is the safety rule: this viewer resizes only panes it opened
+# itself, so the loom session pane, the ticker (never tracked in MAP) and
+# anything a human put on screen are out of reach by construction rather than
+# by remembering to exclude them. The left column keeps its own contract — the
+# ticker's 25% strip under the session is set by `new_pane down "$ANCHOR" 0.75`
+# and is not this function's business.
+_column_ids() { # <seed pane> → column pane ids, top to bottom
+    local seed="$1" owned
+    owned=$(awk '{ print $1 }' "$MAP" 2>/dev/null | jq -R . | jq -s . 2>/dev/null) || return 1
+    [ -n "$owned" ] || return 1
+    "$HERDR" pane layout --pane "$seed" 2>/dev/null | jq -r --arg seed "$seed" --argjson owned "$owned" '
+        .result.layout as $l
+        | if ($l.zoomed // false) then empty else
+            ( $l.panes[]? | select(.pane_id == $seed) | .rect ) as $s
+            | $l.panes
+            | map(select(.rect.x == $s.x and .rect.width == $s.width
+                         and ((.pane_id as $p | $owned | index($p)) != null)))
+            | sort_by(.rect.y)[] | .pane_id
+          end' 2>/dev/null
+}
+
+# The resize for one divider, as a direction plus a magnitude. Negative deltas
+# travel as `up` rather than as a negative `--amount`, which the argument parser
+# would read as a flag. Re-read per divider rather than solving the column in
+# closed form: rows are integers, herdr quantises every ratio to whole rows, and
+# a closed-form pass accumulates that rounding all the way down the column.
+_split_delta() { # <seed> <ids> <k> <n> → "<up|down> <amount>", empty if settled
+    local seed="$1" ids="$2" k="$3" n="$4" heights
+    heights=$("$HERDR" pane layout --pane "$seed" 2>/dev/null \
+        | jq -r '.result.layout.panes[]? | "H \(.pane_id) \(.rect.height)"' 2>/dev/null) || return 1
+    [ -n "$heights" ] || return 1
+    printf '%s\n%s\n' "$heights" "$(printf '%s\n' "$ids" | awk 'NF { print "I", NR - 1, $1 }')" \
+    | awk -v k="$k" -v n="$n" '
+        $1 == "H" { h[$2] = $3; next }
+        $1 == "I" { id[$2] = $3; next }
+        END {
+            R = 0
+            for (i = k; i < n; i++) { if (!(id[i] in h)) exit 1; R += h[id[i]] }
+            if (R <= 0) exit 1
+            d = 1.0 / (n - k) - h[id[k]] / R
+            if (d < 0)      { if (-d >= 0.005) printf "up %.5f\n", -d }
+            else if (d >= 0.005) printf "down %.5f\n", d
+        }'
+}
+
+# Everything here fails soft. A `pane layout` that errors, a rect that will not
+# parse, or a resize that fails skips the rebalance and never touches the
+# pane-opening path above: this viewer's first rule is that deleting herdr from
+# the machine leaves the build unaffected (see the header), and a cosmetic pass
+# must not be the thing that breaks it.
+rebalance_column() { # <a pane in the column>
+    local seed="$1" ids n k id step
+    [ -n "$seed" ] || return 0
+    ids=$(_column_ids "$seed") || return 0
+    [ -n "$ids" ] || return 0
+    n=$(printf '%s\n' "$ids" | grep -c . || :)
+    # Two panes are already 50/50 from herdr's own default split; one is the
+    # whole column. Neither has a divider worth moving.
+    [ "${n:-0}" -ge 3 ] || return 0
+    k=0
+    while [ "$k" -le $((n - 2)) ]; do
+        id=$(printf '%s\n' "$ids" | sed -n "$((k + 1))p")
+        step=$(_split_delta "$seed" "$ids" "$k" "$n") || return 0
+        if [ -n "$step" ]; then
+            "$HERDR" pane resize --pane "$id" --direction ${step% *} --amount "${step#* }" \
+                >/dev/null 2>&1 || return 0
+        fi
+        k=$((k + 1))
+    done
+}
+
 # A viewer that cannot open a pane has no job left to do, and staying alive is
 # worse than dying: it holds the singleton, so every later launch path exits
 # with "already running — nothing to do" and the build runs unwatched. Exiting
@@ -358,7 +444,13 @@ while :; do
         mv "$MAP.new" "$MAP"
     fi
 
+    # Seed for the one rebalance this poll is allowed (P44). Set only by a pane
+    # that was actually SPLIT this poll, never by one reused from MAP: a human
+    # who drags a divider to read one lane's output keeps that size until the
+    # next lane arrives, and a rebalance on every poll would take it back.
+    rebalance_seed=""
     for lane in $running; do
+        split_new=""
         if grep -qE "^[^ ]+ ${lane} " "$MAP" 2>/dev/null; then
             continue                                   # already on screen
         fi
@@ -430,6 +522,7 @@ while :; do
             # nothing on screen and no way to put anything there.
             [ -n "$pane" ] || wp_blind "no pane could be opened for $lane — every anchor is gone."
             STACK_LAST="$pane"
+            split_new=1
         fi
         # A pane the user closed makes this fail; drop it and try again next poll
         # rather than taking the whole viewer down with it.
@@ -437,10 +530,15 @@ while :; do
             "$HERDR" pane rename "$pane" "$lane" >/dev/null 2>&1 || :
             printf '%s %s %s\n' "$pane" "$lane" "$t" >> "$MAP"
             echo "watch-panes: $lane (ticket $t) → $pane"
+            # Only a pane that is both new and registered in MAP can seed the
+            # rebalance: the column is read as "shares this pane's x/width and
+            # is in MAP", so a seed missing from MAP would exclude itself.
+            [ -n "$split_new" ] && rebalance_seed="$pane" || :
         else
             echo "watch-panes: pane $pane is gone; dropping it" >&2
         fi
     done
+    [ -n "$rebalance_seed" ] && rebalance_column "$rebalance_seed" || :
 
     # Test seam: a bounded run for the suite (real use never sets it).
     if [ -n "${WATCH_POLLS:-}" ]; then

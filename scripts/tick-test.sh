@@ -3061,6 +3061,25 @@ case "$1 $2" in
     "pane list")         printf '{"result":{"panes":['; s=""
                          for p in ${HERDR_PANE_LIST:-}; do printf '%s{"pane_id":"%s"}' "$s" "$p"; s=","; done
                          printf ']}}\n' ;;
+    # The column geometry the rebalance reads (13q). Every pane this stub ever
+    # split is reported in ONE column — same x/width — with the halving heights
+    # a real column decays into, so the deltas are real. stub:p0 (the launching
+    # session pane) is reported in that same column as a decoy: it is not in the
+    # viewer's MAP, so a working MAP filter must never resize it. HERDR_NO_LAYOUT
+    # is a herdr that cannot answer; HERDR_ZOOMED is a human reading one pane.
+    "pane layout")       [ -n "${HERDR_NO_LAYOUT:-}" ] && exit 1
+                         awk -v z="${HERDR_ZOOMED:-}" '
+                            /^pane split/ { n++; ln[n] = NR }
+                            END {
+                              printf "{\"result\":{\"layout\":{\"zoomed\":%s,\"panes\":[", (z != "" ? "true" : "false")
+                              printf "{\"pane_id\":\"stub:p0\",\"rect\":{\"x\":100,\"y\":0,\"width\":50,\"height\":1}}"
+                              y = 1; h = 40
+                              for (i = 1; i <= n; i++) {
+                                printf ",{\"pane_id\":\"stub:p%d\",\"rect\":{\"x\":100,\"y\":%d,\"width\":50,\"height\":%d}}", ln[i], y, h
+                                y += h; h = (h >= 4 ? int(h / 2) : 2)
+                              }
+                              printf "]}}}\n"
+                            }' "$HERDR_CALLS" ;;
 esac
 exit 0
 EOF
@@ -3420,6 +3439,91 @@ grep -q "rename .* ticket 96 — idle" "$T/herdr-calls" \
     && ok "watch-panes: a merge that did not merge keeps its pane idle" \
     || bad "watch-panes: blocked-merge pane was not kept"
 rm -f "$T/wp13j-home/lanes"/*.pid
+
+# 13q. The right column is evened out when a lane pane opens, and only then
+#      (P44). Every lane pane is split off the newest pane with no ratio, so
+#      herdr halves it and the column decays 1/2, 1/4, 1/8 — measured live
+#      2026-08-05 at 24/21/10/10 rows where equal is 16. The stub reports that
+#      decay; the viewer must move every divider except the last one's.
+#      Pane ids follow the stub's call counter, as in 13i: with the ticker off,
+#      the anchor is stub:p1 (call 1), lane 92's split is call 6 → stub:p6, and
+#      lane 93's is call 9 → stub:p9. The bottom pane has no divider below it.
+QH="$T/wp13q-home"; mkdir -p "$QH/lanes"
+for n in 91 92 93; do echo $$ > "$QH/lanes/impl-$n.pid"; done
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 WATCH_MAX_PANES=9 LOOM_HOME="$QH" WATCH_POLLS=2 WATCH_POLL_SECONDS=0 \
+    bash "$WP" >/dev/null 2>&1 || :
+rs=$(grep -c "^pane resize " "$T/herdr-calls" || :)
+# Two polls, three lanes: poll 1 opens the panes and rebalances once, poll 2
+# opens nothing and must resize nothing. A human who drags a divider to read
+# one lane keeps that size until the next lane arrives.
+if [ "$rs" = 2 ] \
+   && grep -q -- "pane resize --pane stub:p1 --direction up" "$T/herdr-calls" \
+   && grep -q -- "pane resize --pane stub:p6 --direction up" "$T/herdr-calls"; then
+    ok "watch-panes: a new lane pane evens out the column above it"
+else
+    bad "watch-panes: expected 2 resizes of stub:p1 and stub:p6, got $rs ($(grep '^pane resize' "$T/herdr-calls" | tr '\n' ';'))"
+fi
+grep -q -- "pane resize --pane stub:p9" "$T/herdr-calls" \
+    && bad "watch-panes: resized the bottom pane, which has no divider below it" \
+    || ok "watch-panes: the bottom pane of the column is left alone"
+# The safety rule: the viewer resizes only panes it owns. stub:p0 is the loom
+# session pane and the stub reports it in the same column as a decoy; the
+# ticker is never tracked in MAP either. Neither may ever be resized — that is
+# what keeps this to the RIGHT column and off the ticker's 25% strip.
+grep -q -- "pane resize --pane stub:p0" "$T/herdr-calls" \
+    && bad "watch-panes: resized the loom session pane — the MAP filter is broken" \
+    || ok "watch-panes: never resizes the session pane it split from"
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_MAX_PANES=9 LOOM_HOME="$QH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    bash "$WP" >/dev/null 2>&1 || :
+tp=$(grep -n -- "render-events --follow" "$T/herdr-calls" | head -1 | cut -d: -f1)
+if [ -n "$tp" ] && ! grep -q -- "pane resize --pane stub:p$((tp - 1))" "$T/herdr-calls"; then
+    ok "watch-panes: the ticker strip keeps its own size"
+else
+    bad "watch-panes: the ticker pane was resized by the column rebalance"
+fi
+# A column of two is already 50/50 from herdr's own split default: nothing to move.
+rm -f "$QH/lanes"/impl-93.pid; : > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 WATCH_MAX_PANES=9 LOOM_HOME="$QH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    bash "$WP" >/dev/null 2>&1 || :
+[ "$(grep -c "^pane resize " "$T/herdr-calls" || :)" = 0 ] \
+    && ok "watch-panes: a two-pane column is left as herdr split it" \
+    || bad "watch-panes: resized a column with no divider worth moving"
+echo $$ > "$QH/lanes/impl-93.pid"
+# Fails soft, both ways: a herdr that cannot report geometry, and a human
+# zoomed into one pane. Panes still open in both cases — deleting herdr from
+# the machine leaves the build unaffected, and a cosmetic pass must not be the
+# thing that breaks that.
+for mode in HERDR_NO_LAYOUT HERDR_ZOOMED; do
+    : > "$T/herdr-calls"
+    env "$mode=1" HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 \
+        HERDR_PANE_ID=stub:p0 WATCH_TICKER=0 WATCH_MAX_PANES=9 LOOM_HOME="$QH" \
+        WATCH_POLLS=1 WATCH_POLL_SECONDS=0 bash "$WP" >/dev/null 2>&1 || :
+    if [ "$(grep -c "^pane resize " "$T/herdr-calls" || :)" = 0 ] \
+       && [ "$(grep -c "render-log" "$T/herdr-calls" || :)" -ge 3 ]; then
+        ok "watch-panes: $mode — no resize, and the lane panes still open"
+    else
+        bad "watch-panes: $mode left $(grep -c '^pane resize ' "$T/herdr-calls" || :) resizes / $(grep -c 'render-log' "$T/herdr-calls" || :) lane panes"
+    fi
+done
+# Planted violation: cut the rebalance call and the column decays untouched,
+# which is the shape the human measured. The copy needs tick.sh beside it, as
+# in 13n — the viewer finds tick.sh by its own directory.
+mkdir -p "$T/wpmod"; ln -sf "$TICK" "$T/wpmod/tick.sh"
+sed 's/&& rebalance_column .*$/|| :/' "$WP" > "$T/wpmod/wp-nobalance.sh"
+chmod +x "$T/wpmod/wp-nobalance.sh"
+: > "$T/herdr-calls"
+HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    WATCH_TICKER=0 WATCH_MAX_PANES=9 LOOM_HOME="$QH" WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+    bash "$T/wpmod/wp-nobalance.sh" >/dev/null 2>&1 || :
+[ "$(grep -c "^pane resize " "$T/herdr-calls" || :)" = 0 ] \
+    && ok "watch-panes-violation: without the call the column is never evened out" \
+    || bad "watch-panes-violation: something other than rebalance_column issued a resize"
+rm -f "$QH/lanes"/impl-9*.pid
 
 # 14. Proposals hygiene: PROPOSALS.md holds ONLY open / in progress / deferred
 #     rows — implemented and dropped ones move to PROPOSALS_ARCHIVED.md, per

@@ -44,6 +44,7 @@ writing a new proposal that touches the same machinery.
 | P42 | Stop the ticker announcing a replay that is not going to happen | implemented 2026-08-04 (`wave_gap` never renders, `lock_held` renders once per wave via a `first` field on the event, `loop_stopped` keeps its own line; all three still land in `events.jsonl` for `retro`) |
 | P43 | Stop the watcher reading its own no-op events as build activity | implemented 2026-08-05 (`_last_activity_ts` scans for the newest non-`tick_skipped` event; the settle window no longer reads `events.jsonl` mtime) |
 | P41 | A concluded ticket should take its viewer pane with it, however it concluded | implemented 2026-08-04 (the ticket-closed read runs for every lane kind, not merge-* alone; probe panes and the failed-read default are unchanged) |
+| P44 | Even out the right column when a lane pane opens | implemented 2026-08-05 (`rebalance_column` in `watch-panes.sh` equalises the right column on the poll that opens a lane pane; only panes in `MAP` are touched, so the session pane and the ticker keep their sizes) |
 
 ## Independent review round (2026-08-01)
 
@@ -1614,3 +1615,82 @@ emits an event kind, that kind must never be able to feed the watcher's own acti
 window under test. The new tests leave it at its real default — one asserting a file of pure
 `tick_skipped` events classifies `halted`, one asserting a real event inside the window still
 reads `active` so a chained handoff's few-second gap is still protected.
+
+## P44 · Even out the right column when a lane pane opens
+
+The right column decays. Each new lane pane is opened by splitting the *newest* pane
+downward with no ratio, so herdr halves that pane: the first lane gets half the column,
+the second a quarter, the third an eighth. The panes carrying the newest lanes — the
+ones the human is most likely to be reading — are the smallest on screen.
+
+**Evidence.** Measured in a live herdr session, 2026-08-05. A right column of four
+panes in a 65-row area: **24 / 21 / 10 / 10 rows**, where equal is 16. The two newest
+lanes had 10 rows each to show a transcript in.
+
+**Root cause.** One line, `watch-panes.sh:399`:
+
+```sh
+[ -n "$STACK_LAST" ] && pane=$(new_pane down "$STACK_LAST")
+```
+
+`STACK_LAST` is always the bottom-most pane, and `new_pane` passes `--ratio` only when
+it is given one — which this call is not. herdr's default split is 50/50, so every lane
+halves whatever is left at the bottom. Nothing here is wrong; the layout contract simply
+never said anything about the sizes, only the positions.
+
+**Fix.** A `rebalance_column` step in `watch-panes.sh`, run **once per poll and only on a
+poll that actually opened a lane pane**:
+
+1. Read `herdr pane layout --pane <the new pane>`. If `.result.layout.zoomed` is true,
+   do nothing — a zoomed pane is a human reading one lane, and resizing under it is noise.
+2. Take the column as the panes whose `rect.x` and `rect.width` match the new pane's **and
+   whose pane id is in `MAP`**. That second condition is the safety rule: the viewer resizes
+   only panes it opened itself. The session pane, the ticker, and anything a human put on
+   screen are untouchable by construction, not by remembering to exclude them.
+3. Sort by `rect.y`. Fewer than three panes: stop. A two-pane column is already 50/50.
+4. For `k` in `0 … N-2`: re-read the layout, let `R` be the summed height of panes `k … N-1`,
+   and issue
+
+   ```sh
+   herdr pane resize --pane <pane k> --direction down --amount <1/(N-k) - h_k/R>
+   ```
+
+Two facts this depends on, both verified against herdr 2026-08. `--amount` is a **signed
+delta on the ratio** of the nearest ancestor split on that axis, and the ratio is the top
+child's share: a split at `0.32258` resized `--direction up --amount 0.1` became `0.22258`.
+And in a column built by repeatedly splitting the bottom pane downward, pane `k` is the top
+child of split `k`, so targeting pane `k` moves exactly the divider below it and nothing else.
+
+Re-reading the layout between steps rather than solving the whole column in closed form is
+deliberate: rows are integers, herdr quantises each ratio to whole rows, and a closed-form
+pass accumulates that rounding all the way down the column. The cost is `N-1` extra reads on
+a poll that has already paid for a split.
+
+**What this must not touch.** The left column is out of scope entirely — the ticker's 25%
+strip under the session pane is a separate contract (`new_pane down "$ANCHOR" 0.75`) and
+keeps its size. The split-order invariant in the layout contract is unchanged. And this
+fires on pane-opening polls only, never every poll: a human who drags a divider to read one
+lane's output keeps that size until the next lane arrives.
+
+**Limits, recorded rather than fixed.** Equal lands within ±1 row when the column height
+does not divide by `N`. Equal is also not the same as usable — six panes in a 65-row window
+are ~10 rows each whether or not they are even, and that is `MAX_PANES`' problem; do not add
+a minimum-height rule here. Everything fails soft: a `pane layout` that errors, a rect that
+will not parse, or a resize that fails skips the rebalance for that poll and never touches
+the pane-opening path. This viewer's first rule is that deleting herdr leaves the build
+unaffected (`watch-panes.sh`, header) — a cosmetic pass must not be the thing that breaks it.
+
+**Tests** (`scripts/tick-test.sh`, against the herdr stub, which gains a `pane layout` case
+reporting rects for the panes it has handed out):
+
+- a third lane pane opens → one `pane resize` per column pane above the last, in top-down order;
+- the same run with the rebalance call removed → zero `pane resize` calls;
+- no `pane resize` ever names the session anchor or the ticker pane;
+- a poll that opens no new pane issues no `pane resize`;
+- `pane layout` exiting non-zero → the lane pane still opens, zero resizes, viewer alive;
+- `zoomed: true` → zero resizes;
+- a two-pane column → zero resizes.
+
+**What would falsify it.** A build where the human reports panes resizing under them while
+they were reading one — that means the pane-opening-only trigger is not the right rule — or
+any `pane resize` call landing on a pane that is not in `MAP`.
