@@ -787,5 +787,18 @@ and the value passes straight to `claude --model`, so nothing breaks.
 
 ## Closed
 
-None yet. When a defect is fixed, move its entry here with the date and what shipped, keeping its
-key.
+### D-TICK-13 · retro's spend report cannot see wave sessions
+*Closed 2026-08-06.*
+
+`tick.sh:1647` — `_spend_by_lane` globbed only `"$LOGS_DIR"/lane-*.jsonl`, so every wave session
+(`wave-*.jsonl`) was skipped before pricing began, and the join at `:2188` — matched to the build
+through `lane_exit`, which a wave never emits — would have dropped them again even if the glob had
+been widened.
+
+**Shipped:** `_spend_by_lane` renamed to `_spend_by_session` and widened to enumerate both
+`lane-*.jsonl` and `wave-*.jsonl`. `RETRO_JQ` now joins wave costs on `stem` (the wave log's own
+basename, present on every `wave_end` event) instead of `lane_exit.id`, and reports them as their
+own `wave` row in the spend-by-kind breakdown and in the grand total — never folded into a lane's
+total, since a wave is the one session kind that writes no code. `tick-test.sh` case 12a2b plants
+one lane log and one wave log in a fixture build and asserts both are priced and the rows sum to
+the total.
