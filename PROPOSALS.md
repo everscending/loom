@@ -58,7 +58,6 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P53 | Ticket size is a phase-4 output, like width | open — proposed 2026-08-06; implementation lanes are 57% of build spend and their cost is fixed when the ticket is written, not when it runs |
 | P54 | The wave reads the snapshot once | open — proposed 2026-08-06; step 1 mandates a re-read after writes, and the second read re-sends the whole document |
-| P55 | `retro` reports spend, not just time | open — proposed 2026-08-06; the per-lane cost split took a one-off script, and nothing in the skill surfaces it |
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P46 | `stale` means alive — one liveness reader, not four | open — proposed 2026-08-06; four consumers filter on `running` alone, one of them the sweeper's `rm -rf` guard |
@@ -521,24 +520,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P55 · `retro` reports spend, not just time
-
-**Problem.** `tick.sh retro` explains where a build's *time* went and says nothing about
-where its *money* went. Producing the table at the top of this section took a one-off script
-over `message.usage` in the lane logs — data that is already on disk, already per-lane,
-already attributable to a ticket by filename. Without it, every spend question is a fresh
-investigation, and the expensive ticket is only discovered after the build is over.
-
-**Fix direction.** A `usage` reader in `tick.sh` that sums `message.usage` per session log
-and prices it by the message's own model, surfaced two ways: as a section in `retro`
-(spend per lane kind, per ticket, and the top spenders), and as a field in `lane-status` so
-a running build shows cost next to progress. Deliberately narrower than **P29**, which
-proposes full OTel export to LangFuse; this is the local, zero-dependency subset, and it
-should ship first — if it answers the question, P29 may not be needed.
-
-**Caveat to check during implementation.** Prices are hardcoded per model family and go
-stale. Keep them in one table with a comment naming the date they were read.
 
 ## P56 · A probe that cannot finish fails fast
 

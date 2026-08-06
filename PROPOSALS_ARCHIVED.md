@@ -47,6 +47,7 @@ writing a new proposal that touches the same machinery.
 | P44 | Even out the right column when a lane pane opens | implemented 2026-08-05 (`rebalance_column` in `watch-panes.sh` equalises the right column on the poll that opens a lane pane; only panes in `MAP` are touched, so the session pane and the ticker keep their sizes) |
 | P52 | A lane that runs away is stopped, not finished | implemented 2026-08-06 (`lane_turn_cap` config, default 150, surfaced in `resolve-config` and `snapshot`; `lane-status` gains a trailing `turns` column read from the existing `.progress` stamp; SKILL.md step 2 tells the wave to `kill-lane` + `transition <iid> blocked` past the cap, same as a spent `rejection_cap`) |
 | P51 | The wave reads a brief snapshot, not the whole board | implemented 2026-08-06 (`snapshot --brief` keeps a full row only for a ticket `is_actionable` (snapshot.jq) calls in-play this turn — ready+unblocked+unclaimed, gateable, merge-queue, stranded, or holding any lane — everything else collapses to a bare iid in `.other_iids`; SKILL.md step 1 names `--brief` as the wave's default read, plain `snapshot` unchanged for `watch`/`graph`/humans) |
+| P55 | `retro` reports spend, not just time | implemented 2026-08-06 (`USAGE_JQ` in `tick.sh` prices a session log from its own `message.usage`; `lane-status` gains a trailing `cost` column; `retro` gains a Spend section — total, by lane kind, top spenders, by ticket — joined against the per-lane logs `clear-lane` never removes) |
 
 ## Independent review round (2026-08-01)
 
@@ -1850,3 +1851,36 @@ cannot) asserts `--brief` keeps exactly those six full rows; a seventh ticket �
 an open ticket, unclaimed, laneless — asserts the inverse: present only in `other_iids`.
 A last case asserts plain `snapshot` (no flag) still carries every ticket and `other_iids`
 stays empty, so the filter is opt-in.
+
+## P55 · `retro` reports spend, not just time
+
+**Problem.** `tick.sh retro` explains where a build's *time* went and says nothing about
+where its *money* went. Producing the table at the top of this file took a one-off script
+over `message.usage` in the lane logs — data that is already on disk, already per-lane,
+already attributable to a ticket by filename. Without it, every spend question is a fresh
+investigation, and the expensive ticket is only discovered after the build is over.
+
+**Fix.** `USAGE_JQ` (`tick.sh`), a jq program that reads one session's raw `.jsonl`
+transcript, sums each assistant message's `usage` fields, and prices them by that
+message's own `.model` against a hardcoded per-family table (`$/MTok`, dated at the
+comment — the proposal's caveat, kept live rather than fixed once). `_lane_cost <file>`
+wraps it for a single lane log; `_spend_by_lane` globs every `lane-*.jsonl` this repo has
+ever kept (`clear-lane` never removes them) into `[{id, cost}, ...]`.
+
+Surfaced two ways, per the fix direction:
+
+- `lane-status` gains a trailing `cost` column (existing columns untouched — `turns` stays
+  at column 6), read the same way `turns` is: computed fresh each call, no new bookkeeping.
+- `retro` gains a **Spend** section: total, split by lane kind (most expensive first), the
+  top five spending lanes, and a per-ticket rollup — joined by lane id against `$lanes`
+  (the `lane_exit` events already scoped to the build), so a lane log from a different
+  build never enters the total.
+
+Deliberately narrower than P29 (full OTel export to LangFuse) — the local, zero-dependency
+subset, meant to ship first and retire the need for P29 if it answers the question.
+
+**Tests** (`scripts/tick-test.sh`): round token counts (1M input tokens per lane) keep the
+dollar amounts on exact integers so the assertions do not chase float formatting —
+`lane-status`'s `cost` column prices a fixture session log correctly; `retro`'s Spend
+section reports the right total, the right per-kind split in cost order, names the top
+spender, and rolls the right amount up to the ticket its lanes worked.

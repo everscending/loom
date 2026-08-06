@@ -57,7 +57,7 @@ technique of its own.
 | `qa` | any | Review this skill's own files; report defects, never fix |
 | `optimize` | any | Compact this SKILL.md without changing behaviour |
 | `prop <Pn>` | any | Implement proposal `Pn` from PROPOSALS.md, then archive it |
-| `retro` | after 6 | Explain a finished build's timings; write proposals |
+| `retro` | after 6 | Explain a finished build's timings and spend; write proposals |
 
 **Verb boundaries are hard stops.** A verb ends at its own output and returns
 to the human — never auto-advance to the next verb, never implement by hand
@@ -561,7 +561,7 @@ stays frozen otherwise.
 
 ### `retro`
 
-Explain where a finished build's time went and write the findings up as
+Explain where a finished build's time and money went and write the findings up as
 proposals — human-run, never invoked by a wave, and it proposes rather than
 fixes. `tick.sh retro [--build <l>] [--vs <l>]` computes the numbers; reading
 them, and the report format: [references/retro.md](references/retro.md).

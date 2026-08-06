@@ -1602,6 +1602,55 @@ fromjson? // empty | . as $e
     fi
 }
 
+# P55: dollar cost of one session log, priced by each assistant message's own
+# model off `message.usage`. Source: claude-api skill pricing cache, read
+# 2026-08-06 — $/MTok, cache write assumed at the 5m ephemeral default (the
+# harness never requests a 1h breakpoint). Re-derive this table whenever
+# pricing changes; nothing else in the skill depends on the literal numbers.
+USAGE_JQ='
+  def price_table:
+    { "haiku-4-5": {input: 1.00,  output: 5.00,  cache_write: 1.25,  cache_read: 0.10},
+      "sonnet-5":  {input: 3.00,  output: 15.00, cache_write: 3.75,  cache_read: 0.30},
+      "opus-5":    {input: 5.00,  output: 25.00, cache_write: 6.25,  cache_read: 0.50},
+      "fable-5":   {input: 10.00, output: 50.00, cache_write: 12.50, cache_read: 1.00} };
+  # An unrecognised or missing model prices at zero rather than guessing —
+  # a silently wrong non-zero number is worse than a visible gap.
+  def price_for($model):
+    (price_table | to_entries | map(select(.key as $k | $model | test($k))) | first | .value)
+    // {input: 0, output: 0, cache_write: 0, cache_read: 0};
+  def usage_cost($u; $model):
+    price_for($model) as $p
+    | ( ($u.input_tokens // 0) * $p.input
+      + ($u.output_tokens // 0) * $p.output
+      + (($u.cache_creation_input_tokens //
+          (($u.cache_creation.ephemeral_5m_input_tokens // 0)
+           + ($u.cache_creation.ephemeral_1h_input_tokens // 0))) // 0) * $p.cache_write
+      + ($u.cache_read_input_tokens // 0) * $p.cache_read
+      ) / 1000000;
+  split("\n") | map(select(length > 0))
+  | map(try fromjson catch empty) | map(select(. != null))
+  | map(select(.type == "assistant") | .message | select(.usage != null))
+  | map(usage_cost(.usage; (.model // "")))
+  | add // 0
+'
+_lane_cost() { # _lane_cost <jsonl-file> -> USD spent by that session, "0" if unreadable
+    [ -f "$1" ] || { echo 0; return; }
+    jq -R -s "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
+}
+
+# P55: every lane log this repo has ever kept — `clear-lane` never removes the
+# jsonl, only the pid/rc/progress state — so `retro` can price a build any
+# time after the fact. One entry per lane id; `retro` filters to its own
+# build by joining against `lane_exit` events, which are already build-scoped.
+_spend_by_lane() { # -> JSON array [{id, cost}, ...]
+    local f id
+    for f in "$LOGS_DIR"/lane-*.jsonl; do
+        [ -f "$f" ] || continue
+        id=$(basename "$f" .jsonl); id=${id#lane-}
+        printf '{"id":%s,"cost":%s}\n' "$(printf '%s' "$id" | jq -R .)" "$(_lane_cost "$f")"
+    done | jq -s '.'
+}
+
 cmd_lane_status() {
     local stale_min pidfile id pid log state
     stale_min=$(cfg heartbeat_stale_minutes 30)
@@ -1631,7 +1680,9 @@ cmd_lane_status() {
         # the branch before any review session ran (P12). `turns` (P52) is the
         # same filtered event count `.progress` already stamps for staleness —
         # a spend signal, not a liveness one — `-` when no stamp exists yet.
-        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -)"
+        # `cost` (P55) is priced straight off the session log's own
+        # `message.usage`, so a running build shows spend next to progress.
+        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl")"
     done
 }
 
@@ -2077,6 +2128,7 @@ RETRO_JQ='
       elif $x >= 60 then "\($x / 60 | floor)m\($x % 60)s" else "\($x)s" end;
   def pct($n; $d): if ($d // 0) == 0 then "  -  "
                    else "\(($n * 1000 / $d | round) / 10)%" end;
+  def usd($n): "$\(($n * 100 | round) / 100)";
   # Seconds of [$a,$b) that fall inside any window in $ws.
   def ov($a; $b; $ws): [$ws[] | (([$b, .b] | min) - ([$a, .a] | max)) | select(. > 0)]
                        | add // 0;
@@ -2129,6 +2181,20 @@ RETRO_JQ='
                     | map(.secs) | add // 0)}
       | . + {open: (.last - .first)}
       | . + {wait: (.open - .work)})) as $tw
+  # P55: priced per lane from its own session log, joined here by id. $spend
+  # covers every lane log this repo has ever kept (clear-lane never removes
+  # the jsonl), so joining against $lanes -- already scoped to $bw via $evs --
+  # is what excludes lanes from any other build.
+  | ($spend | map({key: .id, value: .cost}) | from_entries) as $spend_by_id
+  | ($lanes | map(. + {cost: ($spend_by_id[.id] // 0)})) as $lanes_c
+  | ($lanes_c | map(.cost) | add // 0) as $total_cost
+  | ($lanes_c | group_by(.type)
+     | map({type: .[0].type, cost: (map(.cost) | add // 0)})
+     | sort_by(-.cost)) as $by_kind
+  | ($tw | map(. as $t | . + {cost: ($lanes_c
+       | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
+       | map(.cost) | add // 0)})) as $twc
+  | ($lanes_c | sort_by(-.cost) | [limit(5; .[])]) as $top
   | ($tk | map({key: .iid, value: .last}) | from_entries) as $closed_at
   | (($snaps | map(select((.deps // {}) | length > 0)) | first | .deps) // {}) as $deps
   # Longest dependency chain the graph allowed — what `graph` would have
@@ -2171,6 +2237,16 @@ RETRO_JQ='
   + (if ($tw | length) == 0 then ["  nothing recorded"]
      else [$tw | sort_by(-.wait) | limit(10; .[])
            | "  #\(.iid)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
+  + ["", "Spend   (priced from every lane session log)", ""]
+  + (if ($lanes_c | length) == 0 then ["  nothing recorded"]
+     else ["  total          \(usd($total_cost))"]
+          + ($by_kind | map("  \(.type)  \(usd(.cost))"))
+          + ["", "  top spenders", ""]
+          + ($top | map("  \(.id)  \(usd(.cost))"))
+          + (if ($twc | map(select(.cost > 0)) | length) == 0 then []
+             else ["", "  by ticket"]
+                  + [$twc | sort_by(-.cost) | limit(5; .[])
+                     | select(.cost > 0) | "  #\(.iid)  \(usd(.cost))"] end) end)
   + ["", "The chain that set the length", ""]
   + (if ($chain | length) == 0 then ["  no ticket history recorded"]
      else [($chain | map("#\(.iid) at \(hms(.last - $t0))") | join("  ←  ") | "  " + .),
@@ -2199,10 +2275,11 @@ cmd_retro() { # retro [--build <label>] [--vs <label>]
     # report first: retro explains what report computes, and never recomputes it.
     if [ -n "$want" ]; then cmd_report --build "$want"; else cmd_report; fi
     echo
-    jq -rs --arg build_want "$want" "$RETRO_JQ" "$EVENTS"
+    local spend_json; spend_json=$(_spend_by_lane)
+    jq -rs --arg build_want "$want" --argjson spend "$spend_json" "$RETRO_JQ" "$EVENTS"
     if [ -n "$vs" ]; then
         printf '\n  ── baseline: %s ──\n\n' "$vs"
-        { cmd_report --build "$vs"; echo; jq -rs --arg build_want "$vs" "$RETRO_JQ" "$EVENTS"; } \
+        { cmd_report --build "$vs"; echo; jq -rs --arg build_want "$vs" --argjson spend "$spend_json" "$RETRO_JQ" "$EVENTS"; } \
             | sed 's/^/  /'
     fi
 }

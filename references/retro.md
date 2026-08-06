@@ -41,6 +41,12 @@ gate's brief was clear enough to satisfy.
 queuing problem, not an implementation problem — and that decides which proposal is worth writing.
 Large waits with small work are the schedule's fault; the reverse is the ticket's.
 
+**Spend.** Priced straight from each lane's own session log, so it needs no separate investigation
+script. Read it next to the time numbers, not instead of them — a lane that took the longest and
+one that cost the most are not always the same lane (a slow lane spent turns waiting, not spending
+tokens; an expensive one paced through a lot of context in a short span). The top-spenders list is
+where an escalated `model::` label or a runaway `lane_turn_cap` candidate shows up first.
+
 **The chain that set the length.** If the actual chain is as deep as the deepest chain in the graph,
 the graph bound the build: widen it. If it is shallower, the schedule bound it, and the graph was
 never the constraint. If one chain accounts for most of the span, nothing else found this round
@@ -78,5 +84,8 @@ they were supposed to move. A proposal that shipped and changed nothing is a fin
   not reflected.
 - A build with no prior build has **no baseline**. Say so; do not invent a standard to judge it
   against.
-- `retro` reads `events.jsonl` and nothing else in the loop reads that file. Keep it that way: a
-  scheduling decision that consulted it would make it shadow state.
+- `retro` reads `events.jsonl` and — for spend — the per-lane session logs under `logs/`; nothing
+  else in the loop reads either. Keep it that way: a scheduling decision that consulted them would
+  make them shadow state.
+- **Spend prices are hardcoded and go stale** (`USAGE_JQ` in `tick.sh`, dated at the comment).
+  A number that looks wrong after a price change probably is — check the date before trusting it.

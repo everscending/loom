@@ -268,6 +268,16 @@ printf '42\n' > "$LOOM_HOME/lanes/impl-7.progress"
 turns1=$("$TICK" lane-status | awk '$1=="impl-7"{print $6}')
 [ "$turns1" = "42" ] && ok "lane-status: turns column reads the same stamp staleness reads" \
     || bad "lane-status: turns column did not read the progress stamp ('$turns1')"
+# P55: `cost` lands after `turns` (column 7), priced from the session log's
+# own `message.usage` — 1M haiku input tokens at $1.00/MTok is exactly $1,
+# chosen to sidestep float-formatting noise in the assertion.
+mkdir -p "$LOOM_HOME/logs"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$LOOM_HOME/logs/lane-impl-7.jsonl"
+cost7=$("$TICK" lane-status | awk '$1=="impl-7"{print $7}')
+[ "$cost7" = "1" ] && ok "lane-status: cost column prices the session log by its own model" \
+    || bad "lane-status: cost column wrong ('$cost7', want 1)"
+rm -f "$LOOM_HOME/logs/lane-impl-7.jsonl"
 for g in impl-7 gate-7 gate-7-r2 merge-7 probe-e11; do "$TICK" clear-lane "$g" >/dev/null; done
 
 # 4e3. Merge lock (P5). Merging is the only step needing single-writer
@@ -3069,6 +3079,37 @@ case "$out" in
     *"#2 at 20m0s  ←  #1 at 10m0s"*) ok "retro: the chain that finished last is walked back through deps" ;;
     *) bad "retro: critical chain wrong ($(printf '%s' "$out" | grep '←')) " ;;
 esac
+
+# 12a2. P55: spend, priced from each lane's own session log — round token
+#       counts (1M input tokens per lane) so the dollar amounts land on exact
+#       integers and the assertion isn't chasing float formatting.
+mkdir -p "$RT/home/logs"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$RT/home/logs/lane-impl-1.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$RT/home/logs/lane-gate-1.jsonl"
+out=$(RTENV "$TICK" retro --build build-r 2>&1)
+case "$out" in
+    *"Spend   (priced from every lane session log)"*) ok "retro: spend section is present" ;;
+    *) bad "retro: no spend section in output" ;;
+esac
+case "$out" in
+    *"total          \$4"*) ok "retro: spend totals every priced lane, not just one kind" ;;
+    *) bad "retro: spend total wrong ($(printf '%s' "$out" | grep -A1 'Spend '))" ;;
+esac
+case "$out" in
+    *"  impl  \$3"*"  gate  \$1"*) ok "retro: spend is split by lane kind, most expensive first" ;;
+    *) bad "retro: spend-by-kind wrong ($(printf '%s' "$out" | grep -E '^  (impl|gate)  \$'))" ;;
+esac
+case "$out" in
+    *"top spenders"*"impl-1  \$3"*) ok "retro: the top spender names the lane and its price" ;;
+    *) bad "retro: top spenders missing impl-1 ($(printf '%s' "$out" | grep -A3 'top spenders'))" ;;
+esac
+case "$out" in
+    *"  by ticket"*"#1  \$4"*) ok "retro: spend rolls up to the ticket its lanes worked" ;;
+    *) bad "retro: per-ticket spend wrong ($(printf '%s' "$out" | grep -A3 'by ticket'))" ;;
+esac
+rm -f "$RT/home/logs/lane-impl-1.jsonl" "$RT/home/logs/lane-gate-1.jsonl"
 
 # 12a. Planted violation: strip the field the buckets depend on. A missing
 #      impl_free must read as UNKNOWN, never as zero — reading it as zero
