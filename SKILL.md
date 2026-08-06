@@ -239,6 +239,16 @@ refuses outside herdr anyway.
    gate run the harness auto-backgrounded blocked on `TaskOutput` over a
    deadlocked pytest and read `running` for 33 minutes.)*
 
+   A lane can also be `running` — genuinely making turns — and still be a
+   problem: past `lane_turn_cap` (`lane-status`'s `turns` column, the same
+   stamp staleness reads), that is effort, not progress. Treat it the way a
+   spent `rejection_cap` is treated: `tick.sh kill-lane`, then
+   `lane.sh transition <iid> blocked` with a report naming the turn count and
+   the last thing the lane was doing. A ticket that needs that many turns was
+   either written too big or the lane is lost — either way the next step is a
+   human decision, not more turns. *(paid: impl-43 ran 456 turns, ~$300, with
+   nothing watching the cost.)*
+
    A **dead merge lane whose ticket is still `merge-queue`** did not merge —
    but **`merge-queue` in the snapshot is not evidence of that**. Chained lanes
    land while a wave is mid-flight, and because the wave did not perform that

@@ -45,6 +45,7 @@ writing a new proposal that touches the same machinery.
 | P43 | Stop the watcher reading its own no-op events as build activity | implemented 2026-08-05 (`_last_activity_ts` scans for the newest non-`tick_skipped` event; the settle window no longer reads `events.jsonl` mtime) |
 | P41 | A concluded ticket should take its viewer pane with it, however it concluded | implemented 2026-08-04 (the ticket-closed read runs for every lane kind, not merge-* alone; probe panes and the failed-read default are unchanged) |
 | P44 | Even out the right column when a lane pane opens | implemented 2026-08-05 (`rebalance_column` in `watch-panes.sh` equalises the right column on the poll that opens a lane pane; only panes in `MAP` are touched, so the session pane and the ticker keep their sizes) |
+| P52 | A lane that runs away is stopped, not finished | implemented 2026-08-06 (`lane_turn_cap` config, default 150, surfaced in `resolve-config` and `snapshot`; `lane-status` gains a trailing `turns` column read from the existing `.progress` stamp; SKILL.md step 2 tells the wave to `kill-lane` + `transition <iid> blocked` past the cap, same as a spent `rejection_cap`) |
 
 ## Independent review round (2026-08-01)
 
@@ -1772,3 +1773,36 @@ reporting rects for the panes it has handed out):
 **What would falsify it.** A build where the human reports panes resizing under them while
 they were reading one — that means the pane-opening-only trigger is not the right rule — or
 any `pane resize` call landing on a pane that is not in `MAP`.
+
+## P52 · A lane that runs away is stopped, not finished
+
+**Problem.** Nothing in the machine bounds what one ticket may spend. `impl-43` ran 456
+turns at an average 426k context per turn — past the context window, so compaction had
+fired and the session was re-reading its own summarised history — for 194M cache-read
+tokens, about $300, or 9% of the whole build, on one ticket. The staleness watcher does not
+see this: the lane is making progress the entire time, so it reads `running` and healthy.
+`rejection_cap` and `crash_cap` bound *failures*; nothing bounds *effort*.
+
+**Fix.** The watcher already stamps `<id>.progress` from the filtered event count, so the
+turn count is in hand.
+
+- `lane_turn_cap` (config, default 150) joins the other caps: layered `cfg`, surfaced with
+  its source in `resolve-config`'s `.scalars`, and published in `snapshot`'s `.config`.
+- `cmd_lane_status` gains a trailing `turns` column (existing columns are untouched — `rc`
+  stays at `$5`) read straight from `$LANES_DIR/<id>.progress`, `-` before any stamp exists.
+  `snapshot.jq` carries it through to `.lanes[].turns`, so the wave never needs a second
+  tracker or filesystem read to compare a lane against the cap.
+- SKILL.md step 2 (Harvest lanes) tells the wave: a `running` lane past `lane_turn_cap` is
+  effort, not progress — treat it the way a spent `rejection_cap` is treated, `kill-lane`
+  then `lane.sh transition <iid> blocked` with a report naming the turn count and what the
+  lane was last doing. A ticket that needs that many turns was written too big (P53) or the
+  lane is lost; either way the next step is a human decision, not more turns.
+
+The comparison and the kill stay the wave's call, exactly like `rejection_cap` and
+`crash_cap` — `lane.sh` already documents that blocking on a cap is a decision, made via
+`transition`, not something a script enforces unilaterally.
+
+**Tests** (`scripts/tick-test.sh`): `lane_turn_cap` defaults to 150 and is surfaced with its
+layer in `resolve-config`, like the other caps; it is published in `snapshot`'s `.config`;
+`lane-status`'s new `turns` column reads the `.progress` stamp and leaves `rc` in place at
+column 5; a lane's `turns` travels into `snapshot`'s `.lanes[]`.

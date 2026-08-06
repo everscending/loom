@@ -255,6 +255,19 @@ types=$("$TICK" lane-status | awk '$1 ~ /-7$|-7-r2$|^probe-e11$/{print $4}' | so
 st=$("$TICK" lane-status | awk '$1=="impl-7"{print $3}')
 [ "$st" = "dead" ] && ok "lane-status: state stays in column 3 for existing readers" \
     || bad "lane-status: state column moved ('$st')"
+# P52: `turns` lands at the END (column 6) so `rc` at $5 does not move under
+# existing readers — impl-7 ran `true` and already exited 0, which is the
+# existing rc contract; only the trailing column is new.
+rc5=$("$TICK" lane-status | awk '$1=="impl-7"{print $5}')
+[ "$rc5" = "0" ] && ok "lane-status: rc stays in column 5 with turns appended" \
+    || bad "lane-status: rc column moved ('$rc5')"
+turns0=$("$TICK" lane-status | awk '$1=="impl-7"{print $6}')
+[ "$turns0" = "-" ] && ok "lane-status: turns column is '-' before any progress stamp" \
+    || bad "lane-status: turns column wrong before stamping ('$turns0')"
+printf '42\n' > "$LOOM_HOME/lanes/impl-7.progress"
+turns1=$("$TICK" lane-status | awk '$1=="impl-7"{print $6}')
+[ "$turns1" = "42" ] && ok "lane-status: turns column reads the same stamp staleness reads" \
+    || bad "lane-status: turns column did not read the progress stamp ('$turns1')"
 for g in impl-7 gate-7 gate-7-r2 merge-7 probe-e11; do "$TICK" clear-lane "$g" >/dev/null; done
 
 # 4e3. Merge lock (P5). Merging is the only step needing single-writer
@@ -1456,6 +1469,15 @@ if [ "$rc" = 0 ] && jq -e . "$T/snap.json" >/dev/null 2>&1; then
 else
     bad "snapshot: did not emit valid JSON (rc=$rc, $(head -2 "$T/snap.err"))"
 fi
+# P52: the lane's turn count travels into the snapshot too — the wave
+# compares it against .config.lane_turn_cap without a second tracker read.
+# Its own stub log: appending to $CALLS would corrupt the 7b call-count test.
+printf '17\n' > "$LOOM_HOME/lanes/merge-51.progress"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-turns" "$TICK" snapshot \
+    > "$T/snap-turns.json" 2>/dev/null
+[ "$(jq -r '.lanes[] | select(.id=="merge-51") | .turns' "$T/snap-turns.json")" = "17" ] \
+    && ok "snapshot: lane turns travel through to .lanes[].turns" \
+    || bad "snapshot: lane turns missing from snapshot ($(jq -c '.lanes[] | select(.id=="merge-51")' "$T/snap-turns.json"))"
 # 7a2. Lane accounting (P10). The snapshot is what the wave reads before
 #      deciding to fill a lane, so the impl/aux split has to be visible there.
 #      Two gates plus a probe alongside one implementer is the exact shape that
@@ -1676,6 +1698,11 @@ jq -e '[.warnings[] | select(test("#30") and test("still assigned"))] | length =
 [ "$(jq -r '.config.merge_attempt_cap' "$T/snap-unblocked.json")" != "null" ] \
     && ok "snapshot: merge_attempt_cap is published so the wave can bound retries" \
     || bad "snapshot: no merge_attempt_cap in config"
+# P52: lane_turn_cap must be published the same way — a wave cannot bound a
+# runaway lane's spend against a cap it never received.
+[ "$(jq -r '.config.lane_turn_cap' "$T/snap-unblocked.json")" != "null" ] \
+    && ok "snapshot: lane_turn_cap is published so the wave can bound a runaway lane" \
+    || bad "snapshot: no lane_turn_cap in config"
 # Tier falls back to the SCOPED label when the body has no `## Risk tier`.
 # The fallback existed but matched a bare `ui`, while `bootstrap.sh` creates
 # `tier::ui` — so it was dead in every repo this skill bootstraps, and a
@@ -2337,6 +2364,17 @@ sed -i.bak '/^stall_action: notify_only$/d;/^max_aux_lanes: 2$/d' "$RC/global.ym
     && [ "$(rc "$RC/bare" | jq -r '.scalars.max_aux_lanes.value')" = "4" ] \
     && ok "resolve-config: unset stall_action/max_aux_lanes report the real defaults" \
     || bad "resolve-config: default disagrees with the code ($(rc "$RC/bare" | jq -c '.scalars | {stall_action, max_aux_lanes}'))"
+
+# 8d³. P52: lane_turn_cap bounds EFFORT, unlike rejection_cap/crash_cap which
+# bound failures — hidden here is a wave silently never noticing a runaway lane.
+printf 'lane_turn_cap: 80\n' >> "$RC/global.yml"
+[ "$(rc "$RC/bare" "$RC/global.yml" | jq -r '.scalars.lane_turn_cap | "\(.value)/\(.source)"')" = "80/global" ] \
+    && ok "resolve-config: lane_turn_cap surfaced with its layer" \
+    || bad "resolve-config: lane_turn_cap hidden ($(rc "$RC/bare" "$RC/global.yml" | jq -c '.scalars.lane_turn_cap'))"
+sed -i.bak '/^lane_turn_cap: 80$/d' "$RC/global.yml"
+[ "$(rc "$RC/bare" | jq -r '.scalars.lane_turn_cap | "\(.value)/\(.source)"')" = "150/default" ] \
+    && ok "resolve-config: unset lane_turn_cap reports the real default (150)" \
+    || bad "resolve-config: lane_turn_cap default disagrees with the code ($(rc "$RC/bare" | jq -c '.scalars.lane_turn_cap'))"
 
 # 8e. A repo `gates:` block overrides the derived pack wholesale.
 cat > "$RC/uv/.loom.yml" <<'EOF'

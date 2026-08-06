@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P52 | A lane that runs away is stopped, not finished | open — proposed 2026-08-06; one ticket ran 456 turns at 426k context/turn, ~$300 of a $3.4k build, with nothing watching the cost |
 | P51 | The wave reads a brief snapshot, not the whole board | open — proposed 2026-08-06; the snapshot is a wave's largest single input (73k chars here, 59% of it ticket rows the wave cannot act on) |
 | P53 | Ticket size is a phase-4 output, like width | open — proposed 2026-08-06; implementation lanes are 57% of build spend and their cost is fixed when the ticket is written, not when it runs |
 | P54 | The wave reads the snapshot once | open — proposed 2026-08-06; step 1 mandates a re-read after writes, and the second read re-sends the whole document |
@@ -526,23 +525,6 @@ A sixth case asserts the inverse for the cheap half: a ticket that is blocked by
 issue, unclaimed and laneless appears **only** as an iid, so the saving is real and not
 quietly undone by a filter that keeps everything. If a later step needs a field the brief
 row drops, add the field — never widen the filter back to "all tickets".
-
-## P52 · A lane that runs away is stopped, not finished
-
-**Problem.** Nothing in the machine bounds what one ticket may spend. `impl-43` ran 456
-turns at an average 426k context per turn — past the context window, so compaction had
-fired and the session was re-reading its own summarised history — for 194M cache-read
-tokens, about $300, or 9% of the whole build, on one ticket. The staleness watcher does not
-see this: the lane is making progress the entire time, so it reads `running` and healthy.
-`rejection_cap` and `crash_cap` bound *failures*; nothing bounds *effort*.
-
-**Fix direction.** The watcher already stamps `<id>.progress` from the filtered event
-count, so the turn count is in hand. Add `lane_turn_cap` (config, default around 150) and
-have the harvest step treat a lane past it the way it treats a spent `rejection_cap`:
-`kill-lane`, then `transition <iid> blocked` with a report naming the turn count and the
-last thing the lane was doing. A ticket that needs 400 turns is a ticket that was written
-wrong (P53) or a lane that is lost; either way the answer is a human decision, not more
-turns. Cheap to implement — no new bookkeeping, one comparison in harvest.
 
 ## P53 · Ticket size is a phase-4 output, like width
 

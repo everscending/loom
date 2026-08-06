@@ -1628,8 +1628,10 @@ cmd_lane_status() {
         fi
         # New columns go on the END: existing readers index state at $3, type
         # at $4. `rc` is `-` until the lane exits; 7 means its pregate rejected
-        # the branch before any review session ran (P12).
-        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -)"
+        # the branch before any review session ran (P12). `turns` (P52) is the
+        # same filtered event count `.progress` already stamps for staleness —
+        # a spend signal, not a liveness one — `-` when no stamp exists yet.
+        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -)"
     done
 }
 
@@ -1916,6 +1918,7 @@ cmd_snapshot() {
         --arg max_lanes "$(cfg max_lanes 4)" --arg rejection_cap "$(cfg rejection_cap 2)" \
         --arg crash_cap "$(cfg crash_cap 2)" --arg stale "$(cfg heartbeat_stale_minutes 30)" \
         --arg merge_attempt_cap "$(cfg merge_attempt_cap 2)" \
+        --arg lane_turn_cap "$(cfg lane_turn_cap 150)" \
         --arg base "$(cfg base '')" --arg max_aux "$(cfg max_aux_lanes 4)" \
         --arg lane_model "$(cfg lane_model '')" --arg rework_model "$(cfg rework_model '')" \
         '{ max_lanes: ($max_lanes | tonumber? // $max_lanes),
@@ -1923,6 +1926,7 @@ cmd_snapshot() {
            rejection_cap: ($rejection_cap | tonumber? // $rejection_cap),
            crash_cap: ($crash_cap | tonumber? // $crash_cap),
            merge_attempt_cap: ($merge_attempt_cap | tonumber? // $merge_attempt_cap),
+           lane_turn_cap: ($lane_turn_cap | tonumber? // $lane_turn_cap),
            heartbeat_stale_minutes: ($stale | tonumber? // $stale),
            lane_model: (if $lane_model == "" then null else $lane_model end),
            rework_model: (if $rework_model == "" then null else $rework_model end),
@@ -2576,6 +2580,7 @@ cmd_resolve_config() {
         --arg rej   "$(cfg rejection_cap 2)"       --arg rej_s   "$(cfg_source rejection_cap)" \
         --arg crash "$(cfg crash_cap 2)"           --arg crash_s "$(cfg_source crash_cap)" \
         --arg mcap  "$(cfg merge_attempt_cap 2)"   --arg mcap_s  "$(cfg_source merge_attempt_cap)" \
+        --arg tcap  "$(cfg lane_turn_cap 150)"     --arg tcap_s  "$(cfg_source lane_turn_cap)" \
         --arg stalem "$(cfg heartbeat_stale_minutes 30)" --arg stalem_s "$(cfg_source heartbeat_stale_minutes)" \
         --arg usage "$(cfg usage_limit pause_and_resume)" --arg usage_s "$(cfg_source usage_limit)" \
         --arg fbm  "$(cfg fallback_model sonnet)"        --arg fbm_s   "$(cfg_source fallback_model)" \
@@ -2594,6 +2599,7 @@ cmd_resolve_config() {
             rejection_cap:           {value: $rej,    source: $rej_s},
             crash_cap:               {value: $crash,  source: $crash_s},
             merge_attempt_cap:       {value: $mcap,   source: $mcap_s},
+            lane_turn_cap:           {value: $tcap,   source: $tcap_s},
             heartbeat_stale_minutes: {value: $stalem, source: $stalem_s},
             min_wave_gap_minutes:    {value: $wgap,   source: $wgap_s},
             usage_limit:             {value: $usage,  source: $usage_s},

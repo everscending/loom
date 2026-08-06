@@ -168,7 +168,7 @@
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
        | map({id: .[0], pid: .[1], state: .[2], type: (.[3] // "unknown"),
-              rc: (.[4] // "-")})) as $lanes
+              rc: (.[4] // "-"), turns: (.[5] // "-")})) as $lanes
     # Which tickets already have a verifier on them. Needed because a lane may
     # now spawn its own gate (P6), and the completion tick it fires lands on a
     # wave that would otherwise spawn a second one under the same id — which
