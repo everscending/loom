@@ -216,10 +216,16 @@ singleton per repo (a second launch exits quietly), so doing this on every
 manual tick is safe. Headless waves have no herdr and skip it; watch-panes
 refuses outside herdr anyway.
 
-1. **Read**: `tick.sh snapshot` — one JSON document: open `build-N` tickets
-   (labels, assignees, tier, blocking edges + closed flags), epic rollup, lane
-   states, lessons tail. Derived and disposable; after your own writes
-   (claims, merges, verdicts) re-run it, never query piecemeal.
+1. **Read**: `tick.sh snapshot --brief` — one JSON document: open `build-N`
+   tickets (labels, assignees, tier, blocking edges + closed flags), epic
+   rollup, lane states, lessons tail. Derived and disposable; after your own
+   writes (claims, merges, verdicts) re-run it, never query piecemeal.
+   `--brief` is the wave's default: a full row only for a ticket this turn can
+   act on (ready+unblocked+unclaimed, gateable, in the merge queue, stranded,
+   or holding a lane) — everything else is a bare iid in `.other_iids`, since
+   `summary` already carries the counts. Plain `snapshot` (no flag) is for
+   `watch`, `graph` and a human. *(paid: 54 tickets cost 73k characters, 59%
+   of it rows a wave could not act on that turn.)*
 
 2. **Harvest lanes.** `rc` 7 = its pregate rejected the branch, not a crash —
    post the rejection straight from the lane log, no verifier. Other `dead`

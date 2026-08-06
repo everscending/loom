@@ -1750,6 +1750,12 @@ _snap_batch_gate() {
 }
 
 cmd_snapshot() {
+    # P51: --brief keeps a full row only for a ticket the wave can act on
+    # THIS turn (see is_actionable in snapshot.jq); the rest collapse to a
+    # bare iid in `.other_iids`. `snapshot` plain stays full — watch, graph
+    # and humans read it, and only the wave's own step-1 read asks for less.
+    local brief=false
+    case "${1:-}" in --brief) brief=true; shift ;; esac
     command -v jq >/dev/null 2>&1 || die "snapshot: jq required"
     # The document builder lives in snapshot.jq beside this script. Say so
     # here: without the check jq fails deep in stage 3 with its own message
@@ -1945,6 +1951,7 @@ cmd_snapshot() {
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg label "$label" --arg build_iid "$build_iid" \
         --arg merge_owner "$(_merge_lock_owner)" \
+        --argjson brief "$brief" \
         -f "$SNAP_JQ"
 
     # The retro record is derived from the finished snapshot, never recomputed
@@ -2851,5 +2858,5 @@ case "${1:-}" in
     agent-status) shift; cmd_agent_status "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
-    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot | graph [file] | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
+    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | graph [file] | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
 esac

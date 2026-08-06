@@ -8,7 +8,7 @@
 # may use apostrophes like prose.
 #
 # Inputs are bound by tick.sh: --slurpfile open/links/mrs/notes/tnotes/
-# milestones/closed, --rawfile lanes_raw/warn_raw, --argjson config, and
+# milestones/closed, --rawfile lanes_raw/warn_raw, --argjson config/brief, and
 # --arg logs_dir/generated_at/label/build_iid/merge_owner. Output is the single
 # JSON document a wave reads; every consumer of a field is named at the field.
 
@@ -160,6 +160,24 @@
           closed: (if $state != null then ($state == "closed")
                    elif ($proj != null and $home != null and $proj != $home) then null
                    else (($open_iids | index($iid)) == null) end) };
+    # P51: --brief keeps a full ticket row only where a wave can act THIS
+    # turn; everything else collapses to a bare iid in `.other_iids`, since
+    # `summary` already carries the counts. $working is the iid (as string)
+    # of every ticket holding a lane of any kind, alive or stale — the same
+    # set `summary.stranded` is defined against, so the two can never drift
+    # apart. The five clauses are the five bullets in the proposal: ready and
+    # unblocked and unclaimed; gateable; in the merge queue (the whole queue,
+    # not just the head — order matters there); stranded (in-progress, no
+    # lane); and holding a lane whatever its label, which is what still needs
+    # a full row for a ticket already `review` behind a running gate lane —
+    # `gate.eligible` is false there precisely because it is already gated.
+    def is_actionable($t; $working):
+        ($t.state == "ready-for-agent" and $t.unblocked and (($t.assignees | length) == 0))
+        or ($t.state == "review" and ($t.gate.eligible // false))
+        or ($t.state == "merge-queue")
+        or ($t.state == "in-progress"
+            and ((($t.iid | tostring) as $i | $working | index($i)) == null))
+        or ((($t.iid | tostring) as $i | $working | index($i)) != null);
 
     ($open[0]) as $issues
     | ($issues | map(.iid)) as $open_iids
@@ -169,6 +187,13 @@
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
        | map({id: .[0], pid: .[1], state: .[2], type: (.[3] // "unknown"),
               rc: (.[4] // "-"), turns: (.[5] // "-")})) as $lanes
+    # The ticket iid (as a string) behind every ALIVE lane, whatever its kind
+    # — a probe's id has no ticket iid in it and simply never matches. Shared
+    # by `summary.stranded` (in-progress AND absent here) and the P51 brief
+    # filter (present here, in ANY state) so the two definitions cannot drift.
+    | ($lanes | map(select(.state != "dead")
+                 | .id | sub("^(impl|gate|merge|probe)-"; "")
+                 | sub("-r[0-9]+$"; ""))) as $working
     # Which tickets already have a verifier on them. Needed because a lane may
     # now spawn its own gate (P6), and the completion tick it fires lands on a
     # wave that would otherwise spawn a second one under the same id — which
@@ -326,7 +351,15 @@
         build: (if $bi == null then null
                 else { iid: $bi.iid, label: $label, title: $bi.title, url: ($bi.web_url // null) } end),
         epics: $epics,
-        tickets: $tickets,
+        # P51: --brief keeps a full row only for what is_actionable calls
+        # in-play this turn; the rest are still counted in `summary` below,
+        # just not carried here — `other_iids` is the bare list so a wave can
+        # still name one without a second read. Plain `snapshot` (the default)
+        # never filters: `$brief` is false and every ticket keeps its row.
+        tickets: (if $brief then [$tickets[] | select(is_actionable(.; $working))]
+                  else $tickets end),
+        other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .iid]
+                     else [] end),
         lanes: $lanes,
         lessons_tail: ($notes[0] | map(select((.system // false) | not))
                        | map({author: (.author.username? // null), created_at, body})),
@@ -375,10 +408,7 @@
             # tickets strand forever while fresh claims take the slots.
             # Consumer: the wave fill step, rework FIRST. (Paid for:
             # build-3 2026-08-02 — #11/#12 gate-FAILed and sat unworked.)
-            stranded: (($lanes | map(select(.state != "dead")
-                        | .id | sub("^(impl|gate|merge|probe)-"; "")
-                        | sub("-r[0-9]+$"; ""))) as $working
-                       | $tickets
+            stranded: ($tickets
                        | map(select(.state == "in-progress"
                               and (((.iid | tostring) as $i
                                     | $working | index($i)) | not)))

@@ -46,6 +46,7 @@ writing a new proposal that touches the same machinery.
 | P41 | A concluded ticket should take its viewer pane with it, however it concluded | implemented 2026-08-04 (the ticket-closed read runs for every lane kind, not merge-* alone; probe panes and the failed-read default are unchanged) |
 | P44 | Even out the right column when a lane pane opens | implemented 2026-08-05 (`rebalance_column` in `watch-panes.sh` equalises the right column on the poll that opens a lane pane; only panes in `MAP` are touched, so the session pane and the ticker keep their sizes) |
 | P52 | A lane that runs away is stopped, not finished | implemented 2026-08-06 (`lane_turn_cap` config, default 150, surfaced in `resolve-config` and `snapshot`; `lane-status` gains a trailing `turns` column read from the existing `.progress` stamp; SKILL.md step 2 tells the wave to `kill-lane` + `transition <iid> blocked` past the cap, same as a spent `rejection_cap`) |
+| P51 | The wave reads a brief snapshot, not the whole board | implemented 2026-08-06 (`snapshot --brief` keeps a full row only for a ticket `is_actionable` (snapshot.jq) calls in-play this turn — ready+unblocked+unclaimed, gateable, merge-queue, stranded, or holding any lane — everything else collapses to a bare iid in `.other_iids`; SKILL.md step 1 names `--brief` as the wave's default read, plain `snapshot` unchanged for `watch`/`graph`/humans) |
 
 ## Independent review round (2026-08-01)
 
@@ -1806,3 +1807,46 @@ The comparison and the kill stay the wave's call, exactly like `rejection_cap` a
 layer in `resolve-config`, like the other caps; it is published in `snapshot`'s `.config`;
 `lane-status`'s new `turns` column reads the `.progress` stamp and leaves `rc` in place at
 column 5; a lane's `turns` travels into `snapshot`'s `.lanes[]`.
+
+## P51 · The wave reads a brief snapshot, not the whole board
+
+**Problem.** `snapshot` is the largest single input any wave reads, and it grows with the
+build rather than with the work. On ai-workout-generator-copilot it is 73k characters, of
+which 43k is 54 per-ticket rows; a wave acts on perhaps five of them. Every other row
+carries `unblocked: false` or `gate.eligible: false` with no lane and no rejections — the
+wave reads it, pays for it in cache creation, and pays for it again on every subsequent
+turn of that session.
+
+**Fix.** `snapshot --brief` (`cmd_snapshot`, `tick.sh`): a full row only for a ticket the
+wave can act on this turn, everything else a bare iid.
+
+- `snapshot.jq` gains `is_actionable($t; $working)` and a `$working` binding (the ticket iid,
+  as a string, behind every ALIVE lane of any kind — factored out of `summary.stranded`,
+  which used to compute the same set inline, so the brief filter and `stranded` can never
+  read it differently). The five clauses are the five states named below.
+- The final document's `tickets` key is the actionable subset under `--brief`, unchanged
+  otherwise; a new `other_iids` key carries the bare iids of the rest (`[]` when not brief).
+  `summary`, `epics` and `warnings` still run over the full internal ticket list either way —
+  only the two output keys are filtered.
+- `cmd_snapshot` takes `--brief` as its first argument and passes `--argjson brief
+  true|false` into the jq program. SKILL.md step 1 names `snapshot --brief` as the wave's
+  default read; plain `snapshot` (unchanged) stays for `watch`, `graph` and a human.
+
+**"Actionable"** — a full row survives for a ticket that is any of:
+
+1. `ready-for-agent`, unclaimed, and `unblocked: true` — the fill step's ready set.
+2. `review` with `gate.eligible: true` — the gate step.
+3. `merge-queue` — the merge step, including tickets behind the one being merged, because
+   the queue is ordered oldest-first and the wave must see the order.
+4. Listed in `summary.stranded` — `in-progress` with no alive lane, the rework path.
+5. Holding a live lane of any kind, whatever its label — harvest reads these, and this is
+   what still surfaces a `review` ticket already behind a running gate lane, where
+   `gate.eligible` reads false precisely because it is already gated.
+
+**Tests** (`scripts/tick-test.sh`): one fixture ticket per clause above (seven total,
+including two `merge-queue` tickets to prove the whole queue survives, not just the head,
+and a `review` ticket held by a live `gate-*` lane to prove clause 5 catches what clause 2
+cannot) asserts `--brief` keeps exactly those six full rows; a seventh ticket — blocked by
+an open ticket, unclaimed, laneless — asserts the inverse: present only in `other_iids`.
+A last case asserts plain `snapshot` (no flag) still carries every ticket and `other_iids`
+stays empty, so the filter is opt-in.

@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P51 | The wave reads a brief snapshot, not the whole board | open — proposed 2026-08-06; the snapshot is a wave's largest single input (73k chars here, 59% of it ticket rows the wave cannot act on) |
 | P53 | Ticket size is a phase-4 output, like width | open — proposed 2026-08-06; implementation lanes are 57% of build spend and their cost is fixed when the ticket is written, not when it runs |
 | P54 | The wave reads the snapshot once | open — proposed 2026-08-06; step 1 mandates a re-read after writes, and the second read re-sends the whole document |
 | P55 | `retro` reports spend, not just time | open — proposed 2026-08-06; the per-lane cost split took a one-off script, and nothing in the skill surfaces it |
@@ -489,42 +488,6 @@ Three findings were config changes rather than proposals, and were applied to
 `~/.loom/config.yml` on 2026-08-06: `rejection_cap` 3 → 2, `rework_model` opus → sonnet
 (19 impl reworks and 35 re-gates in that build, one of them a round-4 Opus lane costing
 102M cache reads on its own), and `min_wave_gap_minutes` 10 → 20.
-
-## P51 · The wave reads a brief snapshot, not the whole board
-
-**Problem.** `snapshot` is the largest single input any wave reads, and it grows with the
-build rather than with the work. On ai-workout-generator-copilot it is 73k characters, of
-which 43k is 54 per-ticket rows; a wave acts on perhaps five of them. Every other row
-carries `unblocked: false` or `gate.eligible: false` with no lane and no rejections — the
-wave reads it, pays for it in cache creation, and pays for it again on every subsequent
-turn of that session.
-
-**Fix direction.** `snapshot --brief`: full rows only for tickets the wave can act on this
-turn (ready and unblocked, in `review` with `gate.eligible`, `merge-queue`, stranded, or
-holding a live lane), plus counts and a bare iid list for the rest. Everything the
-scheduler needs to *decide* stays; everything it only needs to *report* becomes a number.
-`summary`, `epics` and `warnings` are unchanged — they are already small and every wave
-reads them. SKILL.md step 1 names `--brief` as the wave's default read; plain `snapshot`
-stays for `watch`, `graph` and humans.
-
-**Write the test before the filter.** Dropping an actionable ticket fails silently: nothing
-errors, the wave simply stops scheduling that ticket, and the build looks healthy. The suite
-case asserts that a ticket in **any** of these five states carries a full row in `--brief`
-output, one fixture per state, and it is the definition of "actionable" the filter is
-written against — not a summary of it:
-
-1. `ready-for-agent`, unclaimed, and `unblocked: true` — the fill step's ready set.
-2. `review` with `gate.eligible: true` — the gate step.
-3. `merge-queue` — the merge step, including tickets behind the one being merged, because
-   the queue is ordered oldest-first and the wave must see the order.
-4. Listed in `summary.stranded` — `in-progress` with no alive lane, the rework path.
-5. Holding a live lane of any kind, whatever its label — harvest reads these, and a lane
-   whose ticket vanished from the board is unharvestable.
-
-A sixth case asserts the inverse for the cheap half: a ticket that is blocked by an open
-issue, unclaimed and laneless appears **only** as an iid, so the saving is real and not
-quietly undone by a filter that keeps everything. If a later step needs a field the brief
-row drops, add the field — never widen the filter back to "all tickets".
 
 ## P53 · Ticket size is a phase-4 output, like width
 

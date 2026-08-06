@@ -1741,6 +1741,57 @@ for l in gate-61 gate-62 probe-e61; do
     "$TICK" clear-lane "$l" >/dev/null
 done
 
+# 7a8. P51: `snapshot --brief` keeps a full row only for a ticket the wave can
+#      act on THIS turn; the rest collapse to a bare iid in `.other_iids`. One
+#      fixture ticket per bullet in the proposal, plus the inverse case.
+cat > "$FX/open-brief.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- Brief epic (#201, #202, #203, #204, #205, #206, #207)\n"},
+ {"iid":201,"title":"Ready and unblocked","project_id":1,"web_url":"https://x/201",
+  "labels":["build-9","ready-for-agent"],"assignees":[]},
+ {"iid":202,"title":"Gateable","project_id":1,"web_url":"https://x/202",
+  "labels":["build-9","review"],"assignees":[{"username":"agent-a"}]},
+ {"iid":203,"title":"Head of the merge queue","project_id":1,"web_url":"https://x/203",
+  "labels":["build-9","merge-queue"],"assignees":[{"username":"agent-a"}]},
+ {"iid":204,"title":"Behind it in the merge queue","project_id":1,"web_url":"https://x/204",
+  "labels":["build-9","merge-queue"],"assignees":[{"username":"agent-a"}]},
+ {"iid":205,"title":"Stranded — in-progress, no lane","project_id":1,"web_url":"https://x/205",
+  "labels":["build-9","in-progress"],"assignees":[{"username":"agent-a"}]},
+ {"iid":206,"title":"Review, already behind a running gate lane","project_id":1,"web_url":"https://x/206",
+  "labels":["build-9","review"],"assignees":[{"username":"agent-a"}]},
+ {"iid":207,"title":"Blocked by an open ticket, unclaimed, laneless","project_id":1,"web_url":"https://x/207",
+  "labels":["build-9","ready-for-agent"],"assignees":[],
+  "description":"## Blocked by\n\n- #205 stranded ticket above\n"}
+]
+EOF
+cat > "$FX/mrs-202.json" <<'EOF'
+[{"iid":202,"title":"Gateable","state":"opened","draft":false,"web_url":"https://x/mr/202","source_branch":"t202","sha":"aaaaaaa0000000000000000000000000000000"}]
+EOF
+cat > "$FX/mrs-206.json" <<'EOF'
+[{"iid":206,"title":"Behind a gate","state":"opened","draft":false,"web_url":"https://x/mr/206","source_branch":"t206","sha":"bbbbbbb0000000000000000000000000000000"}]
+EOF
+"$TICK" spawn-lane gate-206 -- sleep 20 >/dev/null
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-brief" \
+    "$TICK" snapshot --brief > "$T/snap-brief.json" 2>/dev/null
+[ "$(jq -c '[.tickets[].iid] | sort' "$T/snap-brief.json")" = "[201,202,203,204,205,206]" ] \
+    && ok "brief: full rows for ready+unblocked, gateable, both merge-queue tickets, stranded, and a lane-held review ticket" \
+    || bad "brief: tickets = $(jq -c '[.tickets[].iid] | sort' "$T/snap-brief.json"), want [201,202,203,204,205,206]"
+[ "$(jq -c '.other_iids' "$T/snap-brief.json")" = "[207]" ] \
+    && ok "brief: the blocked, unclaimed, laneless ticket is a bare iid, not a full row" \
+    || bad "brief: other_iids = $(jq -c '.other_iids' "$T/snap-brief.json"), want [207]"
+[ "$(jq -r '.tickets[] | select(.iid==206) | .gate.eligible' "$T/snap-brief.json")" = "false" ] \
+    && ok "brief: #206 earns its row via the lane clause, not the gateable one (already gated)" \
+    || bad "brief: #206 unexpectedly gate.eligible — the fixture no longer tests what it claims to"
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-brief-full" \
+    "$TICK" snapshot > "$T/snap-full.json" 2>/dev/null
+[ "$(jq -c '[.tickets[].iid] | sort' "$T/snap-full.json")" = "[201,202,203,204,205,206,207]" ] \
+    && [ "$(jq -c '.other_iids' "$T/snap-full.json")" = "[]" ] \
+    && ok "brief: plain snapshot (no flag) still carries every ticket, other_iids empty" \
+    || bad "brief: plain snapshot filtered rows or populated other_iids ($(jq -c '{t: [.tickets[].iid], o: .other_iids}' "$T/snap-full.json"))"
+kill "$(cat "$LOOM_HOME/lanes/gate-206.pid" 2>/dev/null)" 2>/dev/null
+"$TICK" clear-lane gate-206 >/dev/null
+
 # The scheduler's universe is "open issues labeled build-N" — #20 is neither.
 jq -e '[.tickets[].iid] | index(20)' "$T/snap.json" >/dev/null 2>&1 \
     && bad "snapshot: non-member issue leaked into tickets" \
