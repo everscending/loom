@@ -50,6 +50,7 @@ writing a new proposal that touches the same machinery.
 | P55 | `retro` reports spend, not just time | implemented 2026-08-06 (`USAGE_JQ` in `tick.sh` prices a session log from its own `message.usage`; `lane-status` gains a trailing `cost` column; `retro` gains a Spend section — total, by lane kind, top spenders, by ticket — joined against the per-lane logs `clear-lane` never removes) |
 | P53 | Ticket size is a phase-4 output, like width | implemented 2026-08-06 (`references/ticket-template.md` gains a Size section; `snapshot.jq` computes `criteria_count`/`file_surface` per ticket; `tick.sh graph` flags an outsized one `likely_deep` and folds a `LIKELY DEEP` clause into `.verdict`; `references/phases-1-5.md` phase 5 names the new verdict alongside `CHAIN-SHAPED`/`NARROW START`) |
 | P57 | Acceptance criteria travel with the probe, not with every wave | implemented 2026-08-06 (`snapshot.jq`: `--brief` drops the `acceptance` key from every epic whose `needs_probe` is false, keeping it byte-identical for an epic awaiting its probe; warnings still computed from the untrimmed epics; no SKILL.md change) |
+| P59 | A pinned interface names fields, not references | implemented 2026-08-06 (`references/ticket-template.md` Pinned interfaces section and `references/phases-1-5.md` phase 4 bullet both now require fields/values/shapes, name a bare endpoint path/type name/file path as a reference not a pin, and require a shape absent from every document of record to be specified in the ticket itself) |
 
 ## Independent review round (2026-08-01)
 
@@ -1974,3 +1975,38 @@ the same trim. Full suite: 456 passed, 0 failed.
 **Relation to P54.** These two now overlap: with the epics block cut, the second snapshot read P54
 targets falls to roughly 2k tokens, and P54's own estimate — already reduced from 4-6% to about 1%
 by P51 — shrinks further. Re-measure against a post-P57 `retro` before spending anything on P54.
+
+## P59 · A pinned interface names fields, not references
+
+**Problem.** `ticket-template.md` requires a **Pinned interfaces** section when tickets share a seam:
+"the exact signature goes verbatim into *every* affected ticket". Nothing checks that what lands
+there is a signature. A section listing an endpoint path satisfies the requirement identically to one
+listing a schema, so a ticket can promise non-relitigable stability for something it never wrote
+down — and a reviewer checking "is this pinned?" gets a yes.
+
+**Evidence.** Two of build-1's three interface tickets did it, and the same cause produced both:
+phase 4 transcribes what the documents of record name, and neither shape was named anywhere.
+
+- **#5** pinned "request and response schemas for `/api/members`, `/api/plan`, `/api/copilot`,
+  `/api/graph/focus`" — endpoint paths, no fields, no type names. Meanwhile #42 renders six specific
+  member fields, #40 a churn indicator, #43 a five-field snapshot with churn reasons carrying their
+  numbers. Whoever implemented #5 would have invented the member shape, and it would have been
+  non-relitigable from that moment — with #42 arriving at layer five to find its field missing.
+- **#9** is data-only, starts on day one, and #12 and #13 are specified to fail loudly against its
+  file. It carried no Pinned interfaces section at all, so three tickets would have started in
+  parallel against a format one of them was still inventing.
+
+Both were fixed by hand on 2026-08-06, before start. Neither was caught by anything.
+
+**Fix.** One line in `ticket-template.md`, and one in the phase-4 rules: a **Pinned
+interfaces** section states the fields, values and shapes — a type body, a JSON example with its
+field rules, a function signature. An endpoint path, a bare type name or a file path is a reference,
+not a pin. And: **an interface ticket whose shape appears in no document of record must specify the
+shape itself** — that is precisely the case where there is nothing to transcribe, and precisely where
+both failures happened.
+
+This is a checkable rule; the P58 step-4 checklist should pick it up too once P58 ships. It is also
+independently useful: on its own it would have caught both #5 and #9 without any of P51's machinery.
+
+**Tests.** Prose-only change in `references/`, which this skill's test suite does not cover — no
+`tick-test.sh` addition applies. Correctness here is a reading, not a check.

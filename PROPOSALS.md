@@ -64,6 +64,7 @@ evidence, and implementation notes belong in this file, not there.
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
+| P58 | Phase 4 drafts the whole set, then checks its own output once | open — proposed 2026-08-06; nine cross-ticket ambiguities in a 54-ticket set, none visible from inside one ticket; folds in the width and size rules, which check the same draft |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — proposed 2026-08-03; 4 of 5 gate rejections in one build |
 | P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
 | P3 | Actually arm the safety-net timer, and check that it worked | open — re-opened 2026-08-02; build-1 paid 2h08m for the unarmed backstop, and the shipped warning cried wolf after arming |
@@ -515,3 +516,93 @@ loop becomes a `lane.sh` verb that takes a URL or command plus a deadline and re
 ready/not-ready, so one shell call replaces a dozen model turns. That is the same
 "grow `lane.sh` until lanes barely need open shell" argument SKILL.md already makes for
 permissions, applied to spend. Smallest of the six; do it last.
+
+## P58 · Phase 4 drafts the whole set, then checks its own output once
+
+**Problem.** Phase 4 routes to `/to-tickets`, whose step 5 publishes one issue per ticket in
+dependency order. Each body is composed, pushed, and left behind before the next one starts, so
+**nothing ever holds the set**. Consistency across tickets is whatever survives in one long context,
+and it degrades as the set grows. `/to-tickets` step 4 then reviews the *breakdown* — title, blocking
+edges, one line of what each ticket delivers — never the bodies, so the human approves a shape and
+nobody reads the acceptance criteria as a body of work.
+
+**Evidence.** A single read of all 54 tickets of ai-workout-generator-copilot build-1, before start
+on 2026-08-06, found **nine ambiguities, every one of them in the join between two tickets and
+invisible from inside either**. Four would have failed the build or the demo: three tickets promised
+a Graph tab the build excluded; #34's acceptance forbade the retry its own design section required,
+with a test enforcing the contradiction; #36's intent list omitted the intent #54 exists to handle;
+#50 required progress states from an endpoint with no channel to deliver them. The other five were a
+rework round each. None was reachable by reviewing one ticket, and the blocking-edge closure check at
+build definition could not see any of them — it reads links, and these were written in prose.
+
+The set is ~95KB, about 25k tokens. It fits in one context comfortably; the pass that found all nine
+took one read.
+
+**Fix direction.** Publishing moves to the end of the phase, and an artifact the phase currently has
+no concept of is added in front of it:
+
+1. Read the source documents — unchanged.
+2. Write every ticket body into **one draft file, one epic at a time**. Per-epic because a single
+   pass over 58 bodies drifts by the end: the last epic's vocabulary wanders from the first's.
+3. Re-read the whole draft **from the file**, not from memory. This step does not exist today and is
+   the only one that can see across tickets.
+4. Run **one** check list over the draft — the phase's single self-check, replacing three rules
+   that today sit in three different files and fire at three different times (see below):
+
+   *Shape* — is this set buildable at speed?
+   - **width**: how many tickets can start at once, and at every layer, computed from the draft's own
+     edges. Where a heavy blocker gates several dependents, split it with a `Pinned interfaces`
+     ticket.
+   - **size**: no ticket whose acceptance criteria cannot plausibly be met in one focused sitting
+     (P53's `criteria_count` and `file_surface` proxies, read off the draft instead of the tracker).
+
+   *Consistency* — does the set agree with itself?
+   - every pinned interface names its fields (P59);
+   - every field a later ticket reads exists in the ticket that pins it;
+   - every capability one ticket's criteria assume has a ticket that builds it;
+   - shared vocabularies — status and severity words, intent lists, state names — are identical
+     everywhere they appear;
+   - no ticket's acceptance criteria contradict its own mandatory adversarial tests;
+   - every command a ticket's gate tier will run exists by the time that ticket merges.
+5. Show the human **the bodies**, not the titles, with the surviving ambiguities as decisions to
+   answer. `/lavish` already carries this shape.
+6. Apply the answers to the draft file.
+7. Hand the finished set to `/to-tickets` to publish. It keeps owning slicing, blocking edges and the
+   tracker mechanics; it stops owning the order in which bodies are decided.
+8. Keep the draft file. `replan` diffs against it.
+
+**Folding in the rules that already exist.** Phase 4 has accumulated three separate "check your own
+output" rules, written at three different times and living in three places:
+
+| Rule | Today | Fires |
+|------|-------|-------|
+| Width | `phases-1-5.md` phase 4 prose: "width is a ticket-writing output, not an afterthought" | decided in phase 4, **measured in phase 5** once the Build issue exists |
+| Size | `ticket-template.md` `## Size`, plus `graph`'s `LIKELY DEEP` verdict (P53) | measured in phase 5, from the tracker |
+| Consistency | nothing | never |
+
+All three ask the same question — *is the set I just wrote any good?* — and two of them can only be
+answered after the tickets are already published, which is why phase 5 exists partly to send you back
+to phase 4. The draft file collapses that: width is computable from the draft's edges, size from its
+criteria counts, consistency from reading it. **One gate, one list, before anything is published.**
+Phase 5 keeps its verdict as a backstop on the published build; it stops being the first time anyone
+finds out. A ninth ambiguity from the 2026-08-06 read belongs to that same list and to no existing
+rule: three E0 tickets carried gate tiers naming commands their own build had not written yet, which
+neither width nor size nor the edge check can see.
+
+**Where it goes.** Loom's own layer, never `/to-tickets` — that skill is shared with other work and
+this file's *stay inside this skill* rule binds. The seam already exists: phase 4 is defined as
+"route to `/to-tickets` **plus** the additions in `ticket-template.md`". The draft file, the check
+list and the human review are more additions; `/to-tickets` step 1 accepts conversation context, so a
+finished draft set is valid input to it.
+
+**Cost.** One extra full-set read and a fix round — roughly 40k tokens on a 58-ticket build. Against
+one lane blocked at layer five on a shape the rules call non-relitigable, with three tickets queued
+behind it, it is not a close call.
+
+**What would falsify it.** A drafted-and-checked set that still ships cross-ticket contradictions at
+the same rate — meaning the check list, not the missing artifact, was the constraint. Or a set small
+enough (say under 15 tickets) that one context never lost the thread, where the extra pass finds
+nothing and should be skipped.
+
+
+**Consumer.** Phase 4, and every ticket that imports a pinned shape without renegotiating it.

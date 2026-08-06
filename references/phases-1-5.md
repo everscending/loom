@@ -60,7 +60,10 @@ dependency order) **plus** the additions in
 - **Design decisions — implement, do not relitigate** (one line each,
   `Decision — reason`), closing every point two engineers could disagree on.
 - **Pinned interfaces**: when tickets share a seam, the exact signature goes
-  verbatim into *every* affected ticket.
+  verbatim into *every* affected ticket — fields, values and shapes, never a
+  bare endpoint path, type name or file path. A shape named in no document
+  of record must be specified here, not invented later by whichever ticket
+  starts first.
 - **Mandatory adversarial tests**: inputs that must be *rejected*, with the
   sentence "fix the rule, not my examples."
 - **Risk tier**: `docs | logic | api | ui` — selects the gate suite from

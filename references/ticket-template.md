@@ -17,7 +17,11 @@ silently turned into an invented threshold here.
 
 Only when this ticket shares a seam with another in-flight ticket: the
 exact signature(s), verbatim, identical in every affected ticket. Marked
-non-relitigable.
+non-relitigable. States fields, values and shapes — a type body, a JSON
+example with its field rules, a function signature. An endpoint path, a
+bare type name or a file path is a reference, not a pin. An interface
+ticket whose shape appears in no document of record must specify the
+shape itself.
 
 **This is also the widening tool.** A dependent needs its blocker's
 *interface*, not its merged body — so a heavy blocker gating several
