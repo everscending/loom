@@ -110,8 +110,15 @@ callers, three contracts — **`tick`** (a human typed it: always runs one wave,
 ignores switch and gap), **`tick --auto`** (the timer: respects both),
 **`tick --from-lane`** (a lane finished: respects the switch, ignores the gap,
 because a handoff is work already in progress). Quiet still gates spend before
-it: `halted` skips the wave entirely, `stalled` + `stall_action: notify_only`
-skips and waits.
+it, and that gate is an **allowlist**: `halted` skips the wave entirely,
+`stalled` + `stall_action: notify_only` skips and waits, `unknown` — the board
+could not be read at all — skips on the timer, and only `active` and `complete`
+buy a wave. Every skip writes a `tick_skipped` event naming its reason, so the
+ticker can say why nothing ran. *(paid: the gate used to name only the states
+that block, so `unknown` fell through. A sleeping laptop runs the missed firing
+the instant it darkwakes, before WiFi is back; `glab` fails, the board reads
+`unknown`, and a full model session launches on a build where every ticket is
+blocked — four overnight waves, one of them 84 minutes, build-3 2026-08-06.)*
 
 **The loop switch.** `start` clears `$LOOM_HOME/loop.stopped`; `stop` writes it.
 While it exists, **automatic** continuation stops — the timer no-ops, and a lane

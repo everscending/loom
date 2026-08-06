@@ -1149,6 +1149,114 @@ qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
     && ok "quiet-check: a real event inside the settle window still reads as active" \
     || bad "quiet-check: real activity misread as '$qb' — settle window no longer protects a handoff gap"
 
+# The SCHEDULER's own events are the same trap one level up. A wave that finds
+# nothing schedulable still writes wave_start, snapshot and wave_end; the tick a
+# minute later read the trailing wave_end as build activity, answered `active`,
+# and walked straight through the halted gate into another wave. (Paid for:
+# build-3 2026-08-06 — wave-035350 started 62s after wave-022852 ended, board
+# holding one blocked ticket the whole time.)
+rm -f "$QB/home/quiet.state"
+now=$(date +%s)
+: > "$QB/home/events.jsonl"
+printf '{"t":"2026-08-06T08:53:50Z","ts":%s,"ev":"wave_start","build":"build-3","stem":"w1"}\n' \
+    "$(( now - 90 ))" >> "$QB/home/events.jsonl"
+printf '{"t":"2026-08-06T08:54:12Z","ts":%s,"ev":"snapshot","build":"build-3","ready":0}\n' \
+    "$(( now - 70 ))" >> "$QB/home/events.jsonl"
+printf '{"t":"2026-08-06T08:55:43Z","ts":%s,"ev":"wave_end","build":"build-3","stem":"w1","rc":0}\n' \
+    "$(( now - 60 ))" >> "$QB/home/events.jsonl"
+PATH="$QB/bin:$PATH" LOOM_HOME="$QB/home" NTFY_CMD="$QBS" LOOM_NTFY_TOPIC=test-topic WATCH
+qb=$(cat "$QB/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qb" = halted ] \
+    && ok "quiet-check: an idle wave's own events do not read as activity" \
+    || bad "quiet-check: wave self-refresh — classified '$qb' (want halted); each idle wave buys the next one"
+
+# 4h6. The quiescence gate in cmd_tick is an ALLOWLIST. It named only the states
+#      that block, so a board the tracker call could not read at all fell
+#      through into a full wave. On a sleeping laptop launchd runs the missed
+#      firing at darkwake, before WiFi is back: glab fails and a model session
+#      launches on a build where every ticket is blocked. (Paid for: build-3
+#      2026-08-06 — four overnight waves, one 84 minutes long, each within a
+#      minute of a darkwake.)
+QU="$T/quiet-unreadable"; mkdir -p "$QU/bin" "$QU/home"
+printf '#!/bin/sh\nexit 1\n' > "$QU/bin/glab"; chmod +x "$QU/bin/glab"   # no network
+printf 'build-3\n' > "$QU/home/.build-label"
+: > "$QU/home/events.jsonl"
+# A wave writes to its own log, never to the tick's stdout, so the only honest
+# probe is a marker the stub command creates.
+UW="$QU/waves"; rm -f "$UW"
+PATH="$QU/bin:$PATH" LOOM_HOME="$QU/home" \
+    LOOM_WAVE_CMD="sh -c 'echo w >> $UW'" "$TICK" tick --auto >/dev/null 2>&1
+if [ -s "$UW" ]; then
+    bad "tick-gate: an unreadable board still spent a wave — the gate is a blocklist again"
+else
+    ok "tick-gate: a board that cannot be read spends nothing"
+fi
+grep -q '"reason":"unreadable"' "$QU/home/events.jsonl" 2>/dev/null \
+    && ok "tick-gate: the skip is recorded, so the ticker can say why nothing ran" \
+    || bad "tick-gate: skipped silently — the next investigation starts from zero again"
+# A failed read is not a state change: it must leave the sentinel alone. Erasing
+# it re-arms whatever state the build was already in, so every network blip
+# re-pushed the same "Build halted" banner (five in one night, build-3
+# 2026-08-06 — the repetition is how the human noticed).
+printf 'halted\n' > "$QU/home/quiet.state"
+PATH="$QU/bin:$PATH" LOOM_HOME="$QU/home" LOOM_WAVE_CMD="true" "$TICK" tick --auto >/dev/null 2>&1
+[ "$(cat "$QU/home/quiet.state" 2>/dev/null)" = halted ] \
+    && ok "tick-gate: an unreadable board forgets nothing, so the banner does not repeat" \
+    || bad "tick-gate: a failed read erased the quiet sentinel — the halted push repeats forever"
+# A repo with no build label yet is NOT unreadable — it is pre-plan, and its
+# first wave is what plans it. Gating that would mean a fresh repo never starts.
+QP="$T/quiet-prebuild"; mkdir -p "$QP/home"
+: > "$QP/home/events.jsonl"          # no .build-label at all
+PW="$QP/waves"; rm -f "$PW"
+LOOM_HOME="$QP/home" LOOM_WAVE_CMD="sh -c 'echo w >> $PW'" "$TICK" tick --auto >/dev/null 2>&1
+[ -s "$PW" ] \
+    && ok "tick-gate: a repo with no build label still gets its first wave" \
+    || bad "tick-gate: pre-plan repo refused a wave — nothing would ever plan it"
+# The classification is captured with $(...), so only the classification may
+# reach stdout. The notifier used to print into that capture, and the ONE firing
+# where a build first goes halted is exactly the firing that notifies: the gate
+# compared "notify: …\nhalted" against "halted", matched nothing, and spent.
+QN="$T/quiet-capture"; mkdir -p "$QN/bin" "$QN/home"
+cat > "$QN/bin/glab" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"state=opened"*) echo '[{"iid":87,"labels":["build-3","blocked"]}]' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$QN/bin/glab"
+printf 'build-3\n' > "$QN/home/.build-label"; : > "$QN/home/events.jsonl"
+rm -f "$QN/home/quiet.state"          # first sight of halted → this tick notifies
+NW="$QN/waves"; rm -f "$NW"
+PATH="$QN/bin:$PATH" LOOM_HOME="$QN/home" NTFY_CMD="true" LOOM_NTFY_TOPIC=test-topic \
+    LOOM_WAVE_CMD="sh -c 'echo w >> $NW'" "$TICK" tick --auto >/dev/null 2>&1
+[ -s "$NW" ] \
+    && bad "tick-gate: the firing that notifies spent a wave — notifier chatter is in the capture again" \
+    || ok "tick-gate: the firing that first reports halted spends nothing"
+
+# And the halted skip must be visible too: it used to return with no event at
+# all, which is why four overnight waves took a morning to explain.
+QV="$T/quiet-halted-ev"; mkdir -p "$QV/bin" "$QV/home"
+cat > "$QV/bin/glab" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"state=opened"*) echo '[{"iid":87,"labels":["build-3","blocked"]}]' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$QV/bin/glab"
+printf 'build-3\n' > "$QV/home/.build-label"; : > "$QV/home/events.jsonl"
+HW="$QV/waves"; rm -f "$HW"
+PATH="$QV/bin:$PATH" LOOM_HOME="$QV/home" \
+    LOOM_WAVE_CMD="sh -c 'echo w >> $HW'" "$TICK" tick --auto >/dev/null 2>&1
+if [ -s "$HW" ]; then
+    bad "tick-gate: an all-blocked board still spent a wave"
+elif grep -q '"reason":"halted"' "$QV/home/events.jsonl" 2>/dev/null; then
+    ok "tick-gate: an all-blocked board skips and says so in the event log"
+else
+    bad "tick-gate: halted skip left no event ($(tail -1 "$QV/home/events.jsonl" 2>/dev/null))"
+fi
+
 # 4h4. The log stays human shaped: the stream is rendered back to prose and the
 #      commands it ran, because waves and humans read these files for verdicts
 #      and crash triage.

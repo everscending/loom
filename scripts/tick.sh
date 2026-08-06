@@ -270,14 +270,30 @@ _epics_unaccepted() { # <build-label>
 # 2026-08-05 — 44 idle waves overnight, ~9 USD, on a board holding one
 # blocked ticket.) An empty result reads as "no activity ever", which is the
 # honest answer and lets the classification below run.
+#
+# The same rule reaches one level up: `wave_start`, `wave_end` and `snapshot`
+# are the SCHEDULER writing about itself. A wave that finds nothing schedulable
+# still writes all three, and the tick 60s later reads the trailing `wave_end`
+# as build activity, answers `active`, and sails through the halted gate into
+# another wave. Only lanes and tracker mutations — `lane_*`, `ticket_*`,
+# `mr_merged`, `gate_verdict` — mean the BUILD did something. A wave doing real
+# work is covered anyway: it spawns lanes, and those events do count.
+# (Paid for: build-3 2026-08-06 — wave-035350 started 62s after wave-022852
+# ended, on a board holding one blocked ticket.)
 _last_activity_ts() {
     [ -f "$EVENTS" ] || { echo 0; return 0; }
     tail -n 500 "$EVENTS" 2>/dev/null \
-        | jq -r 'select(.ev != "tick_skipped" and .ev != "notify") | .ts // empty' 2>/dev/null \
+        | jq -r 'select(.ev | IN("tick_skipped","notify","wave_start","wave_end",
+                                 "snapshot","tick_replayed") | not) | .ts // empty' 2>/dev/null \
         | tail -1 | grep -E '^[0-9]+$' || echo 0
 }
 
-_quiet_check() { # prints: active | stalled | halted | complete | unknown
+# `unknown` and `unreadable` are two different facts and the spend gate treats
+# them differently. `unknown` = there is no build to classify yet (no label
+# written), which is the normal pre-plan state and must not stop a tick.
+# `unreadable` = there IS a build and the tracker call FAILED, so the board's
+# real state is unavailable — that one must never buy a wave on the timer.
+_quiet_check() { # prints: active | stalled | halted | complete | unknown | unreadable
     local label age open count blocked
     [ -f "$LOOM_HOME/.build-label" ] || { echo unknown; return 0; }
     label=$(cat "$LOOM_HOME/.build-label" 2>/dev/null)
@@ -288,8 +304,8 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown
     age=$(( $(date +%s) - $(_last_activity_ts) ))
     [ "$age" -lt "${LOOM_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
     open=$(glab api "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
-        || { echo unknown; return 0; }
-    count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unknown; return 0; }
+        || { echo unreadable; return 0; }
+    count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unreadable; return 0; }
     # Zero open tickets is "all the work merged", NOT "the product was
     # accepted". An epic whose probe never ran — or ran, FAILED, and had its
     # fixes merged — reaches this line looking exactly like one that passed,
@@ -312,6 +328,12 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown
 _notify_quiet() { # <state> — notify once per state change; activity re-arms
     local state="$1" sentinel="$LOOM_HOME/quiet.state" prev=""
     [ -f "$sentinel" ] && prev=$(cat "$sentinel" 2>/dev/null)
+    # A failed read is not a state change and must not erase the memory of one.
+    # Clearing the sentinel here re-arms whatever the build was already in, so
+    # every network blip re-pushed the same "Build halted" banner — five of them
+    # in one night, which is how the human noticed any of this. Say nothing,
+    # remember nothing, wait for a firing that could actually see the board.
+    [ "$state" = unreadable ] && return 0
     if [ "$state" = active ] || [ "$state" = unknown ]; then rm -f "$sentinel"; return 0; fi
     [ "$state" = "$prev" ] && return 0
     printf '%s\n' "$state" > "$sentinel"
@@ -719,11 +741,18 @@ _wave_gap_ok() {
 # stamped progress and nothing classified quiet. A separate 60s program had to
 # exist to cover it. Watching first makes that program unnecessary.
 # Prints the quiet state so the caller can reuse it without a second read.
+# The caller captures this with `$(...)`, so the classification is the ONLY
+# thing allowed on stdout. Everything else here — stale-lane warnings, the
+# notifier's own chatter about whether a push went out — goes to stderr, or it
+# is prepended to the state string and every downstream comparison silently
+# stops matching. The quiescence gate then reads
+# "notify: event 'build_halted' not in push list…\nhalted" instead of "halted",
+# matches no case arm, and spends a wave on the ONE firing where the build just
+# went halted — the firing that notifies is exactly the firing that must not.
 _watch_pass() {
-    _stamp_progress
-    _notify_stale
+    { _stamp_progress; _notify_stale; } >&2
     local q; q=$(_quiet_check)
-    _notify_quiet "$q"
+    _notify_quiet "$q" >&2
     printf '%s' "$q"
 }
 
@@ -784,12 +813,44 @@ cmd_tick() {
     # stall_action=notify_only → ping the human and wait (testbed fizzle
     # protocol); default resume → the wave IS the recovery. complete → let
     # the wave run: it posts the completion report and tears the agent down.
+    #
+    # This is an ALLOWLIST, and it must stay one. It used to name only the two
+    # states that block, so every state it did not name fell through into a
+    # wave — including the one meaning "the tracker call FAILED, we have no idea
+    # what the board says". On a laptop that sleeps, launchd runs the missed
+    # firing the instant the machine darkwakes, before WiFi is back: glab fails,
+    # and a full model session launches on a build whose every ticket is
+    # blocked. "We could not read the board" is the state that most obviously
+    # must not spend. (Paid for: build-3 2026-08-06 — four overnight waves, one
+    # of them 84 minutes, each within a minute of a darkwake, on a board holding
+    # one blocked ticket.)
+    #
+    # `unreadable` is gated on `--auto` alone, because the timer is the only
+    # caller that spends unattended and forever. A human's `tick` and a lane's
+    # handoff are both bounded and both have someone or something behind them;
+    # refusing those on a transient read failure would strand a chained lane for
+    # a whole heartbeat interval. The timer retries in 60s regardless, so a
+    # skipped automatic firing costs nothing but the wave it did not buy.
+    # `unknown` — no build label yet — is the pre-plan state and still runs: it
+    # is how a repo that has never planned gets its first wave.
     case "$quiet" in
-        halted) echo "tick: every open ticket is blocked — nothing to schedule, no wave"; return 0 ;;
-        stalled) if [ "$(cfg stall_action resume)" = "notify_only" ]; then
-                     echo "tick: stalled and stall_action=notify_only — notified, waiting for the human"
+        halted) echo "tick: every open ticket is blocked — nothing to schedule, no wave"
+                _ev tick_skipped reason halted
+                return 0 ;;
+        unreadable) if [ "$mode" = auto ]; then
+                     echo "tick: could not read the board (glab, auth or network) — no wave until it reads clean"
+                     _ev tick_skipped reason unreadable
                      return 0
                  fi ;;
+        stalled) if [ "$(cfg stall_action resume)" = "notify_only" ]; then
+                     echo "tick: stalled and stall_action=notify_only — notified, waiting for the human"
+                     _ev tick_skipped reason stalled_notify_only
+                     return 0
+                 fi ;;
+        active|complete|unknown) ;;
+        *)      echo "tick: unrecognised quiescence state '$quiet' — no wave"
+                _ev tick_skipped reason unclassified state "$quiet"
+                return 0 ;;
     esac
     # A manual or self-triggered loop with no launchd agent has no backstop:
     # when a wave fizzles, nothing ever fires again (build-1 2026-08-02 sat
