@@ -361,20 +361,6 @@ time.
 
 ## `scripts/bootstrap.sh`
 
-### D-BOOT-01 · `_require_repo` proves "inside a repo", not "at a repo root"
-`bootstrap.sh:35` — `git rev-parse --git-dir` searches upward, and versioning dotfiles with a git
-repo at `$HOME` is common.
-**Failure:** with `~/.git` present, `cd ~` then `bootstrap.sh settings` passes the check,
-`REPO_ROOT=$HOME`, and `tick.sh:2623` writes `~/.claude/settings.json` — Claude Code's user-level
-global settings — installing loom's allowlist as the default for every project on the machine.
-Exit 0. With `--force` it overwrites an existing file with no backup (a planted personal settings
-file was destroyed this way during review). This is the 2026-08-01 defect, reintroduced by a check
-that walks up.
-**Fix direction:** resolve through `git -C … rev-parse --show-toplevel` and require it to equal
-`REPO_ROOT`.
-**Test:** `tick-test.sh:2534-2546` points `LOOM_REPO` at a directory with no git at all. No
-fixture for a subdirectory of a repo, none for a `$HOME` that is itself a repo.
-
 ### D-BOOT-02 · from a subdirectory the allowlist is written where nothing reads it, and reports success
 `bootstrap.sh:161-172` — same root cause as D-BOOT-01, likelier trigger.
 **Failure:** the human is in `myrepo/src/deep` and runs `bootstrap.sh settings` (or a tick fires
@@ -786,6 +772,19 @@ and the value passes straight to `claude --model`, so nothing breaks.
 ---
 
 ## Closed
+
+### D-BOOT-01 · `_require_repo` proves "inside a repo", not "at a repo root"
+*Closed 2026-08-06.*
+
+`bootstrap.sh:35` used `git rev-parse --git-dir`, which searches upward, so a `REPO_ROOT` merely
+nested under any repo — including a `$HOME` versioning dotfiles — passed the same check as one at
+the actual root, and a repo-scoped write went to whatever directory `REPO_ROOT` happened to be.
+
+**Shipped:** `_require_repo` now resolves `git -C "$REPO_ROOT" rev-parse --show-toplevel` and
+requires it to equal `$(cd "$REPO_ROOT" && pwd -P)`, refusing with a named reason when they differ.
+`tick-test.sh` case 9c6 adds two fixtures: a `REPO_ROOT` nested inside an ordinary repo, and one
+nested inside a repo standing in for a `$HOME` with its own `.git` — both refused, both confirmed
+to create nothing at either candidate root.
 
 ### D-TICK-13 · retro's spend report cannot see wave sessions
 *Closed 2026-08-06.*

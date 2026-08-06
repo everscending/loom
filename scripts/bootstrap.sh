@@ -27,15 +27,25 @@ TICK="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/tick.sh"
 die() { echo "bootstrap.sh: $*" >&2; exit 1; }
 
 # REPO_ROOT falls back to $PWD, so every repo-scoped write must first prove it
-# is pointed at a repo. Without this, running the script from $HOME wrote
-# ~/.claude/settings.json — the human's own Claude Code configuration — because
-# the only git check happened AFTER the write and merely warned. Machine-scoped
-# setup (global-config) does not need a repo and does not call this.
+# is pointed at a repo ROOT, not merely somewhere inside one. Without this,
+# running the script from $HOME wrote ~/.claude/settings.json — the human's
+# own Claude Code configuration — because the only git check happened AFTER
+# the write and merely warned. `rev-parse --git-dir` proves "inside a repo"
+# and searches upward, so it also passes from a subdirectory (writing an
+# allowlist nothing reads) and from a $HOME that itself has a stray `.git`
+# (writing loom's allowlist as everyone's global default) — `--show-toplevel`
+# is the check that actually answers "is this the root". Machine-scoped setup
+# (global-config) does not need a repo and does not call this.
 _require_repo() { # <what>
-    git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
+    local toplevel
+    toplevel="$(git -C "$REPO_ROOT" rev-parse --show-toplevel 2>/dev/null)" \
         || die "$1: '$REPO_ROOT' is not a git repository. Run this from the repo,
   or set LOOM_REPO. Refusing to write repo files into a directory that is not
   one (from \$HOME this would target your personal ~/.claude/settings.json)."
+    [ "$(cd "$REPO_ROOT" && pwd -P)" = "$toplevel" ] \
+        || die "$1: '$REPO_ROOT' is inside a git repository but is not its root
+  ($toplevel). Run this from the repo root, or set LOOM_REPO to it. Refusing
+  to write repo files somewhere nothing reads them from."
 }
 
 # The ticket state machine, as SKILL.md defines it. `closed` is a tracker

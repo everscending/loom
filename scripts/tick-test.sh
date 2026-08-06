@@ -2702,6 +2702,40 @@ fi
     && bad "bootstrap-violation: it created .claude/ outside a repo anyway" \
     || ok "bootstrap-violation: nothing at all was created outside the repo"
 
+# 9c6. D-BOOT-01: `git rev-parse --git-dir` searches upward, so a REPO_ROOT
+#      that is merely INSIDE a repo (a subdirectory, or a directory nested
+#      under a $HOME versioning dotfiles) used to pass the same check as one
+#      AT the repo's root. From a real project subdirectory this is D-BOOT-02
+#      (writes an allowlist nothing reads); from under a $HOME repo it is
+#      D-BOOT-01 itself (writes into the wrong tree's .claude/ entirely). Both
+#      shapes must now be refused — only the toplevel may write.
+SUBREPO="$BT/subrepo"; mkdir -p "$SUBREPO/nested/deeper"
+git -C "$SUBREPO" init -q 2>/dev/null || git init -q "$SUBREPO" 2>/dev/null || :
+if LOOM_REPO="$SUBREPO/nested/deeper" LOOM_GLOBAL_CONFIG="$BT/g.yml" GLAB_CMD="$BT/fx/glab" \
+   "$BOOT" settings >/dev/null 2>&1; then
+    bad "bootstrap-violation (D-BOOT-01): wrote settings from a subdirectory of a repo, not its root"
+else
+    ok "bootstrap (D-BOOT-01): refuses a REPO_ROOT that is a subdirectory of a repo"
+fi
+[ -e "$SUBREPO/nested/deeper/.claude" ] \
+    && bad "bootstrap-violation (D-BOOT-01): created .claude/ off the repo root anyway" \
+    || ok "bootstrap-violation (D-BOOT-01): nothing was created under the subdirectory"
+
+FAKEHOME="$BT/fake-home"; mkdir -p "$FAKEHOME/projects/scratch"
+git -C "$FAKEHOME" init -q 2>/dev/null || git init -q "$FAKEHOME" 2>/dev/null || :
+if LOOM_REPO="$FAKEHOME/projects/scratch" LOOM_GLOBAL_CONFIG="$BT/g.yml" GLAB_CMD="$BT/fx/glab" \
+   "$BOOT" settings >/dev/null 2>&1; then
+    bad "bootstrap-violation (D-BOOT-01): wrote settings under a \$HOME-style dotfiles repo, not its root"
+else
+    ok "bootstrap (D-BOOT-01): a directory merely nested under a \$HOME repo is refused, not treated as the root"
+fi
+[ -e "$FAKEHOME/.claude" ] \
+    && bad "bootstrap-violation (D-BOOT-01): installed loom's allowlist as the \$HOME-repo's own settings" \
+    || ok "bootstrap-violation (D-BOOT-01): nothing was created at the \$HOME-style repo root either"
+# The root itself must still work — this is what 9a/9b/9c already exercise
+# against $BT/repo (a real, non-nested toplevel), so no separate positive
+# assertion is needed here.
+
 # 9d. First tick bootstraps; later ticks do not pay for it again.
 rm -rf "$BT/home"
 out=$(BOOTENV "$TICK" tick 2>&1)
