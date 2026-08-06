@@ -3,7 +3,7 @@
 # turn. Human-run convenience, never called by the machinery (P24).
 #
 # Nothing about a build changes if this is never run, or if herdr is not
-# installed: it only reads `tick.sh lane-status` and follows files the lanes
+# installed: it only reads `tick.sh lanes-alive` and follows files the lanes
 # already write. Delete herdr from the machine and the build is unaffected —
 # `tick.sh render-log <id> --follow` still works in any terminal.
 #
@@ -405,7 +405,9 @@ while :; do
         exit 0
     fi
     ensure_ticker
-    running=$("$TICK" lane-status 2>/dev/null | awk '$3 == "running" { print $1 }') || running=""
+    # P46: `stale` is alive but silent — its pane must not be released or
+    # marked idle. `lanes-alive` is the one place that reads liveness.
+    running=$("$TICK" lanes-alive 2>/dev/null | awk '{ print $1 }') || running=""
 
     # Release panes whose lane is gone, keeping the ticket stamp so the next
     # stage of the same ticket comes back to the same pane. The follow command

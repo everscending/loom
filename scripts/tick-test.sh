@@ -1100,6 +1100,31 @@ qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
     && ok "quiet-check: once every epic is accepted the build completes normally" \
     || bad "quiet-check: accepted build classified '$qs' (want complete)"
 
+# 4h5b. P46: a `stale` lane still holds its ticket — `_quiet_check` must read
+#       it as `active` and return before ever touching the tracker, the same
+#       as a `running` one. Proven by absence: `glab` is stubbed to leave a
+#       marker on every call, and with a stale-but-alive lane present that
+#       marker must never appear — the old `running`-only check fell through
+#       into this exact read.
+QAL="$T/quiet-alive"; mkdir -p "$QAL/bin" "$QAL/home/lanes" "$QAL/home/logs" "$QAL/repo"
+cat > "$QAL/bin/glab" <<EOF
+#!/usr/bin/env bash
+: > "$QAL/glab-called"
+echo '[]'
+EOF
+chmod +x "$QAL/bin/glab"
+printf 'build-9\n' > "$QAL/home/.build-label"
+printf 'heartbeat_stale_minutes: 0\n' > "$QAL/repo/.loom.yml"
+LOOM_REPO="$QAL/repo" LOOM_HOME="$QAL/home" "$TICK" spawn-lane gate-40 -- sleep 20 >/dev/null
+touch -t 202001010000 "$QAL/home/logs/lane-gate-40.log"
+PATH="$QAL/bin:$PATH" LOOM_REPO="$QAL/repo" LOOM_HOME="$QAL/home" LOOM_QUIET_SETTLE=0 WATCH
+if [ ! -e "$QAL/glab-called" ]; then
+    ok "quiet-check: a stale-but-alive lane reads active without touching the tracker (P46)"
+else
+    bad "quiet-check: a stale lane fell through to a tracker read — treated as gone"
+fi
+kill "$(cat "$QAL/home/lanes/gate-40.pid" 2>/dev/null)" 2>/dev/null
+
 # 4h3b. P43: the settle window must not be refreshed by the watcher's OWN
 #       no-op bookkeeping. `_quiet_check` used to read `events.jsonl`'s mtime as
 #       "did anything happen", but every 60s firing writes `tick_skipped` into
@@ -3696,6 +3721,29 @@ grep -q "^pane close " "$T/herdr-calls" \
     || ok "watch-panes-violation: with merge-* alone, a closed ticket keeps its pane forever"
 rm -f "$T/wp13p2-home/lanes"/*.pid
 
+# 13p2. P46: a `stale` lane's pane must not be released — the process still
+#       holds the ticket, it is only quiet. Same real-lane fixture, pointed at
+#       a config that makes any existing log read stale on sight.
+WPQ_REPO="$T/wp13q-repo"; mkdir -p "$WPQ_REPO"
+printf 'heartbeat_stale_minutes: 0\n' > "$WPQ_REPO/.loom.yml"
+mkdir -p "$T/wp13q-home/lanes" "$T/wp13q-home/logs"
+sleep 30 & echo $! > "$T/wp13q-home/lanes/impl-96.pid"
+touch -t 202001010000 "$T/wp13q-home/logs/lane-impl-96.log"
+: > "$T/herdr-calls"
+LOOM_REPO="$WPQ_REPO" HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
+    LOOM_HOME="$T/wp13q-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    bash "$WP" >/dev/null 2>&1 || :
+kill "$(cat "$T/wp13q-home/lanes/impl-96.pid" 2>/dev/null)" 2>/dev/null
+if grep -Eq "rename [^ ]+ impl-96$" "$T/herdr-calls" \
+   && ! grep -q -- "— idle" "$T/herdr-calls" \
+   && ! grep -q "^pane close " "$T/herdr-calls"; then
+    ok "watch-panes: a stale-but-alive lane's pane stays live, not idle (P46)"
+else
+    bad "watch-panes: stale lane pane mishandled ($(grep -E 'rename|close' "$T/herdr-calls" | tr '\n' ';'))"
+fi
+rm -f "$T/wp13q-home/lanes"/*.pid
+
 # 13n. A viewer that cannot open a pane says so and exits, instead of polling
 #      forever looking healthy (P39). Every split hangs off the pane the
 #      viewer was launched from; when that session is gone the id refers to
@@ -4542,6 +4590,29 @@ if [ -e "$SW/repo-wt-8" ]; then
 else
     bad "sweep: deleted a worktree with unmerged work"
 fi
+
+# P46: a `stale` lane is alive but silent, not gone — filtering the live-cwd
+# guard on `running` alone let it fall through, and a lane that had not yet
+# committed (indistinguishable from merged work, its new files untracked) was
+# seconds from `rm -rf` under its own live process. Same merged-branch setup as
+# repo-wt-7, but this worktree holds a REAL process the status reads `stale`.
+git -C "$SW/repo" checkout -qb done-work-2 main
+echo more2 > "$SW/repo/h"; git -C "$SW/repo" add h; git -C "$SW/repo" commit -qm work2
+git -C "$SW/repo" checkout -q main
+git -C "$SW/repo" merge -q --no-edit done-work-2; git -C "$SW/repo" push -q origin main
+git -C "$SW/repo" worktree add -q "$SW/repo-wt-9" done-work-2 2>/dev/null
+printf 'heartbeat_stale_minutes: 0\n' > "$SW/repo/.loom.yml"
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" spawn-lane impl-96 --cwd "$SW/repo-wt-9" -- sleep 20 >/dev/null
+touch -t 202001010000 "$SW/home/logs/lane-impl-96.log"
+st=$(LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" lane-status | awk '$1=="impl-96"{print $3}')
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >"$SW/out96" 2>&1
+if [ "$st" = stale ] && [ -e "$SW/repo-wt-9" ]; then
+    ok "sweep: a stale-but-alive lane's worktree survives (P46)"
+else
+    bad "sweep: stale lane's worktree mishandled (state=$st, present=$([ -e "$SW/repo-wt-9" ] && echo yes || echo no))"
+fi
+kill "$(cat "$SW/home/lanes/impl-96.pid" 2>/dev/null)" 2>/dev/null
+rm -f "$SW/repo/.loom.yml"
 
 # --- close/merge: a ticket must never close over its own unmerged MR --------
 # merge-1 ran reconcile, ran the gate, ran `lane.sh close 1` and reported

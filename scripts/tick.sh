@@ -159,9 +159,10 @@ cmd_sweep() {
     elif git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
     else base=main; fi
     git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
-    # cwd of every running lane — never sweep ground a live process stands on
+    # cwd of every ALIVE lane (running or stale) — never sweep ground a live
+    # process stands on. A `stale` lane is quiet, not gone (P46).
     local live_cwds="" pid live_n=0
-    for pid in $(cmd_lane_status 2>/dev/null | awk '$3=="running"{print $2}' || true); do
+    for pid in $(_lanes_alive | awk '{print $2}' || true); do
         live_n=$((live_n + 1))
         live_cwds="$live_cwds $(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' || true)"
     done
@@ -310,7 +311,7 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown | unre
     [ -f "$LOOM_HOME/.build-label" ] || { echo unknown; return 0; }
     label=$(cat "$LOOM_HOME/.build-label" 2>/dev/null)
     [ -n "$label" ] || { echo unknown; return 0; }
-    if cmd_lane_status 2>/dev/null | awk '$3=="running"{f=1} END{exit !f}'; then
+    if [ -n "$(_lanes_alive)" ]; then
         echo active; return 0
     fi
     age=$(( $(date +%s) - $(_last_activity_ts) ))
@@ -1707,6 +1708,15 @@ cmd_lane_status() {
     done
 }
 
+# P46: `stale` means "alive but silent past the heartbeat window" — the process
+# still holds its pid, its worktree and its ticket. Filtering on `running`
+# alone read a stale lane as gone: sweep's live-cwd guard nearly `rm -rf`'d a
+# wedged lane's worktree, `_quiet_check` walked past it into a full tracker
+# read, and `watch-panes.sh` closed its pane. This is the one place that
+# question — "is a process still there?" — gets answered; every caller reads
+# it, never `cmd_lane_status | awk '$3=="running"'` by hand.
+_lanes_alive() { cmd_lane_status 2>/dev/null | awk '$3=="running"||$3=="stale"'; }
+
 cmd_clear_lane() {
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified"
@@ -2955,6 +2965,7 @@ case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
     lane-status)  shift; cmd_lane_status "$@" ;;
+    lanes-alive)  shift; _lanes_alive "$@" ;;
     orch-home)    echo "$LOOM_HOME" ;;   # the repo's state dir — for viewer accessories that need a pidfile home
     render-log)   shift; cmd_render_log "$@" ;;
     render-events) shift; cmd_render_events "$@" ;;

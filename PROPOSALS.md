@@ -59,7 +59,6 @@ evidence, and implementation notes belong in this file, not there.
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
-| P46 | `stale` means alive — one liveness reader, not four | open — proposed 2026-08-06; four consumers filter on `running` alone, one of them the sweeper's `rm -rf` guard |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
@@ -381,22 +380,6 @@ assert only the absence of a call, and pass against a stand-in that is `exit 127
   nothing uses.
 
 **Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
-
-## P46 · `stale` means alive — one liveness reader, not four
-
-**Problem.** `lane-status` reports `running | stale | dead`, where `stale` is "pid alive, no model
-turn for `heartbeat_stale_minutes`" — the wedge state a human triages. Four consumers filter on
-`running` alone and so treat a live lane as gone: `cmd_sweep` (`tick.sh:164`), whose live-cwd set
-is the only thing standing between a live lane and `rm -rf` of its worktree; `_quiet_check`
-(`tick.sh:301`), which then classifies `halted` or `complete` with a lane still holding a ticket;
-and `watch-panes.sh:408`, which closes a stale probe's pane and marks a stale implementer's pane
-idle and reusable. The lesson is already written down for gate dispatch at `tick-test.sh:2116`
-and was not carried to the other three.
-
-**Fix direction.** One helper — `_lanes_alive` — returning `running` **and** `stale`, used
-everywhere the question is "is a process there"; `running` stays only where the question is "is it
-making progress". Add a suite case per consumer with a stale-but-alive lane present: a sweepable
-worktree under one, a `tick --auto` classification under another, a viewer poll under the third.
 
 ## P48 · The wave prompt is generated, not hand-maintained
 

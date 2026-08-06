@@ -52,6 +52,7 @@ writing a new proposal that touches the same machinery.
 | P57 | Acceptance criteria travel with the probe, not with every wave | implemented 2026-08-06 (`snapshot.jq`: `--brief` drops the `acceptance` key from every epic whose `needs_probe` is false, keeping it byte-identical for an epic awaiting its probe; warnings still computed from the untrimmed epics; no SKILL.md change) |
 | P59 | A pinned interface names fields, not references | implemented 2026-08-06 (`references/ticket-template.md` Pinned interfaces section and `references/phases-1-5.md` phase 4 bullet both now require fields/values/shapes, name a bare endpoint path/type name/file path as a reference not a pin, and require a shape absent from every document of record to be specified in the ticket itself) |
 | P47 | Guards fail closed | implemented 2026-08-06 (`lane.sh`'s four guard reads and `tick.sh cmd_sweep`'s merge-range check now capture the read's own exit status before touching its output, and `die` on failure instead of falling through to "not blocked" / "not closed" / "no open MR" / "no commits ahead") |
+| P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
 
 ## Independent review round (2026-08-01)
 
@@ -2044,3 +2045,36 @@ guard depends on and asserting both a `die` and that nothing was written: `_bloc
 `cmd_close`'s `closed_by` read (isolated from `_blocked_guard` by leaving the issue-state read
 healthy), `cmd_merge_failed`'s `closed_by` read, and `cmd_sweep`'s unresolvable base ref. Full
 suite: 461 passed, 0 failed (456 → 461).
+
+## P46 · `stale` means alive — one liveness reader, not four
+
+**Problem.** `lane-status` reports `running | stale | dead`, where `stale` is "pid alive, no model
+turn for `heartbeat_stale_minutes`" — the wedge state a human triages. Four consumers filtered on
+`running` alone and so treated a live lane as gone: `cmd_sweep` (`tick.sh:164`), whose live-cwd set
+is the only thing standing between a live lane and `rm -rf` of its worktree; `_quiet_check`
+(`tick.sh:313`), which then classified `halted` or `complete` with a lane still holding a ticket;
+and `watch-panes.sh:408`, which closed a stale probe's pane and marked a stale implementer's pane
+idle and reusable.
+
+**Fix direction.** One helper — `_lanes_alive` — returning `running` **and** `stale`, used
+everywhere the question is "is a process there"; `running` stays only where the question is "is it
+making progress".
+
+**As implemented (2026-08-06).** `tick.sh` gains `_lanes_alive()`, a one-line wrapper around
+`cmd_lane_status | awk '$3=="running"||$3=="stale"'`, placed next to `cmd_lane_status` itself.
+`cmd_sweep`'s live-cwd loop and `_quiet_check`'s early-active check both call it in-process instead
+of hand-filtering on `running`. `watch-panes.sh` runs as a separate process and can only reach
+`tick.sh` through its CLI, so `_lanes_alive` is also exposed as a `lanes-alive` subcommand;
+`watch-panes.sh`'s poll loop now reads `tick.sh lanes-alive` instead of piping `lane-status` through
+its own `awk '$3=="running"'`. `snapshot.jq`'s gate-eligibility read was already correct (`state !=
+"dead"`, P11) and needed no change — it was the "lesson already written down" the proposal's
+Evidence pointed at, not a fourth site to fix.
+
+**Tests.** Three new cases in `scripts/tick-test.sh`, one per consumer, each spawning a real
+background lane and forcing it `stale` (`heartbeat_stale_minutes: 0` plus a backdated log) rather
+than asserting on a mock: `sweep` keeps a merged-branch worktree alive under a stale lane instead of
+deleting it; `_quiet_check` (via the `WATCH`/`tick --auto` path) reads `active` and returns before
+ever calling `glab`, proven by a stub that plants a marker on any call and asserting the marker
+never appears; `watch-panes.sh`'s poll keeps a stale lane's pane live — no idle rename, no close.
+All three fail against the pre-fix code (confirmed by running them against the unmodified scripts)
+and pass against the fix. Full suite: 468 passed, 0 failed (465 → 468, three new cases).
