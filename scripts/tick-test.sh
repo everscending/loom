@@ -3125,7 +3125,7 @@ printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage"
     > "$RT/home/logs/lane-gate-1.jsonl"
 out=$(RTENV "$TICK" retro --build build-r 2>&1)
 case "$out" in
-    *"Spend   (priced from every lane session log)"*) ok "retro: spend section is present" ;;
+    *"Spend   (priced from every lane and wave session log)"*) ok "retro: spend section is present" ;;
     *) bad "retro: no spend section in output" ;;
 esac
 case "$out" in
@@ -3145,6 +3145,30 @@ case "$out" in
     *) bad "retro: per-ticket spend wrong ($(printf '%s' "$out" | grep -A3 'by ticket'))" ;;
 esac
 rm -f "$RT/home/logs/lane-impl-1.jsonl" "$RT/home/logs/lane-gate-1.jsonl"
+
+# 12a2b. D-TICK-13: wave sessions are priced too. `_spend_by_session` used to
+#        glob only `lane-*.jsonl`, so every wave log was skipped before pricing
+#        began, and the total silently understated a build's real spend. A
+#        wave emits no `lane_exit`, so it cannot join by lane id like the
+#        others -- it joins by `stem` (the wave log's own basename) instead.
+printf '{"ts":2700,"ev":"wave_end","build":"build-r","stem":"wave-9","rc":0,"secs":5}\n' >> "$RTF"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$RT/home/logs/lane-impl-1.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$RT/home/logs/lane-gate-1.jsonl"
+printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+                '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+    > "$RT/home/logs/wave-9.jsonl"
+out=$(RTENV "$TICK" retro --build build-r 2>&1)
+case "$out" in
+    *"total          \$6"*) ok "retro: a priced total includes wave sessions, not just lanes" ;;
+    *) bad "retro: wave spend missing from total ($(printf '%s' "$out" | grep -A1 'Spend '))" ;;
+esac
+case "$out" in
+    *"  impl  \$3"*"  wave  \$2"*"  gate  \$1"*) ok "retro: wave sessions get their own row, not folded into a lane" ;;
+    *) bad "retro: wave-by-kind row wrong ($(printf '%s' "$out" | grep -E '^  (impl|wave|gate)  \$'))" ;;
+esac
+rm -f "$RT/home/logs/lane-impl-1.jsonl" "$RT/home/logs/lane-gate-1.jsonl" "$RT/home/logs/wave-9.jsonl"
 
 # 12a. Planted violation: strip the field the buckets depend on. A missing
 #      impl_free must read as UNKNOWN, never as zero — reading it as zero

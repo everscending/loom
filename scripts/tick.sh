@@ -1638,17 +1638,26 @@ _lane_cost() { # _lane_cost <jsonl-file> -> USD spent by that session, "0" if un
     jq -R -s "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
 }
 
-# P55: every lane log this repo has ever kept — `clear-lane` never removes the
-# jsonl, only the pid/rc/progress state — so `retro` can price a build any
-# time after the fact. One entry per lane id; `retro` filters to its own
-# build by joining against `lane_exit` events, which are already build-scoped.
-_spend_by_lane() { # -> JSON array [{id, cost}, ...]
+# P55/D-TICK-13: every lane AND wave log this repo has ever kept — `clear-lane`
+# never removes the jsonl, only the pid/rc/progress state, and wave logs are
+# never pruned either — so `retro` can price a build any time after the fact.
+# One entry per lane id or wave stem; `retro` joins lanes against `lane_exit`
+# events and waves against `wave_end` events (by `stem`, which is the wave
+# log's own basename), both already build-scoped.
+_spend_by_session() { # -> JSON array [{id, cost}, ...], id is a lane id or a wave stem
     local f id
-    for f in "$LOGS_DIR"/lane-*.jsonl; do
-        [ -f "$f" ] || continue
-        id=$(basename "$f" .jsonl); id=${id#lane-}
-        printf '{"id":%s,"cost":%s}\n' "$(printf '%s' "$id" | jq -R .)" "$(_lane_cost "$f")"
-    done | jq -s '.'
+    {
+        for f in "$LOGS_DIR"/lane-*.jsonl; do
+            [ -f "$f" ] || continue
+            id=$(basename "$f" .jsonl); id=${id#lane-}
+            printf '{"id":%s,"cost":%s}\n' "$(printf '%s' "$id" | jq -R .)" "$(_lane_cost "$f")"
+        done
+        for f in "$LOGS_DIR"/wave-*.jsonl; do
+            [ -f "$f" ] || continue
+            id=$(basename "$f" .jsonl)
+            printf '{"id":%s,"cost":%s}\n' "$(printf '%s' "$id" | jq -R .)" "$(_lane_cost "$f")"
+        done
+    } | jq -s '.'
 }
 
 cmd_lane_status() {
@@ -2181,15 +2190,20 @@ RETRO_JQ='
                     | map(.secs) | add // 0)}
       | . + {open: (.last - .first)}
       | . + {wait: (.open - .work)})) as $tw
-  # P55: priced per lane from its own session log, joined here by id. $spend
-  # covers every lane log this repo has ever kept (clear-lane never removes
-  # the jsonl), so joining against $lanes -- already scoped to $bw via $evs --
-  # is what excludes lanes from any other build.
+  # P55/D-TICK-13: priced per session from its own log, joined here by id.
+  # $spend covers every lane AND wave log this repo has ever kept, so joining
+  # against $lanes/$waves -- already scoped to $bw via $evs -- is what
+  # excludes sessions from any other build. Waves emit no `lane_exit`, so they
+  # join on `stem` (the log basename) instead of `id`.
   | ($spend | map({key: .id, value: .cost}) | from_entries) as $spend_by_id
   | ($lanes | map(. + {cost: ($spend_by_id[.id] // 0)})) as $lanes_c
-  | ($lanes_c | map(.cost) | add // 0) as $total_cost
+  | ($evs | map(select(.ev == "wave_end"))) as $waves
+  | ($waves | map(. + {cost: ($spend_by_id[.stem // ""] // 0)})) as $waves_c
+  | ($waves_c | map(.cost) | add // 0) as $wave_cost
+  | (($lanes_c | map(.cost) | add // 0) + $wave_cost) as $total_cost
   | ($lanes_c | group_by(.type)
      | map({type: .[0].type, cost: (map(.cost) | add // 0)})
+     | (if $wave_cost > 0 then . + [{type: "wave", cost: $wave_cost}] else . end)
      | sort_by(-.cost)) as $by_kind
   | ($tw | map(. as $t | . + {cost: ($lanes_c
        | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
@@ -2237,8 +2251,8 @@ RETRO_JQ='
   + (if ($tw | length) == 0 then ["  nothing recorded"]
      else [$tw | sort_by(-.wait) | limit(10; .[])
            | "  #\(.iid)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
-  + ["", "Spend   (priced from every lane session log)", ""]
-  + (if ($lanes_c | length) == 0 then ["  nothing recorded"]
+  + ["", "Spend   (priced from every lane and wave session log)", ""]
+  + (if ($lanes_c | length) == 0 and ($waves_c | length) == 0 then ["  nothing recorded"]
      else ["  total          \(usd($total_cost))"]
           + ($by_kind | map("  \(.type)  \(usd(.cost))"))
           + ["", "  top spenders", ""]
@@ -2275,7 +2289,7 @@ cmd_retro() { # retro [--build <label>] [--vs <label>]
     # report first: retro explains what report computes, and never recomputes it.
     if [ -n "$want" ]; then cmd_report --build "$want"; else cmd_report; fi
     echo
-    local spend_json; spend_json=$(_spend_by_lane)
+    local spend_json; spend_json=$(_spend_by_session)
     jq -rs --arg build_want "$want" --argjson spend "$spend_json" "$RETRO_JQ" "$EVENTS"
     if [ -n "$vs" ]; then
         printf '\n  ── baseline: %s ──\n\n' "$vs"
