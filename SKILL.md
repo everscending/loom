@@ -57,6 +57,7 @@ technique of its own.
 | `qa` | any | Review this skill's own files; report defects, never fix |
 | `optimize` | any | Compact this SKILL.md without changing behaviour |
 | `prop <Pn>` | any | Implement proposal `Pn` from PROPOSALS.md, then archive it |
+| `fix <Dn>` | any | Implement the fix for defect `Dn` from OPEN_DEFECTS.md, verify, then close it |
 | `retro` | after 6 | Explain a finished build's timings and spend; write proposals |
 
 **Verb boundaries are hard stops.** A verb ends at its own output and returns
@@ -590,6 +591,15 @@ wave. Its Fix section is a decision already made: implement it in the
 machinery, spend `SKILL.md` lines last, test it, then archive the proposal.
 Resolution, layer order, the test bar and the archive step:
 [references/prop.md](references/prop.md).
+
+### `fix <Dn>`
+
+Fix one confirmed defect from `OPEN_DEFECTS.md` — human-run, never invoked by
+a wave. Its Failure section is already reproduced; implement the fix, prove
+it with a test that fails without it, then close the entry. A defect marked
+`Covered by` a proposal is refused here — it belongs to `prop` instead.
+Resolution, the test bar and the close step:
+[references/fix.md](references/fix.md).
 
 ## Failure policy
 
