@@ -4631,6 +4631,116 @@ else
     ok "hard cut: a repo carrying both names runs on the new one"
 fi
 
+# 23. Guards fail closed (P47): every guard read in lane.sh used to be
+#     `… 2>/dev/null … || true`, so an API failure could not be told apart
+#     from "read succeeded and says no" — the guard just passed. Demonstrated:
+#     with the closed_by read failing, `lane.sh close 70` closed the ticket
+#     having checked no MR; with the issue read failing, a lane transitioned a
+#     ticket carrying a human `blocked` hold. Each case below fails the ONE
+#     read the guard depends on and asserts both a `die` and that nothing was
+#     written — a refused write costs one wave, a write made blind costs the
+#     thing it was guarding.
+GF="$T/guardsfail"; mkdir -p "$GF"
+
+# (a) _blocked_guard's own read, exercised through `close` (which calls it
+#     before its closed_by check): the issue-state read fails outright.
+cat > "$GF/fail-issue-70.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  *"issues/70/closed_by"*) echo '[]' ;;
+  *"issues/70"*) exit 1 ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$GF/fail-issue-70.sh"
+GLAB_CMD="$GF/fail-issue-70.sh" STUB_LOG="$GF/ca" "$LANE" close 70 >"$GF/oa" 2>&1; rc_a=$?
+if [ "$rc_a" != 0 ] && grep -q 'could not read issue state' "$GF/oa" \
+   && ! grep -q 'closed_by' "$GF/ca" && ! grep -q 'state_event=close' "$GF/ca"; then
+    ok "guards fail closed: _blocked_guard dies on a failed issue read, writes nothing"
+else
+    bad "guards fail closed: close/_blocked_guard rc=$rc_a, out=$(head -1 "$GF/oa")"
+fi
+
+# (b) cmd_transition's own closed-ticket read fails outright.
+cat > "$GF/fail-issue-71.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  *"issues/71"*) exit 1 ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$GF/fail-issue-71.sh"
+GLAB_CMD="$GF/fail-issue-71.sh" STUB_LOG="$GF/cb" "$LANE" transition 71 review >"$GF/ob" 2>&1; rc_b=$?
+if [ "$rc_b" != 0 ] && grep -q 'could not read issue state' "$GF/ob" \
+   && ! grep -q 'add_labels' "$GF/cb"; then
+    ok "guards fail closed: transition dies on a failed issue read, writes nothing"
+else
+    bad "guards fail closed: transition rc=$rc_b, out=$(head -1 "$GF/ob")"
+fi
+
+# (c) cmd_close's own closed_by read fails outright (issue-state read, i.e.
+#     _blocked_guard, still succeeds — isolates the second guard).
+cat > "$GF/fail-closedby-72.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  *"issues/72/closed_by"*) exit 1 ;;
+  *"issues/72"*) echo '{"state":"opened","labels":[]}' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$GF/fail-closedby-72.sh"
+GLAB_CMD="$GF/fail-closedby-72.sh" STUB_LOG="$GF/cc" "$LANE" close 72 >"$GF/oc" 2>&1; rc_c=$?
+if [ "$rc_c" != 0 ] && grep -q 'could not read closed_by' "$GF/oc" \
+   && ! grep -q 'state_event=close' "$GF/cc"; then
+    ok "guards fail closed: close dies on a failed closed_by read, writes nothing"
+else
+    bad "guards fail closed: close/closed_by rc=$rc_c, out=$(head -1 "$GF/oc")"
+fi
+
+# (d) cmd_merge_failed's own closed_by read fails outright.
+cat > "$GF/fail-closedby-73.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+case "$*" in
+  *"issues/73/closed_by"*) exit 1 ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$GF/fail-closedby-73.sh"
+echo body > "$GF/report.md"
+GLAB_CMD="$GF/fail-closedby-73.sh" STUB_LOG="$GF/cd" "$LANE" merge-failed 73 --file "$GF/report.md" \
+    >"$GF/od" 2>&1; rc_d=$?
+if [ "$rc_d" != 0 ] && grep -q 'could not read closed_by' "$GF/od" \
+   && ! grep -q '/notes' "$GF/cd"; then
+    ok "guards fail closed: merge-failed dies on a failed closed_by read, writes nothing"
+else
+    bad "guards fail closed: merge-failed rc=$rc_d, out=$(head -1 "$GF/od")"
+fi
+
+# (e) cmd_sweep's `git log origin/$base..$branch` range: an unresolvable base
+#     ref (unfetched or missing) used to read as "no commits ahead" and arm
+#     the delete path. Give it a base that has no origin ref at all.
+SWF="$T/sweepfail"; mkdir -p "$SWF"
+git -c init.defaultBranch=main init -q --bare "$SWF/origin.git"
+git clone -q "$SWF/origin.git" "$SWF/repo" 2>/dev/null
+git -C "$SWF/repo" config user.email t@t; git -C "$SWF/repo" config user.name t
+echo base > "$SWF/repo/f"; git -C "$SWF/repo" add f
+git -C "$SWF/repo" commit -qm base; git -C "$SWF/repo" push -q origin main
+git -C "$SWF/repo" checkout -qb ticket-work
+echo more > "$SWF/repo/g"; git -C "$SWF/repo" add g; git -C "$SWF/repo" commit -qm work
+git -C "$SWF/repo" checkout -q main
+git -C "$SWF/repo" worktree add -q "$SWF/repo-wt-9" ticket-work 2>/dev/null
+printf 'base: doesnotexist\n' > "$SWF/repo/.loom.yml"
+LOOM_REPO="$SWF/repo" LOOM_HOME="$SWF/home" "$TICK" sweep >"$SWF/out" 2>&1
+if [ -e "$SWF/repo-wt-9" ] && grep -q 'cannot resolve' "$SWF/out"; then
+    ok "guards fail closed: sweep refuses an unresolved base ref, never reads it as merged"
+else
+    bad "guards fail closed: sweep worktree present=$([ -e "$SWF/repo-wt-9" ] && echo yes || echo no) ($(head -1 "$SWF/out"))"
+fi
+
 # Whole-suite guard, checked last because it is a property of every test above
 # it: nothing in this file may reach the pane opener. The global stub catches a
 # test that sets HERDR_ENV=1 without its own stub; a test that `unset`s the

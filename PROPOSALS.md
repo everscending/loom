@@ -60,7 +60,6 @@ evidence, and implementation notes belong in this file, not there.
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P46 | `stale` means alive — one liveness reader, not four | open — proposed 2026-08-06; four consumers filter on `running` alone, one of them the sweeper's `rm -rf` guard |
-| P47 | Guards fail closed | open — proposed 2026-08-06; every guard read in `lane.sh` passes on a transient API failure |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
@@ -398,21 +397,6 @@ and was not carried to the other three.
 everywhere the question is "is a process there"; `running` stays only where the question is "is it
 making progress". Add a suite case per consumer with a stale-but-alive lane present: a sweepable
 worktree under one, a `tick --auto` classification under another, a viewer poll under the third.
-
-## P47 · Guards fail closed
-
-**Problem.** Every guard read in `lane.sh` is `… 2>/dev/null … || true` (`:136`, `:221`, `:466`,
-`:529`), so an API failure makes the guard *pass*. Demonstrated: with the `closed_by` read failing,
-`lane.sh close 70` closed the ticket having checked no MR; with the issue read failing, a lane
-transitioned a ticket carrying a human `blocked` hold. `cmd_sweep`'s merge check has the same
-shape — `git log "origin/$base..$branch" 2>/dev/null` cannot tell "no commits ahead" from "range
-does not resolve", so an unfetched or missing base ref arms the delete path on a worktree holding
-real work.
-
-**Fix direction.** Separate "read succeeded and says no" from "read failed": capture the exit
-status, and on failure `die` with the reason. A refused write costs one wave; a write made blind
-costs the thing it was guarding. Suite cases: a stub that exits non-zero on each guard read, with
-the assertion that nothing was written.
 
 ## P48 · The wave prompt is generated, not hand-maintained
 

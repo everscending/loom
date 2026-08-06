@@ -51,6 +51,7 @@ writing a new proposal that touches the same machinery.
 | P53 | Ticket size is a phase-4 output, like width | implemented 2026-08-06 (`references/ticket-template.md` gains a Size section; `snapshot.jq` computes `criteria_count`/`file_surface` per ticket; `tick.sh graph` flags an outsized one `likely_deep` and folds a `LIKELY DEEP` clause into `.verdict`; `references/phases-1-5.md` phase 5 names the new verdict alongside `CHAIN-SHAPED`/`NARROW START`) |
 | P57 | Acceptance criteria travel with the probe, not with every wave | implemented 2026-08-06 (`snapshot.jq`: `--brief` drops the `acceptance` key from every epic whose `needs_probe` is false, keeping it byte-identical for an epic awaiting its probe; warnings still computed from the untrimmed epics; no SKILL.md change) |
 | P59 | A pinned interface names fields, not references | implemented 2026-08-06 (`references/ticket-template.md` Pinned interfaces section and `references/phases-1-5.md` phase 4 bullet both now require fields/values/shapes, name a bare endpoint path/type name/file path as a reference not a pin, and require a shape absent from every document of record to be specified in the ticket itself) |
+| P47 | Guards fail closed | implemented 2026-08-06 (`lane.sh`'s four guard reads and `tick.sh cmd_sweep`'s merge-range check now capture the read's own exit status before touching its output, and `die` on failure instead of falling through to "not blocked" / "not closed" / "no open MR" / "no commits ahead") |
 
 ## Independent review round (2026-08-01)
 
@@ -2010,3 +2011,36 @@ independently useful: on its own it would have caught both #5 and #9 without any
 
 **Tests.** Prose-only change in `references/`, which this skill's test suite does not cover — no
 `tick-test.sh` addition applies. Correctness here is a reading, not a check.
+
+## P47 · Guards fail closed
+
+**Problem.** Every guard read in `lane.sh` was `… 2>/dev/null … || true` (`:136`, `:221`, `:466`,
+`:529`), so an API failure made the guard *pass*. Demonstrated: with the `closed_by` read failing,
+`lane.sh close 70` closed the ticket having checked no MR; with the issue read failing, a lane
+transitioned a ticket carrying a human `blocked` hold. `cmd_sweep`'s merge check had the same
+shape — `git log "origin/$base..$branch" 2>/dev/null` could not tell "no commits ahead" from
+"range does not resolve", so an unfetched or missing base ref armed the delete path on a worktree
+holding real work.
+
+**Fix direction.** Separate "read succeeded and says no" from "read failed": capture the exit
+status, and on failure `die` with the reason.
+
+**As implemented (2026-08-06).** Each of the four `lane.sh` reads now runs as its own statement —
+`out=$("$GLAB" api … 2>/dev/null) && rc=0 || rc=$?` — so the API call's exit status is captured
+independently of whatever jq does with its output; `set -euo pipefail` would otherwise abort the
+script on the bare assignment before a message could be composed, which is why the `&&`/`||` pair
+is load-bearing and not just style. A non-zero `rc` dies naming the read that failed and why the
+guard cannot proceed blind, instead of falling through to "not blocked" (`_blocked_guard`), "not
+closed" (`cmd_transition`), or "no open/merged MR" (`cmd_close`, `cmd_merge_failed`). `cmd_sweep`'s
+`git log origin/$base..$branch` gets the same treatment in `tick.sh`: its own exit status is
+captured before the emptiness check, and an unresolvable range now skips the worktree with a
+logged reason rather than reading as "no commits ahead, safe to delete". `cmd_merge`'s existing
+`closed_by` read was left alone — it already fails closed (empty `mr` → `die`), just with a
+misleading message on an API error; not the shape this proposal was about.
+
+**Tests.** Five new cases in `scripts/tick-test.sh` §23, each failing exactly the one read the
+guard depends on and asserting both a `die` and that nothing was written: `_blocked_guard` (via
+`close`, whose issue-state read precedes its own), `cmd_transition`'s closed-ticket read,
+`cmd_close`'s `closed_by` read (isolated from `_blocked_guard` by leaving the issue-state read
+healthy), `cmd_merge_failed`'s `closed_by` read, and `cmd_sweep`'s unresolvable base ref. Full
+suite: 461 passed, 0 failed (456 → 461).

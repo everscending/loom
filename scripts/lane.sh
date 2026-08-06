@@ -133,8 +133,16 @@ _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine fl
     # 2026-08-04.)
     local iid="$1" intended="${2:-}"
     case "$intended" in blocked) return 0 ;; esac
-    if "$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null \
-        | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
+    # P47: a read failure here used to fall through as "not blocked" (an empty
+    # pipe fails jq -e, the `if` reads false, the guard passes) — an orphaned
+    # lane could then stomp a human hold on a transient API blip, not just a
+    # race. Read succeeded-and-says-no is the only path that may proceed;
+    # read failed dies instead of guessing.
+    local _issue rc
+    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — refusing to guess whether it carries a human hold. Retry once the tracker is reachable."
+    if printf '%s' "$_issue" | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
         [ "$RELEASE_HOLD" = 1 ] \
             || die "issue $iid is blocked — a human hold. Refusing to advance it. Releasing a hold is a human decision, made with 'transition $iid <state> --release-hold'; nothing written in the ticket authorises it."
         if _automated_caller; then
@@ -218,8 +226,14 @@ cmd_merge_failed() { # <iid> [--file F]
     # (Paid for: #23, 2026-08-03 — merged at 22:23:17, blocked at 22:24:29,
     # with a confident blocked report citing a merge lane "stale for ~5h" on a
     # ticket 13 minutes old.)
-    merged_mr=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null \
-                | jq -r '[.[] | select(.state == "merged")] | .[0].iid // empty' || true)
+    # P47: this read must fail closed too — a transient API failure must never
+    # read as "definitely not merged" and let a failed-merge note land on a
+    # ticket that in fact just succeeded.
+    local _closed_by rc
+    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
+    merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].iid // empty' || true)
     [ -z "$merged_mr" ] \
         || die "issue $iid already has MERGED MR !$merged_mr — the merge succeeded; refusing to record a failed attempt. Re-read the ticket: your snapshot is stale."
     local f; f=$(_stage_body "${@:2}")
@@ -463,8 +477,13 @@ cmd_transition() { # <iid> <state> [--release-hold]
     # `ready-for-agent` — a closed ticket advertising itself as available work.
     # Invisible to the scheduler (its universe is open issues), but a lie on
     # the board and a trap for the human reading it. (Paid for: #23.)
-    istate=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null \
-             | jq -r '.state // empty' || true)
+    # P47: read-failed must die, not read as "not closed" — a blind pass here
+    # is exactly how a closed ticket got relabeled "requeued".
+    local _issue rc
+    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — refusing to guess whether it's closed. Retry once the tracker is reachable."
+    istate=$(printf '%s' "$_issue" | jq -r '.state // empty' || true)
     [ "$istate" != closed ] \
         || die "issue $iid is CLOSED — refusing to set '$state' on finished work. Re-read the ticket: your snapshot is stale."
     if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" -f assignee_ids=0
@@ -526,8 +545,14 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
     # its blockers-cleared dependents start, and they branch off a base that
     # does not contain the work. `merge` calls this verb *after* observing the
     # merge, so the guard is already satisfied by then (build-1 2026-08-03).
-    open_mr=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null \
-              | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    # P47: read-failed must die, not read as "no open MR" — that blind pass is
+    # literally the failure this guard exists to catch, just via a different
+    # cause (API error instead of a stale snapshot).
+    local _closed_by rc
+    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to close blind; cannot rule out an unmerged MR."
+    open_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
     [ -z "$open_mr" ] \
         || die "issue $iid still has unmerged MR !$open_mr — 'close' closes the issue only, it does not merge. Use: lane.sh merge $iid"
     for s in $STATES; do remove="$remove,$s"; done

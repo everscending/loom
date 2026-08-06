@@ -187,7 +187,19 @@ cmd_sweep() {
         if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $dir_p"; then
             branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
             [ -n "$branch" ] || continue
-            if [ -n "$(git -C "$REPO_ROOT" log "origin/$base..$branch" --oneline 2>/dev/null | head -1)" ]; then
+            # P47: `git log A..B` cannot tell "no commits ahead" from "range
+            # does not resolve" once its own exit status is thrown away — an
+            # unfetched or missing base ref used to read as "merged" and arm
+            # the delete path on a worktree holding real, unmerged work.
+            # Capture the exit status on its own (no pipe) so a failed
+            # resolve dies instead of guessing.
+            local _ahead ahead_rc
+            _ahead=$(git -C "$REPO_ROOT" log "origin/$base..$branch" --oneline 2>/dev/null) && ahead_rc=0 || ahead_rc=$?
+            if [ "$ahead_rc" -ne 0 ]; then
+                echo "sweep: $dir — cannot resolve origin/$base..$branch (rc=$ahead_rc), base ref missing or unfetched — skipping rather than risk deleting unmerged work"
+                continue
+            fi
+            if [ -n "$_ahead" ]; then
                 continue                     # unmerged work — not ours to touch
             fi
             # `|| true` is load-bearing: under `set -euo pipefail`, a `grep -v`
