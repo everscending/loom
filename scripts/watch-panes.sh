@@ -63,6 +63,22 @@ if [ "${1:-}" = "ticker" ]; then
     exit 0
 fi
 
+# `/loom watch` raises the viewer, and a human typing `watch` is asking to SEE
+# the build — an intent newer than whatever earlier `q` or `off` closed it, on
+# the same reasoning that lets `start` clear both switches. So `raise` clears
+# BOTH and brings the viewer up, where `on` clears the viewer switch alone and
+# leaves a deliberate `ticker off` standing. Only human-typed verbs (`start`,
+# `watch`) may use it: an automatic tick undoing a human's close is the thing
+# the switches exist to prevent.
+# (Asked for by the human, 2026-08-05: a `ticker-off` marker left an armed
+# build with no ticker for 40 minutes, and `watch` reporting healthy the whole
+# time read as the viewer being broken rather than as a setting.)
+if [ "${1:-}" = "raise" ]; then
+    _dir="$("$TICK" orch-home 2>/dev/null)"
+    rm -f "$_dir/ticker-off"
+    exec "$0" on
+fi
+
 # The whole viewer, same shape as the ticker switch above. Until now only the
 # ticker had an off-switch: closing everything meant killing the process by
 # its pidfile, by hand, from a command someone had to be told. The script's

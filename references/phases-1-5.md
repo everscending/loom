@@ -116,9 +116,10 @@ to go unattended — no `launchctl`, no plist, no cron.
 **`start` also opens the window on the build it just armed.** Inside herdr it
 raises the viewer itself — a pane per live worker plus the build ticker — and
 clears both off-switches on the way, so a `q` pressed in a previous build's
-ticker cannot leave this one unwatched. It is the only path that clears them:
-an automatic tick undoing a human's close would make the switch worthless.
-Outside herdr, and when a viewer is already up, it does nothing.
+ticker cannot leave this one unwatched. `watch` clears them too, by the same
+argument — both are typed by a human asking to see the build. Those two are the
+only paths: an automatic tick undoing a human's close would make the switch
+worthless. Outside herdr, and when a viewer is already up, it does nothing.
 
 **`start` is now what makes a build autonomous, not a side effect of ticking.**
 Without it, a lane cannot chain and an automatic tick does nothing; a manual

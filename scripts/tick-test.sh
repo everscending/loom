@@ -3117,6 +3117,29 @@ LOOM_HOME="$T/wp13f-home" bash "$WP" ticker on >/dev/null 2>&1 \
     && [ ! -f "$T/wp13f-home/ticker-off" ] \
     && ok "watch-panes: 'ticker on' clears the marker" \
     || bad "watch-panes: ticker on left the marker behind"
+
+# 13g-raise. `/loom watch` uses `raise`, which clears BOTH switches, where `on`
+#      clears the viewer switch alone and leaves a deliberate `ticker off`
+#      standing. Without it a `q` pressed earlier makes `watch` raise a viewer
+#      that closes its own ticker every poll, and the human reads a setting as
+#      a broken viewer. (Paid for: build-3 2026-08-05.)
+touch "$T/wp13f-home/ticker-off" "$T/wp13f-home/viewer-off"
+HERDR_ENV= LOOM_HOME="$T/wp13f-home" bash "$WP" raise >/dev/null 2>&1 || :
+if [ ! -f "$T/wp13f-home/ticker-off" ] && [ ! -f "$T/wp13f-home/viewer-off" ]; then
+    ok "watch-panes: 'raise' clears both the ticker and viewer switches"
+else
+    bad "watch-panes: raise left ticker-off=$([ -f "$T/wp13f-home/ticker-off" ] && echo yes || echo no) viewer-off=$([ -f "$T/wp13f-home/viewer-off" ] && echo yes || echo no)"
+fi
+# `on` must NOT touch the ticker switch — the two axes stay independent, so a
+# human can keep the panes and drop the strip.
+touch "$T/wp13f-home/ticker-off" "$T/wp13f-home/viewer-off"
+HERDR_ENV= LOOM_HOME="$T/wp13f-home" bash "$WP" on >/dev/null 2>&1 || :
+if [ -f "$T/wp13f-home/ticker-off" ] && [ ! -f "$T/wp13f-home/viewer-off" ]; then
+    ok "watch-panes: 'on' leaves a deliberate ticker-off standing"
+else
+    bad "watch-panes: 'on' wrongly cleared the ticker switch"
+fi
+rm -f "$T/wp13f-home/ticker-off" "$T/wp13f-home/viewer-off"
 # Mid-run off: the stub plants the marker the instant the ticker starts
 # streaming; the next poll must CLOSE the live ticker pane, not just stop
 # reopening it.

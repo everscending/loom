@@ -492,8 +492,8 @@ per lane — what it's doing, why, what's next — plus merge-queue depth and
 blocked list. Read-only.
 
 Then give the human eyes on the work: inside herdr (`$HERDR_ENV` is `1`),
-launch `scripts/watch-panes.sh` **detached** — a pane per live lane running
-`tick.sh render-log <id> --follow`, plus a build-ticker strip running
+**always `scripts/watch-panes.sh raise`, detached** — a pane per live lane
+running `tick.sh render-log <id> --follow`, plus a build-ticker strip running
 `tick.sh render-events --follow` (one timestamped line per step: claimed, →
 review, gate verdict, merged — deterministic, zero model time; narrating
 mechanical events with a session is the wrong tool). The viewer keeps the
@@ -501,9 +501,15 @@ ticker alive every poll, so Ctrl-C and closing the pane is futile — the
 gestures that stick are **`q` inside the ticker pane**, `watch-panes.sh ticker
 off|on` for that strip, and `watch-panes.sh off|on` for the whole viewer
 (closes every pane it owns and exits, honored mid-run and at launch, so the
-next tick cannot undo it). Only `start` clears those switches — arming a build
-is a newer intent than a close, and it raises the viewer itself. Detached, so
-the panes outlive this session.
+next tick cannot undo it). `raise` is what clears both switches, which is why
+`watch` uses it and a plain launch is wrong here: a human typing `watch` is
+asking to see the build, an intent newer than whatever earlier close is on
+disk. Only `start` and `watch` may clear them — an *automatic* tick undoing a
+human's close is the thing the switches exist to prevent. Detached, so the
+panes outlive this session. *(paid: build-3 2026-08-05 — a `ticker-off` marker
+from a `q` pressed 40 minutes earlier meant `watch` raised a viewer that
+silently closed its own ticker every poll, and the human read a working
+setting as a broken viewer.)*
 Outside herdr, name those commands instead. `--no-panes` for the summary
 alone. Never hand the human a command to paste when it can just be run.
 
