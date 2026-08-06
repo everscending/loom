@@ -28,30 +28,6 @@ should have caught it; almost none of them could have.
 
 ## `scripts/tick.sh`
 
-### D-TICK-01 · sweep can `rm -rf` a live lane's worktree
-`tick.sh:164` — `cmd_sweep` builds `live_cwds` from `cmd_lane_status | awk '$3=="running"'`. A
-`stale` lane is alive (pid responds; no model turn for `heartbeat_stale_minutes`) but contributes
-no cwd, and does not raise `live_n`, so the lsof bailout at `:173` never fires either.
-**Failure:** `impl-51` sits 35 min inside one slow test → reads `stale`. Next tick sweeps: the lane
-has not committed, so `origin/main..<branch>` is empty and reads as merged; its new files are
-untracked, so the modified-tracked-files check sees nothing → `git worktree remove --force` +
-`rm -rf` under a live process. The comment at `:168-172` names this exact outcome as what the
-guard exists to prevent.
-**Test:** the identical lesson is already written for gate dispatch at `tick-test.sh:2116`; the
-sweep block (`:4260-4299`) has no live or stale lane in a sweepable worktree.
-**Covered by:** P46.
-
-### D-TICK-02 · a failed `git log` in the merge check reads as "merged"
-`tick.sh:190` — `[ -n "$(git -C "$REPO_ROOT" log "origin/$base..$branch" --oneline 2>/dev/null | head -1)" ]`
-cannot distinguish "no commits ahead" from "revision range does not resolve".
-**Failure:** no `origin` remote, or `base` derives to `main` at `:158-160` and the remote never had
-that ref → `git log` exits 128 with empty stdout, stderr discarded, the `continue` is skipped, and
-a worktree holding committed work is `rm -rf`'d. `git branch -d` at `:210` then refuses, so the
-commits survive in the object store; the working tree and untracked artifacts do not.
-**Test:** `tick-test.sh:4288-4297` proves only the happy negative. No case plants a missing or
-unfetched base ref.
-**Covered by:** P47.
-
 ### D-TICK-03 · both locks stamp the owner pid after claiming the lock
 `tick.sh:497-508`, `:517-524` — `lock_acquire` creates the dir at `:497` and writes the pid at
 `:498`. A second tick whose `mkdir` fails in that window reads an empty pid at `:503`, fails
@@ -88,18 +64,6 @@ firing before WiFi returns, `_quiet_check` fails its `glab` call → `unreadable
 correctly skipped at `:843`, but `_prune_scratch` and `cmd_sweep` already ran, with `git fetch
 origin` having failed at `:161`, so D-TICK-02's merge judgement is made against stale on-disk refs.
 **Test:** no case runs `tick --auto` in the `unreadable` state with a sweepable worktree present.
-
-### D-TICK-06 · `_quiet_check` counts only `running` lanes as activity
-`tick.sh:301` — same root cause as D-TICK-01, different consequence.
-**Failure:** the last unblocked ticket is held by a lane wedged on a polling tool (the merge-50
-shape at `:2729-2732`) and therefore `stale`; every other open member carries `blocked`.
-`_quiet_check` finds no `running` lane, gets `blocked == count`, returns `halted` → `:837` refuses
-every wave and `_notify_quiet` pushes "Build halted" while a lane is alive holding a ticket. The
-`count == 0` branch mirrors it: a build whose last lane is stale-but-alive can classify `complete`
-and be torn down.
-**Test:** the quiet-check block (`tick-test.sh:1035-1160`) drives classification purely from
-planted event logs; no case has a lane pidfile present at all.
-**Covered by:** P46.
 
 ### D-TICK-07 · acceptance and quiescence reads truncate at one page
 `tick.sh:246`, `:247`, `:306`, `:1889-1890` — `per_page=100` with no `--paginate`, unlike `:1775`
@@ -317,16 +281,6 @@ already landed. On retry (`[{21,merged},{5,opened}]`) it merged `!5`, the stray.
 **Test:** `tick-test.sh:4340-4348` covers "no open MR closes the issue" only; there is no
 happy-path merge test at all.
 
-### D-LANE-04 · every guard read fails open
-`lane.sh:136`, `:221`, `:466`, `:529` — each is `2>/dev/null … || true` or an `if`-condition
-pipeline, so a transient API failure makes the guard *pass*.
-**Failure:** verified twice — (a) `closed_by` stub exits 1 → `lane.sh close 70` closed the ticket
-rc 0 without ever checking an MR; (b) issue-read stub exits 1 on a ticket carrying a human
-`blocked` hold → `LOOM_LANE_ID=impl-71 lane.sh transition 71 review` wrote `add_labels=review`
-rc 0, stomping the hold. One GitLab 502 during a build.
-**Test:** no test in the suite makes a stub read fail.
-**Covered by:** P47.
-
 ### D-LANE-05 · `verdict` posts its note before the blocked guard runs
 `lane.sh:190-192` — the note is posted, then `_set_state` runs `_blocked_guard`.
 **Failure:** verified — on a `blocked` ticket, `verdict 80 fail deadbeef --class marks-attribution`
@@ -360,14 +314,6 @@ time.
 ---
 
 ## `scripts/bootstrap.sh`
-
-### D-BOOT-02 · from a subdirectory the allowlist is written where nothing reads it, and reports success
-`bootstrap.sh:161-172` — same root cause as D-BOOT-01, likelier trigger.
-**Failure:** the human is in `myrepo/src/deep` and runs `bootstrap.sh settings` (or a tick fires
-`bootstrap.sh all`). The allowlist lands at `myrepo/src/deep/.claude/settings.json`; Claude Code
-reads it only from the project root, so no lane ever gets it. Exit 0 → `tick.sh:695` writes the
-`.bootstrapped` sentinel → never retried. The uncommitted-file warning at `:170` fires too, so it
-reads exactly like success.
 
 ### D-BOOT-03 · `cmd_settings || true` turns a settings refusal into "bootstrap: done"
 `bootstrap.sh:198` — contradicts the P30 mechanism its own comment describes at `:149-153` ("no
@@ -415,17 +361,6 @@ available to re-anchor on. Lane panes keep working, so the viewer looks healthy.
 it: `on` (`:104-105`) sees a live pidfile and declines. The P39 shape with the ticker path left
 out; produces the 2026-08-05 symptom described at `:73-75`.
 **Test:** 13n exercises a dead anchor only at startup and only with `WATCH_TICKER=0`.
-
-### D-PANE-03 · only `running` counts, so a stale lane's pane is closed or reused
-`watch-panes.sh:408` — same root cause as D-TICK-01 and D-TICK-06.
-**Failure:** `probe-e4` emits nothing for 31 minutes → drops out of `$running` → `:439`
-`probe-*) story_done=1` → its pane is closed and its scrollback destroyed while the process works.
-An `impl-N` lane instead gets stamped "ticket N — idle" with "── lane impl-N ended ──" printed into
-it — the misreading the idle stamp exists to prevent (`:413-415`) — and, now idle, becomes a reuse
-candidate at `:483`, so another ticket's lane can take a still-alive lane's pane. If that ticket is
-already closed, `:442` closes the pane outright.
-**Test:** no test combines `stale` with the viewer; every wp13* fixture writes a live pid.
-**Covered by:** P46.
 
 ### D-PANE-04 · a partial `lane-status` read is discarded entirely
 `watch-panes.sh:408` — `|| running=""` under `set -euo pipefail`.
@@ -785,6 +720,85 @@ requires it to equal `$(cd "$REPO_ROOT" && pwd -P)`, refusing with a named reaso
 `tick-test.sh` case 9c6 adds two fixtures: a `REPO_ROOT` nested inside an ordinary repo, and one
 nested inside a repo standing in for a `$HOME` with its own `.git` — both refused, both confirmed
 to create nothing at either candidate root.
+
+### D-BOOT-02 · from a subdirectory the allowlist is written where nothing reads it, and reports success
+*Closed 2026-08-06.*
+
+`bootstrap.sh:161-172` — same root cause as D-BOOT-01: running `bootstrap.sh settings` (or `all`)
+from `myrepo/src/deep` wrote the allowlist to `myrepo/src/deep/.claude/settings.json`, which Claude
+Code never reads, then reported success and stamped the `.bootstrapped` sentinel so it was never
+retried.
+
+**Shipped:** no separate change — D-BOOT-01's fix to `_require_repo` (`git -C "$REPO_ROOT"
+rev-parse --show-toplevel` must equal `$REPO_ROOT`) runs before `cmd_settings` and `cmd_labels`
+write anything, so a `REPO_ROOT` that is a subdirectory of a repo is refused with a named reason
+instead of silently writing where nothing reads it. `tick-test.sh` case 9c6, added for D-BOOT-01,
+already plants exactly this shape — a `REPO_ROOT` nested under an ordinary repo — and asserts both
+the refusal and that `.claude/` is created nowhere; no further fixture was needed.
+
+### D-LANE-04 · every guard read fails open
+*Closed 2026-08-06.*
+
+`lane.sh:136`, `:221`, `:466`, `:529` were each `2>/dev/null … || true` or an `if`-condition
+pipeline, so a transient API failure made the guard pass: a failed `closed_by` read let `close`
+close a ticket without ever checking for an open MR; a failed issue read let `transition` stomp a
+human `blocked` hold.
+
+**Shipped:** `P47` — each of the four reads now captures its own exit status (`out=$(...) &&
+rc=0 || rc=$?`, kept separate from `set -euo pipefail` aborting on the bare assignment) and `die`s
+naming the failed read instead of falling through to "not blocked" / "not closed" / "no open MR".
+`tick-test.sh` §23 adds one case per guard, each failing exactly the read it depends on and
+asserting both a `die` and that nothing was written.
+
+### D-PANE-03 · only `running` counts, so a stale lane's pane is closed or reused
+*Closed 2026-08-06.*
+
+`watch-panes.sh:408` — same root cause as D-TICK-01 and D-TICK-06: a `stale` (alive but silent)
+lane dropped out of `$running`, so its pane was closed outright or marked idle and handed to
+another ticket's lane while the original process still held it.
+
+**Shipped:** `P46` — `watch-panes.sh`'s poll now reads the new `tick.sh lanes-alive` subcommand
+(`running` and `stale`) instead of filtering `lane-status` on `running` by hand. `tick-test.sh`
+case 13p2 forces a real background lane `stale` and asserts its pane stays live — no idle rename,
+no close.
+
+### D-TICK-01 · sweep can `rm -rf` a live lane's worktree
+*Closed 2026-08-06.*
+
+`tick.sh:164` — `cmd_sweep`'s live-cwd guard filtered `cmd_lane_status` on `running` alone, so a
+`stale` (alive but silent past the heartbeat window) lane contributed no cwd and never tripped the
+lsof bailout — a wedged-but-alive lane's uncommitted, untracked work was seconds from
+`git worktree remove --force` + `rm -rf`.
+
+**Shipped:** `P46` — `tick.sh` gains `_lanes_alive()` (`running` **or** `stale`), and `cmd_sweep`'s
+live-cwd loop now calls it instead of hand-filtering on `running`. `tick-test.sh` spawns a real
+background lane, backdates its log to force `stale`, and asserts the worktree survives a `sweep`.
+
+### D-TICK-02 · a failed `git log` in the merge check reads as "merged"
+*Closed 2026-08-06.*
+
+`tick.sh:190` — `[ -n "$(git log "origin/$base..$branch" --oneline 2>/dev/null | head -1)" ]`
+could not distinguish "no commits ahead" from "revision range does not resolve" (missing or
+unfetched base ref); either way it read as "merged" and armed the delete path on a worktree
+holding committed, unmerged work.
+
+**Shipped:** `P47` — the `git log` read now captures its own exit status before the emptiness
+check; a non-zero exit logs "cannot resolve … base ref missing or unfetched" and skips the
+worktree instead of deleting it. `tick-test.sh` plants an unresolvable `base:` and asserts the
+worktree survives with the reason logged.
+
+### D-TICK-06 · `_quiet_check` counts only `running` lanes as activity
+*Closed 2026-08-06.*
+
+`tick.sh:301` — same root cause as D-TICK-01: `_quiet_check`'s early "is anything active" check
+filtered on `running` alone, so a lane holding the build's last unblocked ticket but currently
+`stale` fell through into `halted`/`complete` classification instead of the pointer that would
+have kept the build alive.
+
+**Shipped:** `P46` — `_quiet_check` now returns `active` on `[ -n "$(_lanes_alive)" ]`, before any
+`halted`/`complete` classification runs. `tick-test.sh` forces a lane `stale` and asserts
+`_quiet_check` returns `active` without ever touching the tracker (proven by absence: `glab` is
+stubbed to leave a marker on any call, and the marker never appears).
 
 ### D-TICK-13 · retro's spend report cannot see wave sessions
 *Closed 2026-08-06.*
