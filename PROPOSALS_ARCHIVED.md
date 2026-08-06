@@ -99,6 +99,84 @@ place is what makes "a reused id cannot inherit an old mtime" true. And `bootstr
 `REPO_ROOT` from `$PWD` with the git check *after* the write: run from `$HOME` it would create
 `~/.claude/settings.json`, the human's own configuration.
 
+## Independent review round (2026-08-06)
+
+Eight independent reviewers — one per file, none told what the others found or why the code looks
+as it does — read `tick.sh`, `snapshot.jq`, `lane.sh`, `bootstrap.sh`, `watch-panes.sh`,
+`tick-test.sh`, `SKILL.md` and `references/*.md` against a suite that was **green at 430 tests**,
+with `snapshot | graph`, `lane-status` and `report` all clean against a live tracker. They found
+**78 defects**, and every one of them was confirmed against the real lines before it was reported.
+None of it was reachable by running the tests.
+
+**What that says about the tests, again, and worse.** The suite grew from 175 to 430 tests and
+its trustworthiness did not grow with it. Twelve tests were found that cannot fail or prove
+something other than what they name, and the two most dangerous guard the two most destructive
+mechanisms in the program:
+
+- The prune-guard test (`tick-test.sh:394-397`) never invokes `tick.sh` at all. It writes its own
+  `case` statement inside a `bash -c` string and asserts on that — it is testing the bash `case`
+  builtin. Deleting `tick.sh:124`, the line that stands in front of the only unbounded `rm -rf`
+  in the project, leaves it green.
+- The event-log invariant test (`tick-test.sh:2902-2906`) greps for readers matching
+  `(<|read|cat|jq…)`, so it cannot see a reader written with `tail` or `grep`. Two production
+  *decision* readers already exist and it is green over both: `_last_activity_ts` (`tick.sh:285`,
+  `tail`) feeds the spend gate, and `_wave_gap_ok` (`tick.sh:731`, `grep`) decides whether a wave
+  runs at all. The invariant the test names — constitution rule 1 — is already false in the code.
+- The read-only-snapshot test (`tick-test.sh:2019-2023`) denylists `issue update|mr merge|…`,
+  but every tracker mutation in this codebase is written as `glab api --method PUT|POST`. It
+  would pass over a snapshot that relabels tickets.
+- The `ok`-in-both-branches pattern, killed in the ntfy block on 2026-08-01, survived at
+  `tick-test.sh:2361-2363`. A guaranteed +1 to the pass count.
+
+A planted violation still only proves what it plants — and a planted violation with no check that
+the mutated copy *ran* proves nothing at all. Three watch-panes tests pass against a stand-in that
+is `exit 127`.
+
+**One bug class ran through four files at once: `stale` means alive.** `lane-status` reports
+`running | stale | dead`, where `stale` is "pid alive, no model turn for `heartbeat_stale_minutes`"
+— the wedge state a human must triage. Four independent consumers filter on `running` alone and
+therefore treat a live lane as gone:
+
+- `cmd_sweep` (`tick.sh:164`) collects live cwds from `running` lanes only, so a stale lane's
+  worktree is eligible for `git worktree remove --force` + `rm -rf` — under a live process, with
+  its uncommitted work in it. The comment two lines below names this exact outcome as what the
+  guard exists to prevent.
+- `_quiet_check` (`tick.sh:301`) counts only `running` as activity, so a build whose last live
+  lane is stale classifies `halted` (or `complete`) and pushes that to the human.
+- `watch-panes.sh:408` closes a stale probe's pane and destroys its scrollback, and stamps a
+  stale `impl-N` pane "idle" — which then makes it a reuse candidate for another ticket.
+
+**And a second class: guards that fail open.** Every guard read in `lane.sh` is
+`… 2>/dev/null … || true`, so a transient API failure makes the guard *pass*. One GitLab 502
+during a build and `close` closes over an unmerged MR, or a lane walks straight through a human's
+`blocked` hold — reporting success both times. The same shape sits in `cmd_sweep`'s merge check
+(`tick.sh:190`), where a `git log` that exits 128 on an unresolvable revision range is
+indistinguishable from "no commits ahead", and arms the delete path.
+
+**Prose and machinery drifted apart in a new place: the wave prompt.** `tick.sh:885-891` composes
+the context injected into every wave, prefaced "trust it over rediscovery" — so where it
+contradicts `SKILL.md`, it wins, from inside. It currently tells every wave to spawn lanes with a
+flat `--model <lane_model>` (defeating P31's per-ticket escalation, so a rework round runs on the
+tier that just failed), lists the `lane.sh` verbs without `merge`, `merge-failed`, `fix-ticket`,
+`reconcile` or `probe-result`, and instructs merge lanes to finish with `lane.sh close` — the
+build-1 merge-1 failure that `cmd_merge` was written to end, and which `cmd_close` now hard-refuses.
+
+**Runtime lessons worth keeping.** Tracker reads that decide acceptance and quiescence
+(`tick.sh:246`, `:247`, `:306`, `:1889`) are capped at one page with no `--paginate`: past 100
+closed members, an epic whose tickets all closed early contributes no milestone title, so the
+build reports `complete` and tears itself down with that epic never probed — the build-2 failure
+the whole gate was written for, reachable again by size alone. Both locks stamp the owner pid
+*after* the `mkdir` that claims them, so a second tick landing in that window reads an unstamped
+lock as a dead-owner lock and breaks it: two concurrent waves, or two merge lanes, from a race the
+comment says is impossible. And `snapshot.jq` matches epics to milestones with bare `startswith`
+in both directions while `lane.sh` matches on an exact-or-dash-boundary rule — so with epics `E1`
+and `E11 Reporting` in one build, a passing `E1` probe closes `E11`'s milestone, reads `E11`'s
+acceptance criteria into `E1`'s brief, and leaves `E1` permanently unaccepted.
+
+All 88 defects are recorded with stable `D-<FILE>-<nn>` keys in
+[OPEN_DEFECTS.md](OPEN_DEFECTS.md), each with its location, failure scenario and test gap. The
+subset that needs a change rather than a fix is P45–P50 in `PROPOSALS.md`.
+
 ## Why this order
 
 P1–P3 are first not because they save the most minutes on a good run, but because each is a

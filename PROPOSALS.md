@@ -56,6 +56,18 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
+| P52 | A lane that runs away is stopped, not finished | open — proposed 2026-08-06; one ticket ran 456 turns at 426k context/turn, ~$300 of a $3.4k build, with nothing watching the cost |
+| P51 | The wave reads a brief snapshot, not the whole board | open — proposed 2026-08-06; the snapshot is a wave's largest single input (73k chars here, 59% of it ticket rows the wave cannot act on) |
+| P53 | Ticket size is a phase-4 output, like width | open — proposed 2026-08-06; implementation lanes are 57% of build spend and their cost is fixed when the ticket is written, not when it runs |
+| P54 | The wave reads the snapshot once | open — proposed 2026-08-06; step 1 mandates a re-read after writes, and the second read re-sends the whole document |
+| P55 | `retro` reports spend, not just time | open — proposed 2026-08-06; the per-lane cost split took a one-off script, and nothing in the skill surfaces it |
+| P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
+| P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
+| P46 | `stale` means alive — one liveness reader, not four | open — proposed 2026-08-06; four consumers filter on `running` alone, one of them the sweeper's `rm -rf` guard |
+| P47 | Guards fail closed | open — proposed 2026-08-06; every guard read in `lane.sh` passes on a transient API failure |
+| P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
+| P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
+| P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — proposed 2026-08-03; 4 of 5 gate rejections in one build |
 | P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
 | P3 | Actually arm the safety-net timer, and check that it worked | open — re-opened 2026-08-02; build-1 paid 2h08m for the unarmed backstop, and the shipped warning cried wolf after arming |
@@ -344,3 +356,255 @@ bootstrap seeds nothing.
 with the collector down (seam built wrong), or dashboards nobody has opened
 after two instrumented builds (artifact without a consumer — drop it).
 
+
+## P45 · A test must prove it can fail
+
+**Problem.** The suite is green at 430 and its trustworthiness did not grow with its size. Twelve
+tests were found on 2026-08-06 that cannot fail, or prove something other than what they name.
+The two worst guard the two most destructive mechanisms in the program: `tick-test.sh:394-397`
+never invokes `tick.sh` at all (it asserts on a `case` statement it writes itself inside
+`bash -c`, so deleting the guard in front of the only unbounded `rm -rf` leaves it green), and
+`tick-test.sh:2902-2906` greps for event-log readers matching `(<|read|cat|jq…)`, so it cannot
+see the two `tail`/`grep` readers already in production. Three watch-panes planted violations
+assert only the absence of a call, and pass against a stand-in that is `exit 127`. The
+`ok`-in-both-branches pattern killed in the ntfy block on 2026-08-01 survived at
+`tick-test.sh:2361-2363`.
+
+**Fix direction.** Make vacuity mechanically detectable rather than a review finding:
+
+- A `--mutate` mode that, for a named set of production lines (the guards, the destructive
+  paths, the caps), deletes or inverts the line in a scratch copy and asserts the suite goes
+  **red**. A test that stays green over its own mutation is reported by name. Run it in `qa`,
+  not on every suite run.
+- Every planted-violation test asserts the mutated copy *ran* — the `[ "$rc_n" = 0 ] && ok`
+  shape already used at `tick-test.sh:3498` — before asserting what it no longer does.
+- A lint pass over the suite banning `|| ok`, and banning an `ok` whose condition contains only
+  the loop variable that produced it.
+- Where a test asserts "no mutation reached the tracker", assert on the shape every mutation in
+  this codebase actually takes (`glab api --method PUT|POST|DELETE`), not on `glab` subcommands
+  nothing uses.
+
+**Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
+
+## P46 · `stale` means alive — one liveness reader, not four
+
+**Problem.** `lane-status` reports `running | stale | dead`, where `stale` is "pid alive, no model
+turn for `heartbeat_stale_minutes`" — the wedge state a human triages. Four consumers filter on
+`running` alone and so treat a live lane as gone: `cmd_sweep` (`tick.sh:164`), whose live-cwd set
+is the only thing standing between a live lane and `rm -rf` of its worktree; `_quiet_check`
+(`tick.sh:301`), which then classifies `halted` or `complete` with a lane still holding a ticket;
+and `watch-panes.sh:408`, which closes a stale probe's pane and marks a stale implementer's pane
+idle and reusable. The lesson is already written down for gate dispatch at `tick-test.sh:2116`
+and was not carried to the other three.
+
+**Fix direction.** One helper — `_lanes_alive` — returning `running` **and** `stale`, used
+everywhere the question is "is a process there"; `running` stays only where the question is "is it
+making progress". Add a suite case per consumer with a stale-but-alive lane present: a sweepable
+worktree under one, a `tick --auto` classification under another, a viewer poll under the third.
+
+## P47 · Guards fail closed
+
+**Problem.** Every guard read in `lane.sh` is `… 2>/dev/null … || true` (`:136`, `:221`, `:466`,
+`:529`), so an API failure makes the guard *pass*. Demonstrated: with the `closed_by` read failing,
+`lane.sh close 70` closed the ticket having checked no MR; with the issue read failing, a lane
+transitioned a ticket carrying a human `blocked` hold. `cmd_sweep`'s merge check has the same
+shape — `git log "origin/$base..$branch" 2>/dev/null` cannot tell "no commits ahead" from "range
+does not resolve", so an unfetched or missing base ref arms the delete path on a worktree holding
+real work.
+
+**Fix direction.** Separate "read succeeded and says no" from "read failed": capture the exit
+status, and on failure `die` with the reason. A refused write costs one wave; a write made blind
+costs the thing it was guarding. Suite cases: a stub that exits non-zero on each guard read, with
+the assertion that nothing was written.
+
+## P48 · The wave prompt is generated, not hand-maintained
+
+**Problem.** `tick.sh:885-891` composes the context injected into every wave, prefaced "trust it
+over rediscovery" — so where it contradicts `SKILL.md`, it wins, from inside the session. It
+tells every wave to spawn lanes with a flat `--model <lane_model>`, defeating P31's per-ticket
+escalation so a rework round runs on the tier that just failed; it lists the `lane.sh` verbs
+without `merge`, `merge-failed`, `fix-ticket`, `reconcile` or `probe-result`; and it instructs
+merge lanes to finish with `lane.sh close`, the build-1 merge-1 failure `cmd_merge` was written to
+end and `cmd_close` now hard-refuses.
+
+**Fix direction.** The prompt states only facts tick.sh *owns* — repo root, state dir, script
+paths, permission mode, the first action — and derives the rest instead of restating it: the verb
+roster from `lane.sh`'s own usage output, the per-ticket model from the snapshot's `.model`, and
+nothing at all about which verb finishes a merge (that is a decision, and it lives in SKILL.md).
+A suite case asserts the injected verb list equals `lane.sh`'s usage list, so the two cannot drift
+again.
+
+## P49 · Every tracker read paginates
+
+**Problem.** `_epics_unaccepted` (`tick.sh:246-247`), `_quiet_check` (`:306`) and the snapshot's
+`closed.json` (`:1889`) read `per_page=100` with no `--paginate`, unlike `:1775` and `:1798`. Past
+100 closed members, an epic whose tickets all closed early contributes no milestone title, the
+acceptance gate returns false, `_quiet_check` prints `complete`, and the completion wave tears the
+agent down with that epic never probed — the build-2 failure the gate exists to prevent, reachable
+again by size alone. The open-issue read truncates the same way, so `blocked == count` is compared
+over a truncated set.
+
+**Fix direction.** One helper that every tracker read goes through, paginating by default; a
+suite fixture that exceeds one page (none does today) for the acceptance gate, the quiescence
+count and the snapshot.
+
+## P50 · `references/loom-config.md` is generated from `resolve-config`
+
+**Problem.** The file that calls itself the canonical config schema is wrong in both directions.
+Undocumented but read: `max_aux_lanes`, `merge_attempt_cap`, `min_wave_gap_minutes` — the last of
+which is the primary spend control. Documented but false: the heartbeat is 60s, not the stated
+900s; the generated allowlist has no `cd` rule, and deliberately so; `tick.sh` does read the
+`gates:` key, to build that allowlist; `runner` is a settable repo key presented as derived only;
+`ticket_done`/`ticket_review`/`mr_merged` are listed as push events nothing emits; and
+`resolve-config`, sold in two files as "the effective config", emits no `ntfy` block at all.
+
+**Fix direction.** `resolve-config` grows a `--schema` mode printing every key it reads with its
+default, source layer and accepted values, and `loom-config.md`'s schema block is that output with
+prose around it. `ntfy` resolution moves into `resolve-config` so one command really does answer
+"where do pushes go". A suite case diffs the documented key set against the emitted one.
+
+## Token spend — the measurement these six proposals come from
+
+Measured 2026-08-06 against the full boostlingo build-1 log set
+(`~/.loom/boostlingo-ai-interpreter-workbench-2061292512/logs/`, 780 sessions,
+81 tickets), by summing `message.usage` per session and pricing each message at its own
+model's published rate. Total: **6.17B cache-read, 169M cache-creation, 12.6M output
+tokens ≈ $3,404 API-equivalent.**
+
+| Session kind | Cost | Share | Sessions | Avg turns | Avg context/turn |
+|---|---|---|---|---|---|
+| impl lanes | $1,948 | 57% | 139 | 119 | 202k |
+| wave sessions | $683 | 20% | 407 | 28 | 118k |
+| gate lanes | $423 | 12% | 121 | 92 | 66k |
+| probe lanes | $239 | 7% | 22 | 162 | 164k |
+| merge lanes | $111 | 3% | 91 | 30 | 75k |
+
+**86% of the bill is cache read plus cache creation, so cost is context size × turns ×
+sessions.** Only those three terms are worth optimising. Two things that look expensive
+and are not: ticket bodies run ~1,500 characters (~400 tokens) and account for roughly
+0.1% of a build even though they sit in context for every turn of every lane; and
+`SKILL.md`, loaded in full by all 780 sessions, is about 1% of spend — worth keeping small
+for readability, but it is not where the money is.
+
+Three findings were config changes rather than proposals, and were applied to
+`~/.loom/config.yml` on 2026-08-06: `rejection_cap` 3 → 2, `rework_model` opus → sonnet
+(19 impl reworks and 35 re-gates in that build, one of them a round-4 Opus lane costing
+102M cache reads on its own), and `min_wave_gap_minutes` 10 → 20.
+
+## P51 · The wave reads a brief snapshot, not the whole board
+
+**Problem.** `snapshot` is the largest single input any wave reads, and it grows with the
+build rather than with the work. On ai-workout-generator-copilot it is 73k characters, of
+which 43k is 54 per-ticket rows; a wave acts on perhaps five of them. Every other row
+carries `unblocked: false` or `gate.eligible: false` with no lane and no rejections — the
+wave reads it, pays for it in cache creation, and pays for it again on every subsequent
+turn of that session.
+
+**Fix direction.** `snapshot --brief`: full rows only for tickets the wave can act on this
+turn (ready and unblocked, in `review` with `gate.eligible`, `merge-queue`, stranded, or
+holding a live lane), plus counts and a bare iid list for the rest. Everything the
+scheduler needs to *decide* stays; everything it only needs to *report* becomes a number.
+`summary`, `epics` and `warnings` are unchanged — they are already small and every wave
+reads them. SKILL.md step 1 names `--brief` as the wave's default read; plain `snapshot`
+stays for `watch`, `graph` and humans.
+
+**Write the test before the filter.** Dropping an actionable ticket fails silently: nothing
+errors, the wave simply stops scheduling that ticket, and the build looks healthy. The suite
+case asserts that a ticket in **any** of these five states carries a full row in `--brief`
+output, one fixture per state, and it is the definition of "actionable" the filter is
+written against — not a summary of it:
+
+1. `ready-for-agent`, unclaimed, and `unblocked: true` — the fill step's ready set.
+2. `review` with `gate.eligible: true` — the gate step.
+3. `merge-queue` — the merge step, including tickets behind the one being merged, because
+   the queue is ordered oldest-first and the wave must see the order.
+4. Listed in `summary.stranded` — `in-progress` with no alive lane, the rework path.
+5. Holding a live lane of any kind, whatever its label — harvest reads these, and a lane
+   whose ticket vanished from the board is unharvestable.
+
+A sixth case asserts the inverse for the cheap half: a ticket that is blocked by an open
+issue, unclaimed and laneless appears **only** as an iid, so the saving is real and not
+quietly undone by a filter that keeps everything. If a later step needs a field the brief
+row drops, add the field — never widen the filter back to "all tickets".
+
+## P52 · A lane that runs away is stopped, not finished
+
+**Problem.** Nothing in the machine bounds what one ticket may spend. `impl-43` ran 456
+turns at an average 426k context per turn — past the context window, so compaction had
+fired and the session was re-reading its own summarised history — for 194M cache-read
+tokens, about $300, or 9% of the whole build, on one ticket. The staleness watcher does not
+see this: the lane is making progress the entire time, so it reads `running` and healthy.
+`rejection_cap` and `crash_cap` bound *failures*; nothing bounds *effort*.
+
+**Fix direction.** The watcher already stamps `<id>.progress` from the filtered event
+count, so the turn count is in hand. Add `lane_turn_cap` (config, default around 150) and
+have the harvest step treat a lane past it the way it treats a spent `rejection_cap`:
+`kill-lane`, then `transition <iid> blocked` with a report naming the turn count and the
+last thing the lane was doing. A ticket that needs 400 turns is a ticket that was written
+wrong (P53) or a lane that is lost; either way the answer is a human decision, not more
+turns. Cheap to implement — no new bookkeeping, one comparison in harvest.
+
+## P53 · Ticket size is a phase-4 output, like width
+
+**Problem.** Implementation lanes are 57% of build spend, and a lane's cost is decided when
+its ticket is written, not when it runs. Phase 4 already treats *width* — how many tickets
+can start at once — as a deliberate ticket-writing output with a measured verdict in phase
+5. It treats *depth* as nobody's business. The result is a long tail: median impl lanes
+finish in well under 100 turns while the top five run 280–456, and those five alone are
+roughly a quarter of the implementation bill.
+
+**Fix direction.** Inside this skill's own layer, so `/to-tickets` is untouched: a size rule
+in `references/ticket-template.md` alongside the existing width rule — a ticket whose
+acceptance criteria cannot plausibly be met in one focused sitting is split, and the
+`Pinned interfaces` block is already the tool for splitting it. Then make it measurable
+rather than exhortative: `tick.sh graph` gains a depth read next to its `CHAIN-SHAPED` /
+`NARROW START` verdicts, flagging tickets with an outsized criteria count or file surface as
+`LIKELY DEEP` at `build` time — a reason to go back to phase 4, exactly as the width verdict
+already is. Pairs with P52: P53 stops writing the runaway, P52 stops paying for it.
+
+## P54 · The wave reads the snapshot once
+
+**Problem.** SKILL.md step 1 says to re-run `snapshot` after the wave's own writes rather
+than query piecemeal, and that instruction is correct — the stale-snapshot failures in step
+2 are what paid for it. But the wave obeys it by re-reading the whole document into context,
+so a 15k-token input lands twice in a session that averages 28 turns, and both copies are
+re-read on every turn after.
+
+**Fix direction.** Have the wave write the snapshot to a file (`tick.sh snapshot --out
+<path>`, or a fixed path in the run directory) and read what it needs with `jq` — the
+re-read after writes then costs one field, not one document. The existing `jq` allow rule
+covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
+subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
+implement P51 first and re-measure before doing this one.
+
+## P55 · `retro` reports spend, not just time
+
+**Problem.** `tick.sh retro` explains where a build's *time* went and says nothing about
+where its *money* went. Producing the table at the top of this section took a one-off script
+over `message.usage` in the lane logs — data that is already on disk, already per-lane,
+already attributable to a ticket by filename. Without it, every spend question is a fresh
+investigation, and the expensive ticket is only discovered after the build is over.
+
+**Fix direction.** A `usage` reader in `tick.sh` that sums `message.usage` per session log
+and prices it by the message's own model, surfaced two ways: as a section in `retro`
+(spend per lane kind, per ticket, and the top spenders), and as a field in `lane-status` so
+a running build shows cost next to progress. Deliberately narrower than **P29**, which
+proposes full OTel export to LangFuse; this is the local, zero-dependency subset, and it
+should ship first — if it answers the question, P29 may not be needed.
+
+**Caveat to check during implementation.** Prices are hardcoded per model family and go
+stale. Keep them in one table with a comment naming the date they were read.
+
+## P56 · A probe that cannot finish fails fast
+
+**Problem.** Probe lanes average 162 turns and 26.6M cache-read tokens each — the highest
+per-session cost of any lane kind, ahead of implementers. The probe brief already mandates a
+hard attempt cap on polling, where hitting the cap is a failure to report, but the cap is
+prose in a generated brief rather than anything the machine enforces, and most of those
+turns are the poll loop.
+
+**Fix direction.** Move the cap out of the brief and into the machinery: the probe's poll
+loop becomes a `lane.sh` verb that takes a URL or command plus a deadline and returns
+ready/not-ready, so one shell call replaces a dozen model turns. That is the same
+"grow `lane.sh` until lanes barely need open shell" argument SKILL.md already makes for
+permissions, applied to spend. Smallest of the six; do it last.
