@@ -364,7 +364,15 @@
     | { generated_at: $generated_at, logs_dir: $logs_dir, config: $config,
         build: (if $bi == null then null
                 else { iid: $bi.iid, label: $label, title: $bi.title, url: ($bi.web_url // null) } end),
-        epics: $epics,
+        # P57: --brief drops `acceptance` from every epic that isn't awaiting
+        # a probe — it's 88% of the epics block and only step 6's probe-brief
+        # assembly ever reads it. `needs_probe` IS `epics_awaiting_probe`'s own
+        # selector (line 390), so one condition covers both phrasings of the
+        # proposal. The warnings above are computed from the untrimmed $epics,
+        # so a trimmed epic can never look like it lacks criteria it has.
+        epics: (if $brief
+                then [$epics[] | if .needs_probe then . else del(.acceptance) end]
+                else $epics end),
         # P51: --brief keeps a full row only for what is_actionable calls
         # in-play this turn; the rest are still counted in `summary` below,
         # just not carried here — `other_iids` is the bare list so a wave can

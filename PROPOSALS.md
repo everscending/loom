@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P57 | Acceptance criteria travel with the probe, not with every wave | open — proposed 2026-08-06; after P51 the epics block is 62% of the brief snapshot and 88% of it is criteria text no wave reads |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
@@ -516,55 +515,3 @@ loop becomes a `lane.sh` verb that takes a URL or command plus a deadline and re
 ready/not-ready, so one shell call replaces a dozen model turns. That is the same
 "grow `lane.sh` until lanes barely need open shell" argument SKILL.md already makes for
 permissions, applied to spend. Smallest of the six; do it last.
-
-## P57 · Acceptance criteria travel with the probe, not with every wave
-
-**Problem.** P51 shipped and worked — the snapshot on ai-workout-generator-copilot went from 76,360
-to 16,832 characters, a 78% cut, with the correctness guard passing (four actionable tickets kept as
-full rows, fifty as bare iids, fifty-four accounted for). That success moved the bottleneck rather
-than removing it. The `epics` block was never touched, so it is now **10,470 of the remaining 16,832
-characters — 62% of everything a wave reads** — against 3,107 characters of ticket rows.
-
-Inside that block the split is lopsided in exactly one direction. Across ten epics, every structural
-field together — `name`, `milestone`, `source`, `complete`, `accepted`, `needs_probe`,
-`open_tickets` — comes to about 1,070 characters. `acceptance` alone is **8,222**, or 88%.
-
-And a wave reads that text in exactly one place: step 6, when assembling a probe brief for an epic
-in `summary.epics_awaiting_probe`. Every other wave pays for it and uses none of it. On this repo
-`epics_awaiting_probe` is empty and all ten epics have `needs_probe: false`, so all 8,222 characters
-are dead weight on every wave that runs — carried into context at cache-creation price, then re-read
-on every turn of a session averaging 28 turns.
-
-The asymmetry is what makes this worth doing rather than tolerating: probes were 22 sessions in the
-measured build, waves were 407. The criteria are needed by the rare session and paid for by the
-common one.
-
-**Fix direction.** P51's own rule, applied one level up. In `--brief` output, an epic carries its
-full entry — `acceptance` included — when it is awaiting a probe or has `needs_probe: true`;
-otherwise it keeps its structural fields and drops the criteria text. Nothing else changes: the
-fields the epic rollup, the completion gate and the warnings are computed from are all in the cheap
-1,070 characters, and the plain `snapshot` output is untouched for `watch`, `graph` and humans.
-
-Expected result on this repo: the brief snapshot roughly halves again, to about 8k characters.
-
-**Write the test before the filter, for the same reason as P51.** Dropping criteria an epic needed
-fails silently — the probe brief is simply assembled without them, and SKILL.md is explicit about
-what that costs: a brief written only from defect history "can never catch what nobody has broken
-yet", which is the E4 failure that paid for the criteria rule in the first place. So the guard is
-two cases, and the second is the one that matters:
-
-1. An epic in `summary.epics_awaiting_probe`, or with `needs_probe: true`, carries its full
-   `acceptance` text in `--brief` output, byte-identical to plain `snapshot`.
-2. An epic with open tickets and `needs_probe: false` carries its structural fields and **no**
-   `acceptance` key — so the saving is real, and cannot be quietly undone by a filter that keeps
-   everything and still passes case 1.
-
-**One thing to preserve while cutting.** `snapshot` warns when an epic reaches probe-ready with no
-criteria, and that warning is load-bearing — it means "write them first". It must stay computed from
-the criteria as read from the milestone, before any trimming, so a trimmed output can never make an
-epic look like it has criteria it lacks, or the reverse. Keep the trim as a projection over the
-finished document, not a change to how it is built.
-
-**Relation to P54.** These two now overlap: with the epics block cut, the second snapshot read P54
-targets falls to roughly 2k tokens, and P54's own estimate — already reduced from 4-6% to about 1%
-by P51 — shrinks further. Do P57 first and re-measure before spending anything on P54.

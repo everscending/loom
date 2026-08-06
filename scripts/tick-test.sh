@@ -1967,6 +1967,29 @@ if [ "$(jq -r '.epics[]|select(.name=="Reporting surface")|.accepted' "$T/snap-a
 else
     bad "snapshot: accepted epic still wanted a probe ($(jq -c '[.epics[]|{name,accepted,needs_probe}]' "$T/snap-acc.json"))"
 fi
+# 7a2b. P57: `--brief` keeps `acceptance` only on an epic actually awaiting
+#       its probe — measured at 88% of the epics block and read by nothing
+#       but step 6's probe-brief assembly, so every other wave paid full
+#       price for text it never used. "Reporting surface" is complete with
+#       an open milestone (needs_probe true); "Ledger core" still has open
+#       tickets (needs_probe false) despite carrying its own criteria too.
+printf '%s\n' '[{"title":"Ledger core","state":"active","description":"## Acceptance criteria\n\n- [ ] Ledger balances\n"},{"title":"Reporting surface","state":"active","description":"## Acceptance criteria\n\n- [ ] A user can file a report and read it back\n"}]' \
+    > "$FX/milestones.json"
+SNAP > "$T/snap-p57-full.json" 2>/dev/null
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$CALLS" "$TICK" snapshot --brief > "$T/snap-p57-brief.json" 2>/dev/null
+full_acc=$(jq -r '.epics[]|select(.name=="Reporting surface")|.acceptance' "$T/snap-p57-full.json")
+brief_acc=$(jq -r '.epics[]|select(.name=="Reporting surface")|.acceptance' "$T/snap-p57-brief.json")
+[ "$full_acc" = "$brief_acc" ] && [ -n "$full_acc" ] && [ "$full_acc" != "null" ] \
+    && ok "brief: an epic awaiting its probe keeps acceptance, byte-identical to plain snapshot" \
+    || bad "brief: probe-ready epic's acceptance changed under --brief (full=$full_acc brief=$brief_acc)"
+jq -e '.epics[]|select(.name=="Ledger core")|has("acceptance")|not' "$T/snap-p57-brief.json" >/dev/null 2>&1 \
+    && ok "brief: an epic not awaiting a probe drops the acceptance key entirely" \
+    || bad "brief: Ledger core still carries acceptance under --brief ($(jq -c '.epics[]|select(.name=="Ledger core")' "$T/snap-p57-brief.json"))"
+jq -e '.epics[]|select(.name=="Ledger core")|.needs_probe == false and .open_tickets == 3' "$T/snap-p57-brief.json" >/dev/null 2>&1 \
+    && ok "brief: an epic dropping acceptance keeps its structural fields" \
+    || bad "brief: Ledger core lost structural fields under --brief ($(jq -c '.epics[]|select(.name=="Ledger core")' "$T/snap-p57-brief.json"))"
+printf '%s\n' '[{"title":"Ledger core","state":"active"},{"title":"Reporting surface","state":"active"}]' \
+    > "$FX/milestones.json"
 # 7a3. P35: a finished epic is found from the milestones of this builds CLOSED
 #      members, not from prose in the Build issue. The body parse reads markdown
 #      LIST items; a Build issue that lists its epics in a TABLE matches nothing,

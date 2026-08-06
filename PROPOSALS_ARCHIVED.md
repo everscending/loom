@@ -49,6 +49,7 @@ writing a new proposal that touches the same machinery.
 | P51 | The wave reads a brief snapshot, not the whole board | implemented 2026-08-06 (`snapshot --brief` keeps a full row only for a ticket `is_actionable` (snapshot.jq) calls in-play this turn — ready+unblocked+unclaimed, gateable, merge-queue, stranded, or holding any lane — everything else collapses to a bare iid in `.other_iids`; SKILL.md step 1 names `--brief` as the wave's default read, plain `snapshot` unchanged for `watch`/`graph`/humans) |
 | P55 | `retro` reports spend, not just time | implemented 2026-08-06 (`USAGE_JQ` in `tick.sh` prices a session log from its own `message.usage`; `lane-status` gains a trailing `cost` column; `retro` gains a Spend section — total, by lane kind, top spenders, by ticket — joined against the per-lane logs `clear-lane` never removes) |
 | P53 | Ticket size is a phase-4 output, like width | implemented 2026-08-06 (`references/ticket-template.md` gains a Size section; `snapshot.jq` computes `criteria_count`/`file_surface` per ticket; `tick.sh graph` flags an outsized one `likely_deep` and folds a `LIKELY DEEP` clause into `.verdict`; `references/phases-1-5.md` phase 5 names the new verdict alongside `CHAIN-SHAPED`/`NARROW START`) |
+| P57 | Acceptance criteria travel with the probe, not with every wave | implemented 2026-08-06 (`snapshot.jq`: `--brief` drops the `acceptance` key from every epic whose `needs_probe` is false, keeping it byte-identical for an epic awaiting its probe; warnings still computed from the untrimmed epics; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -1929,3 +1930,47 @@ not-deep rather than erroring. `snapshot.jq`'s extraction itself was hand-verifi
 synthetic ticket body (4 checklist items under `## Acceptance criteria`, 3 distinct file
 tokens across an unrelated section) but has no test of its own in `tick-test.sh`, which
 exercises `graph` directly against synthetic snapshot JSON rather than through `glab`.
+
+## P57 · Acceptance criteria travel with the probe, not with every wave
+
+**Problem.** P51 shipped and worked — the snapshot on ai-workout-generator-copilot went from 76,360
+to 16,832 characters, a 78% cut, with the correctness guard passing (four actionable tickets kept as
+full rows, fifty as bare iids, fifty-four accounted for). That success moved the bottleneck rather
+than removing it. The `epics` block was never touched, so it is now **10,470 of the remaining 16,832
+characters — 62% of everything a wave reads** — against 3,107 characters of ticket rows.
+
+Inside that block the split is lopsided in exactly one direction. Across ten epics, every structural
+field together — `name`, `milestone`, `source`, `complete`, `accepted`, `needs_probe`,
+`open_tickets` — comes to about 1,070 characters. `acceptance` alone is **8,222**, or 88%.
+
+And a wave reads that text in exactly one place: step 6, when assembling a probe brief for an epic
+in `summary.epics_awaiting_probe`. Every other wave pays for it and uses none of it. On this repo
+`epics_awaiting_probe` is empty and all ten epics have `needs_probe: false`, so all 8,222 characters
+are dead weight on every wave that runs — carried into context at cache-creation price, then re-read
+on every turn of a session averaging 28 turns.
+
+The asymmetry is what makes this worth doing rather than tolerating: probes were 22 sessions in the
+measured build, waves were 407. The criteria are needed by the rare session and paid for by the
+common one.
+
+**Fix.** P51's own rule, applied one level up, in `snapshot.jq` alone. In `--brief` output, an epic
+carries its full entry — `acceptance` included — when `needs_probe` is true (the same selector
+`epics_awaiting_probe` already uses); otherwise `del(.acceptance)` drops the key and keeps every
+structural field. The `epics` block used to assemble the output document unconditionally
+(`epics: $epics`); the trim is applied only there, as a projection over the already-finished `$epics`
+value, so the warnings computed earlier in the same program (including the "ready to probe but no
+criteria section" one) still read the untrimmed criteria and cannot be fooled by the cut. Plain
+`snapshot` (no `--brief`) is untouched. No SKILL.md change: the rule is enforced by the filter, not
+decided by a wave.
+
+**Tests** (`scripts/tick-test.sh`, alongside the existing acceptance-rollup fixture): with both
+"Ledger core" (open tickets, `needs_probe: false`) and "Reporting surface" (`needs_probe: true`)
+carrying their own `## Acceptance criteria` section, `--brief` output keeps "Reporting surface"'s
+`acceptance` byte-identical to plain `snapshot`, drops the key entirely from "Ledger core" (asserted
+with `has("acceptance")`, not merely `== null`, so a filter that keeps the key and blanks it still
+fails), and confirms "Ledger core" keeps its structural fields (`needs_probe`, `open_tickets`) under
+the same trim. Full suite: 456 passed, 0 failed.
+
+**Relation to P54.** These two now overlap: with the epics block cut, the second snapshot read P54
+targets falls to roughly 2k tokens, and P54's own estimate — already reduced from 4-6% to about 1%
+by P51 — shrinks further. Re-measure against a post-P57 `retro` before spending anything on P54.
