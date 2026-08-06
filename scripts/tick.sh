@@ -2371,6 +2371,16 @@ GRAPH_JQ='
    end) as $cpath
 | ($ts | map(select(.state == "ready-for-agent" and .unblocked == true
                     and (((.assignees // []) | length) == 0))) | length) as $startable
+# P53: depth is decided when the ticket is written, same as width — flag an
+# outsized one before the build starts rather than discover it at turn 300.
+# Thresholds are a starting point (median tickets run well under this), not a
+# calibrated cutoff; tighten or loosen them once a build has data to check
+# against.
+| (6) as $deep_criteria
+| (6) as $deep_files
+| ($ts | map(select(((.criteria_count // 0) > $deep_criteria)
+                    or ((.file_surface // 0) > $deep_files))
+           | {iid, criteria_count: (.criteria_count // 0), file_surface: (.file_surface // 0)})) as $deep
 | {tickets: $n,
    max_lanes: $max_lanes,
    critical_path: {length: ($maxdepth + 1), iids: $cpath},
@@ -2379,6 +2389,7 @@ GRAPH_JQ='
    startable_now: $startable,
    levels: $levels,
    cycle_suspected: $cycle,
+   likely_deep: $deep,
    verdict:
      (($maxdepth + 1) as $len
       | (if $len == 1 then "1 merge cycle" else "\($len) merge cycles" end) as $cyc
@@ -2392,6 +2403,9 @@ GRAPH_JQ='
            elif $opening < $max_lanes and $opening < $widest then "NARROW START — "
            else "" end)
           + "opens \($opening) wide, widest level \($widest), against \($max_lanes) lanes; critical path \($cyc) through \($n) tickets"
+          + (if ($deep | length) > 0
+             then "; LIKELY DEEP — #\($deep | map(.iid | tostring) | join(", #")) (outsized acceptance-criteria or file count — split before build)"
+             else "" end)
         end)}
 '
 

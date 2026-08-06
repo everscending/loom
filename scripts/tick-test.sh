@@ -2337,6 +2337,41 @@ out=$(printf '{"config":{"max_lanes":4},"tickets":[]}' | "$TICK" graph)
     && ok "graph: an empty build analyses cleanly instead of erroring" \
     || bad "graph: empty build broke the analysis"
 
+# 7g6. P53: depth is decided when the ticket is written, same as width. An
+#      outsized acceptance-criteria or file count on a single ticket is
+#      flagged as LIKELY DEEP, named in both the structured list and the
+#      verdict string — a build under threshold raises nothing.
+out=$(printf '{"config":{"max_lanes":4},"tickets":[%s]}' \
+    '{"iid":1,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":9,"file_surface":1}' \
+    | "$TICK" graph)
+if [ "$(printf '%s' "$out" | jq -c '.likely_deep')" = '[{"iid":1,"criteria_count":9,"file_surface":1}]' ] \
+   && case "$(printf '%s' "$out" | jq -r .verdict)" in *"LIKELY DEEP"*"#1"*) true ;; *) false ;; esac; then
+    ok "graph: an outsized acceptance-criteria count is flagged LIKELY DEEP"
+else
+    bad "graph: no depth alarm on an outsized criteria count ($(printf '%s' "$out" | jq -c '{likely_deep, verdict}'))"
+fi
+out=$(printf '{"config":{"max_lanes":4},"tickets":[%s]}' \
+    '{"iid":2,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":1,"file_surface":9}' \
+    | "$TICK" graph)
+case "$(printf '%s' "$out" | jq -r .verdict)" in
+    *"LIKELY DEEP"*"#2"*) ok "graph: an outsized file count is flagged LIKELY DEEP too" ;;
+    *) bad "graph: file-count-only depth signal missed ($(printf '%s' "$out" | jq -r .verdict))" ;;
+esac
+# Planted violation: a ticket comfortably under both thresholds must not cry
+# wolf, same discipline as 7g3 for width.
+out=$(GRAPH "$(printf '{"iid":3,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":3,"file_surface":2}')")
+case "$(printf '%s' "$out" | jq -r .verdict)" in
+    *"LIKELY DEEP"*) bad "graph-violation: a normally-sized ticket was flagged LIKELY DEEP" ;;
+    *) ok "graph-violation: a normally-sized ticket raises no depth alarm" ;;
+esac
+# A ticket with no size signal at all (a synthetic snapshot from before P53,
+# or a test fixture that never sets criteria_count/file_surface) must default
+# to 0, not null propagating into a false comparison.
+out=$(GRAPH "$(GN 4)")
+[ "$(printf '%s' "$out" | jq -c '.likely_deep')" = "[]" ] \
+    && ok "graph: a ticket with no size fields defaults to not-deep" \
+    || bad "graph: missing size fields broke the depth read ($(printf '%s' "$out" | jq -c '.likely_deep'))"
+
 # --- 8. P22 layered config: repo > derived > global > built-in -------------
 RC="$T/rc"; mkdir -p "$RC"
 rc() { LOOM_REPO="$1" LOOM_GLOBAL_CONFIG="${2:-$RC/none.yml}" "$TICK" resolve-config; }

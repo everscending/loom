@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P53 | Ticket size is a phase-4 output, like width | open — proposed 2026-08-06; implementation lanes are 57% of build spend and their cost is fixed when the ticket is written, not when it runs |
 | P54 | The wave reads the snapshot once | open — proposed 2026-08-06; step 1 mandates a re-read after writes, and the second read re-sends the whole document |
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
@@ -487,24 +486,6 @@ Three findings were config changes rather than proposals, and were applied to
 `~/.loom/config.yml` on 2026-08-06: `rejection_cap` 3 → 2, `rework_model` opus → sonnet
 (19 impl reworks and 35 re-gates in that build, one of them a round-4 Opus lane costing
 102M cache reads on its own), and `min_wave_gap_minutes` 10 → 20.
-
-## P53 · Ticket size is a phase-4 output, like width
-
-**Problem.** Implementation lanes are 57% of build spend, and a lane's cost is decided when
-its ticket is written, not when it runs. Phase 4 already treats *width* — how many tickets
-can start at once — as a deliberate ticket-writing output with a measured verdict in phase
-5. It treats *depth* as nobody's business. The result is a long tail: median impl lanes
-finish in well under 100 turns while the top five run 280–456, and those five alone are
-roughly a quarter of the implementation bill.
-
-**Fix direction.** Inside this skill's own layer, so `/to-tickets` is untouched: a size rule
-in `references/ticket-template.md` alongside the existing width rule — a ticket whose
-acceptance criteria cannot plausibly be met in one focused sitting is split, and the
-`Pinned interfaces` block is already the tool for splitting it. Then make it measurable
-rather than exhortative: `tick.sh graph` gains a depth read next to its `CHAIN-SHAPED` /
-`NARROW START` verdicts, flagging tickets with an outsized criteria count or file surface as
-`LIKELY DEEP` at `build` time — a reason to go back to phase 4, exactly as the width verdict
-already is. Pairs with P52: P53 stops writing the runaway, P52 stops paying for it.
 
 ## P54 · The wave reads the snapshot once
 

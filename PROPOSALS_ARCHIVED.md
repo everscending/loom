@@ -48,6 +48,7 @@ writing a new proposal that touches the same machinery.
 | P52 | A lane that runs away is stopped, not finished | implemented 2026-08-06 (`lane_turn_cap` config, default 150, surfaced in `resolve-config` and `snapshot`; `lane-status` gains a trailing `turns` column read from the existing `.progress` stamp; SKILL.md step 2 tells the wave to `kill-lane` + `transition <iid> blocked` past the cap, same as a spent `rejection_cap`) |
 | P51 | The wave reads a brief snapshot, not the whole board | implemented 2026-08-06 (`snapshot --brief` keeps a full row only for a ticket `is_actionable` (snapshot.jq) calls in-play this turn — ready+unblocked+unclaimed, gateable, merge-queue, stranded, or holding any lane — everything else collapses to a bare iid in `.other_iids`; SKILL.md step 1 names `--brief` as the wave's default read, plain `snapshot` unchanged for `watch`/`graph`/humans) |
 | P55 | `retro` reports spend, not just time | implemented 2026-08-06 (`USAGE_JQ` in `tick.sh` prices a session log from its own `message.usage`; `lane-status` gains a trailing `cost` column; `retro` gains a Spend section — total, by lane kind, top spenders, by ticket — joined against the per-lane logs `clear-lane` never removes) |
+| P53 | Ticket size is a phase-4 output, like width | implemented 2026-08-06 (`references/ticket-template.md` gains a Size section; `snapshot.jq` computes `criteria_count`/`file_surface` per ticket; `tick.sh graph` flags an outsized one `likely_deep` and folds a `LIKELY DEEP` clause into `.verdict`; `references/phases-1-5.md` phase 5 names the new verdict alongside `CHAIN-SHAPED`/`NARROW START`) |
 
 ## Independent review round (2026-08-01)
 
@@ -1884,3 +1885,47 @@ dollar amounts on exact integers so the assertions do not chase float formatting
 `lane-status`'s `cost` column prices a fixture session log correctly; `retro`'s Spend
 section reports the right total, the right per-kind split in cost order, names the top
 spender, and rolls the right amount up to the ticket its lanes worked.
+
+## P53 · Ticket size is a phase-4 output, like width
+
+**Problem.** Implementation lanes are 57% of build spend, and a lane's cost is decided when
+its ticket is written, not when it runs. Phase 4 already treats *width* — how many tickets
+can start at once — as a deliberate ticket-writing output with a measured verdict in phase
+5. It treats *depth* as nobody's business. The result is a long tail: median impl lanes
+finish in well under 100 turns while the top five run 280–456, and those five alone are
+roughly a quarter of the implementation bill.
+
+**Fix.** Two halves, exactly as proposed. *Ticket side* (`references/ticket-template.md`):
+a new `## Size` section, alongside `PRD requirement`, stating the rule in prose — a ticket
+whose acceptance criteria cannot plausibly be met in one focused sitting is split, using
+`Pinned interfaces` as the same splitting tool width already uses — and naming the `graph`
+verdict that makes it checkable. *Measurable side*: `snapshot.jq` computes two cheap proxies
+per ticket while it already has the description in hand — `criteria_count` (checklist items
+under the ticket's own `## Acceptance criteria` section) and `file_surface` (distinct
+file-extension tokens anywhere in the body, extension-whitelisted to keep prose like "e.g."
+from inflating it). `tick.sh graph`'s `GRAPH_JQ` reads both off `.tickets[]`, flags any
+ticket over threshold (`criteria_count > 6` or `file_surface > 6` — a starting point, not a
+calibrated cutoff; both fields default to 0 so a pre-P53 snapshot or a fixture that never
+sets them reads as not-deep, never null-propagates into a false positive) into a structured
+`likely_deep` array, and folds a `LIKELY DEEP — #<iid>...` clause onto `.verdict` alongside
+`CHAIN-SHAPED`/`NARROW START`. `references/phases-1-5.md` phase 5 names the new verdict in
+the same sentence as the other two, pointing back at the ticket-template size rule.
+
+**Deviation from the Fix section as written.** The proposal placed the size rule "alongside
+the existing width rule" in `references/ticket-template.md`; the width rule itself actually
+lives in `references/phases-1-5.md`'s phase 4 section, not in `ticket-template.md` (which has
+no width rule to sit beside). Implemented as literally directed — the size rule went into
+`ticket-template.md` as named — and cross-linked phase 5's verdict-reporting sentence to it
+instead, since that is where the width verdict's own instruction actually sits.
+
+**Pairs with P52** (`lane_turn_cap`, archived above): P53 stops writing the runaway ticket,
+P52 stops paying for one that got written anyway.
+
+**Tests** (`scripts/tick-test.sh`, section 7g): an outsized `criteria_count` alone is flagged
+`LIKELY DEEP` in both `.likely_deep` and `.verdict`; an outsized `file_surface` alone is
+flagged too; a ticket comfortably under both thresholds raises nothing (the planted-violation
+discipline already used for `CHAIN-SHAPED`); a ticket carrying neither field at all reads as
+not-deep rather than erroring. `snapshot.jq`'s extraction itself was hand-verified against a
+synthetic ticket body (4 checklist items under `## Acceptance criteria`, 3 distinct file
+tokens across an unrelated section) but has no test of its own in `tick-test.sh`, which
+exercises `graph` directly against synthetic snapshot JSON rather than through `glab`.

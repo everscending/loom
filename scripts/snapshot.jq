@@ -223,12 +223,26 @@
            + ($body | map(select(. as $b | ($natids | index($b)) == null))
                     | map(blocker(.; "body"; null; null; $open_iids; $home)))) as $bb
         | rejections_of((($N[$t.iid | tostring]) // [])) as $rej
+        # P53: depth, like width, is decided when the ticket is written. Two cheap
+        # proxies read straight off the body `graph` can flag before a lane ever
+        # opens it — how many acceptance criteria it promises, and how many
+        # distinct files it already names. Both are heuristics (a stray "e.g."-
+        # shaped token can inflate file_surface by one), which is why `graph`
+        # only ever uses them to flag, never to block.
+        | ($t.description // "") as $desc
+        | ($desc | section("Acceptance criteria")
+           | [scan("(?m)^[ \\t]*[-*+][ \\t]+\\[[ xX]\\][ \\t]+")] | length) as $criteria_count
+        | ($desc
+           | [scan("[A-Za-z0-9_][A-Za-z0-9_./-]*\\.(?:ts|tsx|js|jsx|py|go|rb|rs|java|c|cpp|h|hpp|cs|md|json|ya?ml|sh|sql|css|html|vue)\\b")]
+           | unique | length) as $file_surface
         | { iid: $t.iid, title: $t.title, url: ($t.web_url // null), labels: $lb,
             state: state_of($lb), tier: ($t | tier_of($lb)),
             fix: (($lb | index("fix")) != null),
             assignees: [($t.assignees // [])[] | .username],
             updated_at: ($t.updated_at // null),
             epic: ($t.epic.title? // $t.milestone.title? // null),
+            criteria_count: $criteria_count,
+            file_surface: $file_surface,
             blocked_by: $bb,
             unblocked: ($bb | all(.closed == true)),
             related: ($lk | map(select((.link_type // "") == "relates_to") | .iid)),

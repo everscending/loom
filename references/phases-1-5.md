@@ -90,8 +90,10 @@ body. Phase 5 measures the result; this phase is where it is decided.
    `Build N` issue (selected epics, config snapshot quoted) and label member
    tickets `build-N`. **Only now** does the build exist to measure, so report
    its shape alongside `max_lanes` — `tick.sh snapshot | tick.sh graph` — and
-   surface a `CHAIN-SHAPED` or `NARROW START` verdict as a reason to go back to
-   phase 4 and split a blocker, not a fact to discover at wave 1. Then **stop**
+   surface a `CHAIN-SHAPED`, `NARROW START` or `LIKELY DEEP` verdict as a
+   reason to go back to phase 4 and split a blocker or an oversized ticket
+   (see [ticket-template.md](ticket-template.md)'s size rule), not a fact to
+   discover at wave 1. Then **stop**
    — tell the human the trigger is `/loom start`.
 2. **A build already defined** → the same surface, pre-filled with the current
    selection, for adjustment: add an epic (label its open tickets `build-N`),
