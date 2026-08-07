@@ -4,10 +4,12 @@
 #
 # Lifted out of tick.sh (P71), where it lived as REPORT_TICKET_JQ, a
 # single-quoted shell string. In a file it is checkable with
-# `jq -n -f report-ticket.jq </dev/null`.
+# `jq -L . -n -f report-ticket.jq </dev/null`.
 #
 # Input is bound by tick.sh: --arg iid (the ticket number); reads the full
-# event array via -rs.
+# event array via -rs. The prelude include is uniform across every jq program
+# here (P72), not a dependency this one has yet.
+include "lib";
   ($iid) as $n
   | (map(select(.ev == "lane_spawn" or .ev == "lane_exit"))
      | map(select(.id | test("^(impl|gate|merge)-\($n)(-|$)")))) as $ls

@@ -3,7 +3,10 @@
 #
 # Lifted out of tick.sh (P71), where it lived inline in cmd_render_events as
 # a local shell string. In a file it is checkable with
-# `jq -n -f render-events.jq </dev/null`.
+# `jq -L . -n -f render-events.jq </dev/null`.
+#
+# P72: `stage` — the lane-id split this file used to define — is in lib.jq
+# beside this one, included below, opposite its bash mirror `_lane_type`.
 #
 # Inputs are bound by tick.sh: --arg bad/warn/good/rst (ANSI color codes, ""
 # when color is off) and --arg when_mode ("ts" formats the numeric `.ts` with
@@ -11,17 +14,11 @@
 # enough to lack strflocaltime). when_mode used to be a jq fragment spliced
 # into the shell string at the point of use; as a file it is passed in as
 # data instead, the way it should have been.
+include "lib";
 def when:
   if $when_mode == "ts"
   then ((.ts // 0) | strflocaltime("%m-%d %H:%M:%S"))
   else (.t // "") end;
-def ref: if test("^[0-9]+$") then "#\(.)" else . end;
-def stage($id):
-  if   ($id | startswith("impl-"))  then {t: ($id | ltrimstr("impl-")  | ref), s: "implementation"}
-  elif ($id | startswith("gate-"))  then {t: ($id | ltrimstr("gate-")  | sub("-r[0-9]+$"; "") | ref), s: "gate review"}
-  elif ($id | startswith("merge-")) then {t: ($id | ltrimstr("merge-") | ref), s: "merge"}
-  elif ($id | startswith("probe-")) then {t: "epic \($id | ltrimstr("probe-"))", s: "acceptance probe"}
-  else {t: $id, s: "lane"} end;
 def round($id): (($id | capture("-r(?<n>[0-9]+)$") | " (round \(.n))") // "");
 # P31: an escalation the human asked for must be visibly taken. Empty model
 # (the lane inherits the session default) renders nothing — the common case

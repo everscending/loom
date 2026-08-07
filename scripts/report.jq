@@ -6,15 +6,16 @@
 # build is over.
 #
 # Lifted out of tick.sh (P71), where it lived as REPORT_JQ, a single-quoted
-# shell string. In a file it is checkable with `jq -n -f report.jq </dev/null`.
+# shell string. In a file it is checkable with
+# `jq -L . -n -f report.jq </dev/null`.
+#
+# P72: `hms` and `pct` are in lib.jq beside this file, included below and
+# shared with retro.jq — `retro` prints both programs one after the other, so
+# two spellings of an hour would show up in one output.
 #
 # Input is bound by tick.sh: --arg build_want (a build label to filter on,
 # "" for every build in the log); reads the full event array via -rs.
-  def hms($s): ($s // 0) as $x
-    | if $x >= 3600 then "\($x / 3600 | floor)h\(($x % 3600) / 60 | floor)m"
-      elif $x >= 60 then "\($x / 60 | floor)m\($x % 60)s" else "\($x)s" end;
-  def pct($n; $d): if ($d // 0) == 0 then "  -  "
-                   else "\(($n * 1000 / $d | round) / 10)%" end;
+include "lib";
   ($build_want) as $bw
   | map(select($bw == "" or .build == $bw)) as $evs
   | if ($evs | length) == 0 then "no events recorded\($bw | if . == "" then "" else " for \(.)" end)"

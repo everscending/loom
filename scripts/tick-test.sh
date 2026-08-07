@@ -2735,9 +2735,12 @@ esac
 #      mid-word and broke 250 tests — and a missing one must be named as a
 #      missing file, not left to jq to complain about its -f argument.
 SNAPJQ="$(dirname "$TICK")/snapshot.jq"
-err=$(jq -n -f "$SNAPJQ" </dev/null 2>&1 || true)
+# P72: -L, because it opens with `include "lib";` now. Without it jq answers
+# "module not found: lib" and the parse check would pass on a program it never
+# managed to compile.
+err=$(jq -L "$(dirname "$TICK")" -n -f "$SNAPJQ" </dev/null 2>&1 || true)
 case "$err" in
-    *"syntax error"*|*"unexpected"*) bad "snapshot.jq: does not parse ($(printf '%s' "$err" | head -1))" ;;
+    *"syntax error"*|*"unexpected"*|*"module not found"*) bad "snapshot.jq: does not parse ($(printf '%s' "$err" | head -1))" ;;
     *) ok "snapshot.jq: parses standalone — checkable without running a snapshot" ;;
 esac
 # Planted violation: hide the file and the guard must name it.
@@ -2767,9 +2770,9 @@ printf '{"tickets":[],"config":{}}\n' > "$PJ/snap.json"
 _p71jq() { # _p71jq <basename.jq> <verb-and-args...> — parse check + hide-and-die check
     local jf="$1" fpath; shift
     fpath="$(dirname "$TICK")/$jf"
-    local err; err=$(jq -n -f "$fpath" </dev/null 2>&1 || true)
+    local err; err=$(jq -L "$(dirname "$TICK")" -n -f "$fpath" </dev/null 2>&1 || true)
     case "$err" in
-        *"syntax error"*|*"unexpected"*) bad "$jf: does not parse ($(printf '%s' "$err" | head -1))" ;;
+        *"syntax error"*|*"unexpected"*|*"module not found"*) bad "$jf: does not parse ($(printf '%s' "$err" | head -1))" ;;
         *) ok "$jf: parses standalone — checkable without running $1" ;;
     esac
     mv "$fpath" "$T/$jf.hidden"
@@ -2788,6 +2791,46 @@ _p71jq report.jq report
 _p71jq report-ticket.jq report --ticket 1
 _p71jq retro.jq retro
 _p71jq graph.jq graph "$PJ/snap.json"
+
+# 7j4. P72: all eight of those programs open with `include "lib";`, and the
+#      prelude they include — lib.jq, the jq counterpart of lib.sh — ships
+#      beside them. Same two checks again: it compiles on its own, and a verb
+#      whose program includes it names the MISSING FILE rather than leaving jq
+#      to say "module not found: lib", which names neither the file nor the
+#      script it ships beside.
+LIBJQ="$(dirname "$TICK")/lib.jq"
+err=$(jq -L "$(dirname "$TICK")" -n 'include "lib"; empty' 2>&1 || true)
+[ -z "$err" ] \
+    && ok "lib.jq: compiles on its own — checkable without running any verb" \
+    || bad "lib.jq: does not compile ($(printf '%s' "$err" | head -1))"
+# The uniform contract, checked as one: every jq program beside tick.sh
+# includes the prelude, so there is no per-file question about which ones need
+# `-L` and no second mechanism for sharing a definition.
+noinc=""
+for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+    grep -q '^include "lib";$' "$(dirname "$TICK")/$jf" || noinc="$noinc $jf"
+done
+[ -z "$noinc" ] \
+    && ok "lib.jq: every jq program beside tick.sh includes the prelude" \
+    || bad "lib.jq: not included by$noinc — those programs cannot use a shared def"
+# Planted violation: hide the prelude. Every verb that runs a jq program must
+# refuse by name, and the three checked here are the three separate places the
+# `-L` directory is resolved (the wave's read, a report, a lane log).
+mv "$LIBJQ" "$T/lib.jq.hidden"
+libmiss=""
+for v in "snapshot" "report" "render-log rj1"; do
+    # shellcheck disable=SC2086
+    out=$(PJENV env GLAB_CMD="$FX/glab-stub.sh" "$TICK" $v 2>&1); rc=$?
+    case "$rc:$out" in
+        0:*)      libmiss="$libmiss [$v ran anyway]" ;;
+        *lib.jq*) : ;;
+        *)        libmiss="$libmiss [$v: $(printf '%s' "$out" | head -1)]" ;;
+    esac
+done
+mv "$T/lib.jq.hidden" "$LIBJQ"
+[ -z "$libmiss" ] \
+    && ok "lib.jq: a missing prelude is named as the missing file by every verb that includes it" \
+    || bad "lib.jq: missing prelude reported unclearly —$libmiss"
 
 # 7k. Read-only guardrail: tick.sh must never mutate tracker state (its whole
 #     charter). Every captured argv is checked against a mutating denylist.
@@ -4901,7 +4944,7 @@ f0=$(grep -cE '"reason":"lock_held","first":"?0"?' "$LKH/events.jsonl" || :)
 # (P71: the ticker program that carries this branch now lives in
 # render-events.jq, not inline in tick.sh, so the mutation targets that file).
 mkdir -p "$T/tickmod"
-for jf in snapshot.jq render.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.sh; do
+for jf in snapshot.jq render.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.sh lib.jq; do
     ln -sf "$(dirname "$TICK")/$jf" "$T/tickmod/$jf"
 done
 cp "$TICK" "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
@@ -5103,6 +5146,97 @@ echo "re-gated at a new HEAD" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" 
 grep -q "orch-verdict PASS beef0001 -->" "$VCAP9" \
     && ok "verdict: the non-duplicate verdict posted its trailer" \
     || bad "verdict: the non-duplicate verdict posted no trailer ($(cat "$VCAP9"))"
+
+# 16a4d. P72: the two facts the write half and the read half had to spell the
+#        same way, and which nothing in this suite ever compared. Both now come
+#        from lib.jq, the one jq prelude every program includes.
+#
+#   (a) The epic slugify. snapshot.jq derives an epic's key from its milestone
+#       title; `lane.sh probe-result <epic> pass` closes the milestone whose
+#       title normalizes to the key it was handed. Nothing asserted that those
+#       two normalizations agree — a comment in each file asking the other to
+#       stay byte-identical was the whole bond. The fixture title carries every
+#       way they could disagree: uppercase, punctuation, and a separator at
+#       both ends.
+P72FX="$T/fx72"; cp -R "$FX" "$P72FX"
+P72HOME="$T/p72-home"; mkdir -p "$P72HOME"
+printf '%s\n' '[{"id":91,"title":" REPORTING/surface! ","state":"active"}]' > "$P72FX/milestones.json"
+snapkey=$(LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" "$TICK" snapshot 2>/dev/null \
+    | jq -r '[.warnings[] | capture("spawn probe-(?<k>[a-z0-9-]+)") | .k] | first // "none"')
+cat > "$T/glab-milestones-p72.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${MCAP:?}"
+case "$*" in
+    *"milestones?state=active"*) echo '[{"id":91,"title":" REPORTING/surface! "}]' ;;
+    *) echo '{}' ;;
+esac
+EOF
+chmod +x "$T/glab-milestones-p72.sh"
+MC72="$T/milestone-calls-p72"; : > "$MC72"
+echo "probe green" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-milestones-p72.sh" MCAP="$MC72" \
+    "$LANE" probe-result 36 "$snapkey" pass >/dev/null 2>&1
+if [ "$snapkey" = "reporting-surface" ] && grep -q "milestones/91" "$MC72"; then
+    ok "P72: the key snapshot.jq derives from a milestone title is the key lane.sh closes it by"
+else
+    bad "P72: slugify disagreement — snapshot said [$snapkey], lane.sh closed [$(grep -o 'milestones/[0-9]*' "$MC72" | head -1)]"
+fi
+# Planted violation: give lane.sh back a private slugify — the pre-P72 `sed`
+# pipeline with one of its three rules dropped, which is exactly the drift two
+# comments cannot prevent. Nothing else changes, and the milestone silently
+# stays open.
+D72="$T/slugdrift"; mkdir -p "$D72"
+for sib in lib.sh lib.jq tick.sh snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+    ln -sf "$(dirname "$TICK")/$sib" "$D72/$sib"
+done
+cat > "$T/drift-line.txt" <<'EOF'
+        norm=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+$//')
+EOF
+awk 'NR==FNR {repl = repl $0 ORS; next} /norm=\$\(printf/ {printf "%s", repl; next} {print}' \
+    "$T/drift-line.txt" "$LANE" > "$D72/lane.sh"
+chmod +x "$D72/lane.sh"
+: > "$MC72"
+echo "probe green" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-milestones-p72.sh" MCAP="$MC72" \
+    "$D72/lane.sh" probe-result 36 "$snapkey" pass >/dev/null 2>&1
+grep -q "state_event=close" "$MC72" \
+    && bad "P72-violation: a drifted private slugify still closed the milestone — this fixture does not exercise the difference" \
+    || ok "P72-violation: with lane.sh back on a slugify of its own the milestone is missed, and no comment could have caught it"
+
+#   (b) The verdict trailer. `lane.sh verdict` writes it and snapshot.jq's
+#       `judged_at` reads it back to answer "this HEAD is already judged" —
+#       one regex, formerly written out three times. The roundtrip is checked
+#       end to end: the note this suite feeds the snapshot is the one lane.sh
+#       actually posted, not a hand-written trailer.
+VCAP72="$T/verdict-roundtrip-body"; : > "$VCAP72"
+echo "gate green at the fixture HEAD" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP72" \
+    "$LANE" verdict 12 pass e52b7c1 >/dev/null 2>&1
+jq -Rs '[{system: false, created_at: "2026-08-07T10:00:00Z", author: {username: "gate"}, body: .}]' \
+    < "$VCAP72" > "$P72FX/notes-12.json"
+LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" "$TICK" snapshot 2>/dev/null > "$T/p72-snap.json"
+if [ "$(jq -r '.tickets[]|select(.iid==12)|.gate.last_verdict.verdict' "$T/p72-snap.json")" = "PASS" ] \
+   && [ "$(jq -r '.tickets[]|select(.iid==12)|.gate.eligible' "$T/p72-snap.json")" = "false" ]; then
+    ok "P72: a verdict lane.sh wrote is found by the snapshot at the same HEAD"
+else
+    bad "P72: trailer roundtrip broken ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p72-snap.json" 2>&1))"
+fi
+# Planted violation: change the trailer regex in the ONE place it now lives.
+# Both readers must go blind together — that is the claim. Three writings
+# became one landing site, so a trailer format change cannot half-land.
+V72="$T/trailer-onesite"; mkdir -p "$V72"
+for sib in tick.sh lane.sh snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.sh; do
+    ln -sf "$(dirname "$TICK")/$sib" "$V72/$sib"
+done
+sed 's/scan("orch-verdict/scan("orch-verdict-v2/' "$(dirname "$TICK")/lib.jq" > "$V72/lib.jq"
+LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" "$V72/tick.sh" snapshot 2>/dev/null > "$T/p72-snap-v2.json"
+v2read=$(jq -r '.tickets[]|select(.iid==12)|.gate.last_verdict' "$T/p72-snap-v2.json")
+echo "same SHA, same outcome, again" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
+    VCAP="$T/p72-dup-bodies" NOTES_FIXTURE="$NOTES_FIXTURE" \
+    "$V72/lane.sh" verdict 9 pass cafe0000 >/dev/null 2>&1 \
+    && v2dup=accepted || v2dup=refused
+if [ "$v2read" = null ] && [ "$v2dup" = accepted ]; then
+    ok "P72-violation: one edit to the shared scan blinds the snapshot read AND lane.sh's duplicate refusal together"
+else
+    bad "P72-violation: a trailer format change half-landed (snapshot read [$v2read], duplicate $v2dup)"
+fi
 
 # 16a-2. P32: `merge-failed` records a merge attempt that did NOT merge. The
 #      merge step always takes the OLDEST merge-queue ticket, so without a
@@ -6070,6 +6204,7 @@ esac
 cp "$TICK" "$WP/bin/tick.sh"
 cp "$(dirname "$TICK")/snapshot.jq" "$WP/bin/snapshot.jq" 2>/dev/null || :
 cp "$(dirname "$TICK")/lib.sh" "$WP/bin/lib.sh" 2>/dev/null || :   # P73 sibling
+cp "$(dirname "$TICK")/lib.jq" "$WP/bin/lib.jq" 2>/dev/null || :   # P72 sibling
 cat > "$WP/bin/lane.sh" <<'EOF'
 #!/usr/bin/env bash
 echo "lane.sh: usage: lane.sh frobnicate <iid> | verdict <iid> pass|fail <sha> | wait-ready --timeout <secs> (--url <url> | -- <cmd...>)" >&2
@@ -6393,7 +6528,7 @@ fi
 #     place it can now live. Both halves must flip together, which is the
 #     whole claim: one rule, one landing site.
 mkdir -p "$LB/nocfg"
-for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
     ln -sf "$(dirname "$TICK")/$jf" "$LB/nocfg/$jf"
 done
 cp "$TICK" "$LB/nocfg/tick.sh"; chmod +x "$LB/nocfg/tick.sh"

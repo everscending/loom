@@ -59,8 +59,9 @@ The whole snapshot in one pass, so every derived field must be a pure function o
 in the document — anything sourced independently can disagree with the thing it was derived from.
 The `//` fallback evaluating against a rebound `.` is the recurring defect here, and the reason
 this file is worth reading on its own: read each `//` and name the value it actually falls back to.
-Check `epic_norm` still matches the milestone slugify in `lane.sh` byte for byte — they are two
-implementations of one key, and drift writes an epic acceptance where nothing reads it.
+`epic_norm` and the verdict-trailer scan come from `scripts/lib.jq` now, shared with `lane.sh`
+(P72), so the drift to look for is a program that re-declares one of them locally instead of
+using the shared def — a second answer to a question that must have one.
 
 ### `scripts/tick-test.sh` — the suite
 

@@ -4,13 +4,19 @@
 # a single-quoted shell string: too big to navigate, impossible to syntax-check
 # on its own, and quietly unable to contain an apostrophe (one in a comment
 # ends the shell quote mid-word and breaks the whole script — it happened).
-# In a file it is checkable with `jq -n -f snapshot.jq </dev/null`, and prose
-# may use apostrophes like prose.
+# In a file it is checkable with `jq -L . -n -f snapshot.jq </dev/null`, and
+# prose may use apostrophes like prose.
+#
+# P72: the epic slugify and the verdict-trailer regex live in lib.jq beside
+# this file, included below and shared with lane.sh, which used to hand-keep
+# its own copy of both.
 #
 # Inputs are bound by tick.sh: --slurpfile open/links/mrs/notes/tnotes/
 # milestones/closed, --rawfile lanes_raw/warn_raw, --argjson config/brief, and
 # --arg logs_dir/generated_at/label/build_iid/merge_owner. Output is the single
 # JSON document a wave reads; every consumer of a field is named at the field.
+
+include "lib";
 
     def section($name):
         (. // "")
@@ -19,10 +25,9 @@
     def state_of($labels):
         (["blocked", "merge-queue", "review", "in-progress", "ready-for-agent"]
          | map(select(. as $s | $labels | index($s))) | first) // null;
-    # Must stay byte-identical to the milestone slugify in lane.sh, or an
-    # epic acceptance is written to one key and read from another.
-    def epic_norm:
-        ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+"; "") | gsub("-+$"; "");
+    # `epic_norm` is in lib.jq, and lane.sh's milestone close normalizes
+    # through the same def — byte-identical by construction now, where it used
+    # to be a comment asking two languages to stay in step.
     # The body section is primary; the label is the fallback. That fallback was
     # dead for every repo this skill bootstraps: it matched a BARE `ui`, while
     # `bootstrap.sh` creates the SCOPED `tier::ui`, so a ticket carrying a
@@ -59,7 +64,7 @@
     def judged_at($notes; $head):
         ([$notes | to_entries[] | .key as $i | .value as $note
           | ($note.body // "")
-          | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})")
+          | orch_verdict_scan
           | {verdict: .[0], sha: .[1], at: ($note.created_at // ""), i: $i}]) as $vs
       | if $head == null then null
         else ($vs | map(select(. as $v | ($head | startswith($v.sha))
@@ -148,7 +153,7 @@
          | sort_by([.at, -.i]) | last) as $reset
       | ([$notes | to_entries[] | .key as $i | .value as $note
           | ($note.body // "")
-          | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})(?:\\s+class=([a-z0-9-]+))?")
+          | orch_verdict_scan
           | {verdict: .[0], class: .[2], at: ($note.created_at // ""), i: $i}]
          | sort_by([.at, -.i])
          | if $reset == null then .

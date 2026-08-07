@@ -5,18 +5,18 @@
 # events — no interpretation, which is the verb's job.
 #
 # Lifted out of tick.sh (P71), where it lived as RETRO_JQ, a single-quoted
-# shell string. In a file it is checkable with `jq -n -f retro.jq </dev/null`.
+# shell string. In a file it is checkable with
+# `jq -L . -n -f retro.jq </dev/null`.
+#
+# P72: `hms`, `pct` and `usd` are in lib.jq beside this file, included below
+# and shared with report.jq, which `retro` prints immediately above its own
+# output.
 #
 # Inputs are bound by tick.sh: --arg build_want (a build label to filter on,
 # "" for every build in the log) and --argjson spend (the per-session cost
 # array from `_spend_by_session`, joined here by lane id / wave stem); reads
 # the full event array via -rs.
-  def hms($s): ($s // 0) as $x
-    | if $x >= 3600 then "\($x / 3600 | floor)h\(($x % 3600) / 60 | floor)m"
-      elif $x >= 60 then "\($x / 60 | floor)m\($x % 60)s" else "\($x)s" end;
-  def pct($n; $d): if ($d // 0) == 0 then "  -  "
-                   else "\(($n * 1000 / $d | round) / 10)%" end;
-  def usd($n): "$\(($n * 100 | round) / 100)";
+include "lib";
   # Seconds of [$a,$b) that fall inside any window in $ws.
   def ov($a; $b; $ws): [$ws[] | (([$b, .b] | min) - ([$a, .a] | max)) | select(. > 0)]
                        | add // 0;

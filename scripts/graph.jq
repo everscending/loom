@@ -6,10 +6,13 @@
 # them at the start, which is exactly when a build is most chain-bound.
 #
 # Lifted out of tick.sh (P71), where it lived as GRAPH_JQ, a single-quoted
-# shell string. In a file it is checkable with `jq -n -f graph.jq </dev/null`.
+# shell string. In a file it is checkable with
+# `jq -L . -n -f graph.jq </dev/null`.
 #
 # No --arg/--argjson bindings; reads the snapshot document as its top-level
-# input (`.tickets`, `.config.max_lanes`).
+# input (`.tickets`, `.config.max_lanes`). The prelude include is uniform
+# across every jq program here (P72), not a dependency this one has yet.
+include "lib";
   (.tickets // []) as $ts
 | ($ts | map(.iid)) as $ids
 | ($ts | length) as $n

@@ -72,6 +72,7 @@ writing a new proposal that touches the same machinery.
 | P49 | Every tracker read paginates | implemented 2026-08-07 (`tick.sh` gains `_glab_list [--capped] <path>`, which paginates and folds glab's one-array-per-page output; all nine tracker reads go through it — the acceptance gate, the quiescence count, the snapshot's stage-1, milestone and closed-member reads — and only the two `sort=desc` notes reads stay capped on purpose) |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | implemented 2026-08-07 (`references/phases-1-5.md` phase 4 drafts every ticket body into one draft file, one epic at a time, re-reads it from the file, and runs a single check list — width and size read off the draft, plus six consistency checks — before the human reviews the bodies and `/to-tickets` publishes; the standalone width prose and `ticket-template.md`'s Size section fold into that list; phase 5's `graph` verdict becomes the backstop; the draft lives beside the PRD and `replan` diffs against it; no SKILL.md change) |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | implemented 2026-08-07 (`tick.sh gate-deps` resolves every path-shaped file the tiers' gate commands — and, for repos declaring gates or a runner, the runner itself — invoke, and exits 1 naming the offending command for any not on the base branch; `references/phases-1-5.md` phase 5 runs it at definition and on every membership amendment, refusing unless a delivering ticket blocks every ticket carrying that tier; the pregate's missing-runner path now declares "tier reduced to review-only" in the lane log and emits a `pregate_reduced` event the ticker renders, instead of the silent skip; no SKILL.md change) |
+| P72 | One jq prelude both halves include | implemented 2026-08-07 (`scripts/lib.jq` — the jq counterpart of lib.sh, same *pure definitions only* entry rule — holds `epic_norm`, `orch_verdict_scan`, `hms`/`pct`/`usd` and `stage`/`ref`; all eight jq programs beside `tick.sh` open with `include "lib";` and every call site passes `jq -L <the scripts dir>`, resolved through `_jq_lib_dir` in lib.sh, which refuses by name when the prelude is missing. `lane.sh _close_epic_milestone` drops its `sed` slugify and normalizes through `epic_norm`; `cmd_verdict`'s duplicate check and snapshot.jq's `judged_at`/`rejections_of` all read the one trailer scan, so three writings became one landing site. `_lane_type` and lib.jq's `stage` now name each other. Suite 603 → 610, 0 failed; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -2877,6 +2878,39 @@ the behavior proof unchanged.
 **Consumer.** `qa` and `optimize`, which get checkable files instead of quoted strings; P72,
 which needs the programs to be files before anything can be shared between them; and every
 future edit to these programs.
+
+## P72 · One jq prelude both halves include
+
+**Problem.** Three facts are duplicated across the jq and shell halves and enforced today only
+by comments and discipline:
+
+- `epic_norm` (snapshot.jq:24) must stay "byte-identical to the milestone slugify in lane.sh"
+  (`_close_epic_milestone`'s `sed`, lane.sh:574) — its own comment says so, and a comment is
+  the only thing holding it.
+- The `orch-verdict` trailer regex is written three times: `judged_at` (snapshot.jq:62),
+  `rejections_of` (snapshot.jq:151), and lane.sh's duplicate-verdict check (lane.sh:259). A
+  trailer format change can half-land.
+- `hms`/`pct` are defined identically in `REPORT_JQ` and `RETRO_JQ`; the lane-id parse exists
+  in bash (`_lane_type`, tick.sh:1526; `tkey`, watch-panes.sh:165) and again in jq
+  (`stage()`, render-events).
+
+**Fix.** `scripts/lib.jq` holding `epic_norm`, one `orch_verdict_scan` def, `hms`/`pct`/`usd`,
+and `stage()`. The P71 files and `snapshot.jq` include it via `jq -L "$(dirname
+"$SELF_PATH")" 'include "lib"; …'`. `lane.sh _close_epic_milestone` drops its `sed` and
+normalizes through `jq -L … 'include "lib"; epic_norm'` — lane.sh already requires jq, and
+byte-identical becomes structural instead of disciplined. The bash lane-id parse stays bash
+(sourcing jq from bash for a hot-path string split is not worth it); `_lane_type` gains a
+cross-reference comment naming its jq mirror so a new lane kind cannot update one and miss the
+other. Depends on P71.
+
+**Tests**: a slugify-equivalence case — one fixture title (with uppercase, punctuation, and a
+leading/trailing separator) run through lane.sh's milestone-close path and snapshot.jq's
+`epic_norm` must produce the same key (today that agreement is asserted nowhere); a
+trailer-roundtrip case — a verdict written by `lane.sh verdict` is found by `judged_at` at the
+same fixture HEAD.
+
+**Consumer.** Whoever next changes the trailer format or the slugify — today a two-file,
+three-language hand-sync with no test to catch the miss.
 
 ## P73 · A shared bash lib for the facts every script re-derives
 

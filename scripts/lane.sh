@@ -266,8 +266,13 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     _notes=$("$GLAB" api "projects/:fullpath/issues/$iid/notes?sort=desc&order_by=created_at&per_page=100" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
         || die "issue $iid: could not read existing verdict trailers (glab api failed, rc=$rc) — refusing to guess whether this is a duplicate. Retry once the tracker is reachable."
-    if printf '%s' "$_notes" | jq -e --arg up "$up" --arg sha "$sha" \
-        '[.[] | (.body // "") | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})") | select(.[0] == $up and .[1] == $sha)] | length > 0' \
+    # P72: the trailer regex is `orch_verdict_scan` in lib.jq, the one the
+    # snapshot reads verdicts back with. It used to be written out here as a
+    # third copy, so a trailer format change could land in the reader and not
+    # in this refusal.
+    local jqd; jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
+    if printf '%s' "$_notes" | jq -L "$jqd" -e --arg up "$up" --arg sha "$sha" \
+        'include "lib"; [.[] | (.body // "") | orch_verdict_scan | select(.[0] == $up and .[1] == $sha)] | length > 0' \
         >/dev/null 2>&1
     then
         die "issue $iid already carries an orch-verdict $up $sha trailer — refusing a duplicate"
@@ -576,12 +581,18 @@ cmd_probe_result() { # <build-iid> <epic-slug> pass|fail [--file F]
 
 _close_epic_milestone() { # <slug> — close active milestones matching the slug
     local slug="$1"
+    # P72: normalized through lib.jq's `epic_norm` — the SAME def the snapshot
+    # derives epic completeness with. This was a `sed` pipeline whose only bond
+    # to the jq side was a comment asking both to stay byte-identical; a drift
+    # writes the acceptance to one key and reads it from another. lane.sh
+    # already requires jq, so the shared def costs nothing but a process.
+    local jqd; jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
     "$GLAB" api "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null \
     | jq -r '.[] | [.id, .title] | @tsv' 2>/dev/null \
     | while IFS=$'\t' read -r mid title; do
         # "E5 · Cascade mode" normalizes to e5-cascade-mode, so both the full
         # slug and a bare "e5" match it.
-        norm=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+        norm=$(printf '%s' "$title" | jq -L "$jqd" -rR 'include "lib"; epic_norm')
         case "$norm" in "$slug"|"$slug"-*)
             "$GLAB" api --method PUT "projects/:fullpath/milestones/$mid" \
                 --field state_event=close >/dev/null 2>&1 \

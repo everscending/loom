@@ -6,10 +6,13 @@
 # the literal numbers.
 #
 # Lifted out of tick.sh (P71), where it lived as USAGE_JQ, a single-quoted
-# shell string. In a file it is checkable with `jq -n -f usage.jq </dev/null`.
+# shell string. In a file it is checkable with
+# `jq -L . -n -f usage.jq </dev/null`.
 #
 # No --arg/--argjson bindings; reads a raw session log (jsonl, one record per
-# line) off stdin via -R -s.
+# line) off stdin via -R -s. The prelude include is uniform across every jq
+# program here (P72), not a dependency this one has yet.
+include "lib";
   def price_table:
     { "haiku-4-5": {input: 1.00,  output: 5.00,  cache_write: 1.25,  cache_read: 0.10},
       "sonnet-5":  {input: 3.00,  output: 15.00, cache_write: 3.75,  cache_read: 0.30},

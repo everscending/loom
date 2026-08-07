@@ -65,7 +65,6 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100. P73 already shipped the extraction half: `_glab_list` lives in `scripts/lib.sh`, which `lane.sh` sources — so route the four reads through it and do NOT create `glab-lib.sh` (one sourced lib, not two) |
-| P72 | One jq prelude both halves include | open — proposed 2026-08-07; depends on P71. Byte-identical-by-comment becomes byte-identical-by-construction |
 | P74 | Each copied mechanism becomes one helper | open — proposed 2026-08-07; locks ×3, usage-pause ×2, notify-once ×4, fail-closed reads ×7 (two verbs read the same issue twice per call) |
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | open — proposed 2026-08-07; 430 and 220 lines, the epilogue/quoting assembly has burned twice already. Do after P71–P74 |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
@@ -372,39 +371,6 @@ counterfactual switch P49 already added).
 
 **Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
 count has grown past 100.
-
-## P72 · One jq prelude both halves include
-
-**Problem.** Three facts are duplicated across the jq and shell halves and enforced today only
-by comments and discipline:
-
-- `epic_norm` (snapshot.jq:24) must stay "byte-identical to the milestone slugify in lane.sh"
-  (`_close_epic_milestone`'s `sed`, lane.sh:574) — its own comment says so, and a comment is
-  the only thing holding it.
-- The `orch-verdict` trailer regex is written three times: `judged_at` (snapshot.jq:62),
-  `rejections_of` (snapshot.jq:151), and lane.sh's duplicate-verdict check (lane.sh:259). A
-  trailer format change can half-land.
-- `hms`/`pct` are defined identically in `REPORT_JQ` and `RETRO_JQ`; the lane-id parse exists
-  in bash (`_lane_type`, tick.sh:1526; `tkey`, watch-panes.sh:165) and again in jq
-  (`stage()`, render-events).
-
-**Fix.** `scripts/lib.jq` holding `epic_norm`, one `orch_verdict_scan` def, `hms`/`pct`/`usd`,
-and `stage()`. The P71 files and `snapshot.jq` include it via `jq -L "$(dirname
-"$SELF_PATH")" 'include "lib"; …'`. `lane.sh _close_epic_milestone` drops its `sed` and
-normalizes through `jq -L … 'include "lib"; epic_norm'` — lane.sh already requires jq, and
-byte-identical becomes structural instead of disciplined. The bash lane-id parse stays bash
-(sourcing jq from bash for a hot-path string split is not worth it); `_lane_type` gains a
-cross-reference comment naming its jq mirror so a new lane kind cannot update one and miss the
-other. Depends on P71.
-
-**Tests**: a slugify-equivalence case — one fixture title (with uppercase, punctuation, and a
-leading/trailing separator) run through lane.sh's milestone-close path and snapshot.jq's
-`epic_norm` must produce the same key (today that agreement is asserted nowhere); a
-trailer-roundtrip case — a verdict written by `lane.sh verdict` is found by `judged_at` at the
-same fixture HEAD.
-
-**Consumer.** Whoever next changes the trailer format or the slugify — today a two-file,
-three-language hand-sync with no test to catch the miss.
 
 ## P74 · Each copied mechanism becomes one helper
 

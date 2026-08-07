@@ -25,6 +25,23 @@
 # exits 2 by contract with the sessions that read it while tick.sh exits 1.
 die() { echo "${0##*/}: $*" >&2; exit "${DIE_RC:-1}"; }
 
+# P72: lib.jq — the jq half of this file — ships beside it, and every jq
+# program in this skill opens with `include "lib";`. That include resolves off
+# jq's `-L` path, so every caller has to say where the prelude is; this returns
+# that directory, and refuses when the file is not in it. Unchecked, the
+# failure is jq's own "module not found: lib", which names neither the file
+# that went missing nor the script it ships beside — the same reason tick.sh
+# names a missing snapshot.jq itself.
+# Takes the directory rather than deriving it from ${BASH_SOURCE[0]}: callers
+# resolve their own script directory ONCE, absolutely, before any `cd`, and
+# tick.sh cds to the repo root mid-verb.
+_jq_lib_dir() { # <dir the scripts ship in> → the same dir, prelude proven present
+    local d="${1:-.}"
+    [ -f "$d/lib.jq" ] \
+        || die "$d/lib.jq is missing — it holds the shared jq prelude every jq program in this skill includes"
+    printf '%s\n' "$d"
+}
+
 # P49: the one tracker LIST read. Every `per_page=` GET in this skill goes
 # through here and PAGINATES — `per_page=100` alone silently returns page 1 and
 # nothing says so. Past 100 closed members an epic whose tickets all closed
@@ -169,6 +186,11 @@ EOF
     return 0
 }
 
+# The lane-id split, bash side. Its jq mirror is `stage` in lib.jq (which also
+# names this one): the ticker has to split the same ids to render them, and jq
+# is the wrong tool to reach for from bash on a hot-path string. A NEW LANE
+# KIND HAS TO BE ADDED IN BOTH PLACES — that is the whole reason each names the
+# other, since a kind added here alone renders as a bare "lane" in the ticker.
 _lane_type() { # <id> → impl | gate | probe | merge, or fails
     case "$1" in
         impl-[0-9]*)          echo impl  ;;

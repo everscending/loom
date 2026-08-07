@@ -1537,12 +1537,16 @@ _render_stream() { # _render_stream <jsonl> <log>
     # precedent. Resolved here, after the jq check above, so a PATH missing
     # `dirname` (or anything else) still falls back to the raw stream instead
     # of aborting the whole script under `set -e`.
-    RENDER_JQ="$(dirname "$SELF_PATH")/render.jq"
+    # P72: every jq program here opens with `include "lib";`, so the same
+    # directory is also jq's `-L` path — resolved through `_jq_lib_dir`, which
+    # refuses by name when the prelude is missing.
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    RENDER_JQ="$jqd/render.jq"
     [ -f "$RENDER_JQ" ] || die "render-log: $RENDER_JQ is missing — it holds the render program and ships beside tick.sh"
     tmp="$jsonl.render"
     # A killed lane leaves a half-written final line, so jq's exit code is
     # ignored and the partial render is used when there is one.
-    jq -r -f "$RENDER_JQ" "$jsonl" > "$tmp" 2>/dev/null || :
+    jq -L "$jqd" -r -f "$RENDER_JQ" "$jsonl" > "$tmp" 2>/dev/null || :
     if [ -s "$tmp" ]; then cat "$tmp" >> "$log"; else cat "$jsonl" >> "$log"; fi
     rm -f "$tmp"
     return 0
@@ -1558,7 +1562,8 @@ _follow_stream() { # _follow_stream <id>
     local jsonl="$LOGS_DIR/lane-$id.jsonl" pidfile="$LANES_DIR/$id.pid"
     local n=0 total pid gone=0
     command -v jq >/dev/null 2>&1 || die "render-log --follow: jq is required"
-    RENDER_JQ="$(dirname "$SELF_PATH")/render.jq"
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
+    RENDER_JQ="$jqd/render.jq"
     [ -f "$RENDER_JQ" ] || die "render-log --follow: $RENDER_JQ is missing — it holds the render program and ships beside tick.sh"
     [ -e "$pidfile" ] || [ -s "$jsonl" ] \
         || die "render-log --follow: no lane '$id' — nothing at $jsonl"
@@ -1567,7 +1572,7 @@ _follow_stream() { # _follow_stream <id>
         if [ -s "$jsonl" ]; then
             total=$(wc -l < "$jsonl" | tr -d ' ')
             if [ "$total" -gt "$n" ]; then
-                sed -n "$((n + 1)),${total}p" "$jsonl" | jq -r -f "$RENDER_JQ" 2>/dev/null || :
+                sed -n "$((n + 1)),${total}p" "$jsonl" | jq -L "$jqd" -r -f "$RENDER_JQ" 2>/dev/null || :
                 n=$total
             fi
         fi
@@ -1631,7 +1636,8 @@ cmd_render_events() { # render-events [--follow]
     # P71: the ticker program lives in render-events.jq beside this script —
     # moved out of a single-quoted shell string, following snapshot.jq's own
     # precedent.
-    local prog_file="$(dirname "$SELF_PATH")/render-events.jq"
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude `stage` lives in
+    local prog_file="$jqd/render-events.jq"
     [ -f "$prog_file" ] || die "render-events: $prog_file is missing — it holds the render program and ships beside tick.sh"
     if [ "$follow" -eq 1 ]; then
         # -F survives rotation, and waits for the file if the build has not
@@ -1643,7 +1649,7 @@ cmd_render_events() { # render-events [--follow]
         # event rendered once per ghost — "duplicates that survive a restart
         # and grow over time" (observed by the human, 2026-08-02).
         trap 'pkill -P $$ 2>/dev/null; exit 0' INT TERM
-        tail -n 100 -F "$EVENTS" 2>/dev/null | jq -R --unbuffered -r \
+        tail -n 100 -F "$EVENTS" 2>/dev/null | jq -L "$jqd" -R --unbuffered -r \
             --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
             --arg when_mode "$when_mode" \
             -f "$prog_file" &   # render-events: display-only reader
@@ -1675,7 +1681,7 @@ cmd_render_events() { # render-events [--follow]
         pkill -P $$ 2>/dev/null || :
     else
         [ -s "$EVENTS" ] || { echo "render-events: no events yet at $EVENTS"; return 0; }
-        jq -R -r --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
+        jq -L "$jqd" -R -r --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
             --arg when_mode "$when_mode" \
             -f "$prog_file" < "$EVENTS"   # render-events: display-only reader
     fi
@@ -1694,9 +1700,10 @@ _lane_cost() { # _lane_cost <jsonl-file> -> USD spent by that session, "0" if un
     command -v jq >/dev/null 2>&1 || { echo 0; return; }
     # P71: the price table lives in usage.jq beside this script — moved out
     # of a single-quoted shell string, following snapshot.jq's own precedent.
-    USAGE_JQ="$(dirname "$SELF_PATH")/usage.jq"
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
+    USAGE_JQ="$jqd/usage.jq"
     [ -f "$USAGE_JQ" ] || die "usage-cost: $USAGE_JQ is missing — it holds the usage-cost program and ships beside tick.sh"
-    jq -R -s -f "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
+    jq -L "$jqd" -R -s -f "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
 }
 
 # P55/D-TICK-13: every lane AND wave log this repo has ever kept — `clear-lane`
@@ -1891,7 +1898,11 @@ cmd_snapshot() {
     # here: without the check jq fails deep in stage 3 with its own message
     # about an unreadable -f argument, and the wave reads that as a tracker
     # problem rather than a missing file.
-    SNAP_JQ="$(dirname "$SELF_PATH")/snapshot.jq"
+    # P72: the same directory is jq's `-L` path — snapshot.jq includes the
+    # shared prelude (the epic slugify and the verdict-trailer regex, both
+    # shared with lane.sh), and `_jq_lib_dir` refuses by name without it.
+    SNAP_JQD="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    SNAP_JQ="$SNAP_JQD/snapshot.jq"
     [ -f "$SNAP_JQ" ] || die "snapshot: $SNAP_JQ is missing — it holds the document builder and ships beside tick.sh"
     command -v "$GLAB_CMD" >/dev/null 2>&1 || die "snapshot: '$GLAB_CMD' not found"
     # glab api's projects/:id shorthand resolves from the cwd's git remote,
@@ -2063,7 +2074,7 @@ cmd_snapshot() {
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
-    jq -n > "$SNAP_TMP/snapshot.json" \
+    jq -L "$SNAP_JQD" -n > "$SNAP_TMP/snapshot.json" \
         --slurpfile open "$SNAP_TMP/open.json" --slurpfile links "$SNAP_TMP/links.json" \
         --slurpfile mrs "$SNAP_TMP/mrs.json" --slurpfile notes "$SNAP_TMP/notes.json" \
         --slurpfile tnotes "$SNAP_TMP/tnotes.json" \
@@ -2126,7 +2137,8 @@ cmd_retro() { # retro [--build <label>] [--vs <label>]
     # of a single-quoted shell string, following snapshot.jq's own precedent.
     # Resolved here, after the jq check above, so a PATH missing `dirname`
     # dies as "jq is required" rather than aborting under `set -e`.
-    RETRO_JQ="$(dirname "$SELF_PATH")/retro.jq"
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude hms/pct/usd live in
+    RETRO_JQ="$jqd/retro.jq"
     [ -f "$RETRO_JQ" ] || die "retro: $RETRO_JQ is missing — it holds the retro program and ships beside tick.sh"
     [ -n "$want" ] || want=$(cat "$BUILD_LABEL_CACHE" 2>/dev/null || echo "")
 
@@ -2134,10 +2146,10 @@ cmd_retro() { # retro [--build <label>] [--vs <label>]
     if [ -n "$want" ]; then cmd_report --build "$want"; else cmd_report; fi
     echo
     local spend_json; spend_json=$(_spend_by_session)
-    jq -rs --arg build_want "$want" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"
+    jq -L "$jqd" -rs --arg build_want "$want" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"
     if [ -n "$vs" ]; then
         printf '\n  ── baseline: %s ──\n\n' "$vs"
-        { cmd_report --build "$vs"; echo; jq -rs --arg build_want "$vs" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"; } \
+        { cmd_report --build "$vs"; echo; jq -L "$jqd" -rs --arg build_want "$vs" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"; } \
             | sed 's/^/  /'
     fi
 }
@@ -2158,16 +2170,18 @@ cmd_report() { # report [--ticket <n>] [--build <label>]
         # this script — moved out of a single-quoted shell string, following
         # snapshot.jq's own precedent. Resolved here, after the jq check
         # above, for the same `set -e` reason as retro.jq.
-        REPORT_TICKET_JQ="$(dirname "$SELF_PATH")/report-ticket.jq"
+        local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
+        REPORT_TICKET_JQ="$jqd/report-ticket.jq"
         [ -f "$REPORT_TICKET_JQ" ] || die "report: $REPORT_TICKET_JQ is missing — it holds the per-ticket report program and ships beside tick.sh"
-        jq -rs --arg iid "$iid" -f "$REPORT_TICKET_JQ" "$EVENTS"
+        jq -L "$jqd" -rs --arg iid "$iid" -f "$REPORT_TICKET_JQ" "$EVENTS"
     else
         # P71: the report program lives in report.jq beside this script —
         # moved out of a single-quoted shell string, following snapshot.jq's
         # own precedent.
-        REPORT_JQ="$(dirname "$SELF_PATH")/report.jq"
+        local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude hms/pct live in
+        REPORT_JQ="$jqd/report.jq"
         [ -f "$REPORT_JQ" ] || die "report: $REPORT_JQ is missing — it holds the report program and ships beside tick.sh"
-        jq -rs --arg build_want "$want" -f "$REPORT_JQ" "$EVENTS"
+        jq -L "$jqd" -rs --arg build_want "$want" -f "$REPORT_JQ" "$EVENTS"
     fi
 }
 
@@ -2188,14 +2202,15 @@ cmd_graph() { # graph [<snapshot.json>]  (default: stdin) — rc 1 on an unwired
     # of a single-quoted shell string, following snapshot.jq's own precedent.
     # Resolved here, after the jq check above, for the same `set -e` reason
     # as retro.jq.
-    GRAPH_JQ="$(dirname "$SELF_PATH")/graph.jq"
+    local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
+    GRAPH_JQ="$jqd/graph.jq"
     [ -f "$GRAPH_JQ" ] || die "graph: $GRAPH_JQ is missing — it holds the graph program and ships beside tick.sh"
     local src="${1:--}" out
     if [ "$src" = "-" ]; then
-        out=$(jq -f "$GRAPH_JQ") || return $?
+        out=$(jq -L "$jqd" -f "$GRAPH_JQ") || return $?
     else
         [ -f "$src" ] || die "graph: no such snapshot file '$src'"
-        out=$(jq -f "$GRAPH_JQ" "$src") || return $?
+        out=$(jq -L "$jqd" -f "$GRAPH_JQ" "$src") || return $?
     fi
     printf '%s\n' "$out"
     # The shape verdicts above are advice; this one is a refusal (P64). The
