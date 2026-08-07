@@ -1549,31 +1549,21 @@ _lane_type() { # <id> → impl | gate | probe | merge, or fails
 # `--fallback-model` downshift under a usage limit shows the truth rather than
 # the request. No cross-file read, so it costs nothing and works identically in
 # `--follow` and in the transcript rendered at exit.
-RENDER_JQ='
-        select(.type == "assistant" or .type == "result"
-               or (.type == "system" and (.subtype // "") == "init"))
-        | if .type == "system" then
-              "── model \(.model // "?") · permission \(.permissionMode // "?") ──"
-          elif .type == "result" then
-              (if (.is_error // false) or ((.subtype // "success") != "success")
-               then "\n[lane failed: \(.subtype // "error")] \(.result // "")"
-               else empty end)
-          else
-              (.message.content[]?
-               | if .type == "text" then .text
-                 elif .type == "tool_use" then
-                     "  $ \(.name): \(((.input.command // .input.file_path // .input.pattern // "") | tostring)[0:200])"
-                 else empty end)
-          end'
-
 _render_stream() { # _render_stream <jsonl> <log>
     local jsonl="$1" log="$2" tmp
     [ -s "$jsonl" ] || return 0
     if ! command -v jq >/dev/null 2>&1; then cat "$jsonl" >> "$log"; return 0; fi
+    # P71: the render program lives in render.jq beside this script — moved
+    # out of a single-quoted shell string, following snapshot.jq's own
+    # precedent. Resolved here, after the jq check above, so a PATH missing
+    # `dirname` (or anything else) still falls back to the raw stream instead
+    # of aborting the whole script under `set -e`.
+    RENDER_JQ="$(dirname "$SELF_PATH")/render.jq"
+    [ -f "$RENDER_JQ" ] || die "render-log: $RENDER_JQ is missing — it holds the render program and ships beside tick.sh"
     tmp="$jsonl.render"
     # A killed lane leaves a half-written final line, so jq's exit code is
     # ignored and the partial render is used when there is one.
-    jq -r "$RENDER_JQ" "$jsonl" > "$tmp" 2>/dev/null || :
+    jq -r -f "$RENDER_JQ" "$jsonl" > "$tmp" 2>/dev/null || :
     if [ -s "$tmp" ]; then cat "$tmp" >> "$log"; else cat "$jsonl" >> "$log"; fi
     rm -f "$tmp"
     return 0
@@ -1589,6 +1579,8 @@ _follow_stream() { # _follow_stream <id>
     local jsonl="$LOGS_DIR/lane-$id.jsonl" pidfile="$LANES_DIR/$id.pid"
     local n=0 total pid gone=0
     command -v jq >/dev/null 2>&1 || die "render-log --follow: jq is required"
+    RENDER_JQ="$(dirname "$SELF_PATH")/render.jq"
+    [ -f "$RENDER_JQ" ] || die "render-log --follow: $RENDER_JQ is missing — it holds the render program and ships beside tick.sh"
     [ -e "$pidfile" ] || [ -s "$jsonl" ] \
         || die "render-log --follow: no lane '$id' — nothing at $jsonl"
     printf -- '── lane %s ──\n' "$id"
@@ -1596,7 +1588,7 @@ _follow_stream() { # _follow_stream <id>
         if [ -s "$jsonl" ]; then
             total=$(wc -l < "$jsonl" | tr -d ' ')
             if [ "$total" -gt "$n" ]; then
-                sed -n "$((n + 1)),${total}p" "$jsonl" | jq -r "$RENDER_JQ" 2>/dev/null || :
+                sed -n "$((n + 1)),${total}p" "$jsonl" | jq -r -f "$RENDER_JQ" 2>/dev/null || :
                 n=$total
             fi
         fi
@@ -1642,9 +1634,12 @@ cmd_render_events() { # render-events [--follow]
     command -v jq >/dev/null 2>&1 || die "render-events: jq is required"
     # The human asked for local wall-clock prefixes; month-day is included
     # because real builds cross midnight (build-1 did). Ancient jq without
-    # strflocaltime falls back to the UTC stamp rather than dying.
-    local when='((.ts // 0) | strflocaltime("%m-%d %H:%M:%S"))'
-    jq -ne '0 | strflocaltime("%H")' >/dev/null 2>&1 || when='(.t // "")'
+    # strflocaltime falls back to the UTC stamp rather than dying. P71: this
+    # used to select which jq fragment to splice into the program text; now
+    # the program is a file, so it is passed in as data instead (when_mode
+    # "ts" or "t", read by render-events.jq's own `when` definition).
+    local when_mode="ts"
+    jq -ne '0 | strflocaltime("%H")' >/dev/null 2>&1 || when_mode="t"
     # Failure lines wear a glyph always and color on a terminal (asked for by
     # the human, 2026-08-02: red/gate-fail and merge-conflict lines must stand
     # out in the strip). Glyphs are plain text so greps and tests see the same
@@ -1654,101 +1649,11 @@ cmd_render_events() { # render-events [--follow]
     if [ "$want_color" = 1 ] || { [ "$want_color" = auto ] && [ -t 1 ]; }; then
         bad=$'\033[1;31m'; warn=$'\033[1;33m'; good=$'\033[1;32m'; rst=$'\033[0m'
     fi
-    local prog='
-def ref: if test("^[0-9]+$") then "#\(.)" else . end;
-def stage($id):
-  if   ($id | startswith("impl-"))  then {t: ($id | ltrimstr("impl-")  | ref), s: "implementation"}
-  elif ($id | startswith("gate-"))  then {t: ($id | ltrimstr("gate-")  | sub("-r[0-9]+$"; "") | ref), s: "gate review"}
-  elif ($id | startswith("merge-")) then {t: ($id | ltrimstr("merge-") | ref), s: "merge"}
-  elif ($id | startswith("probe-")) then {t: "epic \($id | ltrimstr("probe-"))", s: "acceptance probe"}
-  else {t: $id, s: "lane"} end;
-def round($id): (($id | capture("-r(?<n>[0-9]+)$") | " (round \(.n))") // "");
-# P31: an escalation the human asked for must be visibly taken. Empty model
-# (the lane inherits the session default) renders nothing — the common case
-# should stay quiet.
-def model($e): (if ($e.model // "") == "" then "" else " (\($e.model))" end);
-fromjson? // empty | . as $e
-| (if $e.ev == "snapshot" then empty else . end)
-| (
-  if   $e.ev == "wave_start" then "wave started"
-  elif $e.ev == "wave_end"  then
-    (if ($e.rc | tostring) == "0" then "wave ended (rc \($e.rc), \($e.secs)s)"
-     else $bad + "✗ wave ended (rc \($e.rc), \($e.secs)s)" + $rst end)
-  elif $e.ev == "lane_spawn" then (stage($e.id) | "\(.t) — \(.s) started") + round($e.id) + model($e)
-  elif $e.ev == "lane_exit" then
-    # A clean exit is suppressed (except probes): its story is already told by
-    # its outcome event (→ review / verdict / closed), and chained handoffs
-    # stamp it after the successor spawned — rendered, that read backwards
-    # ("gate started, then implementation ended"; human, 2026-08-02).
-    stage($e.id) as $s
-    | if ($e.rc | tostring) == "7"
-      then $bad + "✗ \($s.t) — pregate REJECTED the branch (no review session spent)" + $rst
-      elif ($e.rc | tostring) == "0" and (($e.id | startswith("probe-")) | not)
-      then empty
-      elif ($e.rc | tostring) == "0"
-      then "\($s.t) — \($s.s) ended (rc \($e.rc), \($e.secs)s)"
-      else $bad + "✗ \($s.t) — \($s.s) ended (rc \($e.rc), \($e.secs)s)" + $rst end
-  elif $e.ev == "lane_kill" then
-    stage($e.id) as $s | $warn + "⚠ \($s.t) — \($s.s) killed (whole tree)" + $rst
-  elif $e.ev == "ticket_claim" then "#\($e.ticket) claimed — implementation begins"
-  elif $e.ev == "ticket_transition" then
-    (({"review": " (implementation complete, awaiting gate)",
-       "merge-queue": " (gate passed)",
-       "blocked": " — a human decision is needed",
-       "ready-for-agent": " (requeued, unassigned)"} | .[$e.state]) // "") as $gloss
-    | (if $e.state == "blocked"
-       then $warn + "⚠ #\($e.ticket) → \($e.state)\($gloss)" + $rst
-       else "#\($e.ticket) → \($e.state)\($gloss)" end)
-  elif $e.ev == "gate_verdict" then
-    (if $e.verdict == "PASS" then $good + "✓ " else $bad + "✗ " end)
-    + "#\($e.ticket) gate verdict: \($e.verdict) @ \($e.sha | tostring | .[0:8])" + $rst
-  elif $e.ev == "ticket_close" then "#\($e.ticket) merged and closed"
-  elif $e.ev == "probe_result" then
-    (if $e.result == "PASS"
-     then $good + "✓ epic \($e.epic) — acceptance probe PASSED" + $rst
-     else $bad + "✗ epic \($e.epic) — acceptance probe FAILED (fix tickets filed)" + $rst end)
-  elif $e.ev == "usage_pause" then "usage limit — paused (until \($e.until))"
-  elif $e.ev == "usage_resume" then "usage limit cleared — resuming"
-  # Three unrelated outcomes shared one sentence (P42). Harmless while the
-  # timer was a 15-minute backstop and a skip nearly always meant lock_held;
-  # the merged 60s scheduler watches on every firing and spends on the gap, so
-  # wave_gap became the routine outcome and printed an exceptional-case line
-  # nine ticks in ten. Of 408 such lines in one day, 253 were wave_gap and
-  # false: that path writes no pending file and no replay follows it. So
-  # wave_gap stays in events.jsonl for retro and never reaches the ticker,
-  # lock_held renders once per wave on the tick that raised the flag, and
-  # loop_stopped keeps a line of its own because it is rare and specific.
-  # (No apostrophes in this comment: the whole program is a single-quoted
-  # shell string, and one would end it mid-word.)
-  elif $e.ev == "tick_skipped" then
-    (if $e.reason == "loop_stopped" then "the loop is stopped — this tick did nothing"
-     elif $e.reason == "lock_held" then
-       # Events written before P42 carry no "first" field; render those, so
-       # replaying an old log still reads the way it did.
-       (if (($e.first // "1") | tostring) == "1"
-        then "a tick landed during a wave — the wave will re-tick on exit"
-        else empty end)
-     else empty end)
-  elif $e.ev == "tick_replayed" then "pending tick replayed"
-  # The renderer owns the "wave:" prefix, so a note that writes its own gets
-  # it stripped rather than doubled ("wave: wave: only #47 is ready" —
-  # observed by the human, 2026-08-03). A wave author naturally types the
-  # prefix; deduping it here is plumbing, and cheaper than a rule telling
-  # every wave not to.
-  elif $e.ev == "wave_note" then
-    "wave: " + (($e.note // "") | sub("(?i)^\\s*wave\\s*:\\s*"; ""))
-  elif $e.ev == "pregate_reduced" then
-    $warn + "⚠ " + (stage($e.id // "") | "\(.t) — \(.s)")
-    + ": \($e.runner // "the gate runner") missing — tier \($e.tier // "?") reduced to review-only (bootstrap not merged)" + $rst
-  elif $e.ev == "viewer_note" then "viewer: \($e.note // "")"
-  elif $e.ev == "notify" then
-    (if (($e.event // "") | test("complete")) then $good else $warn end)
-    + "⚑ \($e.title // $e.event)" + $rst
-  else ([$e | del(.t, .ts, .ev, .build) | to_entries[] | "\(.key)=\(.value | tostring)"] | join(" ")) as $kv
-       | "\($e.ev)\(if $kv == "" then "" else " " + $kv end)"
-  end
-) as $line
-| "\('"$when"')  \($line)"'
+    # P71: the ticker program lives in render-events.jq beside this script —
+    # moved out of a single-quoted shell string, following snapshot.jq's own
+    # precedent.
+    local prog_file="$(dirname "$SELF_PATH")/render-events.jq"
+    [ -f "$prog_file" ] || die "render-events: $prog_file is missing — it holds the render program and ships beside tick.sh"
     if [ "$follow" -eq 1 ]; then
         # -F survives rotation, and waits for the file if the build has not
         # started yet; seed with recent history so the pane opens with
@@ -1761,7 +1666,8 @@ fromjson? // empty | . as $e
         trap 'pkill -P $$ 2>/dev/null; exit 0' INT TERM
         tail -n 100 -F "$EVENTS" 2>/dev/null | jq -R --unbuffered -r \
             --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
-            "$prog" &   # render-events: display-only reader
+            --arg when_mode "$when_mode" \
+            -f "$prog_file" &   # render-events: display-only reader
         local _pipe=$!
         # `q` quits, when there is a keyboard attached. Ctrl-C could always
         # stop this process, but a viewer that reopens a dead ticker every
@@ -1791,7 +1697,8 @@ fromjson? // empty | . as $e
     else
         [ -s "$EVENTS" ] || { echo "render-events: no events yet at $EVENTS"; return 0; }
         jq -R -r --arg bad "$bad" --arg warn "$warn" --arg good "$good" --arg rst "$rst" \
-            "$prog" < "$EVENTS"   # render-events: display-only reader
+            --arg when_mode "$when_mode" \
+            -f "$prog_file" < "$EVENTS"   # render-events: display-only reader
     fi
 }
 
@@ -1800,35 +1707,17 @@ fromjson? // empty | . as $e
 # 2026-08-06 — $/MTok, cache write assumed at the 5m ephemeral default (the
 # harness never requests a 1h breakpoint). Re-derive this table whenever
 # pricing changes; nothing else in the skill depends on the literal numbers.
-USAGE_JQ='
-  def price_table:
-    { "haiku-4-5": {input: 1.00,  output: 5.00,  cache_write: 1.25,  cache_read: 0.10},
-      "sonnet-5":  {input: 3.00,  output: 15.00, cache_write: 3.75,  cache_read: 0.30},
-      "opus-5":    {input: 5.00,  output: 25.00, cache_write: 6.25,  cache_read: 0.50},
-      "fable-5":   {input: 10.00, output: 50.00, cache_write: 12.50, cache_read: 1.00} };
-  # An unrecognised or missing model prices at zero rather than guessing —
-  # a silently wrong non-zero number is worse than a visible gap.
-  def price_for($model):
-    (price_table | to_entries | map(select(.key as $k | $model | test($k))) | first | .value)
-    // {input: 0, output: 0, cache_write: 0, cache_read: 0};
-  def usage_cost($u; $model):
-    price_for($model) as $p
-    | ( ($u.input_tokens // 0) * $p.input
-      + ($u.output_tokens // 0) * $p.output
-      + (($u.cache_creation_input_tokens //
-          (($u.cache_creation.ephemeral_5m_input_tokens // 0)
-           + ($u.cache_creation.ephemeral_1h_input_tokens // 0))) // 0) * $p.cache_write
-      + ($u.cache_read_input_tokens // 0) * $p.cache_read
-      ) / 1000000;
-  split("\n") | map(select(length > 0))
-  | map(try fromjson catch empty) | map(select(. != null))
-  | map(select(.type == "assistant") | .message | select(.usage != null))
-  | map(usage_cost(.usage; (.model // "")))
-  | add // 0
-'
 _lane_cost() { # _lane_cost <jsonl-file> -> USD spent by that session, "0" if unreadable
     [ -f "$1" ] || { echo 0; return; }
-    jq -R -s "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
+    # No jq, no cost — same "0" the old inline `|| echo 0` fallback gave when
+    # jq itself was missing, checked explicitly here so the file resolution
+    # below (which needs `dirname`) is never reached on a PATH without jq.
+    command -v jq >/dev/null 2>&1 || { echo 0; return; }
+    # P71: the price table lives in usage.jq beside this script — moved out
+    # of a single-quoted shell string, following snapshot.jq's own precedent.
+    USAGE_JQ="$(dirname "$SELF_PATH")/usage.jq"
+    [ -f "$USAGE_JQ" ] || die "usage-cost: $USAGE_JQ is missing — it holds the usage-cost program and ships beside tick.sh"
+    jq -R -s -f "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
 }
 
 # P55/D-TICK-13: every lane AND wave log this repo has ever kept — `clear-lane`
@@ -2239,235 +2128,10 @@ cmd_snapshot() {
 # want the same events shaped differently. Neither reads anything but
 # events.jsonl, so a report costs no tracker calls and works long after a build
 # is over.
-REPORT_JQ='
-  def hms($s): ($s // 0) as $x
-    | if $x >= 3600 then "\($x / 3600 | floor)h\(($x % 3600) / 60 | floor)m"
-      elif $x >= 60 then "\($x / 60 | floor)m\($x % 60)s" else "\($x)s" end;
-  def pct($n; $d): if ($d // 0) == 0 then "  -  "
-                   else "\(($n * 1000 / $d | round) / 10)%" end;
-  ($build_want) as $bw
-  | map(select($bw == "" or .build == $bw)) as $evs
-  | if ($evs | length) == 0 then "no events recorded\($bw | if . == "" then "" else " for \(.)" end)"
-    else
-  ($evs | map(.build) | map(select(. != null)) | last // "(unlabelled)") as $blabel
-  | ($evs | map(.ts) | min) as $t0 | ($evs | map(.ts) | max) as $t1
-  | ($t1 - $t0) as $span
-  | ($evs | map(select(.ev == "wave_end"))) as $waves
-  | ($evs | map(select(.ev == "lane_exit"))) as $lanes
-  | ($waves | map(.secs) | add // 0) as $wave_secs
-  | ($lanes | map(.secs) | add // 0) as $lane_secs
-  # Blackout: each pause runs to its own resume, or to the last event if the
-  # build never resumed. Counted from the events, not from the clock.
-  | ([$evs | to_entries[] | select(.value.ev == "usage_pause")
-      | .key as $i | .value.ts as $pt
-      | (($evs[$i+1:] | map(select(.ev == "usage_resume")) | first | .ts) // $t1) - $pt]
-     | add // 0) as $black
-  # Peak concurrency by sweep: +1 on spawn, -1 on exit, ordered by time.
-  | ([$evs | map(select(.ev == "lane_spawn" or .ev == "lane_exit"))
-      | sort_by(.ts)[] | if .ev == "lane_spawn" then 1 else -1 end]
-     | reduce .[] as $d ({n: 0, peak: 0};
-         (.n + $d) as $x | {n: $x, peak: (if $x > .peak then $x else .peak end)})
-     | .peak) as $peak
-  | ($evs | map(select(.ev == "snapshot"))) as $snaps
-  | (($snaps | first | .tickets | keys?) // []) as $first_ids
-  | (($snaps | last  | .tickets | keys?) // []) as $last_ids
-  | ($first_ids | map(select(. as $i | ($last_ids | index($i)) == null)) | length) as $closed
-  | [ "Build \($blabel)   span \(hms($span))   \($closed) ticket(s) closed",
-      "",
-      "  inside waves   \(hms($wave_secs))   \(pct($wave_secs; $span))   \($waves | length) wave(s), \($waves | map(select(.rc != 0)) | length) failed, \($evs | map(select(.ev == "wave_start" and .retry == 1)) | length) retried",
-      "  lane-seconds   \(hms($lane_secs))   \(pct($lane_secs; $span))   \($lanes | length) lane(s), peak \($peak) concurrent",
-      "  usage blackout \(hms($black))   \(pct($black; $span))   \($evs | map(select(.ev == "usage_pause")) | length) pause(s)",
-      "",
-      "  lanes by type  " + (if ($lanes | length) == 0 then "none"
-                             else ($lanes | group_by(.type)
-                                   | map("\(.[0].type // "?")=\(length)") | join("  ")) end),
-      "  mechanical rejections (rc 7)   \($lanes | map(select(.rc == 7)) | length)",
-      "  crashed lanes (rc not 0 or 7)  \($lanes | map(select(.rc != 0 and .rc != 7)) | length)",
-      "  ticks skipped mid-wave \($evs | map(select(.ev == "tick_skipped")) | length), replayed \($evs | map(select(.ev == "tick_replayed")) | length)"
-    ] | join("\n")
-    end
-'
-
-# Per-ticket forensics: every lane that touched it, and the states it passed
-# through, with the log path to read next.
-REPORT_TICKET_JQ='
-  ($iid) as $n
-  | (map(select(.ev == "lane_spawn" or .ev == "lane_exit"))
-     | map(select(.id | test("^(impl|gate|merge)-\($n)(-|$)")))) as $ls
-  | (map(select(.ev == "snapshot"))
-     | map({ts, t, state: (.tickets[$n] // null)})
-     | map(select(.state != null))) as $st
-  | if ($ls | length) == 0 and ($st | length) == 0
-    then "ticket #\($n): nothing recorded"
-    else
-  ["ticket #\($n)", ""]
-  + (if ($st | length) > 0 then
-       ["  states:"] + ([$st[0]] + [$st[1:][] as $x | $x] | . as $all
-        | [range(0; ($all | length)) | select(. == 0 or ($all[.].state != $all[.-1].state))
-           | "    \($all[.].t)  \($all[.].state)"])
-     else [] end)
-  + (if ($ls | length) > 0 then
-       ["", "  lanes:"]
-       + ([$ls | group_by(.id)[]
-           | (map(select(.ev == "lane_spawn")) | first) as $s
-           | (map(select(.ev == "lane_exit")) | last) as $e
-           | "    \($s.id // $e.id)  " +
-             (if $e == null then "still running" else "\($e.secs)s  rc \($e.rc)" end) +
-             (if $e.rc == 7 then "  (pregate rejection — no review session spent)" else "" end) +
-             # P31: which model the round ran on, so an escalation can be
-             # priced against its outcome (does the stronger tier actually
-             # clear a ticket the base tier failed?). Blank = session default.
-             (if ($s.model // "") == "" then "" else "  on \($s.model)" end) +
-             "  \($s.log // "")"])
-     else [] end)
-  | join("\n") end
-'
 
 # Retro: the four things `report` deliberately does not compute, because each
 # needs the snapshot record rather than the wave/lane totals (P26). Everything
 # here is arithmetic over events — no interpretation, which is the verb's job.
-RETRO_JQ='
-  def hms($s): ($s // 0) as $x
-    | if $x >= 3600 then "\($x / 3600 | floor)h\(($x % 3600) / 60 | floor)m"
-      elif $x >= 60 then "\($x / 60 | floor)m\($x % 60)s" else "\($x)s" end;
-  def pct($n; $d): if ($d // 0) == 0 then "  -  "
-                   else "\(($n * 1000 / $d | round) / 10)%" end;
-  def usd($n): "$\(($n * 100 | round) / 100)";
-  # Seconds of [$a,$b) that fall inside any window in $ws.
-  def ov($a; $b; $ws): [$ws[] | (([$b, .b] | min) - ([$a, .a] | max)) | select(. > 0)]
-                       | add // 0;
-  ($build_want) as $bw
-  | map(select($bw == "" or .build == $bw)) as $evs
-  | if ($evs | length) == 0
-    then "no events recorded\($bw | if . == "" then "" else " for \(.)" end)"
-    else
-  ($evs | map(.ts) | min) as $t0 | ($evs | map(.ts) | max) as $t1
-  | ($evs | map(select(.ev == "snapshot"))) as $snaps
-  | ($evs | map(select(.ev == "lane_exit"))) as $lanes
-  | ($lanes | map(.secs) | add // 0) as $lane_secs
-  | ([$evs | to_entries[] | select(.value.ev == "usage_pause")
-      | .key as $i | .value.ts as $pt
-      | {a: $pt,
-         b: (($evs[$i+1:] | map(select(.ev == "usage_resume")) | first | .ts) // $t1)}])
-    as $pauses
-  # Each snapshot describes the world until the next one. Blackout is carved out
-  # of every interval it overlaps, so a pause cannot masquerade as starvation.
-  # A snapshot written before this record existed carries no impl_free. Reading
-  # that as zero would report a starved build as "at capacity" — the missing
-  # field means UNKNOWN, and unknown time is shown as its own line rather than
-  # silently distributed into a bucket.
-  | ([range(0; ($snaps | length)) as $i
-      | $snaps[$i] as $s
-      | {a: $s.ts, b: (($snaps[$i + 1] | .ts) // $t1),
-         free: $s.impl_free, ready: ($s.ready // 0),
-         known: ($s.impl_free != null)}
-      | . + {tot: (.b - .a)} | . + {paused: ov(.a; .b; $pauses)}
-      | . + {act: (.tot - .paused)}]) as $ivs
-  | ($ivs | map(.paused) | add // 0) as $paused
-  | ($ivs | map(select(.known) | .act) | add // 0) as $covered
-  | ($ivs | map(select(.known | not) | .act) | add // 0) as $unknown
-  | ($ivs | map(select(.known and .free <= 0) | .act) | add // 0) as $atcap
-  | ($ivs | map(select(.known and .free > 0 and .ready == 0) | .act) | add // 0) as $starved
-  | ($ivs | map(select(.known and .free > 0 and .ready > 0) | .act) | add // 0) as $slack
-  | ($lanes | map(select(.rc == 7))) as $rej
-  | ($lanes | map(select(.rc != 0 and .rc != 7))) as $crash
-  | ($lanes | map(select(.id | test("-r[0-9]+$")))) as $regate
-  | (($rej + $crash + $regate) | unique_by(.id)) as $waste
-  | ($waste | map(.secs) | add // 0) as $rework
-  # Ticket spans, at wave resolution: first and last snapshot that named it.
-  | ([$snaps[] | .ts as $ts | (.tickets // {}) | to_entries[]
-      | {iid: .key, ts: $ts}]
-     | group_by(.iid)
-     | map({iid: .[0].iid, first: (map(.ts) | min), last: (map(.ts) | max)})) as $tk
-  | ($tk | map(. as $t
-      | . + {work: ($lanes
-                    | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
-                    | map(.secs) | add // 0)}
-      | . + {open: (.last - .first)}
-      | . + {wait: (.open - .work)})) as $tw
-  # P55/D-TICK-13: priced per session from its own log, joined here by id.
-  # $spend covers every lane AND wave log this repo has ever kept, so joining
-  # against $lanes/$waves -- already scoped to $bw via $evs -- is what
-  # excludes sessions from any other build. Waves emit no `lane_exit`, so they
-  # join on `stem` (the log basename) instead of `id`.
-  | ($spend | map({key: .id, value: .cost}) | from_entries) as $spend_by_id
-  | ($lanes | map(. + {cost: ($spend_by_id[.id] // 0)})) as $lanes_c
-  | ($evs | map(select(.ev == "wave_end"))) as $waves
-  | ($waves | map(. + {cost: ($spend_by_id[.stem // ""] // 0)})) as $waves_c
-  | ($waves_c | map(.cost) | add // 0) as $wave_cost
-  | (($lanes_c | map(.cost) | add // 0) + $wave_cost) as $total_cost
-  | ($lanes_c | group_by(.type)
-     | map({type: .[0].type, cost: (map(.cost) | add // 0)})
-     | (if $wave_cost > 0 then . + [{type: "wave", cost: $wave_cost}] else . end)
-     | sort_by(-.cost)) as $by_kind
-  | ($tw | map(. as $t | . + {cost: ($lanes_c
-       | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
-       | map(.cost) | add // 0)})) as $twc
-  | ($lanes_c | sort_by(-.cost) | [limit(5; .[])]) as $top
-  | ($tk | map({key: .iid, value: .last}) | from_entries) as $closed_at
-  | (($snaps | map(select((.deps // {}) | length > 0)) | first | .deps) // {}) as $deps
-  # Longest dependency chain the graph allowed — what `graph` would have
-  # predicted from the same edges, recomputed here so the two are comparable.
-  | (reduce range(0; 12) as $_ ({};
-       . as $d | reduce ($deps | keys[]) as $k ($d;
-         .[$k] = (1 + ([($deps[$k] // [])[] | tostring | ($d[.] // 0)] | max // 0))))) as $depth
-  | (($depth | to_entries | map(.value) | max) // 0) as $predicted
-  # The chain that actually finished last: walk back from the latest-closing
-  # ticket, each step taking the blocker that closed latest. limit() is a cycle
-  # guard — a dependency cycle would otherwise recurse forever.
-  | (($tw | sort_by(.last) | last) // null) as $tail
-  | (if $tail == null then []
-     else [limit(20; {iid: $tail.iid, last: $tail.last}
-       | recurse(. as $c
-           | [($deps[$c.iid] // [])[] | tostring | select($closed_at[.] != null)]
-           | max_by($closed_at[.]) | select(. != null)
-           | {iid: ., last: $closed_at[.]}))] end) as $chain
-  | ["Where the capacity went   (sampled at wave cadence, so ±one wave)",
-     "",
-     "  at capacity    \(hms($atcap))  \(pct($atcap; $covered))   every impl slot busy",
-     "  starved        \(hms($starved))  \(pct($starved; $covered))   slots free, nothing ready",
-     "  slack          \(hms($slack))  \(pct($slack; $covered))   slots free AND work ready",
-     "  blackout       \(hms($paused))  \(pct($paused; ($covered + $paused)))   usage limit"]
-  + (if $unknown > 0 then
-       ["  unrecorded     \(hms($unknown))          snapshots predating this record"]
-     else [] end)
-  + (if $slack > 0 then
-       ["", "  → slack is capacity that existed, with work waiting for it. Start there."]
-     elif $starved > $atcap then
-       ["", "  → starvation dominates: the graph, not the lane cap, set the pace."]
-     else [] end)
-  + ["", "Rework — lane time that produced nothing",
-     "",
-     "  mechanical rejections  \($rej | length) lane(s)  \(hms($rej | map(.secs) | add // 0))",
-     "  crashed lanes          \($crash | length) lane(s)  \(hms($crash | map(.secs) | add // 0))",
-     "  re-gates               \($regate | length) lane(s)  \(hms($regate | map(.secs) | add // 0))",
-     "  total                  \(hms($rework))  \(pct($rework; $lane_secs)) of all lane time"]
-  + ["", "Wait vs work per ticket   (open span minus lane time)", ""]
-  + (if ($tw | length) == 0 then ["  nothing recorded"]
-     else [$tw | sort_by(-.wait) | limit(10; .[])
-           | "  #\(.iid)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
-  + ["", "Spend   (priced from every lane and wave session log)", ""]
-  + (if ($lanes_c | length) == 0 and ($waves_c | length) == 0 then ["  nothing recorded"]
-     else ["  total          \(usd($total_cost))"]
-          + ($by_kind | map("  \(.type)  \(usd(.cost))"))
-          + ["", "  top spenders", ""]
-          + ($top | map("  \(.id)  \(usd(.cost))"))
-          + (if ($twc | map(select(.cost > 0)) | length) == 0 then []
-             else ["", "  by ticket"]
-                  + [$twc | sort_by(-.cost) | limit(5; .[])
-                     | select(.cost > 0) | "  #\(.iid)  \(usd(.cost))"] end) end)
-  + ["", "The chain that set the length", ""]
-  + (if ($chain | length) == 0 then ["  no ticket history recorded"]
-     else [($chain | map("#\(.iid) at \(hms(.last - $t0))") | join("  ←  ") | "  " + .),
-           "",
-           "  actual chain \($chain | length) deep; deepest chain in the graph was \($predicted)"]
-          + (if ($predicted > ($chain | length)) then
-               ["  → the longest path was not what finished last; the schedule, not the graph, bound it."]
-             else [] end) end)
-  | join("\n")
-    end
-'
-
 cmd_retro() { # retro [--build <label>] [--vs <label>]
     local want="" vs=""
     while [ $# -gt 0 ]; do
@@ -2479,16 +2143,22 @@ cmd_retro() { # retro [--build <label>] [--vs <label>]
     done
     [ -s "$EVENTS" ] || die "retro: no events recorded yet — $EVENTS is empty or missing"
     command -v jq >/dev/null 2>&1 || die "retro: jq is required"
+    # P71: the retro program lives in retro.jq beside this script — moved out
+    # of a single-quoted shell string, following snapshot.jq's own precedent.
+    # Resolved here, after the jq check above, so a PATH missing `dirname`
+    # dies as "jq is required" rather than aborting under `set -e`.
+    RETRO_JQ="$(dirname "$SELF_PATH")/retro.jq"
+    [ -f "$RETRO_JQ" ] || die "retro: $RETRO_JQ is missing — it holds the retro program and ships beside tick.sh"
     [ -n "$want" ] || want=$(cat "$BUILD_LABEL_CACHE" 2>/dev/null || echo "")
 
     # report first: retro explains what report computes, and never recomputes it.
     if [ -n "$want" ]; then cmd_report --build "$want"; else cmd_report; fi
     echo
     local spend_json; spend_json=$(_spend_by_session)
-    jq -rs --arg build_want "$want" --argjson spend "$spend_json" "$RETRO_JQ" "$EVENTS"
+    jq -rs --arg build_want "$want" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"
     if [ -n "$vs" ]; then
         printf '\n  ── baseline: %s ──\n\n' "$vs"
-        { cmd_report --build "$vs"; echo; jq -rs --arg build_want "$vs" --argjson spend "$spend_json" "$RETRO_JQ" "$EVENTS"; } \
+        { cmd_report --build "$vs"; echo; jq -rs --arg build_want "$vs" --argjson spend "$spend_json" -f "$RETRO_JQ" "$EVENTS"; } \
             | sed 's/^/  /'
     fi
 }
@@ -2505,9 +2175,20 @@ cmd_report() { # report [--ticket <n>] [--build <label>]
         esac
     done
     if [ -n "$iid" ]; then
-        jq -rs --arg iid "$iid" "$REPORT_TICKET_JQ" "$EVENTS"
+        # P71: the per-ticket report program lives in report-ticket.jq beside
+        # this script — moved out of a single-quoted shell string, following
+        # snapshot.jq's own precedent. Resolved here, after the jq check
+        # above, for the same `set -e` reason as retro.jq.
+        REPORT_TICKET_JQ="$(dirname "$SELF_PATH")/report-ticket.jq"
+        [ -f "$REPORT_TICKET_JQ" ] || die "report: $REPORT_TICKET_JQ is missing — it holds the per-ticket report program and ships beside tick.sh"
+        jq -rs --arg iid "$iid" -f "$REPORT_TICKET_JQ" "$EVENTS"
     else
-        jq -rs --arg build_want "$want" "$REPORT_JQ" "$EVENTS"
+        # P71: the report program lives in report.jq beside this script —
+        # moved out of a single-quoted shell string, following snapshot.jq's
+        # own precedent.
+        REPORT_JQ="$(dirname "$SELF_PATH")/report.jq"
+        [ -f "$REPORT_JQ" ] || die "report: $REPORT_JQ is missing — it holds the report program and ships beside tick.sh"
+        jq -rs --arg build_want "$want" -f "$REPORT_JQ" "$EVENTS"
     fi
 }
 
@@ -2522,131 +2203,20 @@ cmd_report() { # report [--ticket <n>] [--build <label>]
 # its dependent can run beside another depth-0 ticket. It is still the right
 # alarm, because a build whose widest level is below `max_lanes` cannot fill
 # them at the start, which is exactly when a build is most chain-bound.
-GRAPH_JQ='
-  (.tickets // []) as $ts
-| ($ts | map(.iid)) as $ids
-| ($ts | length) as $n
-| ((.config.max_lanes // 4) | tonumber? // 4) as $max_lanes
-# A blocker whose closed state is unknown (cross-project link) counts as
-# blocking: the snapshot already warns about it and the pessimistic read is the
-# safe one here.
-# Blockers OUTSIDE this build still hold their dependent back, so they cannot
-# simply be dropped — doing that made crucible report "opens 7 wide" when three
-# of those seven were waiting on issues outside the build. They get no depth of
-# their own (this graph cannot see them), but they do push their dependent off
-# depth 0, which is the number that matters.
-| ($ts | map({key: (.iid | tostring),
-              value: [(.blocked_by // [])[]
-                      | select((.closed // false) != true)
-                      | .iid | select(. as $b | ($ids | index($b)) != null)]})
-       | from_entries) as $preds
-| ($ts | map({key: (.iid | tostring),
-              value: ((.blocked_by // [])
-                      | map(select((.closed // false) != true) | .iid)
-                      | any(. as $b | ($ids | index($b)) == null))})
-       | from_entries) as $ext
-| (if $n == 0 then {} else
-     reduce range(0; $n + 1) as $_ (
-       ($ts | map({key: (.iid | tostring), value: 0}) | from_entries);
-       reduce ($preds | keys_unsorted[]) as $k (
-         .;
-         .[$k] = ((([$preds[$k][] as $p | .[$p | tostring]]
-                    + (if $ext[$k] then [0] else [] end)) | max // -1) + 1)))
-   end) as $depth
-| ($depth | to_entries | map({iid: (.key | tonumber), depth: .value})) as $dl
-| ([$dl[].depth] | max // -1) as $maxdepth
-| ($dl | group_by(.depth) | map({depth: .[0].depth, iids: (map(.iid) | sort)})
-       | sort_by(.depth)) as $levels
-| ($levels | map(.iids | length) | max // 0) as $widest
-# How wide the build OPENS, which is a different question from how wide it ever
-# gets and is the one build 2 actually lost an hour to: "frontier is 1 wide
-# until #12 merges; it opens to 3 the moment it does". Both get reported.
-# The level at DEPTH 0, not whatever sorts first. When every ticket is blocked
-# by something outside the build there is no depth-0 level at all, and reading
-# levels[0] then reported the depth-1 group as the frontier — "opens 3 wide"
-# while nothing at all could start. Same false reassurance as the out-of-build
-# edge bug, one layer up.
-| ((($levels | map(select(.depth == 0)) | first | .iids) // []) | length) as $opening
-# A DAG of n nodes cannot have depth n; if it does, the fixpoint never settled.
-| ($n > 0 and $maxdepth >= $n) as $cycle
-| (if $n == 0 then []
-   else reduce range(0; $maxdepth) as $_
-          ([$dl | map(select(.depth == $maxdepth)) | first | .iid];
-           . as $path
-           | ($path[0] | tostring) as $cur
-           | ([$preds[$cur][] | select($depth[(. | tostring)] == ($depth[$cur] - 1))]
-              | first) as $prev
-           | if $prev == null then $path else [$prev] + $path end)
-   end) as $cpath
-| ($ts | map(select(.state == "ready-for-agent" and .unblocked == true
-                    and (((.assignees // []) | length) == 0))) | length) as $startable
-# P53: depth is decided when the ticket is written, same as width — flag an
-# outsized one before the build starts rather than discover it at turn 300.
-# Thresholds are a starting point (median tickets run well under this), not a
-# calibrated cutoff; tighten or loosen them once a build has data to check
-# against.
-| (6) as $deep_criteria
-| (6) as $deep_files
-| ($ts | map(select(((.criteria_count // 0) > $deep_criteria)
-                    or ((.file_surface // 0) > $deep_files))
-           | {iid, criteria_count: (.criteria_count // 0), file_surface: (.file_surface // 0)})) as $deep
-# P64: unit-tier gates judge tickets; nothing before the epic probe judges the
-# EPIC. ai-workout build-1 — every E1 ticket passed its gate while the running
-# app never called build_kg1() once, and the probe, the last step of the epic,
-# was the first thing that looked. A wiring ticket owns that seam, and it is a
-# graph property, so it needs no label of its own: an epic has one when some
-# member is blocked by every other member of that epic. A one-ticket epic
-# passes trivially — there is nothing to wire together — and a ticket carrying
-# no epic belongs to none, so neither can raise a false refusal.
-| ([$ts[] | .epic // empty] | unique) as $epic_names
-| ($epic_names | map(. as $e
-    | ($ts | map(select(.epic == $e))) as $mem
-    | ($mem | map(.iid)) as $mids
-    | if ($mem | any(. as $c
-             | (($c.blocked_by // []) | map(.iid)) as $bb
-             | ($mids | map(select(. != $c.iid))
-                | all(. as $o | ($bb | index($o)) != null))))
-      then empty else $e end)) as $unwired
-| {tickets: $n,
-   max_lanes: $max_lanes,
-   critical_path: {length: ($maxdepth + 1), iids: $cpath},
-   widest_level: $widest,
-   opening_width: $opening,
-   startable_now: $startable,
-   levels: $levels,
-   cycle_suspected: $cycle,
-   likely_deep: $deep,
-   unwired_epics: $unwired,
-   verdict:
-     (($maxdepth + 1) as $len
-      | (if $len == 1 then "1 merge cycle" else "\($len) merge cycles" end) as $cyc
-      # The alarm is width against BOTH the lane count and the ticket count: a
-      # build with fewer tickets than lanes is small, not chain-shaped, and
-      # crying wolf there would train the human to ignore this line.
-      | if $n == 0 then "no tickets in this build"
-        elif $cycle then "dependency cycle — depths did not settle; fix the blocking edges"
-        else
-          (if $widest < $max_lanes and $widest < $n then "CHAIN-SHAPED — "
-           elif $opening < $max_lanes and $opening < $widest then "NARROW START — "
-           else "" end)
-          + "opens \($opening) wide, widest level \($widest), against \($max_lanes) lanes; critical path \($cyc) through \($n) tickets"
-          + (if ($deep | length) > 0
-             then "; LIKELY DEEP — #\($deep | map(.iid | tostring) | join(", #")) (outsized acceptance-criteria or file count — split before build)"
-             else "" end)
-          + (if ($unwired | length) > 0
-             then "; UNWIRED EPIC — \($unwired | join(", ")) (no ticket blocked by every other member; phase 4 must end each epic with a wiring ticket)"
-             else "" end)
-        end)}
-'
-
 cmd_graph() { # graph [<snapshot.json>]  (default: stdin) — rc 1 on an unwired epic
     command -v jq >/dev/null 2>&1 || die "graph: jq required"
+    # P71: the graph program lives in graph.jq beside this script — moved out
+    # of a single-quoted shell string, following snapshot.jq's own precedent.
+    # Resolved here, after the jq check above, for the same `set -e` reason
+    # as retro.jq.
+    GRAPH_JQ="$(dirname "$SELF_PATH")/graph.jq"
+    [ -f "$GRAPH_JQ" ] || die "graph: $GRAPH_JQ is missing — it holds the graph program and ships beside tick.sh"
     local src="${1:--}" out
     if [ "$src" = "-" ]; then
-        out=$(jq "$GRAPH_JQ") || return $?
+        out=$(jq -f "$GRAPH_JQ") || return $?
     else
         [ -f "$src" ] || die "graph: no such snapshot file '$src'"
-        out=$(jq "$GRAPH_JQ" "$src") || return $?
+        out=$(jq -f "$GRAPH_JQ" "$src") || return $?
     fi
     printf '%s\n' "$out"
     # The shape verdicts above are advice; this one is a refusal (P64). The

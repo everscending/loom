@@ -65,6 +65,7 @@ writing a new proposal that touches the same machinery.
 | P67 | One gate per commit | implemented 2026-08-07 (`tick.sh spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket+HEAD, via a `_gate_lock_reserve`/`_gate_lock_owner` pair shaped exactly like the existing merge lock but keyed per `<ticket>@<sha>` instead of one shared dir) |
 | P68 | Implementation briefs get the headless survival rules probes get | implemented 2026-08-07 (`tick.sh spawn-lane --brief` appends the headless execution rules to the lane's copy of every brief, whatever the lane kind, and refuses a brief that tells the session to invoke a skill by slash command) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
+| P71 | The embedded jq programs live in files, like snapshot.jq | implemented 2026-08-07 (the seven jq programs `tick.sh` embedded as single-quoted shell strings ship as `render.jq`, `render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq` and `graph.jq` beside `snapshot.jq`, each loaded with `jq -f` behind a missing-file die; the ticker's spliced `$when` fragment became an `--arg`; tick.sh −497 lines) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 | P38 | One way for a lane to fire the next wave, not two | implemented 2026-08-07 (`tick.sh cmd_tick` refuses a bare `tick` when `LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error; SKILL.md step 5 no longer tells the merge lane to fire its own tick) |
 | P49 | Every tracker read paginates | implemented 2026-08-07 (`tick.sh` gains `_glab_list [--capped] <path>`, which paginates and folds glab's one-array-per-page output; all nine tracker reads go through it — the acceptance gate, the quiescence count, the snapshot's stage-1, milestone and closed-member reads — and only the two `sort=desc` notes reads stay capped on purpose) |
@@ -2842,3 +2843,36 @@ a `curl` + `sleep` loop" (net near-zero — an existing line rewritten in place,
 never-ready command returns 1 at the deadline (bounded, not before and not hung); `--timeout`
 is required; needs `--url` or `-- <cmd...>`; the two together are refused; `--url` invokes
 `curl` against that URL. Full suite: 511 passed, 0 failed (505 → 511).
+
+## P71 · The embedded jq programs live in files, like snapshot.jq
+
+**Problem.** `tick.sh` still embeds six full jq programs as single-quoted shell strings —
+`RENDER_JQ` (tick.sh:1552), the render-events program (1657), `USAGE_JQ` (1803), `REPORT_JQ`
+(2242), `REPORT_TICKET_JQ` (2293), `RETRO_JQ` (2329) and `GRAPH_JQ` (2525) — roughly 600 lines
+of jq that cannot be syntax-checked on their own and cannot contain an apostrophe.
+`snapshot.jq`'s own header is the case for the fix, already made and already paid for: it was
+lifted out of `cmd_snapshot` because 370 lines of jq in a shell string were "too big to
+navigate, impossible to syntax-check on its own, and quietly unable to contain an apostrophe
+(one in a comment ends the shell quote mid-word and breaks the whole script — it happened)."
+Two of the remaining programs still carry the warning comment "No apostrophes in this comment:
+the whole program is a single-quoted shell string" (tick.sh:1721, snapshot.jq:263) — a rule
+readers must remember because the structure cannot enforce it.
+
+**Fix.** Move each program to its own file beside `snapshot.jq` — `render.jq`,
+`render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq`, `graph.jq` —
+loaded with `jq -f "$(dirname "$SELF_PATH")/<name>.jq"`, each behind the same missing-file die
+`SNAP_JQ` already gets (tick.sh:2027: fail naming the file, so a wave reads "file missing"
+rather than a jq error about an unreadable `-f` argument). Shell-interpolated fragments (the
+`$when` prefix spliced into the render-events program at tick.sh:1751) become `--arg`
+parameters, which they should have been anyway. No logic changes; the diff is relocation plus
+argument plumbing.
+
+**Tests** (`scripts/tick-test.sh`): a `jq -n -f` parse check per shipped `.jq` file, so a
+syntax error is caught by the suite instead of by the first wave that runs the verb; one
+planted violation — remove a `.jq` file, the owning verb dies naming it (the shape the
+`SNAP_JQ` guard already has). The existing render/report/retro/graph output-shape tests carry
+the behavior proof unchanged.
+
+**Consumer.** `qa` and `optimize`, which get checkable files instead of quoted strings; P72,
+which needs the programs to be files before anything can be shared between them; and every
+future edit to these programs.

@@ -65,7 +65,6 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100 |
-| P71 | The embedded jq programs live in files, like snapshot.jq | open — proposed 2026-08-07; ~600 lines of jq inside shell strings, unsyntax-checkable, apostrophe-hostile |
 | P72 | One jq prelude both halves include | open — proposed 2026-08-07; depends on P71. Byte-identical-by-comment becomes byte-identical-by-construction |
 | P73 | A shared bash lib for the facts every script re-derives | open — proposed 2026-08-07; widens P70's sourced-file seam. Base-branch rule written six ways, one already drifted |
 | P74 | Each copied mechanism becomes one helper | open — proposed 2026-08-07; locks ×3, usage-pause ×2, notify-once ×4, fail-closed reads ×7 (two verbs read the same issue twice per call) |
@@ -374,39 +373,6 @@ counterfactual switch P49 already added).
 
 **Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
 count has grown past 100.
-
-## P71 · The embedded jq programs live in files, like snapshot.jq
-
-**Problem.** `tick.sh` still embeds six full jq programs as single-quoted shell strings —
-`RENDER_JQ` (tick.sh:1552), the render-events program (1657), `USAGE_JQ` (1803), `REPORT_JQ`
-(2242), `REPORT_TICKET_JQ` (2293), `RETRO_JQ` (2329) and `GRAPH_JQ` (2525) — roughly 600 lines
-of jq that cannot be syntax-checked on their own and cannot contain an apostrophe.
-`snapshot.jq`'s own header is the case for the fix, already made and already paid for: it was
-lifted out of `cmd_snapshot` because 370 lines of jq in a shell string were "too big to
-navigate, impossible to syntax-check on its own, and quietly unable to contain an apostrophe
-(one in a comment ends the shell quote mid-word and breaks the whole script — it happened)."
-Two of the remaining programs still carry the warning comment "No apostrophes in this comment:
-the whole program is a single-quoted shell string" (tick.sh:1721, snapshot.jq:263) — a rule
-readers must remember because the structure cannot enforce it.
-
-**Fix.** Move each program to its own file beside `snapshot.jq` — `render.jq`,
-`render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq`, `graph.jq` —
-loaded with `jq -f "$(dirname "$SELF_PATH")/<name>.jq"`, each behind the same missing-file die
-`SNAP_JQ` already gets (tick.sh:2027: fail naming the file, so a wave reads "file missing"
-rather than a jq error about an unreadable `-f` argument). Shell-interpolated fragments (the
-`$when` prefix spliced into the render-events program at tick.sh:1751) become `--arg`
-parameters, which they should have been anyway. No logic changes; the diff is relocation plus
-argument plumbing.
-
-**Tests** (`scripts/tick-test.sh`): a `jq -n -f` parse check per shipped `.jq` file, so a
-syntax error is caught by the suite instead of by the first wave that runs the verb; one
-planted violation — remove a `.jq` file, the owning verb dies naming it (the shape the
-`SNAP_JQ` guard already has). The existing render/report/retro/graph output-shape tests carry
-the behavior proof unchanged.
-
-**Consumer.** `qa` and `optimize`, which get checkable files instead of quoted strings; P72,
-which needs the programs to be files before anything can be shared between them; and every
-future edit to these programs.
 
 ## P72 · One jq prelude both halves include
 

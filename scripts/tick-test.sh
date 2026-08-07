@@ -2750,6 +2750,45 @@ case "$rc:$out" in
     *) bad "snapshot: missing builder failed unclearly ($(printf '%s' "$out" | head -1))" ;;
 esac
 
+# 7j3. P71: the other six jq programs tick.sh used to embed as single-quoted
+#      shell strings are FILES now too, beside tick.sh — render.jq,
+#      render-events.jq, usage.jq, report.jq, report-ticket.jq, retro.jq and
+#      graph.jq. Same two checks as snapshot.jq above, once per file: it
+#      parses on its own, and a missing one is named by the verb that owns it
+#      rather than left to jq to complain about its -f argument.
+PJ="$T/p71"; mkdir -p "$PJ/home/logs"
+PJENV() { LOOM_HOME="$PJ/home" "$@"; }
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n' \
+    > "$PJ/home/logs/lane-rj1.jsonl"
+printf '{"ev":"wave_start","ts":1,"build":"b"}\n{"ev":"wave_end","ts":2,"rc":0,"secs":1,"build":"b"}\n' \
+    > "$PJ/home/events.jsonl"
+printf '{"tickets":[],"config":{}}\n' > "$PJ/snap.json"
+
+_p71jq() { # _p71jq <basename.jq> <verb-and-args...> — parse check + hide-and-die check
+    local jf="$1" fpath; shift
+    fpath="$(dirname "$TICK")/$jf"
+    local err; err=$(jq -n -f "$fpath" </dev/null 2>&1 || true)
+    case "$err" in
+        *"syntax error"*|*"unexpected"*) bad "$jf: does not parse ($(printf '%s' "$err" | head -1))" ;;
+        *) ok "$jf: parses standalone — checkable without running $1" ;;
+    esac
+    mv "$fpath" "$T/$jf.hidden"
+    local out rc; out=$(PJENV "$TICK" "$@" 2>&1); rc=$?
+    mv "$T/$jf.hidden" "$fpath"
+    case "$rc:$out" in
+        0:*) bad "$jf: $1 ran with no $jf on disk" ;;
+        *"$jf"*) ok "$jf: a missing $jf is named as the missing file" ;;
+        *) bad "$jf: $1 with missing $jf failed unclearly ($(printf '%s' "$out" | head -1))" ;;
+    esac
+}
+_p71jq render.jq render-log rj1
+_p71jq render-events.jq render-events
+_p71jq usage.jq retro
+_p71jq report.jq report
+_p71jq report-ticket.jq report --ticket 1
+_p71jq retro.jq retro
+_p71jq graph.jq graph "$PJ/snap.json"
+
 # 7k. Read-only guardrail: tick.sh must never mutate tracker state (its whole
 #     charter). Every captured argv is checked against a mutating denylist.
 if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (create|delete)|-X *(POST|PUT|DELETE|PATCH)" "$CALLS"; then
@@ -4854,10 +4893,16 @@ f0=$(grep -cE '"reason":"lock_held","first":"?0"?' "$LKH/events.jsonl" || :)
     || bad "tick: expected one first=1 and one first=0 lock_held, got $f1/$f0"
 # Planted violation: collapse the three reasons back into one sentence and the
 # false line returns — proving the branch, not the fixture, is what suppresses
-# it. The copy needs snapshot.jq beside it, as tick.sh ships with.
-mkdir -p "$T/tickmod"; ln -sf "$(dirname "$TICK")/snapshot.jq" "$T/tickmod/snapshot.jq"
+# it. The copy needs every sibling .jq file beside it, as tick.sh ships with
+# (P71: the ticker program that carries this branch now lives in
+# render-events.jq, not inline in tick.sh, so the mutation targets that file).
+mkdir -p "$T/tickmod"
+for jf in snapshot.jq render.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+    ln -sf "$(dirname "$TICK")/$jf" "$T/tickmod/$jf"
+done
+cp "$TICK" "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
 sed '/elif $e.ev == "tick_skipped"/,/elif $e.ev == "tick_replayed"/s/else empty end)/else "tick landed mid-wave — remembered for replay" end)/g' \
-    "$TICK" > "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
+    "$(dirname "$TICK")/render-events.jq" > "$T/tickmod/render-events.jq"
 LOOM_HOME="$SKH" "$T/tickmod/tick.sh" render-events 2>&1 | grep -q "tick landed mid-wave" \
     && ok "ticker-violation: with one sentence for all three, the false line is back" \
     || bad "ticker-violation: the collapsed renderer printed nothing — the test proves nothing"
