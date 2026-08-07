@@ -4862,6 +4862,44 @@ GITW merge --abort 2>/dev/null || :
     && bad "base-check: ran with no command" \
     || ok "base-check: no command is refused"
 
+# 16b3. P56: `wait-ready` replaces a probe's hand-rolled curl+sleep turn loop
+#       with one deterministic call — ready/not-ready, never a hang past its
+#       own deadline. A command that is already true returns fast; a command
+#       that never becomes true still returns, at the deadline, not before.
+GLAB_CMD=/usr/bin/true "$LANE" wait-ready --timeout 5 -- true >/dev/null 2>&1 \
+    && ok "wait-ready: an already-ready command returns 0 immediately" \
+    || bad "wait-ready: an already-ready command was not reported ready"
+_wr_start=$(date +%s)
+GLAB_CMD=/usr/bin/true "$LANE" wait-ready --timeout 2 --interval 1 -- false >/dev/null 2>&1
+_wr_rc=$?
+_wr_elapsed=$(( $(date +%s) - _wr_start ))
+if [ "$_wr_rc" = 1 ] && [ "$_wr_elapsed" -ge 2 ] && [ "$_wr_elapsed" -le 6 ]; then
+    ok "wait-ready: a command that never succeeds returns 1 at the deadline, not before and not hung"
+else
+    bad "wait-ready: never-ready command rc=$_wr_rc elapsed=${_wr_elapsed}s (want rc=1, ~2s)"
+fi
+GLAB_CMD=/usr/bin/true "$LANE" wait-ready -- true >/dev/null 2>&1 \
+    && bad "wait-ready: ran with no --timeout" \
+    || ok "wait-ready: --timeout is required"
+GLAB_CMD=/usr/bin/true "$LANE" wait-ready --timeout 2 >/dev/null 2>&1 \
+    && bad "wait-ready: ran with neither --url nor a command" \
+    || ok "wait-ready: needs --url or -- <cmd...>"
+GLAB_CMD=/usr/bin/true "$LANE" wait-ready --timeout 2 --url http://example.invalid -- true >/dev/null 2>&1 \
+    && bad "wait-ready: accepted both --url and a command" \
+    || ok "wait-ready: --url and -- <cmd...> together are refused"
+_WR_URL_CALLS="$T/wait-ready-url-calls"; : > "$_WR_URL_CALLS"
+_WR_CURL_STUB="$T/curl"; mkdir -p "$T/wrbin"
+cat > "$T/wrbin/curl" <<EOF
+#!/usr/bin/env bash
+echo "\$@" >> "$_WR_URL_CALLS"
+exit 0
+EOF
+chmod +x "$T/wrbin/curl"
+PATH="$T/wrbin:$PATH" GLAB_CMD=/usr/bin/true "$LANE" wait-ready --timeout 5 --url https://example.invalid/health >/dev/null 2>&1 \
+    && grep -q "example.invalid/health" "$_WR_URL_CALLS" \
+    && ok "wait-ready: --url polls via curl against that URL" \
+    || bad "wait-ready: --url did not invoke curl against the URL"
+
 # 16c. reconcile re-syncs DERIVED state. A worktree cut before a ticket added
 #      a dependency carries an install that predates it, so the instant the
 #      base merges in the gate goes red on a module nobody installed — and

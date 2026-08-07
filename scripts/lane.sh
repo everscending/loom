@@ -54,6 +54,17 @@
 #                                            its output, exit with its rc —
 #                                            the evidence a --base-red claim
 #                                            must be built on
+#   lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>)
+#                                            poll a URL or command until it
+#                                            succeeds or the deadline passes;
+#                                            replaces a probe's hand-rolled
+#                                            curl+sleep loop (P56 — probe lanes
+#                                            averaged 162 turns, most of it
+#                                            polling). One shell call, never a
+#                                            hang: exits 0 ready, 1 not-ready
+#                                            at the deadline — the caller's cue
+#                                            to report the failure, not retry
+#                                            forever
 #   lane.sh rescope <iid> [--file F]          this ticket is now DIFFERENT work:
 #                                            post what changed and retire the
 #                                            rejections recorded before it. A
@@ -318,6 +329,44 @@ cmd_base_check() { # [--] <cmd...> — run <cmd> against clean origin/<base>
     rmdir "$wtp" 2>/dev/null || true
     echo "lane.sh: base-check on clean origin/$base exited rc=$rc" >&2
     return "$rc"
+}
+
+cmd_wait_ready() { # --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>)
+    # P56: the probe brief already told sessions to poll under a hard attempt
+    # cap, but that cap was prose in a generated brief, not anything the
+    # machine enforced — and most of a probe's 162-turn average was the poll
+    # loop itself, one model turn per curl+sleep. This is that loop as a
+    # single deterministic call: it returns ready/not-ready, it can never run
+    # past its own deadline, and it costs one shell call instead of a dozen
+    # model turns. Same argument P32/P36/etc already made for tracker writes,
+    # applied to spend instead of correctness.
+    local timeout="" interval=2 url=""
+    while [ $# -gt 0 ]; do case "$1" in
+        --timeout)  timeout="${2:-}";  shift 2 ;;
+        --interval) interval="${2:-}"; shift 2 ;;
+        --url)      url="${2:-}";      shift 2 ;;
+        --)         shift; break ;;
+        *) break ;;
+    esac; done
+    case "$timeout" in ''|*[!0-9]*|0) die "wait-ready: --timeout must be a positive integer (seconds) — an unbounded poll is exactly the turn-burn this verb exists to remove" ;; esac
+    case "$interval" in ''|*[!0-9]*|0) die "wait-ready: --interval must be a positive integer (seconds), default 2" ;; esac
+    if [ -n "$url" ]; then
+        [ $# -eq 0 ] || die "wait-ready: pass either --url or -- <cmd...>, not both"
+        set -- curl -fsS -o /dev/null "$url"
+    fi
+    [ $# -gt 0 ] || die "wait-ready: need --url <url> or -- <cmd...>"
+    local deadline elapsed=0
+    deadline=$(( $(date +%s) + timeout ))
+    while :; do
+        if "$@" >/dev/null 2>&1; then
+            echo "lane.sh: ready after ${elapsed}s — $*"
+            return 0
+        fi
+        [ "$(date +%s)" -lt "$deadline" ] \
+            || { echo "lane.sh: not ready after ${timeout}s (deadline hit) — $* — this is a failure to report, not a hang" >&2; return 1; }
+        sleep "$interval"
+        elapsed=$((elapsed + interval))
+    done
 }
 
 cmd_rescope() { # <iid> [--file F]
@@ -743,6 +792,7 @@ case "${1:-}" in
     verdict)    shift; cmd_verdict "$@" ;;
     merge-failed) shift; cmd_merge_failed "$@" ;;
     base-check) shift; cmd_base_check "$@" ;;
+    wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
     rescope)    shift; cmd_rescope "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
@@ -751,5 +801,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

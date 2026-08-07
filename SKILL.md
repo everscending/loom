@@ -467,9 +467,11 @@ refuses outside herdr anyway.
    **The probe prompt is the failure surface** — put these in it every time.
    *Every step blocks*: a headless session gets no notifications or wake-ups,
    so "I've backgrounded it and will be notified" never wakes (it killed one
-   probe outright). *Poll, never await*: run the stack as a background shell
-   and poll it (`BashOutput`, or a `curl` + `sleep` loop) under a hard attempt
-   cap, where hitting the cap is a failure to report. *Kill the stack before
+   probe outright). *Poll, never await*: run the stack as a background shell,
+   then check readiness with **`lane.sh wait-ready --timeout <secs> (--url
+   <url> | -- <cmd...>)`** — one call, deadline-bounded, never a hand-rolled
+   `curl`+`sleep` turn loop (P56). A `wait-ready` timeout is a failure to
+   report. *Kill the stack before
    exiting* (`KillShell`); ephemeral files go in `$LOOM_SCRATCH` and are never
    cleaned up by hand. *Report last*: fix tickets, then the epic result via
    `lane.sh probe-result <build-iid> <epic-slug> pass|fail --file <report>` —

@@ -64,7 +64,6 @@ evidence, and implementation notes belong in this file, not there.
 | P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
 | P69 | The verdict verb enforces its own trailer | open — adopted 2026-08-07, ai-workout build-1: unclassed FAILs, spurious classes on PASS, duplicate trailers; tranche 2 |
-| P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
@@ -500,20 +499,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P56 · A probe that cannot finish fails fast
-
-**Problem.** Probe lanes average 162 turns and 26.6M cache-read tokens each — the highest
-per-session cost of any lane kind, ahead of implementers. The probe brief already mandates a
-hard attempt cap on polling, where hitting the cap is a failure to report, but the cap is
-prose in a generated brief rather than anything the machine enforces, and most of those
-turns are the poll loop.
-
-**Fix direction.** Move the cap out of the brief and into the machinery: the probe's poll
-loop becomes a `lane.sh` verb that takes a URL or command plus a deadline and returns
-ready/not-ready, so one shell call replaces a dozen model turns. That is the same
-"grow `lane.sh` until lanes barely need open shell" argument SKILL.md already makes for
-permissions, applied to spend. Smallest of the six; do it last.
 
 ## P58 · Phase 4 drafts the whole set, then checks its own output once
 

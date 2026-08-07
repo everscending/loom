@@ -58,6 +58,7 @@ writing a new proposal that touches the same machinery.
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
+| P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 
 ## Independent review round (2026-08-01)
 
@@ -2311,3 +2312,28 @@ One note on the evidence. It still reproduces as written — merge-10's logs say
 at worktree CREATION either, not merely left stale by a merge. This fix covers the reconcile
 half, which is what the proposal specified; worktree-creation setup for nested ecosystems is a
 separate gap.
+
+## P56 · A probe that cannot finish fails fast
+
+**Problem.** Probe lanes average 162 turns and 26.6M cache-read tokens each — the highest
+per-session cost of any lane kind, ahead of implementers. The probe brief already mandates a
+hard attempt cap on polling, where hitting the cap is a failure to report, but the cap is
+prose in a generated brief rather than anything the machine enforces, and most of those
+turns are the poll loop.
+
+**Fix.** The poll loop becomes `lane.sh wait-ready --timeout <secs> [--interval <secs>]
+(--url <url> | -- <cmd...>)`: one deterministic call instead of a model-driven curl+sleep
+turn loop. It polls the URL (via `curl -fsS`) or runs the given command every `--interval`
+seconds (default 2) until it exits 0 (ready, rc 0) or `--timeout` seconds pass (not ready,
+rc 1) — never past its own deadline, so hitting it is a single rc a probe checks, not a
+turn-by-turn judgment call.
+
+**Implementation (2026-08-07).** Entirely in `scripts/lane.sh` (`cmd_wait_ready`, dispatched
+as `wait-ready`) — same layer as `base-check`, no tracker mutation involved. SKILL.md: the
+probe-prompt's "Poll, never await" bullet now names `wait-ready` instead of "`BashOutput`, or
+a `curl` + `sleep` loop" (net near-zero — an existing line rewritten in place, not a new one).
+
+**Tests.** `scripts/tick-test.sh`: an already-ready command returns 0 immediately; a
+never-ready command returns 1 at the deadline (bounded, not before and not hung); `--timeout`
+is required; needs `--url` or `-- <cmd...>`; the two together are refused; `--url` invokes
+`curl` against that URL. Full suite: 511 passed, 0 failed (505 → 511).
