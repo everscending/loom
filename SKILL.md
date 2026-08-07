@@ -90,10 +90,10 @@ wave immediately, so the loop advances at the speed of work. The scheduler
 timer is only a slow heartbeat (~15 min) for the two things completion can't
 signal: the initial kick, and resuming after a full stall. Prefer launchd on
 macOS over cron. Redundant fires are safe — a tick landing mid-wave is
-remembered and replayed once when that wave exits. A loop kicked by manual
-`tick` without `start` has **no** backstop: one fizzled wave stalls the build
-silently, `tick.sh` warns on every un-armed tick, and that warning is a to-do,
-not noise. *(paid: a wave misread a permission denial as "never bootstrapped",
+remembered and replayed once when that wave exits. Every tick arms the backstop
+itself if none is armed, so a loop kicked by manual `tick` acquires one; if
+launchd refuses, one push says so and the build is running unprotected.
+*(paid: a wave misread a permission denial as "never bootstrapped",
 exited without harvesting, and nothing fired again for hours.)*
 
 **One agent, watching first, spending second.** A single launchd entry per

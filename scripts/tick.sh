@@ -576,6 +576,9 @@ USAGE_PAUSE="${LOOM_USAGE_PAUSE:-$LOOM_HOME/usage.pause}"
 # was spawned before `stop` has its follow-on command already baked in, so the
 # only place the decision can be read is when that command runs.
 LOOP_STOPPED="${LOOM_LOOP_STOPPED:-$LOOM_HOME/loop.stopped}"
+# Sentinel for the un-armed push, same shape as quiet.state: one notification
+# per state change, not one line per tick.
+UNARMED_STATE="${LOOM_UNARMED_STATE:-$LOOM_HOME/agent.unarmed}"
 WAVE_FAILS="${LOOM_WAVE_FAILS:-$LOOM_HOME/wave-failures}"
 RETRY_BACKOFF="${LOOM_RETRY_BACKOFF_SECONDS:-30}"
 
@@ -795,6 +798,10 @@ cmd_tick() {
         _ev tick_skipped reason loop_stopped
         return 0
     fi
+    # Before every gate below, because the firing that gets skipped is exactly
+    # the firing after which nothing else may fire. Cheap: one file test once
+    # armed.
+    _ensure_armed
     if [ "$mode" = auto ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
@@ -865,12 +872,6 @@ cmd_tick() {
                 _ev tick_skipped reason unclassified state "$quiet"
                 return 0 ;;
     esac
-    # A manual or self-triggered loop with no launchd agent has no backstop:
-    # when a wave fizzles, nothing ever fires again (build-1 2026-08-02 sat
-    # stalled for hours after one bad wave). Warn every tick until it is armed.
-    if ! "$LAUNCHCTL_CMD" print "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
-        echo "tick: warning — heartbeat agent not installed; if a wave fizzles the build stalls silently (arm it with /loom start)" >&2
-    fi
     LOOM_SCRATCH=$(_new_scratch wave); export LOOM_SCRATCH
     # Sessions run under cfg permission_mode (see SKILL.md "Headless
     # permissions" and references/loom-config.md). Both values honor
@@ -2459,6 +2460,14 @@ cmd_graph() { # graph [<snapshot.json>]  (default: stdin)
 # --- launchd lifecycle (per-repo, self-installing) ------------------------
 LOOM_LABEL="com.loom.$REPO_KEY"
 PLIST_DIR="${LOOM_PLIST_DIR:-$HOME/Library/LaunchAgents}"
+# 60s, because this ONE agent does both jobs: it watches on every firing
+# (stamping lane progress, classifying quiet, notifying) and starts a wave only
+# when the switch is on and `min_wave_gap_minutes` has passed. The old split was
+# 900s for a scheduler that went blind whenever a wave held the lock, plus a
+# separate 60s watcher to cover that blindness. One program watching first needs
+# neither. Spending is paced by the gap, not by the timer, so the fast tick
+# costs nothing.
+HEARTBEAT_INTERVAL=60
 
 _write_plist() {  # _write_plist <path> <interval>
     local path="$1" interval="$2" b d toolpath=""
@@ -2493,6 +2502,72 @@ _write_plist() {  # _write_plist <path> <interval>
 </dict>
 </plist>
 EOF
+}
+
+# Is launchd actually running this label RIGHT NOW? `print gui/<uid>/<label>`
+# is the precise answer but it needs the caller to be inside that GUI domain,
+# which a nohup'd lane is not: after the human armed build-1 at 09:54 launchd
+# demonstrably fired wave-095403, and every self-triggered tick for the rest of
+# the morning still warned "not installed". `list <label>` is domain-free and
+# answers from anywhere, so it is the fallback, not the primary.
+_agent_loaded() {
+    "$LAUNCHCTL_CMD" print "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1 && return 0
+    "$LAUNCHCTL_CMD" list "$LOOM_LABEL" >/dev/null 2>&1
+}
+
+# Is a heartbeat ARMED for this repo — readable from every context, including a
+# detached lane's? The installed plist file is the arm record: `_arm_agent`
+# writes it only after launchd accepted it, `uninstall` removes it, and a
+# rejected one is moved aside. So its presence is a fact any process can read
+# without a domain, and the launchd probe above is only the fallback for a
+# plist living somewhere this process cannot see.
+_agent_armed() {
+    [ -f "$PLIST_DIR/$LOOM_LABEL.plist" ] && return 0
+    _agent_loaded
+}
+
+_arm_agent() {  # _arm_agent <interval> — write + load the agent; rc 1 if launchd refused
+    local interval="$1" plist="$PLIST_DIR/$LOOM_LABEL.plist"
+    mkdir -p "$LOGS_DIR" "$PLIST_DIR"
+    _write_plist "$plist" "$interval"
+    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true   # idempotent
+    "$LAUNCHCTL_CMD" bootstrap "gui/$(id -u)" "$plist" || true
+    # Retire this repo's old separate watcher, if one is still loaded from
+    # before the merge. Left alone it would keep firing every 60s alongside
+    # the new agent, doing the same work twice and notifying twice.
+    _retire_watcher
+    _agent_loaded && return 0
+    # A plist launchd never loaded is worse than no plist: every later context
+    # reads that file as "armed", so the build would believe it had a backstop
+    # it does not have, and nothing would retry. Move it aside — it is the
+    # evidence a human needs — and report the failure.
+    mkdir -p "$LOOM_HOME"
+    mv -f "$plist" "$LOOM_HOME/$LOOM_LABEL.plist.rejected" 2>/dev/null || rm -f "$plist"
+    return 1
+}
+
+# A build with no heartbeat has no backstop: when a wave fizzles, nothing ever
+# fires again. Build-1 2026-08-02 paid 2h08m of dead air for exactly that, and
+# the stderr warning that shipped after crucible fired fifteen times into a log
+# nobody was reading. So: arm one instead of advising about it, and when
+# launchd refuses, push ONCE per state change rather than every tick. Skipped
+# while the loop switch is off — a stopped build is not supposed to have a
+# timer, and `start` is the only thing allowed to reverse that.
+_ensure_armed() {
+    _loop_stopped && return 0
+    if _agent_armed; then rm -f "$UNARMED_STATE"; return 0; fi
+    if _arm_agent "$HEARTBEAT_INTERVAL"; then
+        rm -f "$UNARMED_STATE"
+        _ev agent_armed by tick interval "$HEARTBEAT_INTERVAL"
+        echo "tick: this build had no heartbeat agent — armed one (${HEARTBEAT_INTERVAL}s), so a fizzled wave can no longer stall it silently"
+        return 0
+    fi
+    [ -f "$UNARMED_STATE" ] && return 0
+    : > "$UNARMED_STATE"
+    _ev agent_unarmed label "$LOOM_LABEL"
+    cmd_notify build_unarmed "Build has no heartbeat — and could not arm one" \
+        "launchd refused $LOOM_LABEL, so nothing restarts this build if a wave fizzles. Run /loom start from a logged-in terminal." >&2 || :
+    return 0
 }
 
 # --- P22 layered config: repo > derived > global > built-in ---------------
@@ -2782,27 +2857,29 @@ _raise_viewer() {
 
 cmd_install() {  # install [--dry-run] [interval-seconds]
     local dry=0; [ "${1:-}" = "--dry-run" ] && { dry=1; shift; }
-    # 60s, because this ONE agent now does both jobs: it watches on every
-    # firing (stamping lane progress, classifying quiet, notifying) and starts
-    # a wave only when the switch is on and `min_wave_gap_minutes` has passed.
-    # The old split was 900s for a scheduler that went blind whenever a wave
-    # held the lock, plus a separate 60s watcher to cover that blindness. One
-    # program watching first needs neither. Spending is paced by the gap, not
-    # by the timer, so the fast tick costs nothing.
-    local interval="${1:-60}"
-    local plist="$PLIST_DIR/$LOOM_LABEL.plist"
-    mkdir -p "$LOGS_DIR" "$PLIST_DIR"
-    _write_plist "$plist" "$interval"
-    if [ "$dry" -eq 1 ]; then echo "generated (dry-run): $plist"; return 0; fi
+    local interval="${1:-$HEARTBEAT_INTERVAL}"
+    if [ "$dry" -eq 1 ]; then
+        # A preview, written OUTSIDE the LaunchAgents directory. Written where
+        # the real one goes, it would leave a plist launchd never loaded, and
+        # the arm record every later context reads is that file's presence.
+        local preview="$LOOM_HOME/$LOOM_LABEL.plist.preview"
+        mkdir -p "$LOOM_HOME"
+        _write_plist "$preview" "$interval"
+        echo "generated (dry-run): $preview"; return 0
+    fi
     # `start` is the switch going ON, and it must clear a previous `stop` or
     # the agent would tick forever refusing to do anything.
     rm -f "$LOOP_STOPPED"
-    "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true   # idempotent
-    "$LAUNCHCTL_CMD" bootstrap "gui/$(id -u)" "$plist"
-    # Retire this repo's old separate watcher, if one is still loaded from
-    # before the merge. Left alone it would keep firing every 60s alongside
-    # the new agent, doing the same work twice and notifying twice.
-    _retire_watcher
+    # `start` verifies the load rather than assuming it. A `bootstrap` that
+    # launchd refuses is silent from the human's side, and the whole point of
+    # this command is that something is now watching the build.
+    if ! _arm_agent "$interval"; then
+        die "loom: launchd REFUSED the build agent ($LOOM_LABEL) — NOTHING is watching this build and no wave will start on its own.
+  The plist it rejected: $LOOM_HOME/$LOOM_LABEL.plist.rejected
+  Check it loads by hand:  launchctl bootstrap gui/$(id -u) $LOOM_HOME/$LOOM_LABEL.plist.rejected
+  Then re-run /loom start. Until it loads, the build survives only on lane self-triggers."
+    fi
+    rm -f "$UNARMED_STATE"
     echo "loom: build agent LOADED ($LOOM_LABEL, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
     _raise_viewer
 }
@@ -2958,8 +3035,13 @@ cmd_agent_status() {
     # and the half it gave read as "no". (Paid for: 2026-08-04, exactly that
     # confusion.)
     local gap; gap=$(cfg min_wave_gap_minutes 10)
-    if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
+    if _agent_loaded; then
         echo "$LOOM_LABEL: loaded — watches every tick; starts a wave at most every ${gap}m"
+    elif [ -f "$PLIST_DIR/$LOOM_LABEL.plist" ]; then
+        # Armed, but launchd is not answering from here. Normal in a detached
+        # lane, and the reason this used to read "not loaded" all morning on a
+        # build launchd was demonstrably driving.
+        echo "$LOOM_LABEL: armed — the agent plist is installed; launchd is not readable from this context"
     else
         echo "$LOOM_LABEL: not loaded — nothing is watching and no wave will start on its own"
     fi

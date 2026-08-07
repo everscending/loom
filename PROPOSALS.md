@@ -71,7 +71,6 @@ evidence, and implementation notes belong in this file, not there.
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | open — proposed 2026-08-06; nine cross-ticket ambiguities in a 54-ticket set, none visible from inside one ticket; folds in the width and size rules, which check the same draft |
 | P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
-| P3 | Actually arm the safety-net timer, and check that it worked | open — re-opened 2026-08-02; build-1 paid 2h08m for the unarmed backstop, and the shipped warning cried wolf after arming |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
 | P20 | Parallelise the human-gated front half | open |
@@ -287,38 +286,6 @@ does not need restating in prose (this file's own "Keep SKILL.md small").
 
 **Tests.** `LOOM_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
 `tick --from-lane` from the same environment still runs.
-
-## P3 · Actually arm the safety-net timer, and check that it worked
-
-A slow background timer exists to restart a stalled loop. It was never running.
-
-**Evidence.** Eight of thirteen waves report `agent-status: not loaded` and spend a paragraph
-advising the operator to run `/loom start` (W1, W2, W4, W5, W9, W10, W12, W13). The
-entire run therefore depended on the self-trigger chain — precisely the mechanism dropping
-signals in P1.
-
-**Re-opened 2026-08-02 (build-1).** The deferral reason — "the skill is driven by `tick` alone" —
-is exactly how build-1 paid: the loop was kicked with manual `tick` on Friday night and left
-unattended with nothing armed. When wave-074603 fizzled at 07:46 (Bash denied wholesale, misread
-as "never bootstrapped", exited without harvesting), **nothing fired again for 2h08m** until the
-human ran `start` at 09:54 — after which #1 merged within 30 minutes. The stderr warning shipped
-since crucible fired on every tick, fifteen times, into a log nobody was reading overnight. Two
-additions to the fix:
-
-- **The warning must reach the human, not the log.** Route the un-armed warning through
-  `tick.sh notify`, once per state change like the quiescence watcher — an un-armed build should
-  produce one push, not fifteen stderr lines.
-- **The armed-check is wrong from detached contexts.** After the agent was armed at 09:54
-  (launchd demonstrably fired wave-095403; `uninstall` at 12:28 unloaded it), every later
-  self-triggered tick *still* warned "not installed": `launchctl print gui/$(id -u)/$LOOM_LABEL`
-  fails from a nohup'd lane context. Probe the installed plist file first, with `launchctl list`
-  as fallback.
-
-**Fix.** `start` verifies the agent actually loaded and fails loudly otherwise. A wave that
-detects `not loaded` installs it rather than advising about it thirteen times.
-
-**What would falsify it.** An un-armed build that does not push a notification within one tick,
-or an armed build that still logs false "not installed" warnings.
 
 ## P18 · Use a cheaper model for scheduling
 

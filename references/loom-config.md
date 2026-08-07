@@ -84,7 +84,7 @@ stall_action: resume            # resume | notify_only — what a tick does when
 ntfy:
   topic: ""                     # ACCESS-PROTECTED topic before enabling pushes (public topic = injection)
                                 # No topic at all → local macOS banner via osascript instead
-  push: [build_complete, build_halted, build_stalled, ticket_blocked, lane_stale, wave_stale, workspace_untrusted]
+  push: [build_complete, build_halted, build_stalled, ticket_blocked, lane_stale, wave_stale, workspace_untrusted, build_unarmed]
                                 # KEEP THIS ON ONE LINE — the reader takes the first `push:` line
                                 # and stops, so a wrapped list silently drops its tail
                                 # lane_stale/wave_stale: a session alive but making no real
@@ -92,6 +92,9 @@ ntfy:
                                 # workspace_untrusted: the repo root has no accepted trust dialog,
                                 # so every lane ignores .claude/settings.json (P30). Deduped like
                                 # the quiet states — one push per state change, not one per tick.
+                                # build_unarmed: a tick found no heartbeat agent AND launchd refused
+                                # to load one, so a fizzled wave would stall the build silently.
+                                # Deduped the same way — one push, not one stderr line per tick.
                                 # + ticket_done | ticket_review | mr_merged | usage_pause | usage_resume
 
 gates:                          # tier keys are FIXED: docs | logic | api | ui (assigned per ticket at gen)

@@ -92,7 +92,7 @@ ntfy:
   topic_prefix: ""
   # One line, always: the reader takes the first `push:` line and stops, so a
   # wrapped list silently drops its tail.
-  push: [build_complete, build_halted, ticket_blocked, workspace_untrusted]
+  push: [build_complete, build_halted, ticket_blocked, workspace_untrusted, build_unarmed]
 EOF
     echo "global-config: wrote $GLOBAL_CONFIG"
     [ -n "$(sed -nE 's/^[[:space:]]*topic_prefix:[[:space:]]*"?([^"#]*)"?.*/\1/p' "$GLOBAL_CONFIG" | xargs)" ] \
