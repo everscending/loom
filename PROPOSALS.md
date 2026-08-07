@@ -65,7 +65,6 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100. P73 already shipped the extraction half: `_glab_list` lives in `scripts/lib.sh`, which `lane.sh` sources — so route the four reads through it and do NOT create `glab-lib.sh` (one sourced lib, not two) |
-| P74 | Each copied mechanism becomes one helper | open — proposed 2026-08-07; locks ×3, usage-pause ×2, notify-once ×4, fail-closed reads ×7 (two verbs read the same issue twice per call) |
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | open — proposed 2026-08-07; 430 and 220 lines, the epilogue/quoting assembly has burned twice already. Do after P71–P74 |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
 
@@ -371,44 +370,6 @@ counterfactual switch P49 already added).
 
 **Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
 count has grown past 100.
-
-## P74 · Each copied mechanism becomes one helper
-
-**Problem.** Four mechanisms exist as verbatim or near-verbatim copies:
-
-- **Locks ×3** — `lock_acquire` (tick.sh:541), `_merge_lock_reserve` (561),
-  `_gate_lock_reserve` (596) plus their two `_owner` twins are one mkdir-atomic,
-  dead-owner-breakable shape written three times. A future fix to the break-stale logic has
-  three places to land and can miss one.
-- **Usage-pause ×2** — the limit-hit block in `cmd_tick` (1019–1029) and its retry copy
-  (1044–1054) are eleven near-identical lines each.
-- **Notify-once ×4** — `_notify_quiet` (373), `_notify_trust` (479), `_notify_stale` (3357)
-  and the `UNARMED_STATE` handling in `_ensure_armed` (2759) each re-implement the
-  sentinel-file "once per state change" pattern.
-- **Fail-closed tracker reads ×7 (lane.sh)** — the P47 "read, rc-check, die refusing to
-  guess" pattern is hand-copied across `_blocked_guard`, `cmd_verdict`, `cmd_merge_failed`,
-  `cmd_transition`, `cmd_submit` (twice) and `cmd_close`. Worse than the duplication:
-  `cmd_transition` and `cmd_submit` each fetch the same issue **twice** per invocation — once
-  inside `_blocked_guard`, again for their own closed/label checks — a doubled tracker
-  round-trip on every state transition in every lane.
-
-**Fix.** Four local helpers, no cross-script sharing needed beyond what P73 provides:
-`_lock_reserve <dir>` / `_lock_owner <dir>` parameterized by directory (only
-`lock_acquire`'s EXIT trap stays at its call site); `_pause_on_limit <stem> <source>` called
-from both attempt paths; a `_once_per_state <sentinel> <state>` core for the three sentinels
-whose semantics match ( `_notify_quiet` keeps its `unreadable`/re-arm carve-outs locally);
-and in lane.sh `_read_issue <iid>` / `_open_mr_closing <iid>` returning the JSON so
-`_blocked_guard` and the caller share one fetch — the double read collapses to one, halving
-issue reads on `transition` and `submit`.
-
-**Tests**: the existing planted violations for lock exclusion, stale-break, pause-on-limit
-and notify-dedup already cover the behavior and must stay green across the swap; add the one
-missing pin — pause-on-limit firing on the *retry* path (the P14 crash-then-limit sequence) —
-and a call-count case asserting `transition` performs exactly one issue GET (fails against
-today's code).
-
-**Consumer.** The next person to fix a lock or sentinel bug (one landing site), and every
-lane's per-transition tracker latency.
 
 ## P75 · `cmd_spawn_lane` and `cmd_tick` decompose into named stages
 

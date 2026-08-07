@@ -366,18 +366,37 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown | unre
     return 0
 }
 
-_notify_quiet() { # <state> — notify once per state change; activity re-arms
-    local state="$1" sentinel="$LOOM_HOME/quiet.state" prev=""
+# The "once per state change" core, written four times before this: the quiet
+# states, workspace trust, the un-armed heartbeat, and the two stale flags. A
+# per-tick warning is fifteen stderr lines into a log nobody reads, or five
+# identical "Build halted" pushes in one night; the sentinel file is what turns
+# it into one message per change. Deciding and RECORDING are one step here, so
+# a caller cannot notify twice by forgetting to write the sentinel. Empty
+# <state> re-arms: the sentinel goes, and the next non-empty state is a change
+# again.
+_once_per_state() { # <sentinel> <state> → 0 say it now, 1 already said
+    local sentinel="$1" state="${2:-}" prev=""
+    if [ -z "$state" ]; then rm -f "$sentinel"; return 1; fi
     [ -f "$sentinel" ] && prev=$(cat "$sentinel" 2>/dev/null)
+    [ "$state" = "$prev" ] && return 1
+    mkdir -p "$(dirname "$sentinel")" 2>/dev/null || :
+    printf '%s\n' "$state" > "$sentinel"
+    return 0
+}
+
+_notify_quiet() { # <state> — notify once per state change; activity re-arms
+    local state="$1" sentinel="$LOOM_HOME/quiet.state"
     # A failed read is not a state change and must not erase the memory of one.
     # Clearing the sentinel here re-arms whatever the build was already in, so
     # every network blip re-pushed the same "Build halted" banner — five of them
     # in one night, which is how the human noticed any of this. Say nothing,
     # remember nothing, wait for a firing that could actually see the board.
     [ "$state" = unreadable ] && return 0
+    # Both carve-outs stay HERE, not in the core: `unreadable` is this reader's
+    # own third answer, and re-arming on activity is this state machine's rule
+    # about which states mean "the build is moving again".
     if [ "$state" = active ] || [ "$state" = unknown ]; then rm -f "$sentinel"; return 0; fi
-    [ "$state" = "$prev" ] && return 0
-    printf '%s\n' "$state" > "$sentinel"
+    _once_per_state "$sentinel" "$state" || return 0
     case "$state" in
         complete) cmd_notify build_complete "Build complete" \
             "Ready set empty, no lanes left. The completion wave posts the report." || : ;;
@@ -473,12 +492,10 @@ _trust_check_dir() { # <absolute-dir> → 0 trusted; else 1, printing the path t
 # Once per state change, like _notify_quiet — a per-tick warning becomes P3's
 # fifteen stderr lines into a log nobody reads.
 _notify_trust() { # <untrusted-path> | "" (empty = trusted, re-arms)
-    local bad="${1:-}" sentinel="$LOOM_HOME/trust.state" prev=""
-    [ -f "$sentinel" ] && prev=$(cat "$sentinel" 2>/dev/null)
-    if [ -z "$bad" ]; then rm -f "$sentinel"; return 0; fi
-    [ "$bad" = "$prev" ] && return 0
-    mkdir -p "$LOOM_HOME"
-    printf '%s\n' "$bad" > "$sentinel"
+    local bad="${1:-}"
+    # The state IS the path: a different untrusted directory is a new fact and
+    # says so, the same one twice says nothing, and trusted (empty) re-arms.
+    _once_per_state "$LOOM_HOME/trust.state" "$bad" || return 0
     cmd_notify workspace_untrusted "Workspace not trusted — lanes will ignore the allowlist" \
         "$bad has not been trusted, so .claude/settings.json is ignored there and lane commands fall to the classifier. Run \`claude\` in it once and accept the trust prompt." >/dev/null 2>&1 || :
     return 0
@@ -527,19 +544,41 @@ cfg_ntfy_events() {
 }
 
 # --- lock (mkdir-atomic, PID-owned, stale-broken) -------------------------
-lock_acquire() {
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-        echo $$ > "$LOCK_DIR/pid"
-        trap 'rm -rf "$LOCK_DIR"' EXIT
-        return 0
+# ONE shape, three locks: the tick lock, the merge lock and the per-gate lock
+# were the same fifteen lines written three times, so a fix to the break-stale
+# rule had three places to land and could miss one. mkdir is the atom (it
+# either creates the directory or it does not, with no window between asking
+# and having); the pid file names the owner; an owner that is gone gets its
+# lock broken by the next attempt, so the worst case is one skipped
+# tick/merge/gate and never two at once.
+_lock_reserve() { # <dir> → 0 reserved (pid stamped), 1 genuinely held
+    local dir="$1" owner
+    mkdir -p "$(dirname "$dir")" 2>/dev/null || :
+    if mkdir "$dir" 2>/dev/null; then
+        echo $$ > "$dir/pid"; return 0
     fi
-    local owner
-    owner=$(cat "$LOCK_DIR/pid" 2>/dev/null || echo "")
+    owner=$(cat "$dir/pid" 2>/dev/null || echo "")
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
-        return 1                          # genuinely held — skip this tick
+        return 1                          # genuinely held
     fi
-    rm -rf "$LOCK_DIR"                    # owner dead: break the stale lock
-    lock_acquire
+    rm -rf "$dir"                         # owner dead: break the stale lock
+    _lock_reserve "$dir"
+}
+
+_lock_owner() { # <dir> → prints the live owner pid, or nothing
+    local owner
+    owner=$(cat "$1/pid" 2>/dev/null || echo "")
+    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && printf '%s\n' "$owner"
+    return 0
+}
+
+# The EXIT trap is the tick lock's alone and stays at this call site: this lock
+# dies with the process that takes it, and the other two deliberately outlive
+# theirs.
+lock_acquire() {
+    _lock_reserve "$LOCK_DIR" || return 1  # genuinely held — skip this tick
+    trap 'rm -rf "$LOCK_DIR"' EXIT
+    return 0
 }
 
 # Same rules, no EXIT trap: this lock outlives the process that takes it. It is
@@ -548,14 +587,7 @@ lock_acquire() {
 # behind, and the dead-owner check breaks it on the next attempt — the failure
 # mode is one skipped merge, never two merges at once.
 _merge_lock_reserve() { # → 0 reserved, 1 genuinely held
-    if mkdir "$MERGE_LOCK_DIR" 2>/dev/null; then
-        echo $$ > "$MERGE_LOCK_DIR/pid"; return 0
-    fi
-    local owner
-    owner=$(cat "$MERGE_LOCK_DIR/pid" 2>/dev/null || echo "")
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then return 1; fi
-    rm -rf "$MERGE_LOCK_DIR"
-    _merge_lock_reserve
+    _lock_reserve "$MERGE_LOCK_DIR"
 }
 
 # Keep the previous run's transcript, but never its mtime. A reused lane id
@@ -573,34 +605,18 @@ _rotate_log() { # <path>
 }
 
 _merge_lock_owner() { # prints the live owner pid, or nothing
-    local owner
-    owner=$(cat "$MERGE_LOCK_DIR/pid" 2>/dev/null || echo "")
-    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && printf '%s\n' "$owner"
-    return 0
+    _lock_owner "$MERGE_LOCK_DIR"
 }
 
 # Same shape as the merge lock, keyed per ticket+commit instead of one global
 # dir (P67) — <key> is "<ticket>@<sha>", so gate-14 at one HEAD never queues
 # behind gate-9 at another, only behind its own true duplicate.
 _gate_lock_reserve() { # <key> → 0 reserved, 1 genuinely held
-    local key="$1"
-    local dir="$GATE_LOCK_DIR/$key"
-    mkdir -p "$GATE_LOCK_DIR" 2>/dev/null || :
-    if mkdir "$dir" 2>/dev/null; then
-        echo $$ > "$dir/pid"; return 0
-    fi
-    local owner
-    owner=$(cat "$dir/pid" 2>/dev/null || echo "")
-    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then return 1; fi
-    rm -rf "$dir"
-    _gate_lock_reserve "$key"
+    _lock_reserve "$GATE_LOCK_DIR/$1"
 }
 
 _gate_lock_owner() { # <key> → prints the live owner pid, or nothing
-    local key="$1" owner
-    owner=$(cat "$GATE_LOCK_DIR/$key/pid" 2>/dev/null || echo "")
-    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && printf '%s\n' "$owner"
-    return 0
+    _lock_owner "$GATE_LOCK_DIR/$1"
 }
 
 # --- usage limits (P14) and wave crashes (P15) ----------------------------
@@ -727,6 +743,27 @@ _usage_gate() {
     _ev usage_resume
     echo "tick: usage limit lifted — resuming"
     cmd_notify usage_resume "Build resumed" "Usage limit lifted; scheduling again." >/dev/null 2>&1 || :
+    return 0
+}
+
+# Both attempt paths hit the same wall and must answer it identically. Written
+# twice, the retry copy was simply MISSING for a while: a crash followed by a
+# limit wrote no pause, exited nonzero and counted as a crash, so every tick
+# after it burned a fresh session against the same wall — the exact behaviour
+# P14 exists to stop. One helper, called from both, is what makes that
+# impossible to reintroduce by editing only one of them.
+_pause_on_limit() { # <stem> <first|retry> → 0 paused, 1 no limit in that run
+    local stem="$1" source="$2" until_at where=""
+    until_at=$(_limit_reset_at "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log" \
+                               "$LOGS_DIR/$stem.err.log")
+    [ -n "$until_at" ] || return 1
+    [ "$source" = retry ] && where=" on the retry"
+    printf '%s\n' "$until_at" > "$USAGE_PAUSE"
+    _ev usage_pause until "$until_at" source "$source"
+    echo "tick: usage limit hit$where — pausing until $(_stamp "$until_at")"
+    cmd_notify usage_pause "Build paused — usage limit" \
+        "No capacity until $(_stamp "$until_at"). The build resumes on the first tick after that." \
+        >/dev/null 2>&1 || :
     return 0
 }
 
@@ -1005,17 +1042,7 @@ Wave context from tick.sh — trust it over rediscovery:
 
     # A usage limit is not a crash: retrying it immediately spends a session to
     # be told the same thing, which is exactly what the observed run did.
-    local until_at
-    until_at=$(_limit_reset_at "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log" "$LOGS_DIR/$stem.err.log")
-    if [ -n "$until_at" ]; then
-        printf '%s\n' "$until_at" > "$USAGE_PAUSE"
-        _ev usage_pause until "$until_at" source first
-        echo "tick: usage limit hit — pausing until $(_stamp "$until_at")"
-        cmd_notify usage_pause "Build paused — usage limit" \
-            "No capacity until $(_stamp "$until_at"). The build resumes on the first tick after that." \
-            >/dev/null 2>&1 || :
-        return 0
-    fi
+    _pause_on_limit "$stem" first && return 0
 
     # P15: three wave logs in build 2 were exactly `Execution error`, 15 bytes,
     # and the wave simply set exit 1 and waited — a crashed LANE at least still
@@ -1026,21 +1053,9 @@ Wave context from tick.sh — trust it over rediscovery:
     rc=0; _run_wave "$stem-retry" "$wave_cmd" "$stream" || rc=$?
     if [ "$rc" -eq 0 ]; then : > "$WAVE_FAILS"; return 0; fi
 
-    # The retry needs the SAME limit check as the first attempt. Without it a
-    # crash-then-limit sequence wrote no pause, exited nonzero and counted as a
-    # crash — so every following tick burned a fresh session against the same
-    # wall, which is exactly the behaviour P14 exists to stop.
-    until_at=$(_limit_reset_at "$LOGS_DIR/$stem-retry.jsonl" \
-                               "$LOGS_DIR/$stem-retry.log" "$LOGS_DIR/$stem-retry.err.log")
-    if [ -n "$until_at" ]; then
-        printf '%s\n' "$until_at" > "$USAGE_PAUSE"
-        _ev usage_pause until "$until_at" source retry
-        echo "tick: usage limit hit on the retry — pausing until $(_stamp "$until_at")"
-        cmd_notify usage_pause "Build paused — usage limit" \
-            "No capacity until $(_stamp "$until_at"). The build resumes on the first tick after that." \
-            >/dev/null 2>&1 || :
-        return 0
-    fi
+    # The retry needs the SAME limit check as the first attempt — the same
+    # call, not a copy of it.
+    _pause_on_limit "$stem-retry" retry && return 0
 
     local fails; fails=$(( $(cat "$WAVE_FAILS" 2>/dev/null || echo 0) + 1 ))
     printf '%s\n' "$fails" > "$WAVE_FAILS"
@@ -2329,8 +2344,7 @@ _ensure_armed() {
         echo "tick: this build had no heartbeat agent — armed one (${HEARTBEAT_INTERVAL}s), so a fizzled wave can no longer stall it silently"
         return 0
     fi
-    [ -f "$UNARMED_STATE" ] && return 0
-    : > "$UNARMED_STATE"
+    _once_per_state "$UNARMED_STATE" unarmed || return 0
     _ev agent_unarmed label "$LOOM_LABEL"
     cmd_notify build_unarmed "Build has no heartbeat — and could not arm one" \
         "launchd refused $LOOM_LABEL, so nothing restarts this build if a wave fizzles. Run /loom start from a logged-in terminal." >&2 || :
@@ -2885,16 +2899,16 @@ _notify_stale() {
     stale_min=$(cfg heartbeat_stale_minutes 30)
     cmd_lane_status 2>/dev/null | while read -r id pid state type rc; do
         [ "$state" = stale ] || continue
-        [ -f "$LANES_DIR/$id.stale-notified" ] && continue
-        : > "$LANES_DIR/$id.stale-notified"
+        _once_per_state "$LANES_DIR/$id.stale-notified" stale || continue
         cmd_notify lane_stale "Lane $id is wedged" \
             "Alive but no real progress for ${stale_min}+ min (retry chatter excluded). Unattended: the next heartbeat wave harvests it. Manual: investigate, then kill + clear-lane + tick." \
             >/dev/null 2>&1 || :
     done
+    # `_once_per_state` goes LAST in the chain because it writes: it must not
+    # record a firing that the conditions above it did not actually earn.
     if [ -d "$LOCK_DIR" ] && [ -f "$LOOM_HOME/wave.progress" ] \
-       && [ ! -f "$LOOM_HOME/wave.stale-notified" ] \
-       && [ -n "$(find "$LOOM_HOME/wave.progress" -mmin +"$stale_min" 2>/dev/null)" ]; then
-        : > "$LOOM_HOME/wave.stale-notified"
+       && [ -n "$(find "$LOOM_HOME/wave.progress" -mmin +"$stale_min" 2>/dev/null)" ] \
+       && _once_per_state "$LOOM_HOME/wave.stale-notified" stale; then
         cmd_notify wave_stale "The scheduling wave is wedged" \
             "A wave holds the tick lock but has made no real progress for ${stale_min}+ min. It blocks all ticks until it exits or is killed." \
             >/dev/null 2>&1 || :

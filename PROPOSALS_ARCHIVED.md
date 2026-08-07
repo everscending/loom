@@ -73,6 +73,7 @@ writing a new proposal that touches the same machinery.
 | P58 | Phase 4 drafts the whole set, then checks its own output once | implemented 2026-08-07 (`references/phases-1-5.md` phase 4 drafts every ticket body into one draft file, one epic at a time, re-reads it from the file, and runs a single check list — width and size read off the draft, plus six consistency checks — before the human reviews the bodies and `/to-tickets` publishes; the standalone width prose and `ticket-template.md`'s Size section fold into that list; phase 5's `graph` verdict becomes the backstop; the draft lives beside the PRD and `replan` diffs against it; no SKILL.md change) |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | implemented 2026-08-07 (`tick.sh gate-deps` resolves every path-shaped file the tiers' gate commands — and, for repos declaring gates or a runner, the runner itself — invoke, and exits 1 naming the offending command for any not on the base branch; `references/phases-1-5.md` phase 5 runs it at definition and on every membership amendment, refusing unless a delivering ticket blocks every ticket carrying that tier; the pregate's missing-runner path now declares "tier reduced to review-only" in the lane log and emits a `pregate_reduced` event the ticker renders, instead of the silent skip; no SKILL.md change) |
 | P72 | One jq prelude both halves include | implemented 2026-08-07 (`scripts/lib.jq` — the jq counterpart of lib.sh, same *pure definitions only* entry rule — holds `epic_norm`, `orch_verdict_scan`, `hms`/`pct`/`usd` and `stage`/`ref`; all eight jq programs beside `tick.sh` open with `include "lib";` and every call site passes `jq -L <the scripts dir>`, resolved through `_jq_lib_dir` in lib.sh, which refuses by name when the prelude is missing. `lane.sh _close_epic_milestone` drops its `sed` slugify and normalizes through `epic_norm`; `cmd_verdict`'s duplicate check and snapshot.jq's `judged_at`/`rejections_of` all read the one trailer scan, so three writings became one landing site. `_lane_type` and lib.jq's `stage` now name each other. Suite 603 → 610, 0 failed; no SKILL.md change) |
+| P74 | Each copied mechanism becomes one helper | implemented 2026-08-07 (four copied mechanisms become four helpers, all local to the file that uses them: `_lock_reserve <dir>`/`_lock_owner <dir>` carry the mkdir-atomic, dead-owner-breakable lock for all three locks — `lock_acquire` keeps only its EXIT trap, the merge and gate locks keep only their names; `_pause_on_limit <stem> <first|retry>` is called from both wave attempts; `_once_per_state <sentinel> <state>` is the notify-once core for the quiet states, workspace trust, the un-armed heartbeat and the two stale flags, with `_notify_quiet`'s `unreadable` and re-arm carve-outs staying at its own site; and in lane.sh `_read_issue <iid> <refusal>` / `_open_mr_closing <iid> <refusal>` take the refusal clause from the caller so every question keeps its own fail-closed read, cache only a SUCCESSFUL body, and are forgotten by `_forget_issue` after each write. `transition` now makes one issue GET where it made two, `submit` two where it made three. Suite 610 -> 619, 0 failed; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -2948,3 +2949,41 @@ today's code).
 
 **Consumer.** Every future ecosystem or base-rule change (lands once instead of six times),
 P70's four migrated reads, and P74's lane.sh helpers, which live beside these.
+
+## P74 · Each copied mechanism becomes one helper
+
+**Problem.** Four mechanisms exist as verbatim or near-verbatim copies:
+
+- **Locks ×3** — `lock_acquire` (tick.sh:541), `_merge_lock_reserve` (561),
+  `_gate_lock_reserve` (596) plus their two `_owner` twins are one mkdir-atomic,
+  dead-owner-breakable shape written three times. A future fix to the break-stale logic has
+  three places to land and can miss one.
+- **Usage-pause ×2** — the limit-hit block in `cmd_tick` (1019–1029) and its retry copy
+  (1044–1054) are eleven near-identical lines each.
+- **Notify-once ×4** — `_notify_quiet` (373), `_notify_trust` (479), `_notify_stale` (3357)
+  and the `UNARMED_STATE` handling in `_ensure_armed` (2759) each re-implement the
+  sentinel-file "once per state change" pattern.
+- **Fail-closed tracker reads ×7 (lane.sh)** — the P47 "read, rc-check, die refusing to
+  guess" pattern is hand-copied across `_blocked_guard`, `cmd_verdict`, `cmd_merge_failed`,
+  `cmd_transition`, `cmd_submit` (twice) and `cmd_close`. Worse than the duplication:
+  `cmd_transition` and `cmd_submit` each fetch the same issue **twice** per invocation — once
+  inside `_blocked_guard`, again for their own closed/label checks — a doubled tracker
+  round-trip on every state transition in every lane.
+
+**Fix.** Four local helpers, no cross-script sharing needed beyond what P73 provides:
+`_lock_reserve <dir>` / `_lock_owner <dir>` parameterized by directory (only
+`lock_acquire`'s EXIT trap stays at its call site); `_pause_on_limit <stem> <source>` called
+from both attempt paths; a `_once_per_state <sentinel> <state>` core for the three sentinels
+whose semantics match ( `_notify_quiet` keeps its `unreadable`/re-arm carve-outs locally);
+and in lane.sh `_read_issue <iid>` / `_open_mr_closing <iid>` returning the JSON so
+`_blocked_guard` and the caller share one fetch — the double read collapses to one, halving
+issue reads on `transition` and `submit`.
+
+**Tests**: the existing planted violations for lock exclusion, stale-break, pause-on-limit
+and notify-dedup already cover the behavior and must stay green across the swap; add the one
+missing pin — pause-on-limit firing on the *retry* path (the P14 crash-then-limit sequence) —
+and a call-count case asserting `transition` performs exactly one issue GET (fails against
+today's code).
+
+**Consumer.** The next person to fix a lock or sentinel bug (one landing site), and every
+lane's per-transition tracker latency.

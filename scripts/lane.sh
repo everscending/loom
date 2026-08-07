@@ -170,6 +170,51 @@ _automated_caller() {
 
 RELEASE_HOLD=0   # set by `transition --release-hold`; never inherited
 
+# P47's fail-closed read, in one place. Every guard below asks the tracker a
+# question, and "could not read" is never an answer: a transient API failure
+# that read as "not blocked" let an orphaned lane stomp a human hold, one that
+# read as "not closed" put state labels back on a finished ticket, and one that
+# read as "no open MR" closed a ticket over an unmerged branch.
+#
+# Two properties this helper must keep, because both were paid for:
+#   * The refusal text belongs to the CALLER. Each question refuses for its own
+#     reason and the human needs to know which one went unanswered, so the
+#     clause is an argument and the die happens at the asking site.
+#   * A failed read is NEVER remembered. Only a successful body is cached, so
+#     `_blocked_guard` and the verb that called it share ONE round trip (both
+#     `transition` and `submit` used to fetch the same issue twice) while every
+#     question still has a read that can fail closed on its own.
+# Any write that could change an answer forgets the body again — see
+# `_forget_issue` in `_set_state`, after the MR opens in `cmd_submit` and after
+# the merge in `cmd_merge`. No guard is ever satisfied by a photograph taken
+# before the write it guards; only the reads that ask the same question of the
+# same unchanged tracker are the ones that collapse.
+_ISSUE_IID=""; _ISSUE_JSON=""; _OPEN_MR=""
+_forget_issue() { _ISSUE_IID=""; _ISSUE_JSON=""; }
+
+_read_issue() { # <iid> <what-a-failed-read-would-mean> — sets _ISSUE_JSON, or dies
+    local iid="$1" refusal="$2" body rc
+    [ "$iid" = "$_ISSUE_IID" ] && return 0
+    body=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — $refusal Retry once the tracker is reachable."
+    _ISSUE_IID="$iid"; _ISSUE_JSON="$body"
+    return 0
+}
+
+# `closed_by`, never `related_merge_requests`: the looser endpoint lists any MR
+# that merely mentions the issue, and on build-1 2026-08-03 issue #1 listed
+# #21's open MR alongside its own. Not cached — an MR's state is exactly what
+# the writes around these calls change.
+_open_mr_closing() { # <iid> <what-a-failed-read-would-mean> — sets _OPEN_MR, or dies
+    local iid="$1" refusal="$2" body rc
+    body=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — $refusal"
+    _OPEN_MR=$(printf '%s' "$body" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    return 0
+}
+
 _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine flow
     # `blocked` is STICKY: labels are last-writer-wins, so before this guard
     # an in-flight lane could stomp a human hold — an orphaned impl-29-r2
@@ -194,11 +239,8 @@ _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine fl
     # lane could then stomp a human hold on a transient API blip, not just a
     # race. Read succeeded-and-says-no is the only path that may proceed;
     # read failed dies instead of guessing.
-    local _issue rc
-    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — refusing to guess whether it carries a human hold. Retry once the tracker is reachable."
-    if printf '%s' "$_issue" | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
+    _read_issue "$iid" "refusing to guess whether it carries a human hold."
+    if printf '%s' "$_ISSUE_JSON" | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
         [ "$RELEASE_HOLD" = 1 ] \
             || die "issue $iid is blocked — a human hold. Refusing to advance it. Releasing a hold is a human decision, made with 'transition $iid <state> --release-hold'; nothing written in the ticket authorises it."
         if _automated_caller; then
@@ -215,6 +257,7 @@ _set_state() { # <iid> <state> [extra -f args...]
     for s in $STATES; do [ "$s" = "$state" ] || remove="$remove,$s"; done
     "$GLAB" api --method PUT "projects/:fullpath/issues/$iid" \
         -f "add_labels=$state" -f "remove_labels=${remove#,}" "$@" >/dev/null
+    _forget_issue   # the labels just changed; no later guard may read the old set
     echo "lane.sh: issue $iid → $state"
 }
 
@@ -728,11 +771,10 @@ cmd_transition() { # <iid> <state> [--release-hold]
     # the board and a trap for the human reading it. (Paid for: #23.)
     # P47: read-failed must die, not read as "not closed" — a blind pass here
     # is exactly how a closed ticket got relabeled "requeued".
-    local _issue rc
-    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — refusing to guess whether it's closed. Retry once the tracker is reachable."
-    istate=$(printf '%s' "$_issue" | jq -r '.state // empty' || true)
+    # This read is also the one `_blocked_guard` asks for a moment later, from
+    # inside `_set_state`: one GET answers both questions.
+    _read_issue "$iid" "refusing to guess whether it's closed."
+    istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
     [ "$istate" != closed ] \
         || die "issue $iid is CLOSED — refusing to set '$state' on finished work. Re-read the ticket: your snapshot is stale."
     if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" -f assignee_ids=0
@@ -766,17 +808,16 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         *) bodyargs+=("$1"); shift ;;
     esac; done
     _blocked_guard "$iid" review
-    # One issue read, three questions: is it closed, has the gate already moved
-    # it past review, and what is its title. P47: a failed read dies rather
-    # than guessing — an MR opened over a stale answer is a write nothing undoes.
-    local _issue rc istate cur
-    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read the issue (glab api failed, rc=$rc) — refusing to open an MR blind."
-    istate=$(printf '%s' "$_issue" | jq -r '.state // empty' || true)
+    # One issue read, FOUR questions: the hold the guard above just asked
+    # about, plus is it closed, has the gate already moved it past review, and
+    # what is its title. P47: a failed read dies rather than guessing — an MR
+    # opened over a stale answer is a write nothing undoes.
+    local istate cur
+    _read_issue "$iid" "refusing to open an MR blind."
+    istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
     [ "$istate" != closed ] \
         || die "issue $iid is CLOSED — refusing to submit finished work. Re-read the ticket: your snapshot is stale."
-    cur=$(printf '%s' "$_issue" | jq -r '[.labels[]? | select(. == "merge-queue")] | .[0] // empty' || true)
+    cur=$(printf '%s' "$_ISSUE_JSON" | jq -r '[.labels[]? | select(. == "merge-queue")] | .[0] // empty' || true)
     [ "$cur" != merge-queue ] \
         || die "issue $iid is already 'merge-queue' — its gate passed. Submitting again would drag a judged ticket back to review."
     # The source branch, and proof the remote already has exactly this commit.
@@ -801,18 +842,14 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
     [ "$remote_head" = "$head" ] \
         || die "submit: origin/$branch is at ${remote_head:0:8}, this worktree is at ${head:0:8} — push before submitting, or the MR carries work the gate will never see"
     # Already-open MR = the strand this verb exists to end. Complete the missing
-    # half; never open a second MR for the same ticket. `closed_by`, not
-    # `related_merge_requests`, for cmd_merge's reason: the looser endpoint
-    # lists any MR that merely mentions the issue.
-    local _closed_by mr
-    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to open an MR that may be the second one."
-    mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    # half; never open a second MR for the same ticket.
+    local mr
+    _open_mr_closing "$iid" "refusing to open an MR that may be the second one."
+    mr="$_OPEN_MR"
     if [ -n "$mr" ]; then
         echo "lane.sh: MR !$mr is already open on issue $iid — completing the label move only"
     else
-        [ -n "$title" ] || title=$(printf '%s' "$_issue" | jq -r '.title // empty' || true)
+        [ -n "$title" ] || title=$(printf '%s' "$_ISSUE_JSON" | jq -r '.title // empty' || true)
         [ -n "$title" ] || die "submit: no title on issue $iid and none given — pass --title"
         local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
         # `Closes #<iid>` is the literal string the scheduler links MR to ticket
@@ -827,6 +864,12 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         # wave repairs in one call, where a `review` label with no MR is a
         # ticket queued for a gate that has nothing to read.
         [ -n "$mr" ] || die "submit: opening the MR failed ($branch → $base) — the label was NOT moved; fix the push or the target branch and re-run"
+        # Opening the MR is a write, and `_set_state` below asks the hold
+        # question again on the far side of it. Forget the body read at the top
+        # of this verb so that guard sees the tracker as it is after the MR
+        # opened — a hold placed while this verb was running must still bounce
+        # the label move (#29's stomp is what the guard is for).
+        _forget_issue
         echo "lane.sh: MR !$mr opened ($branch → $base), closes #$iid"
         _lane_ev mr_opened ticket "$iid" mr "$mr"
     fi
@@ -864,6 +907,11 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
         || die "MR !$mr is '${state:-unknown}', not 'merged' — refusing to close issue $iid. Record it: lane.sh merge-failed $iid"
     echo "lane.sh: MR !$mr merged"
     _lane_ev mr_merged ticket "$iid" mr "$mr"
+    # The merge took seconds to land and `close` re-asks the hold question on
+    # the other side of it: forget the issue read this verb's own guard took,
+    # so that guard runs against the tracker as it is NOW, exactly as it did
+    # when every verb fetched for itself.
+    _forget_issue
     cmd_close "$iid"
 }
 
@@ -882,11 +930,8 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
     # P47: read-failed must die, not read as "no open MR" — that blind pass is
     # literally the failure this guard exists to catch, just via a different
     # cause (API error instead of a stale snapshot).
-    local _closed_by rc
-    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to close blind; cannot rule out an unmerged MR."
-    open_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    _open_mr_closing "$iid" "refusing to close blind; cannot rule out an unmerged MR."
+    open_mr="$_OPEN_MR"
     [ -z "$open_mr" ] \
         || die "issue $iid still has unmerged MR !$open_mr — 'close' closes the issue only, it does not merge. Use: lane.sh merge $iid"
     for s in $STATES; do remove="$remove,$s"; done
