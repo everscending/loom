@@ -66,6 +66,7 @@ writing a new proposal that touches the same machinery.
 | P68 | Implementation briefs get the headless survival rules probes get | implemented 2026-08-07 (`tick.sh spawn-lane --brief` appends the headless execution rules to the lane's copy of every brief, whatever the lane kind, and refuses a brief that tells the session to invoke a skill by slash command) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P71 | The embedded jq programs live in files, like snapshot.jq | implemented 2026-08-07 (the seven jq programs `tick.sh` embedded as single-quoted shell strings ship as `render.jq`, `render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq` and `graph.jq` beside `snapshot.jq`, each loaded with `jq -f` behind a missing-file die; the ticker's spliced `$when` fragment became an `--arg`; tick.sh −497 lines) |
+| P73 | A shared bash lib for the facts every script re-derives | implemented 2026-08-07 (`scripts/lib.sh` — entry rule *pure functions only, nothing runs at source time* — holds `die` (prefix from `$0`, rc from `DIE_RC`), `_glab_list`, `_yaml_scalar`/`cfg`/`cfg_source`, `_detect_base`/`_base_ref`, one lockfile→toolchain table behind `_stack_for` (tick.sh's `detect_stack`, and through it `_derive_gates_tsv`) and `_install_cmd_for` (lane.sh's second copy of that table is gone), and `_lane_type`; sourced by `tick.sh`, `lane.sh` and `bootstrap.sh` off their own directory with a named die when missing. All six base-branch call sites migrate, so `lane.sh` `base-check`, `reconcile` and `submit` now honour a declared `base:` — `submit` used to probe `ls-remote` for develop and target a branch its own merges never reconciled against. P70's four un-paginated lane.sh reads stay open. SKILL.md: one line corrected in place (reconcile's base rule), none added. Suite 590 → 603, 0 failed) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 | P38 | One way for a lane to fire the next wave, not two | implemented 2026-08-07 (`tick.sh cmd_tick` refuses a bare `tick` when `LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error; SKILL.md step 5 no longer tells the merge lane to fire its own tick) |
 | P49 | Every tracker read paginates | implemented 2026-08-07 (`tick.sh` gains `_glab_list [--capped] <path>`, which paginates and folds glab's one-array-per-page output; all nine tracker reads go through it — the acceptance gate, the quiescence count, the snapshot's stage-1, milestone and closed-member reads — and only the two `sort=desc` notes reads stay capped on purpose) |
@@ -2876,3 +2877,40 @@ the behavior proof unchanged.
 **Consumer.** `qa` and `optimize`, which get checkable files instead of quoted strings; P72,
 which needs the programs to be files before anything can be shared between them; and every
 future edit to these programs.
+
+## P73 · A shared bash lib for the facts every script re-derives
+
+**Problem.** The base-branch rule — config `base`, else `develop` if `origin/develop` exists,
+else `main` — is written six times: tick.sh `cmd_sweep` (189), `_base_ref` (2883),
+`cmd_resolve_config` (3132); lane.sh `cmd_base_check` (356), `cmd_reconcile` (593),
+`cmd_submit` (800). The sixth already drifts: `submit` probes with `ls-remote` and never
+consults the config key, so a repo that sets `base:` gets MRs targeted by a different rule
+than the one its merges reconcile against. The lockfile→toolchain table exists twice
+(`detect_stack`, tick.sh:2795; `_install_cmd_for`, lane.sh:679 — "kept as its own copy" by
+its own comment); `die` three times; `_yaml_scalar`-shaped config reading twice.
+
+lane.sh's standing rationale — "deliberately stands alone" — is about not sourcing *tick.sh*,
+whose top level has side effects (mkdir, the `.orchestrator.yml` refusal, REPO_ROOT
+resolution, exit paths). It is not an argument against a side-effect-free function file, and
+P70 has already made that call: `glab-lib.sh` is a sourced shared file. This proposal widens
+that seam rather than opening a second one.
+
+**Fix.** One `scripts/lib.sh` (P70's `glab-lib.sh` becomes this file, or is folded into it if
+P70 lands first — one sourced lib, not two). Entry rule, stated in its header: pure functions
+only, nothing runs at source time, no tracker mutations ever. Contents: `_glab_list` (P70),
+`_detect_base <dir>`/`_base_ref <dir>` (all six call sites migrate, `submit` included —
+that is a behavior fix and the test below pins it), the lockfile→toolchain/installer table
+(one table serving `detect_stack`, `_derive_gates_tsv` and `_install_cmd_for`), `_lane_type`,
+`_yaml_scalar`/`cfg`/`cfg_source`, and `die` (prefix from `$0`). Resolved and sourced via the
+`dirname` pattern every script already uses to find its siblings, with a loud die when
+missing. The read/write charter is untouched: the lib mutates nothing, tick-test.sh's
+argv-scan of mutating verbs still binds on tick.sh, and lane.sh still never sources tick.sh.
+
+**Tests**: source-time purity — sourcing lib.sh in a bare environment creates no files and
+prints nothing; per-migrated-site behavior pins — sweep/resolve-config/base-check/reconcile
+against fixtures where the answer is `develop` vs `main` vs a config `base:`; and the drift
+fix — `submit` in a repo with `base:` set targets that base (a case that fails against
+today's code).
+
+**Consumer.** Every future ecosystem or base-rule change (lands once instead of six times),
+P70's four migrated reads, and P74's lane.sh helpers, which live beside these.

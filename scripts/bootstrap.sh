@@ -24,7 +24,13 @@ GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 GLAB_CMD="${GLAB_CMD:-glab}"
 TICK="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/tick.sh"
 
-die() { echo "bootstrap.sh: $*" >&2; exit 1; }
+# P73: `die` was written a third time here. It lives in lib.sh beside this
+# script now, with the rest of the derivations both halves share.
+LIB_SH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib.sh"
+[ -f "$LIB_SH" ] \
+    || { echo "bootstrap.sh: $LIB_SH is missing — it holds the shared derivations and ships beside bootstrap.sh" >&2; exit 1; }
+. "$LIB_SH"
+DIE_RC=1
 
 # REPO_ROOT falls back to $PWD, so every repo-scoped write must first prove it
 # is pointed at a repo ROOT, not merely somewhere inside one. Without this,

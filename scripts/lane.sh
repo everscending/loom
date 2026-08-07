@@ -113,7 +113,18 @@
 # Every verb is safe to re-run; nothing here deletes.
 set -euo pipefail
 
-die() { echo "lane.sh: $*" >&2; exit 2; }
+# P73: the derivations this file used to keep its own copy of — the
+# base-branch rule, the lockfile→installer table, `die` — live in lib.sh
+# beside this script. This is NOT the thing "lane.sh deliberately stands
+# alone" was ever about: that rule is about not sourcing tick.sh, whose top
+# level makes directories, resolves REPO_ROOT and can exit. lib.sh is pure
+# functions and runs nothing at source time, so the write half loses no
+# independence by sharing it — and stops drifting from the read half.
+LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+[ -f "$LIB_SH" ] \
+    || { echo "lane.sh: $LIB_SH is missing — it holds the shared derivations and ships beside lane.sh" >&2; exit 2; }
+. "$LIB_SH"
+DIE_RC=2   # every refusal in this file exits 2, and briefs read that code
 # Same seam as tick.sh, for the same reason: the test suite exercises these
 # verbs against a capture stub, never the real tracker.
 GLAB="${GLAB_CMD:-glab}"
@@ -353,8 +364,7 @@ cmd_base_check() { # [--] <cmd...> — run <cmd> against clean origin/<base>
     [ $# -gt 0 ] || die "base-check: no command given (usage: lane.sh base-check [--] <cmd...>)"
     git fetch origin >/dev/null 2>&1 || die "base-check: git fetch failed"
     local base
-    if git show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null
-    then base=develop; else base=main; fi
+    base=$(_detect_base .)
     git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null \
         || die "base-check: origin/$base does not exist"
     local wtp rc=0
@@ -591,8 +601,7 @@ cmd_reconcile() { # [<base>] — fetch and MERGE origin/<base> into the branch
     local base="${1:-}"
     git fetch origin >/dev/null 2>&1 || die "reconcile: git fetch failed"
     if [ -z "$base" ]; then
-        if git show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null
-        then base=develop; else base=main; fi
+        base=$(_detect_base .)
     elif ! git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then
         # Every other verb in this file takes <iid> first (verdict, merge,
         # merge-failed, claim, transition, ...) — reconcile is the one
@@ -667,41 +676,10 @@ EOF
     return 0
 }
 
-# The installer for one directory: lockfile before manifest, exactly as
-# tick.sh detect_stack orders it — a lockfile names the toolchain actually in
-# use, a manifest only the ecosystem. Kept as its own copy rather than sourcing
-# tick.sh: lane.sh is the write half and deliberately stands alone.
-#
-# A manifest with no lockfile beside it is usually a workspace member (a
-# pnpm/yarn monorepo keeps one lockfile at the root), so the search walks UP to
-# the nearest ancestor that has one and installs there. Guessing `npm install`
-# inside a pnpm workspace package would write a second, wrong node_modules.
-_install_cmd_for() { # <dir> → "<install dir>\t<command>", or empty
-    local d="${1:-.}" probe
-    probe="$d"
-    while :; do
-        if   [ -f "$probe/uv.lock" ];           then printf '%s\t%s\n' "$probe" "uv sync"; return 0
-        elif [ -f "$probe/poetry.lock" ];       then printf '%s\t%s\n' "$probe" "poetry install"; return 0
-        elif [ -f "$probe/pnpm-lock.yaml" ];    then printf '%s\t%s\n' "$probe" "pnpm install"; return 0
-        elif [ -f "$probe/yarn.lock" ];         then printf '%s\t%s\n' "$probe" "yarn install"; return 0
-        elif [ -f "$probe/package-lock.json" ]; then printf '%s\t%s\n' "$probe" "npm ci"; return 0
-        elif [ -f "$probe/Cargo.lock" ];        then printf '%s\t%s\n' "$probe" "cargo fetch"; return 0
-        elif [ -f "$probe/go.sum" ];            then printf '%s\t%s\n' "$probe" "go mod download"; return 0
-        fi
-        [ "$probe" != "." ] || break
-        probe=$(dirname "$probe")
-    done
-    # No lockfile anywhere above it — fall back to the manifest in the
-    # directory that actually moved.
-    if   [ -f "$d/pyproject.toml" ]; then printf '%s\t%s\n' "$d" "uv sync"
-    elif [ -f "$d/package.json" ];   then printf '%s\t%s\n' "$d" "npm install"
-    elif [ -f "$d/go.mod" ];         then printf '%s\t%s\n' "$d" "go mod download"
-    elif [ -f "$d/Cargo.toml" ];     then printf '%s\t%s\n' "$d" "cargo fetch"
-    fi
-    # Explicit: nothing to install is not an error, and under `set -e` a
-    # falling-through `elif` would take the whole reconcile down with it.
-    return 0
-}
+# `_install_cmd_for` is in lib.sh now, over the one toolchain table tick.sh's
+# `detect_stack` reads too. It was a second hand-kept copy of that table — its
+# own comment said "kept as its own copy" — and an ecosystem added to one copy
+# was silently missing from the other.
 
 # Never fatal: a failed install is not a failed reconcile. The tier gate is
 # the arbiter of whether this branch is mergeable, and it runs next — so this
@@ -797,8 +775,11 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
     branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
     [ -n "$branch" ] && [ "$branch" != HEAD ] \
         || die "submit: detached HEAD — an MR needs a source branch (this verb runs in the lane worktree)"
-    if git ls-remote --exit-code --heads origin develop >/dev/null 2>&1
-    then base=develop; else base=main; fi
+    # P73: the SAME base rule every other call site uses, config key included.
+    # This one used to probe `ls-remote` for develop and never look at
+    # `base:`, so a repo that declared a base got its MRs targeted at a branch
+    # its own merges never reconcile against.
+    base=$(_detect_base .)
     [ "$branch" != "$base" ] \
         || die "submit: the current branch IS the base branch ($base) — there is nothing to merge"
     head=$(git rev-parse HEAD 2>/dev/null || true)

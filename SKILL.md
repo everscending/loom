@@ -381,7 +381,7 @@ refuses outside herdr anyway.
    can never be pushed; the verb exists because two lanes chose rebase off
    this very step and dead-ended at the denial, one of them then asking a
    headless void for permission twice. The verb picks the integration base
-   itself (`develop` if it exists, else `main`, always the remote ref), and
+   itself (declared `base:`, else `develop`, else `main`; the remote ref), and
    **re-installs dependencies when that merge moved a manifest or lockfile** —
    a worktree cut hours ago has an install that predates whatever landed
    since, and step 4 installs only at creation. So a gate red *after*

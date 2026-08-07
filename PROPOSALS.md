@@ -64,9 +64,8 @@ evidence, and implementation notes belong in this file, not there.
 | P20 | Parallelise the human-gated front half | open |
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
-| P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100 |
+| P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100. P73 already shipped the extraction half: `_glab_list` lives in `scripts/lib.sh`, which `lane.sh` sources — so route the four reads through it and do NOT create `glab-lib.sh` (one sourced lib, not two) |
 | P72 | One jq prelude both halves include | open — proposed 2026-08-07; depends on P71. Byte-identical-by-comment becomes byte-identical-by-construction |
-| P73 | A shared bash lib for the facts every script re-derives | open — proposed 2026-08-07; widens P70's sourced-file seam. Base-branch rule written six ways, one already drifted |
 | P74 | Each copied mechanism becomes one helper | open — proposed 2026-08-07; locks ×3, usage-pause ×2, notify-once ×4, fail-closed reads ×7 (two verbs read the same issue twice per call) |
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | open — proposed 2026-08-07; 430 and 220 lines, the epilogue/quoting assembly has burned twice already. Do after P71–P74 |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
@@ -406,43 +405,6 @@ same fixture HEAD.
 
 **Consumer.** Whoever next changes the trailer format or the slugify — today a two-file,
 three-language hand-sync with no test to catch the miss.
-
-## P73 · A shared bash lib for the facts every script re-derives
-
-**Problem.** The base-branch rule — config `base`, else `develop` if `origin/develop` exists,
-else `main` — is written six times: tick.sh `cmd_sweep` (189), `_base_ref` (2883),
-`cmd_resolve_config` (3132); lane.sh `cmd_base_check` (356), `cmd_reconcile` (593),
-`cmd_submit` (800). The sixth already drifts: `submit` probes with `ls-remote` and never
-consults the config key, so a repo that sets `base:` gets MRs targeted by a different rule
-than the one its merges reconcile against. The lockfile→toolchain table exists twice
-(`detect_stack`, tick.sh:2795; `_install_cmd_for`, lane.sh:679 — "kept as its own copy" by
-its own comment); `die` three times; `_yaml_scalar`-shaped config reading twice.
-
-lane.sh's standing rationale — "deliberately stands alone" — is about not sourcing *tick.sh*,
-whose top level has side effects (mkdir, the `.orchestrator.yml` refusal, REPO_ROOT
-resolution, exit paths). It is not an argument against a side-effect-free function file, and
-P70 has already made that call: `glab-lib.sh` is a sourced shared file. This proposal widens
-that seam rather than opening a second one.
-
-**Fix.** One `scripts/lib.sh` (P70's `glab-lib.sh` becomes this file, or is folded into it if
-P70 lands first — one sourced lib, not two). Entry rule, stated in its header: pure functions
-only, nothing runs at source time, no tracker mutations ever. Contents: `_glab_list` (P70),
-`_detect_base <dir>`/`_base_ref <dir>` (all six call sites migrate, `submit` included —
-that is a behavior fix and the test below pins it), the lockfile→toolchain/installer table
-(one table serving `detect_stack`, `_derive_gates_tsv` and `_install_cmd_for`), `_lane_type`,
-`_yaml_scalar`/`cfg`/`cfg_source`, and `die` (prefix from `$0`). Resolved and sourced via the
-`dirname` pattern every script already uses to find its siblings, with a loud die when
-missing. The read/write charter is untouched: the lib mutates nothing, tick-test.sh's
-argv-scan of mutating verbs still binds on tick.sh, and lane.sh still never sources tick.sh.
-
-**Tests**: source-time purity — sourcing lib.sh in a bare environment creates no files and
-prints nothing; per-migrated-site behavior pins — sweep/resolve-config/base-check/reconcile
-against fixtures where the answer is `develop` vs `main` vs a config `base:`; and the drift
-fix — `submit` in a repo with `base:` set targets that base (a case that fails against
-today's code).
-
-**Consumer.** Every future ecosystem or base-rule change (lands once instead of six times),
-P70's four migrated reads, and P74's lane.sh helpers, which live beside these.
 
 ## P74 · Each copied mechanism becomes one helper
 

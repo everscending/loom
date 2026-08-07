@@ -111,28 +111,27 @@ mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
-die() { echo "tick.sh: $*" >&2; exit 1; }
-
-# P49: the one tracker LIST read. Every `per_page=` GET in this script goes
-# through here and PAGINATES — `per_page=100` alone silently returns page 1 and
-# nothing says so. Past 100 closed members an epic whose tickets all closed
-# early contributes no milestone title, `_epics_unaccepted` answers false,
-# `_quiet_check` prints `complete`, and the completion wave tears the agent
-# down with that epic never probed: the build-2 failure the acceptance gate
-# exists to prevent, reachable again by size alone. The open read truncates the
-# same way, so `blocked == count` gets compared over a partial board.
-# `--paginate` emits one array PER PAGE, so the fold is part of the read, not a
-# nicety. Prints one JSON array; returns non-zero when the call failed or the
-# result was not an array, so every caller's existing failure path still fires.
-# `--capped` is the deliberate opposite and stays explicit: a `sort=desc` notes
-# read wants the newest N, and paginating it would pull the whole thread.
-_glab_list() { # [--capped] <api-path> → one JSON array on stdout
-    local capped=false
-    case "${1:-}" in --capped) capped=true; shift ;; esac
-    if $capped; then "$GLAB_CMD" api "$1"; else "$GLAB_CMD" api --paginate "$1"; fi \
-        | jq -s 'if (length > 0) and all(type == "array") then add
-                 else error("not a JSON array") end' 2>/dev/null
-}
+# P73: the facts both halves of this skill derive — the base-branch rule, the
+# config readers, the lockfile→toolchain table, the paginating list read, and
+# `die` itself — live in lib.sh beside this script, sourced instead of written
+# twice. Pure functions only and nothing runs at source time, which is what
+# lets lane.sh (the write half) share the same file without ever sourcing
+# tick.sh. Named loudly when absent, exactly as snapshot.jq is: unchecked, the
+# failure is a stream of "command not found" from whichever function ran first
+# and says nothing about the file that went missing. `die` comes FROM the lib,
+# so this one check has to speak for itself.
+# Resolved off `${BASH_SOURCE[0]}` with parameter expansion, not `dirname`
+# and not SELF_PATH: this runs at source time, ahead of every `command -v`
+# check in the file, so a PATH carrying neither `dirname` nor `basename` must
+# still get far enough to report the real problem (SELF_PATH collapses to `/`
+# in exactly that case, and the suite pins it).
+LIB_DIR="${BASH_SOURCE[0]%/*}"
+[ "$LIB_DIR" != "${BASH_SOURCE[0]}" ] || LIB_DIR="."   # invoked with a bare name
+LIB_SH="$LIB_DIR/lib.sh"
+[ -f "$LIB_SH" ] \
+    || { echo "tick.sh: $LIB_SH is missing — it holds the shared derivations and ships beside tick.sh" >&2; exit 1; }
+. "$LIB_SH"
+DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
 
 # A fresh, empty, uniquely-named directory for one session to write in, handed
 # over as $LOOM_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
@@ -186,10 +185,7 @@ cmd_sweep() {
     # nothing, rc 0, no output. Same visible symptom as the pipefail crash,
     # different cause, so it has its own regression test.
     root_p=$(cd "$REPO_ROOT" 2>/dev/null && pwd -P) || root_p="$REPO_ROOT"
-    base=$(_yaml_scalar "$CONFIG" base)
-    if [ -n "$base" ]; then :
-    elif git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
-    else base=main; fi
+    base=$(_detect_base "$REPO_ROOT" "$CONFIG")
     git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
     # cwd of every ALIVE lane (running or stale) — never sweep ground a live
     # process stands on. A `stale` lane is quiet, not gone (P46).
@@ -488,14 +484,7 @@ _notify_trust() { # <untrusted-path> | "" (empty = trusted, re-arms)
     return 0
 }
 
-# --- config readers (flat keys; ntfy block) -------------------------------
-cfg() { # cfg <key> <default> — layered: repo > global > built-in (P22)
-    local v
-    v=$(_yaml_scalar "$CONFIG" "$1")
-    [ -n "$v" ] || v=$(_yaml_scalar "$GLOBAL_CONFIG" "$1")
-    printf '%s\n' "${v:-$2}"
-}
-
+# --- config readers (ntfy block; the flat-key readers are in lib.sh) ------
 _ntfy_key() { # _ntfy_key <file> <key>   (key is matched with its colon, so
               # `topic` never matches `topic_prefix`)
     [ -f "$1" ] || { echo ""; return; }
@@ -1523,16 +1512,6 @@ ui"
 # lane — gates and probes included — counted against `max_lanes`, turning a
 # 4-lane build into one implementer. Enforced here because this is the only
 # place a lane id is ever created.
-_lane_type() { # <id> → impl | gate | probe | merge, or fails
-    case "$1" in
-        impl-[0-9]*)          echo impl  ;;
-        gate-[0-9]*)          echo gate  ;;
-        merge-[0-9]*)         echo merge ;;
-        probe-[A-Za-z0-9]*)   echo probe ;;
-        *) return 1 ;;
-    esac
-}
-
 # The stream is machine shaped; the log stays human shaped. This turns one into
 # the other when the lane exits, so `lane-status`, crash triage and every wave
 # that tails a lane log keep reading plain text (P13). Never fatal: a lane that
@@ -2350,32 +2329,9 @@ _ensure_armed() {
 
 GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 
-_yaml_scalar() { # _yaml_scalar <file> <key> -> value or empty
-    local f="$1" k="$2" v=""
-    [ -f "$f" ] && v=$(sed -nE "s/^${k}:[[:space:]]*([^#]*).*/\1/p" "$f" | head -1 | xargs) || true
-    printf '%s' "$v"
-}
-
-cfg_source() { # cfg_source <key> -> repo | global | default
-    [ -n "$(_yaml_scalar "$CONFIG" "$1")" ] && { echo repo; return; }
-    [ -n "$(_yaml_scalar "$GLOBAL_CONFIG" "$1")" ] && { echo global; return; }
-    echo default
-}
-
-detect_stack() {
-    local r="$REPO_ROOT"
-    # Lockfile before manifest: a lockfile names the actual toolchain in use,
-    # a manifest only names the ecosystem.
-    if   [ -f "$r/uv.lock" ];         then echo uv
-    elif [ -f "$r/poetry.lock" ];     then echo poetry
-    elif [ -f "$r/pyproject.toml" ];  then echo python
-    elif [ -f "$r/pnpm-lock.yaml" ];  then echo pnpm
-    elif [ -f "$r/yarn.lock" ];       then echo yarn
-    elif [ -f "$r/package.json" ];    then echo npm
-    elif [ -f "$r/go.mod" ];          then echo go
-    elif [ -f "$r/Cargo.toml" ];      then echo cargo
-    else echo unknown; fi
-}
+# This repo's ecosystem, off lib.sh's one toolchain table — the same table
+# lane.sh's installer reads, so an ecosystem added there is detected here.
+detect_stack() { _stack_for "$REPO_ROOT"; }
 
 _node_runner() { case "$(detect_stack)" in pnpm) echo pnpm;; yarn) echo yarn;; *) echo npm;; esac; }
 
@@ -2445,22 +2401,10 @@ _repo_gates_tsv() {
       }' "$CONFIG"
 }
 
-# The ref a branch is measured against: the repo's declared base, else develop
-# where it exists, else main — preferring the remote ref, then a local branch,
-# then HEAD. <dir> is asked the question so a lane worktree can answer for
-# itself; HEAD means "no base here", and a caller measuring a diff must treat
-# that as unknown rather than as an empty diff.
-_base_ref() { # <dir> → ref name
-    local dir="$1" base
-    base=$(_yaml_scalar "$CONFIG" base)
-    if [ -n "$base" ]; then :
-    elif git -C "$dir" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
-    else base=main; fi
-    if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then printf 'origin/%s\n' "$base"
-    elif git -C "$dir" show-ref --verify --quiet "refs/heads/$base" 2>/dev/null; then printf '%s\n' "$base"
-    else printf 'HEAD\n'; fi
-}
-
+# The ref a branch is measured against lives in lib.sh now, shared with
+# lane.sh. Every call from this script passes $CONFIG explicitly: the git
+# question may be asked of a lane worktree, but the REPO's declared base is
+# what governs, so the config file must not follow the directory.
 # P31: the mandatory adversarial test, made checkable. A ticket's
 # `## Mandatory adversarial tests` section is enforced today in prose, one
 # expensive review round at a time — seat-reservations build-1 spent 787s of
@@ -2513,7 +2457,7 @@ _adv_tier_paths() { # <tier> → space-separated paths that tier's commands invo
 _adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reject
     local iid="$1" tier="$2" dir="$3" paths ref changed f p body sect
     paths=$(_adv_tier_paths "$tier"); [ -n "$paths" ] || return 1
-    ref=$(_base_ref "$dir"); [ "$ref" != HEAD ] || return 1
+    ref=$(_base_ref "$dir" "$CONFIG"); [ "$ref" != HEAD ] || return 1
     changed=$(git -C "$dir" diff --name-only "$ref...HEAD" 2>/dev/null) || return 1
     [ -n "$changed" ] || return 1
     while IFS= read -r f; do
@@ -2555,7 +2499,7 @@ cmd_gate_deps() { # gate-deps — exit 1 naming each gate command whose file is 
     local runner ref gates repo_gates explicit_runner
     explicit_runner=$(_yaml_scalar "$CONFIG" runner)
     runner="$explicit_runner"; [ -n "$runner" ] || runner="scripts/gate.sh"
-    ref=$(_base_ref "$REPO_ROOT")
+    ref=$(_base_ref "$REPO_ROOT" "$CONFIG")
     repo_gates=$(_repo_gates_tsv)
     gates="$repo_gates"; [ -n "$gates" ] || gates=$(_derive_gates_tsv)
     # The runner is what the pregate and the merge re-gate execute, so it is a
@@ -2699,10 +2643,7 @@ cmd_resolve_config() {
     local stack base gates_tsv gates_src runner
     stack=$(detect_stack)
     # `base` was never a real setting: SKILL.md already states the rule.
-    base=$(_yaml_scalar "$CONFIG" base)
-    if [ -n "$base" ]; then :
-    elif git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
-    else base=main; fi
+    base=$(_detect_base "$REPO_ROOT" "$CONFIG")
     gates_tsv=$(_repo_gates_tsv); gates_src=repo
     [ -n "$gates_tsv" ] || { gates_tsv=$(_derive_gates_tsv); gates_src=derived; }
     runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
