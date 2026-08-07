@@ -30,7 +30,8 @@
 #   clear-lane <id>              forget a harvested lane (removes pid file)
 #   snapshot                     the wave read set as one JSON document
 #   graph [file]                 dependency shape of that snapshot: critical
-#                                path, widest level, what can start now
+#                                path, widest level, what can start now; rc 1
+#                                when an epic has no wiring ticket (P64)
 #   notify <event> <title> <body> [click-url]
 #   trust-check [--notify] [dir]  will a headless lane there load the repo
 #                                allowlist? Asks both the filesystem walk and
@@ -2557,6 +2558,23 @@ GRAPH_JQ='
 | ($ts | map(select(((.criteria_count // 0) > $deep_criteria)
                     or ((.file_surface // 0) > $deep_files))
            | {iid, criteria_count: (.criteria_count // 0), file_surface: (.file_surface // 0)})) as $deep
+# P64: unit-tier gates judge tickets; nothing before the epic probe judges the
+# EPIC. ai-workout build-1 — every E1 ticket passed its gate while the running
+# app never called build_kg1() once, and the probe, the last step of the epic,
+# was the first thing that looked. A wiring ticket owns that seam, and it is a
+# graph property, so it needs no label of its own: an epic has one when some
+# member is blocked by every other member of that epic. A one-ticket epic
+# passes trivially — there is nothing to wire together — and a ticket carrying
+# no epic belongs to none, so neither can raise a false refusal.
+| ([$ts[] | .epic // empty] | unique) as $epic_names
+| ($epic_names | map(. as $e
+    | ($ts | map(select(.epic == $e))) as $mem
+    | ($mem | map(.iid)) as $mids
+    | if ($mem | any(. as $c
+             | (($c.blocked_by // []) | map(.iid)) as $bb
+             | ($mids | map(select(. != $c.iid))
+                | all(. as $o | ($bb | index($o)) != null))))
+      then empty else $e end)) as $unwired
 | {tickets: $n,
    max_lanes: $max_lanes,
    critical_path: {length: ($maxdepth + 1), iids: $cpath},
@@ -2566,6 +2584,7 @@ GRAPH_JQ='
    levels: $levels,
    cycle_suspected: $cycle,
    likely_deep: $deep,
+   unwired_epics: $unwired,
    verdict:
      (($maxdepth + 1) as $len
       | (if $len == 1 then "1 merge cycle" else "\($len) merge cycles" end) as $cyc
@@ -2582,18 +2601,31 @@ GRAPH_JQ='
           + (if ($deep | length) > 0
              then "; LIKELY DEEP — #\($deep | map(.iid | tostring) | join(", #")) (outsized acceptance-criteria or file count — split before build)"
              else "" end)
+          + (if ($unwired | length) > 0
+             then "; UNWIRED EPIC — \($unwired | join(", ")) (no ticket blocked by every other member; phase 4 must end each epic with a wiring ticket)"
+             else "" end)
         end)}
 '
 
-cmd_graph() { # graph [<snapshot.json>]  (default: stdin)
+cmd_graph() { # graph [<snapshot.json>]  (default: stdin) — rc 1 on an unwired epic
     command -v jq >/dev/null 2>&1 || die "graph: jq required"
-    local src="${1:--}"
+    local src="${1:--}" out
     if [ "$src" = "-" ]; then
-        jq "$GRAPH_JQ"
+        out=$(jq "$GRAPH_JQ") || return $?
     else
         [ -f "$src" ] || die "graph: no such snapshot file '$src'"
-        jq "$GRAPH_JQ" "$src"
+        out=$(jq "$GRAPH_JQ" "$src") || return $?
     fi
+    printf '%s\n' "$out"
+    # The shape verdicts above are advice; this one is a refusal (P64). The
+    # document still prints — phase 5 reads it either way — and the non-zero
+    # exit is what stops a build being defined over an epic nothing wires
+    # together, instead of the probe discovering it hours later.
+    if printf '%s' "$out" | jq -e '((.unwired_epics // []) | length) > 0' >/dev/null 2>&1; then
+        echo "graph: refuse this build definition — each epic above needs a wiring ticket, blocked by the epic's other members, whose acceptance criteria are the epic's own, exercised against the running app (P64)." >&2
+        return 1
+    fi
+    return 0
 }
 
 # --- launchd lifecycle (per-repo, self-installing) ------------------------

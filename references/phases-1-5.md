@@ -74,6 +74,20 @@ mechanics) **plus** the additions in
 - **PRD requirement**: the requirement ID this ticket satisfies; the gate
   verifies faithfulness against it.
 
+**Every epic ends with a wiring ticket.** One last member per epic, **blocked
+by every other member**, whose acceptance criteria are the *epic's* own
+acceptance criteria (phase 3) exercised against the **running app and the real
+data** — the same bar the probe applies. Unit-tier gates judge tickets; without
+this ticket nothing judges the epic until the probe, which is the last step.
+*(paid: ai-workout build-1 — every E1 ticket passed its gate while the running
+app never called `build_kg1()` once, `/api/graph/focus` served byte-identical
+fixture output for every member, and the shipped catalog's 18
+`bilateral_pair_id` values all dangled; the probe found all of it, and it cost
+three fix tickets. E0's probe failed twice on the same kind of gap.)* The probe
+then confirms; it never discovers. `tick.sh graph` refuses a build definition
+whose epics lack one, so a missing wiring ticket costs a phase-5 rerun, not an
+epic.
+
 Ambiguity found while writing a ticket is a phase-1 escape: close the decision
 in the ADR/UX spec *first*, then write the ticket.
 
@@ -143,7 +157,11 @@ the first time anyone finds out.
    surface a `CHAIN-SHAPED`, `NARROW START` or `LIKELY DEEP` verdict as a
    reason to go back to phase 4 and split a blocker or an oversized ticket
    per its check list, not a fact to discover at wave 1 — a backstop on the
-   published build, not the first time anyone looks. Then **stop**
+   published build, not the first time anyone looks. Those three are advice;
+   `UNWIRED EPIC` is a **refusal** — `graph` exits 1, naming each epic with no
+   ticket blocked by every other member, and the definition does not stand
+   until phase 4 writes that epic its wiring ticket. Re-run it on any
+   amendment that adds an epic, for the same reason. Then **stop**
    — tell the human the trigger is `/loom start`.
 2. **A build already defined** → the same surface, pre-filled with the current
    selection, for adjustment: add an epic (label its open tickets `build-N`),

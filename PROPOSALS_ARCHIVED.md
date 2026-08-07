@@ -58,6 +58,7 @@ writing a new proposal that touches the same machinery.
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | implemented 2026-08-07 (`lane.sh submit` opens the MR carrying `Closes #<iid>` and moves the label to `review` in one call, refusing an unpushed HEAD, a closed ticket and an already-judged one, and completing rather than duplicating an open MR; `snapshot` derives `summary.repairs` — the two stranded shapes, each with the single command that repairs it — and warns on each) |
+| P64 | Every epic ends with a wiring ticket | implemented 2026-08-07 (`tick.sh graph` derives `unwired_epics` — an epic with no member blocked by every other member of that epic — names each in the verdict as `UNWIRED EPIC` and exits 1, so phase 5's shape read becomes a definition-time refusal while still printing the document; a one-ticket epic and epicless tickets are never refused; `references/phases-1-5.md` phase 4 requires a wiring ticket per epic whose acceptance criteria are the epic's own, exercised against the running app and the real data, and phase 5 re-runs the check on any amendment that adds an epic; no SKILL.md change) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
 | P67 | One gate per commit | implemented 2026-08-07 (`tick.sh spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket+HEAD, via a `_gate_lock_reserve`/`_gate_lock_owner` pair shaped exactly like the existing merge lock but keyed per `<ticket>@<sha>` instead of one shared dir) |
@@ -2505,6 +2506,36 @@ holding an alive lane — the same `$working` set `summary.stranded` is defined 
 judged at this HEAD" has one definition and cannot drift. Full suite: 521 passed, 0 failed
 (511 → 521). SKILL.md net −1 line: step 4's impl bullet now names the one verb instead of
 narrating open-MR-then-relabel.
+
+## P64 · Every epic ends with a wiring ticket
+
+**Problem.** Unit-tier gates judge tickets; nothing before the epic probe judges the epic. In
+ai-workout build-1, every E1 (exercise graph) ticket passed its gate while the running app never
+called `build_kg1()` once — `/api/graph/focus` served byte-identical fixture output for every
+member — and the shipped catalog's 18 `bilateral_pair_id` values all dangled. The probe, the last
+step of the epic, was the first thing that looked.
+
+**Evidence.** E1 probe FAIL 06:27 → fix tickets #69 (wire the graph into the app), #70 (docs),
+#71 (dangling ids — a product decision, blocked). E0's probe similarly failed twice on gaps
+(no run command, undocumented env vars) that a wiring-level ticket would have owned.
+
+**Fix.** Phase 4 must end each epic with a wiring ticket, blocked by the epic's other members,
+whose acceptance criteria are the epic's own acceptance criteria exercised against the running
+app and the real data — the same bar the probe applies. The build-definition check refuses an
+epic without one. The probe then confirms; it never discovers.
+
+**What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
+same rate — meaning the bar transfer, not the missing owner, was the problem.
+
+**Implemented 2026-08-07.** The check is a graph property, so it needs no label of its own: an
+epic has its wiring ticket when some member's `blocked_by` covers every other member of that epic.
+`GRAPH_JQ` derives `unwired_epics` from `.tickets[].epic`, names them in the verdict as
+`UNWIRED EPIC`, and `cmd_graph` exits 1 — the document still prints, because phase 5 reads the
+rest of it either way. A one-ticket epic and a ticket carrying no epic can never raise a false
+refusal, which is the cost side the P60 evidence names. Phase 4 in `references/phases-1-5.md`
+carries the requirement and the acceptance bar; phase 5 separates the three advisory verdicts from
+this one refusal and re-runs it on any amendment that adds an epic. Full suite: 565 passed, 0
+failed (560 → 565). No SKILL.md change.
 
 ## P65 · Fix tickets are born with edges and checked for twins
 

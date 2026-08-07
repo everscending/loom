@@ -58,7 +58,6 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
-| P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
@@ -430,26 +429,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P64 · Every epic ends with a wiring ticket
-
-**Problem.** Unit-tier gates judge tickets; nothing before the epic probe judges the epic. In
-ai-workout build-1, every E1 (exercise graph) ticket passed its gate while the running app never
-called `build_kg1()` once — `/api/graph/focus` served byte-identical fixture output for every
-member — and the shipped catalog's 18 `bilateral_pair_id` values all dangled. The probe, the last
-step of the epic, was the first thing that looked.
-
-**Evidence.** E1 probe FAIL 06:27 → fix tickets #69 (wire the graph into the app), #70 (docs),
-#71 (dangling ids — a product decision, blocked). E0's probe similarly failed twice on gaps
-(no run command, undocumented env vars) that a wiring-level ticket would have owned.
-
-**Fix.** Phase 4 must end each epic with a wiring ticket, blocked by the epic's other members,
-whose acceptance criteria are the epic's own acceptance criteria exercised against the running
-app and the real data — the same bar the probe applies. The build-definition check refuses an
-epic without one. The probe then confirms; it never discovers.
-
-**What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
-same rate — meaning the bar transfer, not the missing owner, was the problem.
 
 ## P70 · `lane.sh`'s own tracker reads paginate too
 

@@ -2899,6 +2899,69 @@ out=$(GRAPH "$(GN 4)")
     && ok "graph: a ticket with no size fields defaults to not-deep" \
     || bad "graph: missing size fields broke the depth read ($(printf '%s' "$out" | jq -c '.likely_deep'))"
 
+# --- 7g7. P64: every epic ends with a wiring ticket ------------------------
+# Unit-tier gates judge tickets; nothing before the epic probe judges the EPIC.
+# ai-workout build-1: every E1 ticket passed its gate while the running app
+# never called build_kg1() once, and the probe — the last step of the epic —
+# was the first thing that looked. An epic has its wiring ticket when some
+# member is blocked by every other member, which is a graph property and needs
+# no label. A definition whose epic has none is REFUSED (rc 1), not annotated.
+GE() { # iid epic [blocker-iid...] — a build member carrying its epic
+    local iid="$1" epic="$2" bb="" b; shift 2
+    for b in "$@"; do bb="$bb${bb:+,}{\"iid\":$b,\"closed\":false}"; done
+    printf '{"iid":%s,"epic":"%s","blocked_by":[%s],"state":"ready-for-agent","unblocked":true,"assignees":[]}' \
+        "$iid" "$epic" "$bb"
+}
+
+# 7g7a. The guard holding: E1's #3 is blocked by #1 but not #2, so no member
+#       covers the epic. Refused by exit code, named in the structured field
+#       AND in the verdict — and the document still prints, because phase 5
+#       reads the rest of it either way.
+out=$(GRAPH "$(GE 1 E1),$(GE 2 E1),$(GE 3 E1 1)" 2>"$T/wiring.err"); rc_g=$?
+if [ "$rc_g" -eq 1 ] \
+   && [ "$(printf '%s' "$out" | jq -c '.unwired_epics')" = '["E1"]' ] \
+   && [ "$(printf '%s' "$out" | jq -r '.tickets')" = "3" ] \
+   && grep -q "wiring ticket" "$T/wiring.err" \
+   && case "$(printf '%s' "$out" | jq -r .verdict)" in *"UNWIRED EPIC"*"E1"*) true ;; *) false ;; esac; then
+    ok "graph: an epic with no ticket blocked by every other member is refused"
+else
+    bad "graph: unwired epic not refused (rc=$rc_g: $(printf '%s' "$out" | jq -c '{unwired_epics,verdict}'))"
+fi
+
+# 7g7b. The mechanism removed: give #3 the one missing edge and the same three
+#       tickets pass. That single edge is the whole fix, so the test that
+#       cannot tell these two apart is testing nothing.
+out=$(GRAPH "$(GE 1 E1),$(GE 2 E1),$(GE 3 E1 1 2)"); rc_g=$?
+if [ "$rc_g" -eq 0 ] && [ "$(printf '%s' "$out" | jq -c '.unwired_epics')" = "[]" ] \
+   && case "$(printf '%s' "$out" | jq -r .verdict)" in *"UNWIRED"*) false ;; *) true ;; esac; then
+    ok "graph: adding the last blocking edge turns the refusal into a pass"
+else
+    bad "graph: a wired epic was still refused (rc=$rc_g: $(printf '%s' "$out" | jq -c '.unwired_epics'))"
+fi
+
+# 7g7c. Only the offending epic is named. A build is refused for E2 while E1 is
+#       correctly wired, so the human is sent back to phase 4 for one epic, not
+#       told the whole set is wrong.
+out=$(GRAPH "$(GE 1 E1),$(GE 2 E1),$(GE 3 E1 1 2),$(GE 4 E2),$(GE 5 E2)" 2>/dev/null); rc_g=$?
+if [ "$rc_g" -eq 1 ] && [ "$(printf '%s' "$out" | jq -c '.unwired_epics')" = '["E2"]' ]; then
+    ok "graph: only the epic missing its wiring ticket is named"
+else
+    bad "graph: wrong epics named (rc=$rc_g: $(printf '%s' "$out" | jq -c '.unwired_epics'))"
+fi
+
+# 7g7d. Planted violation, the same discipline as 7g3: a false refusal at
+#       definition time is more expensive than the check is worth. A one-ticket
+#       epic has nothing to wire together, and every fixture in this suite
+#       carries no epic at all — neither may be refused.
+out=$(GRAPH "$(GE 6 E3)"); rc_g=$?
+[ "$rc_g" -eq 0 ] && [ "$(printf '%s' "$out" | jq -c '.unwired_epics')" = "[]" ] \
+    && ok "graph-violation: a one-ticket epic is not refused for lacking a wiring ticket" \
+    || bad "graph-violation: single-member epic falsely refused (rc=$rc_g)"
+out=$(GRAPH "$(GN 1),$(GB 2 1),$(GB 3 1)"); rc_g=$?
+[ "$rc_g" -eq 0 ] && [ "$(printf '%s' "$out" | jq -c '.unwired_epics')" = "[]" ] \
+    && ok "graph-violation: tickets carrying no epic raise no wiring refusal" \
+    || bad "graph-violation: epicless tickets falsely refused (rc=$rc_g)"
+
 # --- 8. P22 layered config: repo > derived > global > built-in -------------
 RC="$T/rc"; mkdir -p "$RC"
 rc() { LOOM_REPO="$1" LOOM_GLOBAL_CONFIG="${2:-$RC/none.yml}" "$TICK" resolve-config; }
