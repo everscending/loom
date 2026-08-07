@@ -59,12 +59,20 @@
 #                                            rejections recorded before it. A
 #                                            human's call only — refused inside
 #                                            a lane or a wave
-#   lane.sh fix-ticket --title <t> --tier <t> --milestone <m> [--file F]
+#   lane.sh fix-ticket --title <t> --tier <t> --milestone <m>
+#                       [--blocked-by <iids>] [--force] [--file F]
 #                                            file a fix ticket a wave can
 #                                            actually schedule: applies all
 #                                            FIVE of build-N (derived), fix,
 #                                            tier::<t>, the epic milestone and
-#                                            ready-for-agent, or refuses
+#                                            ready-for-agent, or refuses.
+#                                            --blocked-by writes a `## Blocked
+#                                            by` section (comma-separated
+#                                            iids) the scheduler already
+#                                            parses. Before creating, refuses
+#                                            on a near-duplicate title among
+#                                            open fix tickets in the same
+#                                            milestone unless --force.
 #   lane.sh probe-result <build-iid> <epic-slug> pass|fail [--file F]
 #                                            post the epic probe's report on
 #                                            the Build issue with a PASS/FAIL
@@ -351,7 +359,7 @@ cmd_rescope() { # <iid> [--file F]
     echo "lane.sh: issue $iid re-scoped — rejections recorded before this note no longer count"
 }
 
-cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F]
+cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F]
     # P33: a fix ticket needs FIVE things to be schedulable — `build-N`, `fix`,
     # a `tier::` label, the defective epic's milestone, AND a state label. The
     # skill prose enumerated four of them and left "entering at ready" as
@@ -363,11 +371,22 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     # refuses, and `--tier`/`--milestone` are required because a tier-less
     # ticket has no gate suite and a milestone-less one lets its epic close
     # over an open defect.
-    local title="" tier="" ms="" bodyargs=()
+    #
+    # P65: a probe-filed ticket used to enter the graph edgeless and
+    # unchecked for twins — #68 duplicated #67, #69 ran while the decision it
+    # depended on (#71) sat blocked, ai-workout build-1 2026-08-07. So this
+    # verb also takes the edges (`--blocked-by`, written into the `##
+    # Blocked by` section the scheduler already parses — SKILL.md's tracker
+    # vocabulary) and checks for a near-duplicate open fix ticket in the same
+    # milestone before creating, refusing unless `--force`: the filing lane
+    # decides with eyes open instead of the graph silently growing a twin.
+    local title="" tier="" ms="" blockedby="" force=false bodyargs=()
     while [ $# -gt 0 ]; do case "$1" in
-        --title)     title="${2:-}"; [ -n "$title" ] || die "--title needs a value"; shift 2 ;;
-        --tier)      tier="${2:-}";  shift 2 ;;
-        --milestone) ms="${2:-}";    shift 2 ;;
+        --title)      title="${2:-}"; [ -n "$title" ] || die "--title needs a value"; shift 2 ;;
+        --tier)       tier="${2:-}";  shift 2 ;;
+        --milestone)  ms="${2:-}";    shift 2 ;;
+        --blocked-by) blockedby="${2:-}"; shift 2 ;;
+        --force)      force=true; shift ;;
         *) bodyargs+=("$1"); shift ;;
     esac; done
     [ -n "$title" ] || die "fix-ticket: --title is required"
@@ -375,6 +394,19 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
         *) die "fix-ticket: --tier must be docs|logic|api|ui (got '${tier:-<empty>}') — without it no gate lane can pick a suite" ;; esac
     [ -n "$ms" ] || die "fix-ticket: --milestone is required — completeness and the re-probe derive from membership, so a milestone-less fix ticket lets its epic close over an open defect"
     local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
+    if [ -n "$blockedby" ]; then
+        # Same section, same parser the scheduler already reads
+        # (snapshot.jq's `section("Blocked by")` / `scan("#([0-9]+)")`) — a
+        # second format here would be invisible to it.
+        printf '\n\n## Blocked by\n\n' >> "$f"
+        local _bb b
+        IFS=',' read -ra _bb <<< "$blockedby"
+        for b in "${_bb[@]}"; do
+            b="${b//[[:space:]]/}"
+            case "$b" in ''|*[!0-9]*) die "fix-ticket: --blocked-by ids must be numeric issue iids (got '$b')" ;; esac
+            printf -- '- #%s\n' "$b" >> "$f"
+        done
+    fi
     # The build label is DERIVED, never asked for: the scheduler's universe is
     # "open issues labeled build-N" for the highest open `Build N` issue, and a
     # lane that had to name it could name last week's.
@@ -387,13 +419,36 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     mid=$("$GLAB" api "projects/:fullpath/milestones?per_page=100" 2>/dev/null \
         | jq -r --arg t "$ms" '.[] | select(.title == $t) | .id' | head -1)
     [ -n "$mid" ] || die "fix-ticket: no milestone titled '$ms'"
+    if ! $force; then
+        # Near-duplicate = word-overlap (Jaccard) >= 0.5 against every OTHER
+        # open fix ticket in the same milestone. A heuristic, like tier_of's
+        # and graph's in snapshot.jq — cheap enough to run on every filing,
+        # and wrong only in the direction that costs a --force flag, never
+        # the direction that silently ships a twin.
+        local dups
+        dups=$("$GLAB" api "projects/:fullpath/issues?state=opened&labels=fix&per_page=100" 2>/dev/null \
+            | jq -c --arg ms "$ms" --arg newt "$title" '
+                def words: ascii_downcase | gsub("[^a-z0-9]+"; " ") | split(" ") | map(select(length > 0));
+                ($newt | words) as $nw
+                | [ .[] | select((.milestone.title // "") == $ms)
+                    | . + {sim: ((.title // "" | words) as $ew
+                                 | (($nw - ($nw - $ew)) | length) as $inter
+                                 | (($nw + $ew) | unique | length) as $uni
+                                 | if $uni == 0 then 0 else ($inter / $uni) end)}
+                    | select(.sim >= 0.5)
+                    | {iid, title, sim} ]')
+        if [ -n "$dups" ] && [ "$dups" != "[]" ] && [ "$dups" != "null" ]; then
+            local hits; hits=$(printf '%s' "$dups" | jq -r '.[] | "#\(.iid) \"\(.title)\""' | tr '\n' ';' | sed 's/;$//')
+            die "fix-ticket: near-duplicate open fix ticket(s) in milestone '$ms' — $hits — refile with --force if this is genuinely separate work"
+        fi
+    fi
     local iid
     iid=$("$GLAB" api --method POST "projects/:fullpath/issues" \
         -f "title=$title" --field "description=@$f" \
         -f "labels=$blabel,fix,tier::$tier,ready-for-agent" \
         -f "milestone_id=$mid" 2>/dev/null | jq -r '.iid // empty')
     [ -n "$iid" ] || die "fix-ticket: create failed"
-    echo "lane.sh: filed #$iid — $blabel, fix, tier::$tier, ready-for-agent, milestone '$ms'"
+    echo "lane.sh: filed #$iid — $blabel, fix, tier::$tier, ready-for-agent, milestone '$ms'${blockedby:+, blocked by $blockedby}"
     _lane_ev fix_filed ticket "$iid" tier "$tier"
 }
 
@@ -696,5 +751,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

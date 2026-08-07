@@ -61,7 +61,6 @@ evidence, and implementation notes belong in this file, not there.
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
-| P65 | Fix tickets are born with edges and checked for twins | open — adopted 2026-08-07, ai-workout build-1: one duplicate, two undeclared dependencies; tranche 1 |
 | P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
 | P69 | The verdict verb enforces its own trailer | open — adopted 2026-08-07, ai-workout build-1: unclassed FAILs, spurious classes on PASS, duplicate trailers; tranche 2 |
@@ -703,20 +702,6 @@ epic without one. The probe then confirms; it never discovers.
 **What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
 same rate — meaning the bar transfer, not the missing owner, was the problem.
 
-## P65 · Fix tickets are born with edges and checked for twins
-
-**Problem.** `lane.sh fix-ticket` applies the five schedulability facts but writes no
-`## Blocked by` section and performs no duplicate check, so probe-filed tickets enter the graph
-edgeless and possibly twice.
-
-**Evidence (ai-workout build-1).** #68 duplicated #67 (the implementing lane discovered this
-mid-flight); #69 ran while the product decision it depends on (#71) sat blocked — its own body
-says building the graph before that decision "will crash the app on every boot" — and #69
-overlaps #55's scope with no edge in either direction.
-
-**Fix.** `fix-ticket` gains `--blocked-by <iids>` (written into the body the scheduler reads),
-and before creating lists open fix tickets in the same milestone, refusing on a near-duplicate
-title unless `--force` — the filing lane decides with eyes open.
 
 ## P67 · One gate per commit
 

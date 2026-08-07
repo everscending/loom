@@ -55,6 +55,7 @@ writing a new proposal that touches the same machinery.
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
+| P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
 
 ## Independent review round (2026-08-01)
@@ -2177,6 +2178,36 @@ check and fix while the fix is open, computes it to null once the fix closes, an
 real attempt sitting beside a base-red one. Full suite: 484 passed, 0 failed (471 → 484).
 SKILL.md net +9 lines, all in step 5: the held-ticket exclusion on the queue-head line, and the
 base-red procedure folded into the existing red-combined-gate sentence.
+
+## P65 · Fix tickets are born with edges and checked for twins
+
+**Problem.** `lane.sh fix-ticket` applies the five schedulability facts but writes no
+`## Blocked by` section and performs no duplicate check, so probe-filed tickets enter the graph
+edgeless and possibly twice.
+
+**Evidence (ai-workout build-1).** #68 duplicated #67 (the implementing lane discovered this
+mid-flight); #69 ran while the product decision it depends on (#71) sat blocked — its own body
+says building the graph before that decision "will crash the app on every boot" — and #69
+overlaps #55's scope with no edge in either direction.
+
+**Fix, as implemented.** `fix-ticket` gained `--blocked-by <iids>`: a comma-separated list of
+issue iids written straight into a `## Blocked by` section of the ticket body, in the exact
+format `snapshot.jq` already parses (`section("Blocked by")` + `scan("#([0-9]+)")`) — no new
+format for the scheduler to learn. A malformed id (non-numeric) refuses before any tracker
+write.
+
+Before creating, it also lists open fix tickets in the same milestone (`labels=fix`) and
+computes a word-overlap (Jaccard) similarity against the new title; a normalized-word overlap
+≥ 0.5 refuses the create and names the colliding ticket(s), unless `--force` is passed — the
+filing lane decides with eyes open instead of the graph silently growing a twin.
+
+**Tests.** `scripts/tick-test.sh`: `--blocked-by` writes a parseable `## Blocked by` section
+(multi-id); a non-numeric `--blocked-by` id is refused; a near-duplicate title in the same
+milestone is refused and posts nothing; `--force` overrides the refusal and still creates; a
+dissimilar title in the same milestone is not blocked. Full suite: 494 passed, 0 failed (492 →
+494, two pre-existing tests' label-extraction fixed for the now-earlier `labels=fix` query
+substring on the same capture file). SKILL.md: no change — the fix lives entirely in
+`lane.sh`'s existing verb.
 
 ## P66 · Reconcile re-installs every ecosystem the merge touched
 

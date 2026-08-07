@@ -4562,7 +4562,7 @@ echo "turns after the first never complete" | LOOM_HOME="$EVH" \
     GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title "realtime turns stall" --tier logic \
         --milestone "E4 · Realtime mode" >/dev/null 2>&1
-lbl=$(grep -o 'labels=[^ ]*' "$FCAP" | head -1)
+lbl=$(grep -o 'labels=[^ ]*' "$FCAP" | grep ',' | head -1)
 miss=""
 for want in build-3 fix tier::logic ready-for-agent; do
     case "$lbl" in *"$want"*) ;; *) miss="$miss $want" ;; esac
@@ -4591,6 +4591,71 @@ echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     "$LANE" fix-ticket --title t --tier bogus --milestone "E4 · Realtime mode" >/dev/null 2>&1 \
     && bad "fix-ticket: accepted a tier outside docs|logic|api|ui" \
     || ok "fix-ticket: an unknown tier is refused"
+
+# 16a-3b. P65: a probe-filed fix ticket used to enter the graph edgeless —
+#      `fix-ticket` now takes `--blocked-by`, writing the `## Blocked by`
+#      section the scheduler already parses (snapshot.jq's
+#      section("Blocked by") / scan("#([0-9]+)")). ai-workout build-1
+#      2026-08-07: #69 ran while the decision it depended on (#71) sat
+#      blocked, with no edge recorded either way.
+FCAP6="$T/fixtkt-blockedby-calls"; : > "$FCAP6"
+echo "graph gap" | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP6" \
+    "$LANE" fix-ticket --title "wire graph before boot" --tier logic \
+        --milestone "E4 · Realtime mode" --blocked-by "71, 55" >/dev/null 2>&1
+descf=$(grep -o 'description=@[^ ]*' "$FCAP6" | tail -1 | cut -d@ -f2)
+if [ -n "$descf" ] && [ -f "$descf" ] \
+   && grep -q '^## Blocked by$' "$descf" \
+   && grep -q '^- #71$' "$descf" && grep -q '^- #55$' "$descf"; then
+    ok "fix-ticket: --blocked-by writes a Blocked by section the scheduler can parse"
+else
+    bad "fix-ticket: --blocked-by section missing or malformed ($(cat "$descf" 2>/dev/null | tail -5 | tr '\n' ';'))"
+fi
+echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP6" \
+    "$LANE" fix-ticket --title t --tier logic --milestone "E4 · Realtime mode" \
+        --blocked-by "71,abc" >/dev/null 2>&1 \
+    && bad "fix-ticket: accepted a non-numeric --blocked-by id" \
+    || ok "fix-ticket: a non-numeric --blocked-by id is refused"
+
+# 16a-3c. P65: before creating, `fix-ticket` refuses a near-duplicate title
+#      among open fix tickets in the same milestone unless --force.
+#      ai-workout build-1 2026-08-07: #68 duplicated #67, discovered only
+#      mid-flight by the implementing lane.
+cat > "$FX/fixtkt-dup-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${ACAP:?}"
+case "$*" in
+  *"milestones"*)                     echo '[{"id":31,"title":"E4 · Realtime mode"}]' ;;
+  *"issues?state=opened&labels=fix"*) echo '[{"iid":67,"title":"Wire probe result into dashboard","milestone":{"title":"E4 · Realtime mode"}}]' ;;
+  *"issues?state=opened"*)            echo '[{"iid":36,"title":"Build 3"},{"iid":9,"title":"Build 2"}]' ;;
+  *"POST"*"issues"*)                  echo '{"iid":68}' ;;
+  *) echo '{}' ;;
+esac
+EOF
+chmod +x "$FX/fixtkt-dup-stub.sh"
+FCAP7="$T/fixtkt-dup-calls"; : > "$FCAP7"
+echo "duplicate" | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-dup-stub.sh" ACAP="$FCAP7" \
+    "$LANE" fix-ticket --title "Wire probe results into dashboard" --tier logic \
+        --milestone "E4 · Realtime mode" >/dev/null 2>&1 \
+    && bad "fix-ticket: created a near-duplicate fix ticket without --force" \
+    || ok "fix-ticket: a near-duplicate title in the same milestone is refused"
+grep -q -- '--method POST' "$FCAP7" \
+    && bad "fix-ticket: the refused duplicate attempt still posted a create" \
+    || ok "fix-ticket: refused duplicate posted nothing"
+FCAP8="$T/fixtkt-dup-force-calls"; : > "$FCAP8"
+echo "duplicate forced" | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-dup-stub.sh" ACAP="$FCAP8" \
+    "$LANE" fix-ticket --title "Wire probe results into dashboard" --tier logic \
+        --milestone "E4 · Realtime mode" --force >/dev/null 2>&1 \
+    && ok "fix-ticket: --force overrides the near-duplicate refusal" \
+    || bad "fix-ticket: --force still refused a near-duplicate"
+grep -q -- '--method POST' "$FCAP8" \
+    && ok "fix-ticket: --force still creates the ticket" \
+    || bad "fix-ticket: --force accepted but nothing was created"
+FCAP9="$T/fixtkt-nodup-calls"; : > "$FCAP9"
+echo "different work" | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-dup-stub.sh" ACAP="$FCAP9" \
+    "$LANE" fix-ticket --title "Add retry backoff to websocket client" --tier logic \
+        --milestone "E4 · Realtime mode" >/dev/null 2>&1 \
+    && ok "fix-ticket: a dissimilar title in the same milestone is not blocked" \
+    || bad "fix-ticket: an unrelated title was refused as a duplicate"
 
 # 16b. lane.sh reconcile: reconciliation is a SCRIPT so a merge lane cannot
 #      choose rebase. Two lanes chose it off the skill prose and dead-ended
