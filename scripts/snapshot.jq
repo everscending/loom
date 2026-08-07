@@ -129,8 +129,30 @@
     # merge-queue ticket, so one poisoned ticket is re-picked by every lane
     # behind it until something counts the attempts and blocks it. (build-3
     # 2026-08-03: three lanes in a row wedged on #50 while #52 and #53 waited.)
+    # P62: an attempt recorded with `base-red=` failed on a check that is red
+    # on clean origin/<base> — a base defect, not this ticket, so it never
+    # counts toward merge_attempt_cap (#26 and #15 burned full caps on
+    # main-is-red, and the spent caps had no reset when the fix merged).
     def merge_attempts_of($notes):
-        [$notes[] | select((.body // "") | test("orch-merge-attempt"))] | length;
+        [$notes[] | select((.body // "")
+          | test("orch-merge-attempt") and (test("orch-merge-attempt [0-9]+ base-red=") | not))]
+        | length;
+    # P62 release side: the park and its automatic release, derived rather
+    # than written. A ticket whose base-red attempts link a fix issue that is
+    # still OPEN is held out of the merge queue (the wave skips tickets with a
+    # merge_hold); the moment the fix merges — its issue closes, so it leaves
+    # the open set — the hold computes to null and the ticket re-enters on its
+    # own, with no requeue write and nothing for a wave to remember. Open-set
+    # inference is valid here because fix tickets are filed in this project
+    # (lane.sh fix-ticket).
+    def merge_hold_of($notes; $open_iids):
+        ([$notes[] | (.body // "")
+          | scan("orch-merge-attempt\\s+[0-9]+\\s+base-red=([A-Za-z0-9._:/#-]+)\\s+fix=([0-9]+)")
+          | {check: .[0], fix: (.[1] | tonumber)}]
+         | map(select(.fix as $f | ($open_iids | index($f)) != null))) as $held
+      | if ($held | length) == 0 then null
+        else {checks: ($held | map(.check) | unique),
+              fixes: ($held | map(.fix) | unique)} end;
     # P31: which model this ticket next IMPLEMENTATION lane gets. The chain is
     # deterministic, so it is resolved here rather than reasoned about in each
     # wave: ticket `model::` label > `rework_model` (round 2 and later) >
@@ -250,6 +272,7 @@
                 | map({iid, title, state, draft, web_url, source_branch, sha})),
             rejections: $rej,
             merge_attempts: merge_attempts_of((($N[$t.iid | tostring]) // [])),
+            merge_hold: merge_hold_of((($N[$t.iid | tostring]) // []); $open_iids),
             model: model_of($lb; $rej; $config),
             gate: gate_of($t.iid; state_of($lb);
                           (($M[$t.iid | tostring]) // []);

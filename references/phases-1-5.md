@@ -66,6 +66,9 @@ dependency order) **plus** the additions in
   starts first.
 - **Mandatory adversarial tests**: inputs that must be *rejected*, with the
   sentence "fix the rule, not my examples."
+- **Repo-wide guards**: a test asserting over the whole tree is a contract
+  change for every later ticket — it must be declared in the ticket body,
+  and phase 4 surfaces the declaration across the set.
 - **Risk tier**: `docs | logic | api | ui` — selects the gate suite from
   `.loom.yml`.
 - **PRD requirement**: the requirement ID this ticket satisfies; the gate

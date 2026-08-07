@@ -54,6 +54,7 @@ writing a new proposal that touches the same machinery.
 | P47 | Guards fail closed | implemented 2026-08-06 (`lane.sh`'s four guard reads and `tick.sh cmd_sweep`'s merge-range check now capture the read's own exit status before touching its output, and `die` on failure instead of falling through to "not blocked" / "not closed" / "no open MR" / "no commits ahead") |
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
+| P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
 
 ## Independent review round (2026-08-01)
 
@@ -2117,3 +2118,61 @@ over the 150-turn cap (it reads 210); and a truncated trailing line leaves the s
 than zeroing it. Full suite: 471 passed, 0 failed (468 → 471, three new cases). SKILL.md's
 staleness paragraph was rewritten in place — no net new lines — because it described the old filter
 by name.
+## P62 · A repo-wide guard test is a contract change, and a red base never costs a merge attempt
+
+**Problem.** Ticket #30 shipped a test scanning *all* of `src` for model-literal strings. It bound
+every later ticket to a rule nobody else agreed to, and it was over-broad (`"60s/side"`,
+`"text/event-stream"`, `EMBEDDING_MODEL_NAME` all matched). Merges began failing on defects
+already present on `origin/main` — not in the branch being merged — and `merge_attempt_cap`
+counted those failures anyway. When the fix ticket (#65) merged, the cap-blocked tickets stayed
+blocked: spent attempts have no reset.
+
+**Evidence (ai-workout build-1).** merge-12 and merge-26 failed on main-is-red (02:04–02:18); #26
+burned its full cap and needed a human unblock *after* #65 had merged; #15 burned its cap on the
+same test at 04:00 and was still blocked at the stop; the 04:27 "every open ticket is blocked"
+halt. Seven incidents total. Sits beside P31 but is a different family: P31 is a test asserting
+too little about its own ticket; this is a test asserting too much about everyone else's.
+
+**Fix, three parts.** *Ticket side*: a test that asserts over the whole tree must be declared in
+the ticket body as a repo-wide guard, so phase 4 can surface the new contract to every later
+ticket. *Merge side* (tranche 1): before counting a failed attempt, the lane re-runs the failing
+check against clean `origin/<base>`; if base alone is red, record the attempt as `base-red` — file
+or link the fix ticket, never count the cap. *Release side*: when a fix ticket naming a failing
+check merges, tickets whose attempts were all `base-red` against that check are requeued
+automatically.
+
+**What would falsify it.** A base-red re-run that misattributes — the branch's own defect happens
+to also fail on base — letting a genuinely broken ticket retry forever; the re-run must compare
+failure identity (test id), not just redness.
+
+**Implementation (2026-08-07).** All three parts, one adaptation on the release side. *Ticket
+side*: `references/ticket-template.md` gains a **Repo-wide guards** section (declare any
+whole-tree assertion, one line per guard; undeclared = a defect in the ticket) and
+`references/phases-1-5.md` phase 4 lists it with the other template additions. *Merge side*:
+`lane.sh merge-failed` gains `--base-red <check-id> --fix <fix-iid>` (both or neither — a
+base-red attempt with no fix link could never be released), folding
+`base-red=<check> fix=<iid>` into the `orch-merge-attempt` trailer; `snapshot`'s
+`merge_attempts` counts only trailers without `base-red=`, so the cap never burns on a base
+defect. A new `lane.sh base-check [--] <cmd...>` runs the failing check in a throwaway detached
+worktree of freshly-fetched clean `origin/<base>` (removed on the way out, rc propagated) — the
+evidence step SKILL.md's step 5 requires before any `--base-red` claim, with the falsification
+guard stated there as procedure: same test id red on base, never mere redness. *Release side,
+adapted*: implemented as a **derived hold**, not a requeue write. `snapshot` computes per-ticket
+`merge_hold` — non-null while any base-red attempt links a fix issue that is still open — and
+step 5 has the merge lane take the oldest `merge-queue` ticket whose `merge_hold` is null. The
+moment the fix merges (its issue closes), the hold computes to null and the ticket re-enters on
+its own: no write, nothing for a wave to remember, and no conflict with the `--release-hold`
+guard, which the proposal's literal "requeue blocked tickets" phrasing would have collided with —
+under the merge-side rule those tickets are never blocked in the first place. Tickets already
+cap-blocked before this shipped (#26-style history) still take a human `unblock`; the mechanism
+is forward-looking by design.
+
+Thirteen suite cases: trailer written with check and fix; `--base-red` without `--fix`, `--fix`
+without `--base-red`, and a space-carrying check id all refused with nothing posted; base-check
+runs on clean base (branch-only file absent there, base file present, rc propagated), removes its
+worktree, refuses an empty command; snapshot reads base-red attempts as 0 toward the cap (planted
+violation: the old any-trailer count reads 2, at the default cap), surfaces `merge_hold` with
+check and fix while the fix is open, computes it to null once the fix closes, and still counts a
+real attempt sitting beside a base-red one. Full suite: 484 passed, 0 failed (471 → 484).
+SKILL.md net +9 lines, all in step 5: the held-ticket exclusion on the queue-head line, and the
+base-red procedure folded into the existing red-combined-gate sentence.

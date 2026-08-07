@@ -1776,6 +1776,61 @@ jq -e '[.warnings[] | select(test("#30") and test("still assigned"))] | length =
 [ "$(u '.tickets[] | select(.iid==30) | .merge_attempts')" = "0" ] \
     && ok "snapshot: a gate verdict does not count as a merge attempt" \
     || bad "snapshot: verdict trailer leaked into merge_attempts"
+# 7a7b. P62: a base-red attempt failed on a defect already on origin/<base>,
+#       not in the branch — so it must never count toward merge_attempt_cap
+#       (#26 and #15 burned full caps on main-is-red), and the ticket is
+#       PARKED while the linked fix issue is open: merge_hold names the check
+#       and the fix, the wave skips held tickets, and the hold computes to
+#       null the moment the fix closes — release is derivation, not a write,
+#       because spent attempts had no reset when #65 merged.
+cat > "$FX/open-basered.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- Ledger core (#50, #51)\n"},
+ {"iid":50,"title":"Held behind an open base fix","project_id":1,"web_url":"https://x/50",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":51,"title":"Fix merged, hold released","project_id":1,"web_url":"https://x/51",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":60,"title":"Fix: model-literal guard over-matches","project_id":1,"web_url":"https://x/60",
+  "labels":["build-2","fix","ready-for-agent"],"assignees":[],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"}
+]
+EOF
+cat > "$FX/notes-50.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-07T02:18:00Z","author":{"username":"merge"},
+  "body":"model-literal guard red on clean main too\n\n<!-- orch-merge-attempt 50 base-red=model-literal-guard fix=60 -->"},
+ {"system":false,"created_at":"2026-08-07T02:04:00Z","author":{"username":"merge"},
+  "body":"same guard, same base defect\n\n<!-- orch-merge-attempt 50 base-red=model-literal-guard fix=60 -->"}]
+EOF
+cat > "$FX/notes-51.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-07T04:00:00Z","author":{"username":"merge"},
+  "body":"real conflict in schema.ts, aborted\n\n<!-- orch-merge-attempt 51 -->"},
+ {"system":false,"created_at":"2026-08-07T03:00:00Z","author":{"username":"merge"},
+  "body":"guard red on base; fix filed\n\n<!-- orch-merge-attempt 51 base-red=model-literal-guard fix=61 -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-basered.json" STUB_LOG="$T/calls-basered" \
+    "$TICK" snapshot > "$T/snap-basered.json" 2>/dev/null
+rm -f "$FX/notes-50.json" "$FX/notes-51.json"
+br() { jq -r "$1" "$T/snap-basered.json"; }
+# Planted violation: the shipped count took ANY orch-merge-attempt trailer, so
+# #50 would read 2 — at the default cap — and the wave would block a ticket
+# whose branch was never once the problem.
+[ "$(br '.tickets[] | select(.iid==50) | .merge_attempts')" = "0" ] \
+    && ok "snapshot: base-red attempts never count toward merge_attempt_cap" \
+    || bad "snapshot: base-red attempts counted ($(br '.tickets[] | select(.iid==50) | .merge_attempts')) — the cap burns on a base defect"
+[ "$(br '.tickets[] | select(.iid==50) | .merge_hold | "\(.checks[0])/\(.fixes[0])"')" = "model-literal-guard/60" ] \
+    && ok "snapshot: an open linked fix parks the ticket — merge_hold names check and fix" \
+    || bad "snapshot: merge_hold wrong ($(br '.tickets[] | select(.iid==50) | .merge_hold | @json'))"
+# Release is derivation: fix #61 is absent from the open set (closed), so the
+# hold is gone with no requeue write — and the one REAL attempt still counts.
+[ "$(br '.tickets[] | select(.iid==51) | .merge_hold')" = "null" ] \
+    && ok "snapshot: a closed fix releases the hold with no write" \
+    || bad "snapshot: hold survived its fix closing ($(br '.tickets[] | select(.iid==51) | .merge_hold | @json'))"
+[ "$(br '.tickets[] | select(.iid==51) | .merge_attempts')" = "1" ] \
+    && ok "snapshot: a real attempt beside a base-red one still counts" \
+    || bad "snapshot: mixed history miscounted ($(br '.tickets[] | select(.iid==51) | .merge_attempts'), want 1)"
 [ "$(jq -r '.config.merge_attempt_cap' "$T/snap-unblocked.json")" != "null" ] \
     && ok "snapshot: merge_attempt_cap is published so the wave can bound retries" \
     || bad "snapshot: no merge_attempt_cap in config"
@@ -4416,6 +4471,41 @@ grep -q "issues/8/notes" "$ACAP2" \
     && ok "merge-failed: posted the attempt on the ticket thread" \
     || bad "merge-failed: no note call ($(cat "$ACAP2" | tr '\n' ';'))"
 
+# 16a-2b. P62: an attempt that failed on a check ALSO red on clean
+#      origin/<base> is a base defect, not this ticket's — merge-12 and
+#      merge-26 failed on main-is-red, #26 and #15 burned full caps on it,
+#      and the spent caps had no reset when the fix ticket merged (ai-workout
+#      build-1, 2026-08-07: seven incidents). `--base-red <check> --fix <n>`
+#      folds both facts into the trailer: base-red= keeps the attempt out of
+#      the cap count, fix= is what releases the park when that issue closes.
+VCAP5="$T/base-red-bodies"; : > "$VCAP5"
+echo "model-literal guard red on clean main too" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP5" \
+    "$LANE" merge-failed 8 --base-red model-literal-guard --fix 65 >/dev/null 2>&1
+grep -q "orch-merge-attempt 8 base-red=model-literal-guard fix=65" "$VCAP5" \
+    && ok "merge-failed: --base-red records check id and fix link in the trailer" \
+    || bad "merge-failed: base-red trailer missing ($(tail -2 "$VCAP5" 2>/dev/null))"
+# Planted violation: a base-red attempt with no fix link would park the
+# ticket with nothing that can ever release it — refused, and nothing posted.
+ACAP5="$T/base-red-calls"; : > "$ACAP5"
+echo "red on base" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP5" \
+    "$LANE" merge-failed 8 --base-red model-literal-guard >/dev/null 2>&1 \
+    && bad "merge-failed: accepted --base-red without --fix" \
+    || ok "merge-failed: --base-red without --fix is refused"
+# The closed_by READ may land before the refusal; what must not land is the
+# note POST.
+grep -q "notes" "$ACAP5" \
+    && bad "merge-failed: the refused base-red attempt still posted to the tracker" \
+    || ok "merge-failed: the refused base-red attempt posted nothing"
+echo "red on base" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP5" \
+    "$LANE" merge-failed 8 --base-red "two words" --fix 65 >/dev/null 2>&1 \
+    && bad "merge-failed: accepted a check id with a space (breaks the trailer parse)" \
+    || ok "merge-failed: a malformed check id is refused"
+echo "orphan fix" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP5" \
+    "$LANE" merge-failed 8 --fix 65 >/dev/null 2>&1 \
+    && bad "merge-failed: accepted --fix without --base-red" \
+    || ok "merge-failed: --fix without --base-red is refused"
+
 # 16a4b. P37: `rescope` retires the rejections of a ticket's OLD scope. It is a
 #       human's judgement about what the ticket now IS, so — like
 #       `--release-hold` — it is refused outright inside a lane or a wave: a
@@ -4536,6 +4626,29 @@ else
     bad "reconcile: conflict path rc=$rc_rec ($(GITW status --porcelain | head -2))"
 fi
 GITW merge --abort 2>/dev/null || :
+
+# 16b2. P62: `base-check` is the evidence step under a --base-red claim — it
+#       runs the caller's command against CLEAN origin/<base> in a throwaway
+#       detached worktree, so a lane never improvises checkout/stash
+#       gymnastics in the branch it is about to merge. The branch here has g
+#       (ticket work) and base does not: a check keyed on the branch's own
+#       state must come back different on clean base, or base-check is
+#       running in the wrong tree and every base-red claim it feeds is
+#       misattribution.
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true "$LANE" base-check -- test -e f ) >/dev/null 2>&1 \
+    && ok "base-check: runs the command against origin/<base> (base file present, rc 0)" \
+    || bad "base-check: a file on base read as missing"
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true "$LANE" base-check -- test -e g ) >/dev/null 2>&1 \
+    && bad "base-check: saw the BRANCH's file on clean base — it is not running on base" \
+    || ok "base-check: the branch's own work is absent from clean base (rc propagated)"
+# The throwaway worktree is gone either way — a leaked one becomes exactly
+# the standing-cleanup-chore shape the sweeper exists to prevent.
+[ "$(GITW worktree list | wc -l | tr -d ' ')" = "1" ] \
+    && ok "base-check: the throwaway worktree is removed on the way out" \
+    || bad "base-check: leaked a worktree ($(GITW worktree list | tail -1))"
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true "$LANE" base-check ) >/dev/null 2>&1 \
+    && bad "base-check: ran with no command" \
+    || ok "base-check: no command is refused"
 
 # 16c. reconcile re-syncs DERIVED state. A worktree cut before a ticket added
 #      a dependency carries an install that predates it, so the instant the

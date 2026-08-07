@@ -59,7 +59,6 @@ evidence, and implementation notes belong in this file, not there.
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
-| P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | open — adopted 2026-08-07, ai-workout build-1: ~7 incidents, #26/#15 cap-blocked; merge-side rule is tranche 1 (before restart) |
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P65 | Fix tickets are born with edges and checked for twins | open — adopted 2026-08-07, ai-workout build-1: one duplicate, two undeclared dependencies; tranche 1 |
@@ -668,33 +667,6 @@ silent skip, so the log says what is not being checked and why.
 **What would falsify it.** A refused build definition whose named cycle a human then shows to be
 spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
 at definition time is cheaper than an hour's stall, but not free.
-
-## P62 · A repo-wide guard test is a contract change, and a red base never costs a merge attempt
-
-**Problem.** Ticket #30 shipped a test scanning *all* of `src` for model-literal strings. It bound
-every later ticket to a rule nobody else agreed to, and it was over-broad (`"60s/side"`,
-`"text/event-stream"`, `EMBEDDING_MODEL_NAME` all matched). Merges began failing on defects
-already present on `origin/main` — not in the branch being merged — and `merge_attempt_cap`
-counted those failures anyway. When the fix ticket (#65) merged, the cap-blocked tickets stayed
-blocked: spent attempts have no reset.
-
-**Evidence (ai-workout build-1).** merge-12 and merge-26 failed on main-is-red (02:04–02:18); #26
-burned its full cap and needed a human unblock *after* #65 had merged; #15 burned its cap on the
-same test at 04:00 and was still blocked at the stop; the 04:27 "every open ticket is blocked"
-halt. Seven incidents total. Sits beside P31 but is a different family: P31 is a test asserting
-too little about its own ticket; this is a test asserting too much about everyone else's.
-
-**Fix, three parts.** *Ticket side*: a test that asserts over the whole tree must be declared in
-the ticket body as a repo-wide guard, so phase 4 can surface the new contract to every later
-ticket. *Merge side* (tranche 1): before counting a failed attempt, the lane re-runs the failing
-check against clean `origin/<base>`; if base alone is red, record the attempt as `base-red` — file
-or link the fix ticket, never count the cap. *Release side*: when a fix ticket naming a failing
-check merges, tickets whose attempts were all `base-red` against that check are requeued
-automatically.
-
-**What would falsify it.** A base-red re-run that misattributes — the branch's own defect happens
-to also fail on base — letting a genuinely broken ticket retry forever; the re-run must compare
-failure identity (test id), not just redness.
 
 ## P63 · Finishing is one verb, and the snapshot spots the half-finished
 

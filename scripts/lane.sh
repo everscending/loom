@@ -32,13 +32,28 @@
 #                                            merge moved a manifest/lockfile,
 #                                            so the gate tests this worktree
 #                                            and not an hours-stale one
-#   lane.sh merge-failed <iid> [--file F]     record a merge attempt that did
+#   lane.sh merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F]
+#                                            record a merge attempt that did
 #                                            NOT merge (conflict, red combined
 #                                            gate, wedged lane), body from
 #                                            F/stdin. Keeps the merge-queue
 #                                            label; the count is what lets the
 #                                            queue stop retrying one poisoned
-#                                            ticket and advance to the next
+#                                            ticket and advance to the next.
+#                                            --base-red: the SAME check is red
+#                                            on clean origin/<base> (prove it
+#                                            with base-check first) — the
+#                                            defect is on base, not in this
+#                                            branch, so the attempt never
+#                                            counts toward merge_attempt_cap
+#                                            and the ticket parks until the
+#                                            linked fix ticket merges
+#   lane.sh base-check [--] <cmd...>         run <cmd> in a throwaway worktree
+#                                            of clean origin/<base> (develop
+#                                            if it exists, else main), print
+#                                            its output, exit with its rc —
+#                                            the evidence a --base-red claim
+#                                            must be built on
 #   lane.sh rescope <iid> [--file F]          this ticket is now DIFFERENT work:
 #                                            post what changed and retire the
 #                                            rejections recorded before it. A
@@ -236,11 +251,65 @@ cmd_merge_failed() { # <iid> [--file F]
     merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].iid // empty' || true)
     [ -z "$merged_mr" ] \
         || die "issue $iid already has MERGED MR !$merged_mr — the merge succeeded; refusing to record a failed attempt. Re-read the ticket: your snapshot is stale."
-    local f; f=$(_stage_body "${@:2}")
-    printf '\n\n<!-- orch-merge-attempt %s -->\n' "$iid" >> "$f"
+    # P62: an attempt that failed on a check that is ALSO red on clean
+    # origin/<base> is not this ticket's failure — merge-12 and merge-26 both
+    # failed on a defect already on main, #26 and #15 burned their full caps
+    # on it, and when the fix ticket merged the spent caps had no reset
+    # (ai-workout build-1, 2026-08-07: seven incidents, one build halt).
+    # `base-red=` in the trailer is what keeps the attempt OUT of the cap
+    # count, and `fix=` is what releases the park: snapshot holds the ticket
+    # out of the merge queue exactly while that fix issue is open. Both facts
+    # or neither — a base-red attempt with no fix link would park the ticket
+    # with nothing that can ever release it.
+    local klass="" fixiid="" bodyargs=()
+    set -- "${@:2}"
+    while [ $# -gt 0 ]; do case "$1" in
+        --base-red) klass="${2:-}"; [ -n "$klass" ] || die "--base-red needs a check id"; shift 2 ;;
+        --fix) fixiid="${2:-}"; [ -n "$fixiid" ] || die "--fix needs an issue iid"; shift 2 ;;
+        *) bodyargs+=("$1"); shift ;;
+    esac; done
+    if [ -n "$klass" ]; then
+        case "$klass" in *[!A-Za-z0-9._:/#-]*) die "--base-red check id may use only A-Za-z0-9 . _ : / # - (no spaces): '$klass'" ;; esac
+        [ -n "$fixiid" ] || die "--base-red needs --fix <fix-iid>: the linked fix ticket is what un-parks this ticket when it merges (file one with lane.sh fix-ticket first)"
+        _check_iid "$fixiid"
+    elif [ -n "$fixiid" ]; then
+        die "--fix only accompanies --base-red"
+    fi
+    local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
+    printf '\n\n<!-- orch-merge-attempt %s%s -->\n' "$iid" \
+        "${klass:+ base-red=$klass fix=$fixiid}" >> "$f"
     _post_note issues "$iid" "$f"
-    _lane_ev merge_failed ticket "$iid"
-    echo "lane.sh: issue $iid — merge attempt recorded"
+    _lane_ev merge_failed ticket "$iid" ${klass:+base_red "$klass"}
+    echo "lane.sh: issue $iid — merge attempt recorded${klass:+ (base-red: $klass, fix #$fixiid — does not count toward the cap)}"
+}
+
+cmd_base_check() { # [--] <cmd...> — run <cmd> against clean origin/<base>
+    # P62: the evidence step under a --base-red claim. The falsification risk
+    # is misattribution — the branch has a real defect that HAPPENS to also be
+    # red on base, and a lane that compared mere redness would retry forever —
+    # so the caller must run the one failing check (same test id), and this
+    # verb only supplies the clean-base ground to run it on: a throwaway
+    # detached worktree at freshly-fetched origin/<base>, removed on the way
+    # out whatever the rc. A script, not instructions, for the reconcile
+    # reason: a lane improvising this with checkout/stash gymnastics in its
+    # own worktree would dirty the branch it is about to merge.
+    [ "${1:-}" = "--" ] && shift
+    [ $# -gt 0 ] || die "base-check: no command given (usage: lane.sh base-check [--] <cmd...>)"
+    git fetch origin >/dev/null 2>&1 || die "base-check: git fetch failed"
+    local base
+    if git show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null
+    then base=develop; else base=main; fi
+    git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null \
+        || die "base-check: origin/$base does not exist"
+    local wtp rc=0
+    wtp=$(mktemp -d "${TMPDIR:-/tmp}/lane-base-check.XXXXXX")
+    git worktree add --detach "$wtp/base" "origin/$base" >/dev/null 2>&1 \
+        || { rmdir "$wtp" 2>/dev/null || true; die "base-check: could not create a worktree at origin/$base"; }
+    ( cd "$wtp/base" && "$@" ) && rc=0 || rc=$?
+    git worktree remove --force "$wtp/base" >/dev/null 2>&1 || true
+    rmdir "$wtp" 2>/dev/null || true
+    echo "lane.sh: base-check on clean origin/$base exited rc=$rc" >&2
+    return "$rc"
 }
 
 cmd_rescope() { # <iid> [--file F]
@@ -568,6 +637,7 @@ case "${1:-}" in
     mr-note)    shift; cmd_mr_note "$@" ;;
     verdict)    shift; cmd_verdict "$@" ;;
     merge-failed) shift; cmd_merge_failed "$@" ;;
+    base-check) shift; cmd_base_check "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
     rescope)    shift; cmd_rescope "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
@@ -576,5 +646,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--file F] | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

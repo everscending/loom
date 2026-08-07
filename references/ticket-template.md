@@ -36,6 +36,19 @@ instead of ahead of them.
 Inputs that must be **rejected**, one per line, ending with:
 "fix the rule, not my examples."
 
+## Repo-wide guards
+
+Only when a deliverable asserts over the **whole tree** — a lint rule, a
+scan of `src/`, a conventions test — rather than this ticket's own files:
+declare it here, one line per guard, scope and rule. A repo-wide guard is a
+contract change binding every later ticket, so phase 4 surfaces this
+section across the set and tightens an over-broad rule before it ships. A
+tree-wide assertion that appears in no ticket's declaration is a defect in
+the ticket, not a stricter test. *(paid: ai-workout build-1 — #30 shipped
+an undeclared model-literal scan of all of `src`; it matched `"60s/side"`,
+`"text/event-stream"` and `EMBEDDING_MODEL_NAME`, and merges started
+failing on defects already on `origin/main`.)*
+
 ## Risk tier
 
 `docs | logic | api | ui` — one word. Selects the gate suite from

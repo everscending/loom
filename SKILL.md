@@ -375,7 +375,8 @@ refuses outside herdr anyway.
    and the merge lane fires its own tick when it lands, picking up whatever it
    newly unblocked.
 
-   The lane does, for the oldest `merge-queue` ticket only:
+   The lane does, for the oldest `merge-queue` ticket whose `.merge_hold` is
+   null (a held ticket is parked behind an open base-red fix) only:
    `lane.sh reconcile` — fetch + **merge** `origin/<base>` into the branch,
    **never rebase**. This skill's own guardrails deny force-push, so rebased history
    can never be pushed; the verb exists because two lanes chose rebase off
@@ -401,9 +402,16 @@ refuses outside herdr anyway.
    and the dependents it unblocks branch from a base without the code in it.
    `close` now refuses that outright. *(paid: merge-1 ran reconcile, ran the
    gate, ran `close`, announced "merged and closed" — MR !1 was still open and
-   four lanes were seconds from branching off it.)* A red *combined* gate is the same shape:
-   this is the first time the branch is tested against what landed on `<base>`
-   since, so record the attempt and leave it — never fix it in the merge lane.
+   four lanes were seconds from branching off it.)* A red *combined* gate is
+   the first time the branch is tested against what landed on `<base>` since —
+   so before recording, re-run the failing check on clean base with
+   `lane.sh base-check -- <cmd>`. The **same check** red there (same test id,
+   not mere redness) is a base defect, not this ticket's: record it
+   `merge-failed <iid> --base-red <check-id> --fix <fix-iid>` (`fix-ticket`
+   one if none exists) — it never counts the cap, and the ticket parks in
+   `.merge_hold` until the fix merges, re-entering the queue on its own.
+   Otherwise record the attempt and leave it — never fix it in the merge
+   lane. *(paid: seven main-is-red incidents; two caps burned with no reset.)*
 
    **Worktree teardown belongs to `tick.sh sweep`, never the merge lane** — a
    lane cannot remove the worktree it stands in, and the human must never
