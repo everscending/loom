@@ -322,6 +322,82 @@ sleep 0.3
 "$TICK" clear-lane merge-73 >/dev/null
 rm -rf "$LOOM_HOME/tick.lock.d"
 
+# 4e4. Gate lock (P67). The impl->gate chain handoff and the scheduler's own
+#      gate step can both spawn a gate for the same ticket at the same HEAD —
+#      ai-workout build-1: gate-14 and gate-14-r2 live at once, #41 gated
+#      twice on one SHA, #8 gated twice within a minute. Same mkdir-atomic,
+#      dead-owner-breakable shape as the merge lock, but keyed per
+#      ticket+commit so unrelated gates never queue behind each other.
+rm -rf "$LOOM_HOME/tick.lock.d" "$LOOM_HOME/gate.lock.d"
+GL="$T/gatelock"; mkdir -p "$GL/repo"
+git init -q "$GL/repo" 2>/dev/null
+git -C "$GL/repo" config user.email t@t; git -C "$GL/repo" config user.name t
+: > "$GL/repo/f"; git -C "$GL/repo" add f >/dev/null 2>&1
+git -C "$GL/repo" commit -qm init >/dev/null 2>&1
+
+"$TICK" spawn-lane gate-14 --no-tick --cwd "$GL/repo" -- sleep 20 >/dev/null
+if "$TICK" spawn-lane gate-14-r2 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1; then
+    bad "gate-lock: a second gate lane started on the same ticket+HEAD (P67 reproduced)"
+else
+    [ -f "$LOOM_HOME/lanes/gate-14-r2.pid" ] \
+        && bad "gate-lock: refused but left a pid file" \
+        || ok "gate-lock: a duplicate gate on the same ticket+HEAD is refused, no lane left behind"
+fi
+
+# Different ticket, same HEAD: proves the lock is per-TICKET, not one shared
+# dir like the merge lock — unrelated gates must never queue behind each other.
+"$TICK" spawn-lane gate-15 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1 \
+    && ok "gate-lock: a different ticket at the same HEAD is unaffected" \
+    || bad "gate-lock: an unrelated ticket queued behind another ticket's lock"
+"$TICK" clear-lane gate-15 >/dev/null 2>&1
+
+# Same ticket, a NEW commit: proves the lock is per-COMMIT, not a standing
+# hold on the ticket that would wedge every later round.
+echo more > "$GL/repo/f"; git -C "$GL/repo" add f >/dev/null 2>&1
+git -C "$GL/repo" commit -qm second >/dev/null 2>&1
+"$TICK" spawn-lane gate-14-r3 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1 \
+    && ok "gate-lock: the same ticket at a NEW head is not blocked by the old commit's lock" \
+    || bad "gate-lock: a stale ticket+HEAD key wedged the next round"
+"$TICK" clear-lane gate-14-r3 >/dev/null 2>&1
+
+# Dead owner: a killed gate lane's lock is broken by the next attempt — one
+# skipped gate, never a permanently wedged ticket.
+kill "$(cat "$LOOM_HOME/lanes/gate-14.pid")" 2>/dev/null; sleep 0.3
+"$TICK" clear-lane gate-14 >/dev/null
+if "$TICK" spawn-lane gate-14-r4 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1; then
+    ok "gate-lock: a killed gate lane's lock is broken by the next attempt"
+else
+    bad "gate-lock: dead owner's lock wedged the ticket permanently"
+fi
+sleep 0.3
+"$TICK" clear-lane gate-14-r4 >/dev/null 2>&1
+rm -rf "$LOOM_HOME/gate.lock.d" "$LOOM_HOME/tick.lock.d"
+
+# Released on exit, no stamp race: an instant gate lane must not fail its own
+# spawn, and the very next spawn on the same ticket+HEAD must find the lock
+# genuinely free (mirrors the merge-lock's own instant-lane case).
+"$TICK" spawn-lane gate-16 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1 \
+    && ok "gate-lock: an instant gate lane spawns cleanly (no stamp race)" \
+    || bad "gate-lock: spawn failed because the lane released before the stamp"
+sleep 0.4
+"$TICK" spawn-lane gate-16-r2 --no-tick --cwd "$GL/repo" -- true >/dev/null 2>&1 \
+    && ok "gate-lock-violation: the released lock is genuinely free for the next round" \
+    || bad "gate-lock-violation: lock left behind by an instant lane"
+"$TICK" clear-lane gate-16 >/dev/null 2>&1; "$TICK" clear-lane gate-16-r2 >/dev/null 2>&1
+rm -rf "$LOOM_HOME/gate.lock.d"
+
+# A non-git cwd has no HEAD to key on, so a same-ticket respawn must never be
+# blocked by it — the graceful-skip path every plain-directory (WT/GWT) gate
+# fixture elsewhere in this suite already relies on.
+mkdir -p "$GL/plain"
+"$TICK" spawn-lane gate-17 --no-tick --cwd "$GL/plain" -- sleep 5 >/dev/null
+"$TICK" spawn-lane gate-17-r2 --no-tick --cwd "$GL/plain" -- true >/dev/null 2>&1 \
+    && ok "gate-lock: a non-git cwd has no HEAD to key on, so it never blocks" \
+    || bad "gate-lock: a directory with no HEAD wrongly blocked a spawn"
+kill "$(cat "$LOOM_HOME/lanes/gate-17.pid" 2>/dev/null)" 2>/dev/null
+"$TICK" clear-lane gate-17 >/dev/null 2>&1; "$TICK" clear-lane gate-17-r2 >/dev/null 2>&1
+rm -rf "$LOOM_HOME/tick.lock.d"
+
 # 4f. A lane runs where its work is: --cwd puts it in the worktree, which is
 #     what removes the need for a `cd` allow rule (P4). Planted violation:
 #     the same spawn WITHOUT the flag must land in the repo root instead.

@@ -18,7 +18,11 @@
 #                                running in <dir> (default: the repo root).
 #                                The lane fires the next wave when it exits
 #                                unless --no-tick; --merge-lock holds the
-#                                single-writer merge lock for its lifetime
+#                                single-writer merge lock for its lifetime.
+#                                A gate-<ticket> lane refuses outright when a
+#                                live gate lane already holds that ticket at
+#                                the same HEAD (P67) — chain and scheduler may
+#                                race for it; the loser exits in milliseconds.
 #   lane-status                  one line per lane: running | stale | dead
 #   render-log <id> [--follow]   lane-<id>.jsonl stream → readable log, or stdout
 #   retro [--build|--vs <l>]     capacity, rework, wait/work, critical chain
@@ -65,6 +69,12 @@ LOCK_DIR="${LOOM_LOCK_DIR:-$LOOM_HOME/tick.lock.d}"
 # behind a rebase-and-merge (P5). Its own lock lets a merge run in a lane while
 # waves keep scheduling. Same mkdir-atomic, dead-owner-breakable semantics.
 MERGE_LOCK_DIR="${LOOM_MERGE_LOCK_DIR:-$LOOM_HOME/merge.lock.d}"
+# P67: the chain handoff and the scheduler's own gate step can both spawn a
+# gate for the same ticket at the same HEAD — two full review sessions for one
+# diff, and the last verdict write wins. One lock dir per ticket+commit (never
+# one global dir like MERGE_LOCK_DIR: unrelated gates must never queue behind
+# each other) gets the same mkdir-atomic, dead-owner-breakable shape.
+GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 # A tick that arrives while a wave holds the lock used to be discarded outright,
 # and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
 # was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
@@ -554,6 +564,30 @@ _rotate_log() { # <path>
 _merge_lock_owner() { # prints the live owner pid, or nothing
     local owner
     owner=$(cat "$MERGE_LOCK_DIR/pid" 2>/dev/null || echo "")
+    [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && printf '%s\n' "$owner"
+    return 0
+}
+
+# Same shape as the merge lock, keyed per ticket+commit instead of one global
+# dir (P67) — <key> is "<ticket>@<sha>", so gate-14 at one HEAD never queues
+# behind gate-9 at another, only behind its own true duplicate.
+_gate_lock_reserve() { # <key> → 0 reserved, 1 genuinely held
+    local key="$1"
+    local dir="$GATE_LOCK_DIR/$key"
+    mkdir -p "$GATE_LOCK_DIR" 2>/dev/null || :
+    if mkdir "$dir" 2>/dev/null; then
+        echo $$ > "$dir/pid"; return 0
+    fi
+    local owner
+    owner=$(cat "$dir/pid" 2>/dev/null || echo "")
+    if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then return 1; fi
+    rm -rf "$dir"
+    _gate_lock_reserve "$key"
+}
+
+_gate_lock_owner() { # <key> → prints the live owner pid, or nothing
+    local key="$1" owner
+    owner=$(cat "$GATE_LOCK_DIR/$key/pid" 2>/dev/null || echo "")
     [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null && printf '%s\n' "$owner"
     return 0
 }
@@ -1197,6 +1231,24 @@ cmd_spawn_lane() {
     if [ "$merge_lock" -eq 1 ]; then
         _merge_lock_reserve || die "spawn-lane: merge lock held by pid $(_merge_lock_owner) — one merge at a time"
     fi
+    # P67: same guard, for a gate lane against its own ticket+HEAD. Keyed off
+    # the worktree's actual commit, read here rather than trusted from the id,
+    # so a stale round number can never fool it. No HEAD to key on (--cwd is
+    # not a git worktree, or has no commits yet) means nothing safe to dedupe
+    # against — let it through exactly as before P67.
+    local gate_lock_key=""
+    if [ "$(_lane_type "$id")" = "gate" ]; then
+        local _gticket="${id#gate-}" _ghead
+        _gticket="${_gticket%-r[0-9]*}"
+        _ghead=$(git -C "$abs" rev-parse HEAD 2>/dev/null || echo "")
+        if [ -n "$_ghead" ]; then
+            gate_lock_key="$_gticket@$_ghead"
+            _gate_lock_reserve "$gate_lock_key" \
+                || die "spawn-lane: a gate lane already holds ticket $_gticket at $_ghead
+  (pid $(_gate_lock_owner "$gate_lock_key")) — one gate per commit (P67). This is the
+  chain/scheduler race resolving itself; the other session owns this verdict."
+        fi
+    fi
 
     # EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE, after the last guard that
     # can refuse. Rotating logs and clearing `<id>.rc` above the merge-lock
@@ -1257,6 +1309,7 @@ cmd_spawn_lane() {
         epi="'$SELF_PATH' render-log '$id'; "
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
+    [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
     [ "$on_done" -eq 1 ] && epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
     # The exit code is recorded FIRST, before the tick fires, or the wave this
     # lane wakes would race the file it needs to read. It is how a wave tells a
@@ -1326,6 +1379,7 @@ ui"
     # dead pid. Stamping from inside closes the window entirely.
     local stamp=""
     [ "$merge_lock" -eq 1 ] && stamp="printf '%s\\n' \$\$ > '$MERGE_LOCK_DIR/pid'; "
+    [ -n "$gate_lock_key" ] && stamp="${stamp}printf '%s\\n' \$\$ > '$GATE_LOCK_DIR/$gate_lock_key/pid'; "
     ( cd "$dir" && exec nohup bash -c \
         '_rc=0; '"$stamp$pre"'if [ "$_rc" -eq 0 ]; then "$@"'"$redirect"'; _rc=$?; fi; '"$epi"' exit $_rc' \
         _lane "$@" ) >>"$log" 2>&1 &

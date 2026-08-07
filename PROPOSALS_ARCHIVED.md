@@ -59,6 +59,7 @@ writing a new proposal that touches the same machinery.
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | implemented 2026-08-07 (`lane.sh submit` opens the MR carrying `Closes #<iid>` and moves the label to `review` in one call, refusing an unpushed HEAD, a closed ticket and an already-judged one, and completing rather than duplicating an open MR; `snapshot` derives `summary.repairs` — the two stranded shapes, each with the single command that repairs it — and warns on each) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
+| P67 | One gate per commit | implemented 2026-08-07 (`tick.sh spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket+HEAD, via a `_gate_lock_reserve`/`_gate_lock_owner` pair shaped exactly like the existing merge lock but keyed per `<ticket>@<sha>` instead of one shared dir) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 
@@ -2348,6 +2349,42 @@ One note on the evidence. It still reproduces as written — merge-10's logs say
 at worktree CREATION either, not merely left stale by a merge. This fix covers the reconcile
 half, which is what the proposal specified; worktree-creation setup for nested ecosystems is a
 separate gap.
+
+## P67 · One gate per commit
+
+**Problem.** The impl→gate chain handoff and the scheduler's gate step can both spawn a gate for
+the same ticket at the same HEAD. P11 deduplicates *sequential* re-gates via the verdict trailer;
+nothing covers the *concurrent* case, so two full review sessions run and the last verdict write
+wins.
+
+**Evidence (ai-workout build-1).** gate-14 and gate-14-r2 live simultaneously on one HEAD (wave
+note 03:49); #41 rounds 2 and 3 both PASSed the same SHA; #8 gated twice within a minute
+(06:00, 06:01). Pure duplicate spend.
+
+**Fix, as implemented.** `spawn-lane` refuses a gate lane when a live gate lane already holds the
+same ticket and HEAD — the merge-lock shape (mkdir-atomic, PID-owned, stale-broken), applied per
+ticket+commit instead of one shared dir, so gates on unrelated tickets or unrelated commits never
+queue behind each other. `_gate_lock_reserve`/`_gate_lock_owner` are the merge lock's two
+functions verbatim, parameterized by a `<ticket>@<sha>` key under `$LOOM_HOME/gate.lock.d/`.
+`cmd_spawn_lane` reads the ticket off the lane id (`gate-<ticket>[-r<round>]`, stripping the round
+suffix) and the commit off `git -C <worktree> rev-parse HEAD` — the worktree's actual HEAD, never
+trusted from the id, so a stale round number can't fool it. The lock is reserved before any
+destructive step (same place the merge lock reserves), released in the lane's own exit epilogue,
+and restamped with the lane's own pid from inside the lane for the same reason the merge lock
+does: the reserving process (`spawn-lane` itself) exits almost immediately, so leaving its pid on
+the lock would make it look abandoned within moments. A worktree with no determinable HEAD (not a
+git checkout yet, or no commits) has nothing safe to key on, so the guard steps aside entirely —
+this is the only reason a gate spawn there is unaffected. Chain and scheduler race safely; the
+loser's `spawn-lane` call dies in milliseconds with no lane and no pid file left behind.
+
+**Tests.** `scripts/tick-test.sh`: a duplicate gate on the same ticket+HEAD is refused and leaves
+no lane; a different ticket at the same HEAD is unaffected (proves per-ticket, not one shared
+lock); the same ticket at a new HEAD is unaffected (proves per-commit, not a standing hold); a
+killed gate lane's lock is broken by the next attempt; an instant gate lane spawns cleanly with no
+stamp race, and the lock it releases is genuinely free for the next round; a non-git cwd has no
+HEAD to key on and never blocks. Full suite: 536 passed, 0 failed (529 → 536). SKILL.md:
+unchanged — the guard is transparent plumbing inside `spawn-lane`, the same class as the existing
+duplicate-live-lane-id guard, which SKILL.md also never narrates.
 
 ## P69 · The verdict verb enforces its own trailer
 

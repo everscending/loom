@@ -60,7 +60,6 @@ evidence, and implementation notes belong in this file, not there.
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
-| P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
@@ -636,21 +635,6 @@ epic without one. The probe then confirms; it never discovers.
 **What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
 same rate — meaning the bar transfer, not the missing owner, was the problem.
 
-
-## P67 · One gate per commit
-
-**Problem.** The impl→gate chain handoff and the scheduler's gate step can both spawn a gate for
-the same ticket at the same HEAD. P11 deduplicates *sequential* re-gates via the verdict trailer;
-nothing covers the *concurrent* case, so two full review sessions run and the last verdict write
-wins.
-
-**Evidence (ai-workout build-1).** gate-14 and gate-14-r2 live simultaneously on one HEAD (wave
-note 03:49); #41 rounds 2 and 3 both PASSed the same SHA; #8 gated twice within a minute
-(06:00, 06:01). Pure duplicate spend.
-
-**Fix.** `spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket and
-HEAD — the merge-lock shape, applied per ticket+commit. Chain and scheduler race safely; the
-loser exits in milliseconds.
 
 ## P68 · Implementation briefs get the headless survival rules probes get
 
