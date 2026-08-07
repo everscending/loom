@@ -58,6 +58,16 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
+| P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
+| P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | open — adopted 2026-08-07, ai-workout build-1: ~7 incidents, #26/#15 cap-blocked; merge-side rule is tranche 1 (before restart) |
+| P61 | Count model turns, not log lines | open — adopted 2026-08-07, ai-workout build-1: two healthy lanes killed at 4 min on ~7× inflated counts; tranche 1 |
+| P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
+| P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
+| P65 | Fix tickets are born with edges and checked for twins | open — adopted 2026-08-07, ai-workout build-1: one duplicate, two undeclared dependencies; tranche 1 |
+| P66 | Reconcile re-installs every ecosystem the merge touched | open — adopted 2026-08-07, ai-workout build-1: merge-10 failed twice, ticket never merged; tranche 1 |
+| P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
+| P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
+| P69 | The verdict verb enforces its own trailer | open — adopted 2026-08-07, ai-workout build-1: unclassed FAILs, spurious classes on PASS, duplicate trailers; tranche 2 |
 | P56 | A probe that cannot finish fails fast | open — proposed 2026-08-06; probes average 162 turns, most of it polling |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
@@ -253,6 +263,10 @@ the round it saves. For the ticket-side half specifically: a build where impleme
 bullet-to-test mapping and this family still accounts for over half the rejections, which would
 mean the gap is comprehension of the bullet rather than accounting for it.
 
+**Final build-1 tally (ai-workout, 2026-08-07).** The build finished its run at 11 first-round
+FAILs in 41 verdicts; the family held at 4 of 11 (#3, #25, #31, #5) plus one late relative, #13's
+`adversarial-test-gap`. No change to the fix; the evidence base is now three builds.
+
 ## P38 · One way for a lane to fire the next wave, not two
 
 **Evidence.** build-3, 2026-08-04 14:19:48. The merge lane for #68 merged MR !65, closed the
@@ -447,6 +461,11 @@ nothing at all about which verb finishes a merge (that is a decision, and it liv
 A suite case asserts the injected verb list equals `lane.sh`'s usage list, so the two cannot drift
 again.
 
+**More evidence (ai-workout build-1, 2026-08-07).** The same hand-maintained-prose failure shape
+reached lane briefs: a wave's brief told impl-2 to invoke `/implement` as a slash command —
+impossible in a headless session — costing two dead spawns before a later wave rewrote the brief
+inline. P68 (adopted 2026-08-07) is the brief-side companion to this proposal.
+
 ## P49 · Every tracker read paginates
 
 **Problem.** `_epics_unaccepted` (`tick.sh:246-247`), `_quiet_check` (`:306`) and the snapshot's
@@ -622,3 +641,185 @@ nothing and should be skipped.
 
 
 **Consumer.** Phase 4, and every ticket that imports a pinned shape without renegotiating it.
+## P60 · A gate command may never depend on an unmerged ticket's deliverable
+
+**Problem.** ai-workout build-1's `.loom.yml` tiers invoke `scripts/gate.sh` (ticket #7's
+deliverable), `scripts/gen_openapi_client.py` (#6's) and the `web/` toolchain (#2's). The ticket
+graph was acyclic, but the *gate* graph was not: #2's own `ui` tier needs #6's script while #6 is
+blocked by #2, and every ticket's merge gate needed #7's runner. No link-based closure check can
+see this class — the cycle runs through a shell command's file dependency, not a blocking edge.
+The pregate's behaviour on a missing runner (skip, silently) meant the mechanical check ran zero
+times all build, and the failure surfaced instead as merge-lane deaths.
+
+**Evidence (2026-08-06/07).** merge-2 died on missing `gen_openapi_client.py` (00:38), merge-5 on
+missing `gate.sh` (00:44); a wave then traced the loop, mass-blocked #2, #5, #10, #32, #36, and the
+build stalled ~1h for a human waiver — the largest single stall of the run. Every gate all night
+logged `pregate: no scripts/gate.sh here, skipping`.
+
+**Fix, two halves.** *Definition side*: when a build is defined (phase 5) — and again whenever
+membership is amended — resolve every file/script the tiers' gate commands invoke; each must
+either exist on the base branch or be delivered by a ticket that blocks every ticket carrying that
+tier, else the definition is refused naming the offending command. P58 already carries this as a
+phase-4 draft-check line ("every command a ticket's gate tier will run exists by the time that
+ticket merges"); this proposal is that rule with teeth at the two later layers, where tickets
+arrive by amendment rather than drafting. *Runtime side*: a missing gate dependency becomes a
+declared bootstrap stage — the pregate reports "tier reduced to X until #n merges" instead of a
+silent skip, so the log says what is not being checked and why.
+
+**What would falsify it.** A refused build definition whose named cycle a human then shows to be
+spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
+at definition time is cheaper than an hour's stall, but not free.
+
+## P61 · Count model turns, not log lines
+
+**Problem.** `_stamp_progress` filters only `api_retry`, `rate_limit_event` and `tool_progress`
+before counting stream events as "turns". A thinking-enabled lane emits mostly `thinking_tokens`
+system events, so the count the staleness clock, `lane_turn_cap` and every wave's judgment read is
+inflated ~7×. This is a measurement defect inside the mechanisms P27 (progress, not bytes) and
+P52 (a runaway lane is stopped) shipped: both assume the stamp means turns.
+
+**Evidence (ai-workout build-1).** impl-25's stream at kill time: 204 lines, 163 `system` events
+(160 of them `thinking_tokens`), 23 real assistant turns — reported as 162 against a 150 cap.
+impl-2 and impl-25, both ~4 minutes old and healthy, were killed and blocked at 23:16–23:19; the
+human unblock note reads "resume — the blocking reason was a bad measurement." Wave turn
+commentary stayed corrupted all night ("206 turns, well under cap").
+
+**Fix.** The stamp counts only assistant-message events. One fixture test replays a captured
+stream (163 thinking events, 23 turns) and asserts 23.
+
+## P62 · A repo-wide guard test is a contract change, and a red base never costs a merge attempt
+
+**Problem.** Ticket #30 shipped a test scanning *all* of `src` for model-literal strings. It bound
+every later ticket to a rule nobody else agreed to, and it was over-broad (`"60s/side"`,
+`"text/event-stream"`, `EMBEDDING_MODEL_NAME` all matched). Merges began failing on defects
+already present on `origin/main` — not in the branch being merged — and `merge_attempt_cap`
+counted those failures anyway. When the fix ticket (#65) merged, the cap-blocked tickets stayed
+blocked: spent attempts have no reset.
+
+**Evidence (ai-workout build-1).** merge-12 and merge-26 failed on main-is-red (02:04–02:18); #26
+burned its full cap and needed a human unblock *after* #65 had merged; #15 burned its cap on the
+same test at 04:00 and was still blocked at the stop; the 04:27 "every open ticket is blocked"
+halt. Seven incidents total. Sits beside P31 but is a different family: P31 is a test asserting
+too little about its own ticket; this is a test asserting too much about everyone else's.
+
+**Fix, three parts.** *Ticket side*: a test that asserts over the whole tree must be declared in
+the ticket body as a repo-wide guard, so phase 4 can surface the new contract to every later
+ticket. *Merge side* (tranche 1): before counting a failed attempt, the lane re-runs the failing
+check against clean `origin/<base>`; if base alone is red, record the attempt as `base-red` — file
+or link the fix ticket, never count the cap. *Release side*: when a fix ticket naming a failing
+check merges, tickets whose attempts were all `base-red` against that check are requeued
+automatically.
+
+**What would falsify it.** A base-red re-run that misattributes — the branch's own defect happens
+to also fail on base — letting a genuinely broken ticket retry forever; the re-run must compare
+failure identity (test id), not just redness.
+
+## P63 · Finishing is one verb, and the snapshot spots the half-finished
+
+**Problem.** A lane finishes with several tracker writes in sequence — push, open MR, move label;
+or post verdict, move label. A session death between steps strands a finished ticket in a state
+no scheduler step looks at, and recovery is model judgment in a later wave.
+
+**Evidence (ai-workout build-1).** Four incidents: #31 pushed MR !8 then died before the relabel
+(repaired 01:55); #26's PASS was posted but the label never flipped (repaired 04:24); #36 and #10
+the same shape (repaired 06:12). Hours of latency each; three repair waves.
+
+**Fix, two halves.** *Verb*: `lane.sh submit` — opens the MR (with the required `Closes #<iid>`)
+and moves the label in one call, refusing partial state it can detect. *Detector*: `snapshot`
+deterministically flags the two stranded shapes — open MR with `Closes #n` but ticket not in
+`review`+; PASS trailer on HEAD but ticket not in `merge-queue` — as named repair items, so the
+wave reads a list instead of re-deriving history.
+
+## P64 · Every epic ends with a wiring ticket
+
+**Problem.** Unit-tier gates judge tickets; nothing before the epic probe judges the epic. In
+ai-workout build-1, every E1 (exercise graph) ticket passed its gate while the running app never
+called `build_kg1()` once — `/api/graph/focus` served byte-identical fixture output for every
+member — and the shipped catalog's 18 `bilateral_pair_id` values all dangled. The probe, the last
+step of the epic, was the first thing that looked.
+
+**Evidence.** E1 probe FAIL 06:27 → fix tickets #69 (wire the graph into the app), #70 (docs),
+#71 (dangling ids — a product decision, blocked). E0's probe similarly failed twice on gaps
+(no run command, undocumented env vars) that a wiring-level ticket would have owned.
+
+**Fix.** Phase 4 must end each epic with a wiring ticket, blocked by the epic's other members,
+whose acceptance criteria are the epic's own acceptance criteria exercised against the running
+app and the real data — the same bar the probe applies. The build-definition check refuses an
+epic without one. The probe then confirms; it never discovers.
+
+**What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
+same rate — meaning the bar transfer, not the missing owner, was the problem.
+
+## P65 · Fix tickets are born with edges and checked for twins
+
+**Problem.** `lane.sh fix-ticket` applies the five schedulability facts but writes no
+`## Blocked by` section and performs no duplicate check, so probe-filed tickets enter the graph
+edgeless and possibly twice.
+
+**Evidence (ai-workout build-1).** #68 duplicated #67 (the implementing lane discovered this
+mid-flight); #69 ran while the product decision it depends on (#71) sat blocked — its own body
+says building the graph before that decision "will crash the app on every boot" — and #69
+overlaps #55's scope with no edge in either direction.
+
+**Fix.** `fix-ticket` gains `--blocked-by <iids>` (written into the body the scheduler reads),
+and before creating lists open fix tickets in the same milestone, refusing on a near-duplicate
+title unless `--force` — the filing lane decides with eyes open.
+
+## P66 · Reconcile re-installs every ecosystem the merge touched
+
+**Problem.** `lane.sh reconcile`'s dependency sync looks only at the root Python manifest
+(`uv sync`); a merge that moves a nested lockfile (`web/pnpm-lock.yaml`) leaves that ecosystem
+uninstalled, and the post-reconcile gate dies on a missing tool.
+
+**Evidence (ai-workout build-1).** merge-10 failed twice (03:30) on `openapi-typescript` missing
+from `web/node_modules`; #10 was still unmerged when the build stopped and will fail the same way
+on resume.
+
+**Fix.** The sync step detects every lockfile the merge moved — root or nested — and runs the
+matching installer per ecosystem. Suite case: a merge staged to move only a nested lockfile
+asserts the nested install ran.
+
+## P67 · One gate per commit
+
+**Problem.** The impl→gate chain handoff and the scheduler's gate step can both spawn a gate for
+the same ticket at the same HEAD. P11 deduplicates *sequential* re-gates via the verdict trailer;
+nothing covers the *concurrent* case, so two full review sessions run and the last verdict write
+wins.
+
+**Evidence (ai-workout build-1).** gate-14 and gate-14-r2 live simultaneously on one HEAD (wave
+note 03:49); #41 rounds 2 and 3 both PASSed the same SHA; #8 gated twice within a minute
+(06:00, 06:01). Pure duplicate spend.
+
+**Fix.** `spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket and
+HEAD — the merge-lock shape, applied per ticket+commit. Chain and scheduler race safely; the
+loser exits in milliseconds.
+
+## P68 · Implementation briefs get the headless survival rules probes get
+
+**Problem.** The probe prompt carries the headless rules paid for by dead probes — every step
+blocks, poll never await, kill before exit. Implementation and merge briefs carry none of them,
+and briefs have separately instructed slash-command invocation, which cannot work in a headless
+session.
+
+**Evidence (ai-workout build-1).** impl-2 spawned three times because its brief said to invoke
+`/implement` (two dead spawns before a wave inlined the instructions); impl-8's first run ended
+"the harness will notify me automatically" over a backgrounded docker build that could never wake
+it — #8 merged ~6h later. Companion to P48: same root (hand-maintained prompt prose), different
+artifact.
+
+**Fix.** The headless rules move into the brief template every lane kind receives — they are
+facts about the execution environment, not about probing — and a brief never instructs a skill
+invocation; it inlines the work. A suite case greps composed briefs for the slash-command shape.
+
+## P69 · The verdict verb enforces its own trailer
+
+**Problem.** The same-class rejection stop (P30) keys off `class=` in the verdict trailer, and
+SKILL.md prose requires it — but `lane.sh verdict` accepts a FAIL without `--class`, a PASS with
+a leftover class, and duplicate trailers on one commit. Three builds running, the stop has had
+nothing reliable to match (fresh slug per round; no slug; now spurious and duplicate slugs).
+
+**Evidence (ai-workout build-1).** #5: two FAIL trailers, no class, same SHA. Spurious
+`class=logic` / `class=regex-tier-match` on PASS trailers. Duplicate PASS trailers on #8 and #30.
+
+**Fix.** `verdict` refuses FAIL without `--class`, strips class from PASS, refuses a second
+identical ticket+SHA+outcome trailer. Machinery, not prose — the prose already lost three times.
