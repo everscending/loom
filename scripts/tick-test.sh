@@ -4335,7 +4335,7 @@ case "$out" in *"⚑ T9 blocked — decision needed"*) \
 # Failure lines stand out (asked for by the human, 2026-08-02): a glyph in
 # the plain bytes always, ANSI color only on a tty or under LOOM_COLOR=1 —
 # so pipes, greps and these very assertions see stable bytes by default.
-echo "regression in error handling" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 5 fail beef1234 >/dev/null 2>&1
+echo "regression in error handling" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 5 fail beef1234 --class error-handling >/dev/null 2>&1
 LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 6 blocked >/dev/null 2>&1
 out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"✗ #5 gate verdict: FAIL @ beef1234"*) \
@@ -4580,6 +4580,65 @@ echo y | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP2" \
     "$LANE" verdict 8 pass beef5678 >/dev/null 2>&1 \
     && ok "verdict: class stays optional" \
     || bad "verdict: classless verdict refused"
+
+# 16a4c. P69: the verdict verb enforces its own trailer instead of relying on
+#        SKILL.md prose — three builds running produced unclassed FAILs,
+#        spurious classes on PASS trailers and duplicate trailers because
+#        nothing in the verb itself checked (ai-workout build-1, 2026-08-07:
+#        #5's two FAIL trailers with no class same SHA; spurious
+#        class=logic / class=regex-tier-match on PASS; duplicate PASS on #8
+#        and #30).
+VCAP6="$T/verdict-noclass-bodies"; : > "$VCAP6"
+echo "no class given" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" verdict 9 fail cafe0000 >/dev/null 2>&1 \
+    && bad "verdict: a FAIL with no --class was accepted" \
+    || ok "verdict: a FAIL with no --class is refused"
+[ -s "$VCAP6" ] \
+    && bad "verdict: the refused classless FAIL still posted a trailer ($(cat "$VCAP6"))" \
+    || ok "verdict: the refused classless FAIL posted nothing"
+
+VCAP7="$T/verdict-pass-strip-bodies"; : > "$VCAP7"
+echo "green, but a stray class rode along" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP7" \
+    "$LANE" verdict 9 pass cafe0000 --class logic >/dev/null 2>&1
+grep -q "orch-verdict PASS cafe0000 -->" "$VCAP7" \
+    && ok "verdict: a PASS strips a passed-in --class from the trailer" \
+    || bad "verdict: PASS trailer missing or malformed ($(tail -2 "$VCAP7" 2>/dev/null))"
+grep -q "class=" "$VCAP7" \
+    && bad "verdict: PASS trailer leaked class= ($(tail -2 "$VCAP7" 2>/dev/null))" \
+    || ok "verdict: no class= survives on a PASS trailer"
+
+# A second identical ticket+SHA+outcome trailer is a duplicate re-gate, not a
+# new verdict — refuse it, and post nothing while refusing.
+cat > "$T/glab-dup-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${VCAP:?}"; echo '{}'; exit 0 ;; esac; done
+cat "${NOTES_FIXTURE:?}"
+EOF
+chmod +x "$T/glab-dup-stub.sh"
+NOTES_FIXTURE="$T/dup-notes.json"
+cat > "$NOTES_FIXTURE" <<'EOF'
+[{"created_at":"2026-08-07T06:00:00Z","body":"Passed on re-review.\n\n<!-- orch-verdict PASS cafe0000 -->"}]
+EOF
+VCAP8="$T/verdict-dup-bodies"; : > "$VCAP8"
+echo "same SHA, same outcome, again" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
+    VCAP="$VCAP8" NOTES_FIXTURE="$NOTES_FIXTURE" \
+    "$LANE" verdict 9 pass cafe0000 >/dev/null 2>&1 \
+    && bad "verdict: a second identical ticket+SHA+outcome trailer was accepted" \
+    || ok "verdict: a duplicate ticket+SHA+outcome trailer is refused"
+[ -s "$VCAP8" ] \
+    && bad "verdict: the refused duplicate still posted a trailer ($(cat "$VCAP8"))" \
+    || ok "verdict: the refused duplicate posted nothing"
+# The same outcome at a DIFFERENT sha is a fresh gate result, not a
+# duplicate, and must still land.
+VCAP9="$T/verdict-nodup-bodies"; : > "$VCAP9"
+echo "re-gated at a new HEAD" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
+    VCAP="$VCAP9" NOTES_FIXTURE="$NOTES_FIXTURE" \
+    "$LANE" verdict 9 pass beef0001 >/dev/null 2>&1 \
+    && ok "verdict: the same outcome at a new sha is not treated as a duplicate" \
+    || bad "verdict: a fresh SHA was wrongly refused as a duplicate"
+grep -q "orch-verdict PASS beef0001 -->" "$VCAP9" \
+    && ok "verdict: the non-duplicate verdict posted its trailer" \
+    || bad "verdict: the non-duplicate verdict posted no trailer ($(cat "$VCAP9"))"
 
 # 16a-2. P32: `merge-failed` records a merge attempt that did NOT merge. The
 #      merge step always takes the OLDEST merge-queue ticket, so without a

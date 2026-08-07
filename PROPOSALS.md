@@ -62,7 +62,6 @@ evidence, and implementation notes belong in this file, not there.
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
-| P69 | The verdict verb enforces its own trailer | open — adopted 2026-08-07, ai-workout build-1: unclassed FAILs, spurious classes on PASS, duplicate trailers; tranche 2 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
@@ -669,16 +668,3 @@ artifact.
 **Fix.** The headless rules move into the brief template every lane kind receives — they are
 facts about the execution environment, not about probing — and a brief never instructs a skill
 invocation; it inlines the work. A suite case greps composed briefs for the slash-command shape.
-
-## P69 · The verdict verb enforces its own trailer
-
-**Problem.** The same-class rejection stop (P30) keys off `class=` in the verdict trailer, and
-SKILL.md prose requires it — but `lane.sh verdict` accepts a FAIL without `--class`, a PASS with
-a leftover class, and duplicate trailers on one commit. Three builds running, the stop has had
-nothing reliable to match (fresh slug per round; no slug; now spurious and duplicate slugs).
-
-**Evidence (ai-workout build-1).** #5: two FAIL trailers, no class, same SHA. Spurious
-`class=logic` / `class=regex-tier-match` on PASS trailers. Duplicate PASS trailers on #8 and #30.
-
-**Fix.** `verdict` refuses FAIL without `--class`, strips class from PASS, refuses a second
-identical ticket+SHA+outcome trailer. Machinery, not prose — the prose already lost three times.

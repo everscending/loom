@@ -59,6 +59,7 @@ writing a new proposal that touches the same machinery.
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | implemented 2026-08-07 (`lane.sh submit` opens the MR carrying `Closes #<iid>` and moves the label to `review` in one call, refusing an unpushed HEAD, a closed ticket and an already-judged one, and completing rather than duplicating an open MR; `snapshot` derives `summary.repairs` — the two stranded shapes, each with the single command that repairs it — and warns on each) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
+| P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 
 ## Independent review round (2026-08-01)
@@ -2347,6 +2348,36 @@ One note on the evidence. It still reproduces as written — merge-10's logs say
 at worktree CREATION either, not merely left stale by a merge. This fix covers the reconcile
 half, which is what the proposal specified; worktree-creation setup for nested ecosystems is a
 separate gap.
+
+## P69 · The verdict verb enforces its own trailer
+
+**Problem.** The same-class rejection stop (P30) keys off `class=` in the verdict trailer, and
+SKILL.md prose requires it — but `lane.sh verdict` accepts a FAIL without `--class`, a PASS with
+a leftover class, and duplicate trailers on one commit. Three builds running, the stop has had
+nothing reliable to match (fresh slug per round; no slug; now spurious and duplicate slugs).
+
+**Evidence (ai-workout build-1).** #5: two FAIL trailers, no class, same SHA. Spurious
+`class=logic` / `class=regex-tier-match` on PASS trailers. Duplicate PASS trailers on #8 and #30.
+
+**Fix, as implemented.** `cmd_verdict` in `lane.sh` now: refuses a FAIL with no `--class`, dying
+before anything is staged or posted; silently drops any `--class` passed alongside a PASS, so no
+class ever reaches a PASS trailer regardless of what the caller sent; and refuses a second
+identical ticket+SHA+outcome trailer, reading the ticket's existing notes
+(`issues/<iid>/notes?sort=desc&order_by=created_at&per_page=100`) before staging or posting and
+scanning their bodies for an exact `orch-verdict <OUTCOME> <sha>` match — a different SHA at the
+same outcome is a fresh gate result, not a duplicate, and still lands. The notes read fails
+closed, the same pattern already used by the blocked-hold guard and `merge-failed`'s base-red
+check: a transient API failure refuses rather than guessing "not a duplicate." SKILL.md was left
+unchanged — its existing prose already only *describes* the trailer format and never claimed the
+rules were optional, so nothing there was made false by moving enforcement into the verb.
+
+**Tests.** `scripts/tick-test.sh`: a FAIL with no `--class` is refused and posts nothing; a PASS
+carrying a stray `--class` posts a trailer with no `class=` in it; a second `verdict` call with
+the same iid, SHA and outcome as one already on the ticket is refused and posts nothing; the same
+outcome at a *different* SHA is not treated as a duplicate and still posts. One pre-existing test
+(the build ticker's FAIL-verdict-renders-with-the-failure-glyph case) needed `--class` added to
+its call, since it was exercising exactly the gap this proposal closes. Full suite: 529 passed, 0
+failed (521 → 529).
 
 ## P56 · A probe that cannot finish fails fast
 

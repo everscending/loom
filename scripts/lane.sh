@@ -234,8 +234,34 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
         *) bodyargs+=("$1"); shift ;;
     esac; done
     case "$klass" in *[!a-z0-9-]*) die "--class must be a kebab slug (a-z, 0-9, -): '$klass'" ;; esac
-    local f up; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
-    up=$(printf '%s' "$res" | tr 'a-z' 'A-Z')
+    local up; up=$(printf '%s' "$res" | tr 'a-z' 'A-Z')
+    # P69: the same-class rejection stop (P30) and the SKILL.md prose both
+    # assume a FAIL always carries a class and a PASS never does, but the verb
+    # itself enforced neither — three builds running produced unclassed FAILs
+    # and spurious classes riding along on PASS trailers (ai-workout build-1,
+    # 2026-08-07). Machinery, not prose: refuse the first, strip the second.
+    if [ "$res" = fail ]; then
+        [ -n "$klass" ] \
+            || die "verdict: a FAIL needs --class <slug> — without it the same-class rejection stop (P30) has nothing to match"
+    else
+        klass=""
+    fi
+    # P69: a second identical ticket+SHA+outcome trailer is a duplicate
+    # re-gate, not a new verdict (duplicate PASS trailers landed on #8 and
+    # #30, ai-workout build-1) — refuse it before anything is staged or
+    # posted. Fail closed on the read, same as the blocked-hold guard above:
+    # a transient API failure must never read as "definitely not a duplicate".
+    local _notes rc
+    _notes=$("$GLAB" api "projects/:fullpath/issues/$iid/notes?sort=desc&order_by=created_at&per_page=100" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read existing verdict trailers (glab api failed, rc=$rc) — refusing to guess whether this is a duplicate. Retry once the tracker is reachable."
+    if printf '%s' "$_notes" | jq -e --arg up "$up" --arg sha "$sha" \
+        '[.[] | (.body // "") | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})") | select(.[0] == $up and .[1] == $sha)] | length > 0' \
+        >/dev/null 2>&1
+    then
+        die "issue $iid already carries an orch-verdict $up $sha trailer — refusing a duplicate"
+    fi
+    local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
     printf '\n\n<!-- orch-verdict %s %s%s -->\n' "$up" "$sha" "${klass:+ class=$klass}" >> "$f"
     # Note first, label second: a verdict note with no label flip is repaired
     # by the next wave (it reads the trailer); a label flip with no note is a
