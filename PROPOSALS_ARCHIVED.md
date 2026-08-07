@@ -65,6 +65,7 @@ writing a new proposal that touches the same machinery.
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 | P38 | One way for a lane to fire the next wave, not two | implemented 2026-08-07 (`tick.sh cmd_tick` refuses a bare `tick` when `LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error; SKILL.md step 5 no longer tells the merge lane to fire its own tick) |
+| P49 | Every tracker read paginates | implemented 2026-08-07 (`tick.sh` gains `_glab_list [--capped] <path>`, which paginates and folds glab's one-array-per-page output; all nine tracker reads go through it — the acceptance gate, the quiescence count, the snapshot's stage-1, milestone and closed-member reads — and only the two `sort=desc` notes reads stay capped on purpose) |
 
 ## Independent review round (2026-08-01)
 
@@ -2213,6 +2214,46 @@ compared as a set (usage order and dispatch order differ and neither is a contra
 prompt names no merge-finishing verb; and — the failing side — a doctored `lane.sh` beside a copy
 of `tick.sh` puts a verb this suite has never heard of into the prompt verbatim, which a
 restatement could not do. Full suite: 545 passed, 0 failed (536 → 545, shared with P68).
+
+## P49 · Every tracker read paginates
+
+**Problem.** `_epics_unaccepted` (`tick.sh:246-247`), `_quiet_check` (`:306`) and the snapshot's
+`closed.json` (`:1889`) read `per_page=100` with no `--paginate`, unlike `:1775` and `:1798`. Past
+100 closed members, an epic whose tickets all closed early contributes no milestone title, the
+acceptance gate returns false, `_quiet_check` prints `complete`, and the completion wave tears the
+agent down with that epic never probed — the build-2 failure the gate exists to prevent, reachable
+again by size alone. The open-issue read truncates the same way, so `blocked == count` is compared
+over a truncated set.
+
+**Fix direction.** One helper that every tracker read goes through, paginating by default; a
+suite fixture that exceeds one page (none does today) for the acceptance gate, the quiescence
+count and the snapshot.
+
+**Implementation (2026-08-07).** Entirely in `scripts/tick.sh`. `_glab_list [--capped] <path>`
+runs `$GLAB_CMD api --paginate <path>` and folds the one-array-per-page output into a single
+array, returning non-zero when the call failed *or* the result was not an array — so every
+caller's existing failure path still fires unchanged. All nine tracker reads in the script go
+through it: `_epics_unaccepted`'s closed-member and active-milestone reads, `_quiet_check`'s open
+read (all three of which also stop calling `glab` bare and now honour the `GLAB_CMD` seam), the
+snapshot's stage-1 open list and background milestone list (whose hand-rolled `--paginate` + fold
+this replaces), and `_snap_api`, which every remaining snapshot call already used. The two
+`sort=desc` notes reads pass `--capped`: they want the newest N, and paginating them would pull
+the whole thread. `_snap_api` keeps its degrade-don't-die contract; its two warning branches
+collapse into one, since a call failure and a non-array response now arrive the same way and are
+told apart by whether the read left anything on stderr. Net −7 lines of call sites for +21 of
+helper. SKILL.md and `references/` unchanged: nothing in either stated a pagination fact, and the
+scripts enforce this one entirely.
+
+**Tests.** `scripts/tick-test.sh`, six cases against fixtures that genuinely exceed one page —
+101 closed members whose only carrier of the unaccepted epic's milestone is the 101st, and 101
+open tickets of which only the 101st is unblocked. Each guard is shown holding and then failing
+with the mechanism removed, via a stub that honours `--paginate` exactly as `glab` does (one array
+per page) and a `STUB_NOPAGE` switch that reproduces the pre-fix single-page read: the acceptance
+gate answers `stalled` paginated and `complete` truncated; the quiescence count answers `stalled`
+paginated and `halted` truncated; the snapshot reports `epics_awaiting_probe: ["Reporting
+surface"]` paginated and `[]` truncated. The snapshot case also pins the call shape both ways —
+the closed-member read carries `--paginate`, the `sort=desc` notes read does not. Full suite: 553
+passed, 0 failed (547 → 553).
 
 ## P61 · Count model turns, not log lines
 

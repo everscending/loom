@@ -112,6 +112,27 @@ TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
 die() { echo "tick.sh: $*" >&2; exit 1; }
 
+# P49: the one tracker LIST read. Every `per_page=` GET in this script goes
+# through here and PAGINATES — `per_page=100` alone silently returns page 1 and
+# nothing says so. Past 100 closed members an epic whose tickets all closed
+# early contributes no milestone title, `_epics_unaccepted` answers false,
+# `_quiet_check` prints `complete`, and the completion wave tears the agent
+# down with that epic never probed: the build-2 failure the acceptance gate
+# exists to prevent, reachable again by size alone. The open read truncates the
+# same way, so `blocked == count` gets compared over a partial board.
+# `--paginate` emits one array PER PAGE, so the fold is part of the read, not a
+# nicety. Prints one JSON array; returns non-zero when the call failed or the
+# result was not an array, so every caller's existing failure path still fires.
+# `--capped` is the deliberate opposite and stays explicit: a `sort=desc` notes
+# read wants the newest N, and paginating it would pull the whole thread.
+_glab_list() { # [--capped] <api-path> → one JSON array on stdout
+    local capped=false
+    case "${1:-}" in --capped) capped=true; shift ;; esac
+    if $capped; then "$GLAB_CMD" api "$1"; else "$GLAB_CMD" api --paginate "$1"; fi \
+        | jq -s 'if (length > 0) and all(type == "array") then add
+                 else error("not a JSON array") end' 2>/dev/null
+}
+
 # A fresh, empty, uniquely-named directory for one session to write in, handed
 # over as $LOOM_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
 # fails if the directory exists, so two sessions starting in the same second
@@ -266,8 +287,8 @@ cmd_sweep() {
 _epics_unaccepted() { # <build-label>
     local label="$1" closed ms
     [ -n "$label" ] || return 1
-    closed=$(glab api "projects/:fullpath/issues?labels=$label&state=closed&per_page=100" 2>/dev/null) || return 1
-    ms=$(glab api "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null) || return 1
+    closed=$(_glab_list "projects/:fullpath/issues?labels=$label&state=closed&per_page=100" 2>/dev/null) || return 1
+    ms=$(_glab_list "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null) || return 1
     printf '%s' "$closed" | jq -e --argjson ms "${ms:-[]}" '
         ([.[] | .milestone.title? // empty] | unique) as $mine
         | ($ms | map(.title) | map(select(. as $t | $mine | index($t))) | length) > 0
@@ -326,7 +347,7 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown | unre
     fi
     age=$(( $(date +%s) - $(_last_activity_ts) ))
     [ "$age" -lt "${LOOM_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
-    open=$(glab api "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
+    open=$(_glab_list "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
         || { echo unreadable; return 0; }
     count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unreadable; return 0; }
     # Zero open tickets is "all the work merged", NOT "the product was
@@ -1927,14 +1948,14 @@ _snap_warn() { printf '%s\n' "$*" >> "$SNAP_TMP/warn.txt"; }
 # A degrading GET: one flaky call costs that field, not the document. A 403
 # on the links endpoint is the EXPECTED path on a tier without native issue
 # links — body-parsed edges carry the wave (SKILL.md's blocking-edge rule).
-_snap_api() {  # _snap_api <out> <path> <what>
-    local out="$1" path="$2" what="$3"
-    if ! "$GLAB_CMD" api "$path" > "$out" 2>"$out.err"; then
+_snap_api() {  # _snap_api [--capped] <out> <path> <what>
+    local capped=""
+    case "${1:-}" in --capped) capped=--capped; shift ;; esac
+    local out="$1" path="$2" what="$3" why
+    if ! _glab_list $capped "$path" > "$out" 2>"$out.err"; then
+        why=$(head -1 "$out.err" 2>/dev/null | tr -d '\n')
         printf '[]\n' > "$out"
-        _snap_warn "degraded: $what — $(head -1 "$out.err" 2>/dev/null | tr -d '\n')"
-    elif ! jq -e 'type == "array"' "$out" >/dev/null 2>&1; then
-        printf '[]\n' > "$out"
-        _snap_warn "degraded: $what — non-array response"
+        _snap_warn "degraded: $what — ${why:-non-array response}"
     fi
     rm -f "$out.err"
 }
@@ -1976,13 +1997,9 @@ cmd_snapshot() {
     # Foundational, so a failure DIES: an empty ticket list from a failed
     # call reads exactly like a genuinely empty build, and launching a wave
     # on a garbage universe is how you get ghost gates.
-    "$GLAB_CMD" api --paginate "projects/:id/issues?state=opened&per_page=100" \
-        > "$SNAP_TMP/raw.json" 2>"$SNAP_TMP/raw.err" \
-        || die "snapshot: open-issue list failed — $(head -2 "$SNAP_TMP/raw.err" | tr '\n' ' ')"
-    # --paginate may emit one array per page; fold them into one array.
-    jq -s 'map(if type == "array" then . else [.] end) | add' "$SNAP_TMP/raw.json" \
-        > "$SNAP_TMP/open.json" 2>/dev/null \
-        || die "snapshot: open-issue list was not JSON"
+    _glab_list "projects/:id/issues?state=opened&per_page=100" \
+        > "$SNAP_TMP/open.json" 2>"$SNAP_TMP/raw.err" \
+        || die "snapshot: open-issue list failed or was not JSON — $(head -2 "$SNAP_TMP/raw.err" | tr '\n' ' ')"
 
     # Milestones — the epic ACCEPTANCE record, and the one thing this snapshot
     # used to write and never read. `lane.sh probe-result <epic> pass` closes
@@ -1999,11 +2016,8 @@ cmd_snapshot() {
     # nothing in the issue payload, so a serial read here would put a whole
     # round-trip on the critical path of every snapshot the build ever takes.
     printf '[]\n' > "$SNAP_TMP/milestones.json"
-    ( "$GLAB_CMD" api --paginate "projects/:id/milestones?per_page=100" \
-        > "$SNAP_TMP/ms.raw" 2>/dev/null \
-      && jq -s 'map(if type == "array" then . else [.] end) | add
-                | map({title, state, description})' "$SNAP_TMP/ms.raw" \
-         > "$SNAP_TMP/ms.json" 2>/dev/null \
+    ( _glab_list "projects/:id/milestones?per_page=100" 2>/dev/null \
+        | jq 'map({title, state, description})' > "$SNAP_TMP/ms.json" 2>/dev/null \
       && mv "$SNAP_TMP/ms.json" "$SNAP_TMP/milestones.json" ) &
 
     local build_iid="" label="" nbuild
@@ -2065,13 +2079,13 @@ cmd_snapshot() {
         _snap_batch_gate
     done
     for iid in $review_iids; do
-        ( _snap_api "$SNAP_TMP/tnotes-$iid.json" \
+        ( _snap_api --capped "$SNAP_TMP/tnotes-$iid.json" \
             "projects/:id/issues/$iid/notes?sort=desc&order_by=created_at&per_page=30" \
             "issue #$iid comments" ) &
         _snap_batch_gate
     done
     if [ -n "$build_iid" ]; then
-        ( _snap_api "$SNAP_TMP/notes.json" \
+        ( _snap_api --capped "$SNAP_TMP/notes.json" \
             "projects/:id/issues/$build_iid/notes?sort=desc&order_by=created_at&per_page=20" \
             "build lessons thread" ) &
         _snap_batch_gate

@@ -1392,6 +1392,72 @@ qs=$(cat "$QH/home/quiet.state" 2>/dev/null || echo missing)
     && ok "quiet-check: once every epic is accepted the build completes normally" \
     || bad "quiet-check: accepted build classified '$qs' (want complete)"
 
+# 4h5p. P49: every tracker read paginates. `per_page=100` returns page 1 and
+#       says nothing about the rest, so past 100 members the acceptance gate
+#       and the quiescence count both read a truncated board — and the build
+#       ends over an unprobed epic by size alone. Fixture: 101 closed members
+#       whose only carrier of the unaccepted epic's milestone is #101, and 101
+#       open tickets of which only #101 is unblocked. Both facts live on page 2
+#       and are invisible to a single page. The stub honours `--paginate` the
+#       way glab does — one array PER PAGE, which is why the fold in
+#       `_glab_list` is part of the read.
+QPG="$T/quiet-paginate"; mkdir -p "$QPG/bin" "$QPG/home"
+cat > "$QPG/bin/glab" <<'EOF'
+#!/usr/bin/env bash
+# STUB_NOPAGE ignores --paginate: that is exactly the pre-P49 read, and it is
+# how the planted violations below remove the mechanism.
+paged=no
+case "$*" in *--paginate*) paged=yes ;; esac
+[ -n "${STUB_NOPAGE:-}" ] && paged=no
+case "$*" in
+  *"state=closed"*)
+      jq -nc '[range(1;101) | {iid: ., milestone: {title: "Ledger core"}}]'
+      [ "$paged" = yes ] && jq -nc '[{iid: 101, milestone: {title: "Reporting surface"}}]' ;;
+  *"state=opened"*)
+      [ -n "${STUB_NO_OPEN:-}" ] && { echo '[]'; exit 0; }
+      jq -nc '[range(1;101) | {iid: ., labels: ["build-4", "blocked"]}]'
+      [ "$paged" = yes ] && jq -nc '[{iid: 101, labels: ["build-4", "ready-for-agent"]}]' ;;
+  *"milestones"*) cat "${QSTUB_MS:?}" ;;
+  *) echo '[]' ;;
+esac
+exit 0
+EOF
+chmod +x "$QPG/bin/glab"
+printf 'build-4\n' > "$QPG/home/.build-label"
+printf '%s\n' '[{"id":9,"title":"Reporting surface"}]' > "$QPG/ms-open.json"
+QPGRUN() { PATH="$QPG/bin:$PATH" LOOM_HOME="$QPG/home" LOOM_QUIET_SETTLE=0 \
+    QSTUB_MS="$QPG/ms-open.json" WATCH; }
+# (a) the acceptance gate: the unaccepted epic is member #101.
+rm -f "$QPG/home/quiet.state"
+STUB_NO_OPEN=1 QPGRUN
+qp=$(cat "$QPG/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qp" = stalled ] \
+    && ok "P49: an epic awaiting probe past the first page of closed members still blocks complete" \
+    || bad "P49: acceptance gate classified '$qp' (want stalled) — the closed-member read truncated"
+# Planted violation: remove the pagination and the same board reads complete —
+# the agent is torn down with that epic never probed.
+rm -f "$QPG/home/quiet.state"
+STUB_NO_OPEN=1 STUB_NOPAGE=1 QPGRUN
+qp=$(cat "$QPG/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qp" = complete ] \
+    && ok "P49-violation: a single-page closed read calls the same unprobed build complete" \
+    || bad "P49-violation: unpaginated read classified '$qp' — the fixture no longer exceeds one page"
+# (b) the quiescence count: `blocked == count` compared over 101 open tickets.
+rm -f "$QPG/home/quiet.state"
+QPGRUN
+qp=$(cat "$QPG/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qp" = stalled ] \
+    && ok "P49: one schedulable ticket on page 2 keeps the build out of halted" \
+    || bad "P49: quiescence count classified '$qp' (want stalled) — the open read truncated"
+# Planted violation: page 1 is 100 blocked tickets, so a single-page read calls
+# a build with live work human-held.
+rm -f "$QPG/home/quiet.state"
+STUB_NOPAGE=1 QPGRUN
+qp=$(cat "$QPG/home/quiet.state" 2>/dev/null || echo missing)
+[ "$qp" = halted ] \
+    && ok "P49-violation: a single-page open read calls a build with schedulable work halted" \
+    || bad "P49-violation: unpaginated count classified '$qp' — the open fixture no longer exceeds one page"
+
 # 4h5b. P46: a `stale` lane still holds its ticket — `_quiet_check` must read
 #       it as `active` and return before ever touching the tracker, the same
 #       as a `running` one. Proven by absence: `glab` is stubbed to leave a
@@ -2407,6 +2473,49 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-table.json" STUB_CLOSED="$FX/clo
 [ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35c.json")" = '["Reporting surface"]' ] \
     && ok "snapshot: an epic with an open ticket stays out of the probe list even with closed members" \
     || bad "snapshot: probed an epic that still has open work ($(jq -c '.summary.epics_awaiting_probe' "$T/snap-p35c.json"))"
+
+# 7f2. P49: the closed-member read is the one P35 added to FIND a finished
+#      epic, and it was the one read still truncating at 100. Fixture: 101
+#      closed members, the finished epic's only member last. Also pins the
+#      call shape both ways — a list read carries `--paginate`, and the
+#      `sort=desc` notes read deliberately does NOT, because it wants the
+#      newest N and paginating it would pull the whole thread.
+cat > "$FX/glab-page-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+FX="$(cd "$(dirname "$0")" && pwd)"
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+paged=no
+case "$*" in *--paginate*) paged=yes ;; esac
+[ -n "${STUB_NOPAGE:-}" ] && paged=no
+case "$*" in
+  *"state=closed"*)
+      jq -nc '[range(1;101) | {iid: (200 + .), milestone: {title: "Ledger core"}}]'
+      [ "$paged" = yes ] && jq -nc '[{iid: 13, milestone: {title: "Reporting surface"}}]' ;;
+  *"state=opened"*) cat "$FX/open-table.json" ;;
+  *"milestones"*)   cat "$FX/milestones.json" ;;
+  *) echo '[]' ;;
+esac
+exit 0
+EOF
+chmod +x "$FX/glab-page-stub.sh"
+: > "$T/calls-p49"
+GLAB_CMD="$FX/glab-page-stub.sh" STUB_LOG="$T/calls-p49" \
+    "$TICK" snapshot > "$T/snap-p49.json" 2>/dev/null
+if [ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p49.json")" = '["Reporting surface"]' ] \
+   && grep -q -- '--paginate.*state=closed' "$T/calls-p49" \
+   && grep -q 'notes?sort=desc' "$T/calls-p49" \
+   && ! grep -q -- '--paginate.*notes?sort=desc' "$T/calls-p49"; then
+    ok "P49: the snapshot pages through closed members, and leaves the capped notes read capped"
+else
+    bad "P49: closed-member paging wrong ($(jq -c '.summary.epics_awaiting_probe' "$T/snap-p49.json"), calls: $(grep -c . "$T/calls-p49"))"
+fi
+# Planted violation: remove the pagination and the finished epic vanishes from
+# the probe list — build-2's failure, reached by member count alone.
+GLAB_CMD="$FX/glab-page-stub.sh" STUB_NOPAGE=1 \
+    "$TICK" snapshot > "$T/snap-p49b.json" 2>/dev/null
+[ "$(jq -c '.summary.epics_awaiting_probe' "$T/snap-p49b.json")" = '[]' ] \
+    && ok "P49-violation: a single-page closed read hides the finished epic entirely" \
+    || bad "P49-violation: unpaginated snapshot still saw it ($(jq -c '.summary.epics_awaiting_probe' "$T/snap-p49b.json")) — fixture no longer exceeds one page"
 
 # Planted violation: with NO milestones at all (a tier or project that does not
 # use them) acceptance is UNKNOWN — it must never manufacture a probe request.

@@ -61,7 +61,6 @@ evidence, and implementation notes belong in this file, not there.
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
-| P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | open — proposed 2026-08-06; nine cross-ticket ambiguities in a 54-ticket set, none visible from inside one ticket; folds in the width and size rules, which check the same draft |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
@@ -374,20 +373,6 @@ assert only the absence of a call, and pass against a stand-in that is `exit 127
   nothing uses.
 
 **Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
-
-## P49 · Every tracker read paginates
-
-**Problem.** `_epics_unaccepted` (`tick.sh:246-247`), `_quiet_check` (`:306`) and the snapshot's
-`closed.json` (`:1889`) read `per_page=100` with no `--paginate`, unlike `:1775` and `:1798`. Past
-100 closed members, an epic whose tickets all closed early contributes no milestone title, the
-acceptance gate returns false, `_quiet_check` prints `complete`, and the completion wave tears the
-agent down with that epic never probed — the build-2 failure the gate exists to prevent, reachable
-again by size alone. The open-issue read truncates the same way, so `blocked == count` is compared
-over a truncated set.
-
-**Fix direction.** One helper that every tracker read goes through, paginating by default; a
-suite fixture that exceeds one page (none does today) for the acceptance gate, the quiescence
-count and the snapshot.
 
 ## P50 · `references/loom-config.md` is generated from `resolve-config`
 
