@@ -4694,6 +4694,57 @@ if [ "$rc_rec" = 0 ] && printf '%s' "$out" | grep -q "FAILED"; then
 else
     bad "reconcile: failed install gave rc=$rc_rec (want 0) or said nothing"
 fi
+# (d) P66: a merge that moves ONLY a nested lockfile installs in that nested
+#     directory. The old code matched the nested path with its regex and then
+#     resolved one command against the WORKING DIRECTORY, so the root
+#     ecosystem got a pointless re-install and `web/node_modules` stayed
+#     exactly as stale as before. The marker is written with a RELATIVE path,
+#     so where it lands is the whole assertion. (Paid for: ai-workout build-1
+#     #10 — merge-10 failed twice on `openapi-typescript` missing from
+#     `web/node_modules`, and the ticket never merged.)
+GITW checkout -q main; mkdir -p "$RG/work/web"; printf 'lock: web-v1\n' > "$RG/work/web/pnpm-lock.yaml"
+GITW add web/pnpm-lock.yaml; GITW commit -qm "add a nested dependency"; GITW push -q origin main
+GITW checkout -q ticket
+rm -f "$RG/work/install-ran.yes" "$RG/work/web/install-ran.yes"
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true \
+    LANE_INSTALL_CMD="touch install-ran.yes" "$LANE" reconcile ) >/dev/null 2>&1
+if [ -f "$RG/work/web/install-ran.yes" ] && [ ! -f "$RG/work/install-ran.yes" ]; then
+    ok "reconcile: a nested lockfile installs in its own directory, not the root"
+elif [ -f "$RG/work/install-ran.yes" ]; then
+    bad "reconcile: nested lockfile moved and the ROOT installer ran — web/ still stale"
+else
+    bad "reconcile: nested lockfile moved and nothing installed anywhere"
+fi
+rm -f "$RG/work/web/install-ran.yes"
+# (e) two ecosystems moved in one merge → both install. One install per
+#     ecosystem is the fix; installing the first one found is the defect.
+GITW checkout -q main
+printf 'lock: v4\n' > "$RG/work/pnpm-lock.yaml"; printf 'lock: web-v2\n' > "$RG/work/web/pnpm-lock.yaml"
+GITW commit -qam "both ecosystems move"; GITW push -q origin main; GITW checkout -q ticket
+rm -f "$RG/work/install-ran.yes" "$RG/work/web/install-ran.yes"
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true \
+    LANE_INSTALL_CMD="touch install-ran.yes" "$LANE" reconcile ) >/dev/null 2>&1
+if [ -f "$RG/work/install-ran.yes" ] && [ -f "$RG/work/web/install-ran.yes" ]; then
+    ok "reconcile: a merge moving two ecosystems installs both"
+else
+    bad "reconcile: only one ecosystem installed (root=$([ -f "$RG/work/install-ran.yes" ] && echo yes || echo no), web=$([ -f "$RG/work/web/install-ran.yes" ] && echo yes || echo no))"
+fi
+rm -f "$RG/work/install-ran.yes" "$RG/work/web/install-ran.yes"
+# (f) a workspace member with no lockfile of its own installs at the workspace
+#     ROOT, where the lockfile lives — guessing `npm install` inside a pnpm
+#     workspace package writes a second, wrong node_modules.
+GITW checkout -q main; mkdir -p "$RG/work/apps/api"
+printf '{"name":"api"}\n' > "$RG/work/apps/api/package.json"
+GITW add apps/api/package.json; GITW commit -qm "a workspace member"; GITW push -q origin main
+GITW checkout -q ticket
+( cd "$RG/work" && GLAB_CMD=/usr/bin/true \
+    LANE_INSTALL_CMD="touch install-ran.yes" "$LANE" reconcile ) >/dev/null 2>&1
+if [ -f "$RG/work/install-ran.yes" ] && [ ! -f "$RG/work/apps/api/install-ran.yes" ]; then
+    ok "reconcile: a lockfile-less workspace member installs at the workspace root"
+else
+    bad "reconcile: workspace member installed in the wrong directory"
+fi
+rm -f "$RG/work/install-ran.yes" "$RG/work/apps/api/install-ran.yes"
 
 # Killing a --follow ticker must take its tail+jq children with it. An
 # orphaned pipeline kept writing to the pane after its wrapper was killed,

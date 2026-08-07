@@ -62,7 +62,6 @@ evidence, and implementation notes belong in this file, not there.
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P65 | Fix tickets are born with edges and checked for twins | open — adopted 2026-08-07, ai-workout build-1: one duplicate, two undeclared dependencies; tranche 1 |
-| P66 | Reconcile re-installs every ecosystem the merge touched | open — adopted 2026-08-07, ai-workout build-1: merge-10 failed twice, ticket never merged; tranche 1 |
 | P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
 | P69 | The verdict verb enforces its own trailer | open — adopted 2026-08-07, ai-workout build-1: unclassed FAILs, spurious classes on PASS, duplicate trailers; tranche 2 |
@@ -718,20 +717,6 @@ overlaps #55's scope with no edge in either direction.
 **Fix.** `fix-ticket` gains `--blocked-by <iids>` (written into the body the scheduler reads),
 and before creating lists open fix tickets in the same milestone, refusing on a near-duplicate
 title unless `--force` — the filing lane decides with eyes open.
-
-## P66 · Reconcile re-installs every ecosystem the merge touched
-
-**Problem.** `lane.sh reconcile`'s dependency sync looks only at the root Python manifest
-(`uv sync`); a merge that moves a nested lockfile (`web/pnpm-lock.yaml`) leaves that ecosystem
-uninstalled, and the post-reconcile gate dies on a missing tool.
-
-**Evidence (ai-workout build-1).** merge-10 failed twice (03:30) on `openapi-typescript` missing
-from `web/node_modules`; #10 was still unmerged when the build stopped and will fail the same way
-on resume.
-
-**Fix.** The sync step detects every lockfile the merge moved — root or nested — and runs the
-matching installer per ecosystem. Suite case: a merge staged to move only a nested lockfile
-asserts the nested install ran.
 
 ## P67 · One gate per commit
 

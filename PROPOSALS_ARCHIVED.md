@@ -55,6 +55,7 @@ writing a new proposal that touches the same machinery.
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
+| P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
 
 ## Independent review round (2026-08-01)
 
@@ -2176,3 +2177,48 @@ check and fix while the fix is open, computes it to null once the fix closes, an
 real attempt sitting beside a base-red one. Full suite: 484 passed, 0 failed (471 → 484).
 SKILL.md net +9 lines, all in step 5: the held-ticket exclusion on the queue-head line, and the
 base-red procedure folded into the existing red-combined-gate sentence.
+
+## P66 · Reconcile re-installs every ecosystem the merge touched
+
+**Problem.** `lane.sh reconcile`'s dependency sync looks only at the root Python manifest
+(`uv sync`); a merge that moves a nested lockfile (`web/pnpm-lock.yaml`) leaves that ecosystem
+uninstalled, and the post-reconcile gate dies on a missing tool.
+
+**Evidence (ai-workout build-1).** merge-10 failed twice (03:30) on `openapi-typescript` missing
+from `web/node_modules`; #10 was still unmerged when the build stopped and will fail the same way
+on resume.
+
+**Fix.** The sync step detects every lockfile the merge moved — root or nested — and runs the
+matching installer per ecosystem. Suite case: a merge staged to move only a nested lockfile
+asserts the nested install ran.
+
+**Implementation (2026-08-07).** Entirely in `scripts/lane.sh`; `SKILL.md` unchanged (net 0 lines
+— step 5 already says reconcile re-installs when the merge moved a manifest or lockfile, and that
+sentence is still true). `_sync_deps` no longer resolves ONE command against the working
+directory. It keeps the same cheap precondition — the merge must have moved a manifest or a
+lockfile at all — then walks every changed path, resolves an install directory and command per
+path through the new `_install_cmd_for`, dedupes on `dir+command`, and runs each one with `cd`
+into its own directory. So a merge moving `web/pnpm-lock.yaml` installs in `web/`, and a merge
+moving both root and nested lockfiles installs twice.
+
+`_install_cmd_for <dir>` prints `"<install dir>\t<command>"`, or nothing. It keeps the old
+lockfile-before-manifest precedence, but searches the directory and then its ancestors for a
+LOCKFILE first, and only falls back to a manifest in the directory that actually moved. That
+walk-up is what makes a monorepo work: `apps/api/package.json` moving in a pnpm workspace
+installs at the root where `pnpm-lock.yaml` lives, instead of guessing `npm install` inside the
+package and writing a second, wrong `node_modules`. It returns 0 explicitly — under `set -e` a
+falling-through `elif` chain would otherwise take the whole reconcile down. `LANE_INSTALL_CMD`
+and `LANE_SYNC_DEPS` keep their meanings; the override now applies per ecosystem.
+
+Three new suite cases beside the existing three: a merge moving only a nested lockfile writes its
+(relative-path) install marker in `web/` and NOT at the root — the discriminator, since the old
+code's regex matched the nested path and then installed at the root; a merge moving two
+ecosystems installs both; a lockfile-less workspace member installs at the workspace root. Full
+suite: 487 passed, 0 failed (484 → 487).
+
+One note on the evidence. It still reproduces as written — merge-10's logs say
+`openapi-typescript` missing, `web/node_modules` never installed — but they carry no
+"moved a manifest or lockfile" line, so on that ticket the nested ecosystem was never installed
+at worktree CREATION either, not merely left stale by a merge. This fix covers the reconcile
+half, which is what the proposal specified; worktree-creation setup for nested ecosystems is a
+separate gap.

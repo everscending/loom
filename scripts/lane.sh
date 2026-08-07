@@ -487,10 +487,6 @@ cmd_reconcile() { # [<base>] — fetch and MERGE origin/<base> into the branch
 # again. (Paid for: build-2 #14, 2026-08-03 — merge attempt 1 died on a red
 # logic gate because `zod` landed on main via #7 while wt-14's node_modules
 # was 18 minutes older; the retry merged clean after nothing but an install.)
-#
-# Never fatal: a failed install is not a failed reconcile. The tier gate is
-# the arbiter of whether this branch is mergeable, and it runs next — so this
-# reports loudly and returns, leaving the verdict where it belongs.
 _sync_deps() { # <sha-before-merge>
     local before="$1"
     [ -n "$before" ] || return 0
@@ -500,30 +496,84 @@ _sync_deps() { # <sha-before-merge>
     # would tax every merge in the build to fix the minority that need it.
     local changed
     changed=$(git diff --name-only "$before"..HEAD 2>/dev/null || echo "")
-    printf '%s\n' "$changed" | grep -qE '(^|/)(uv\.lock|poetry\.lock|pyproject\.toml|pnpm-lock\.yaml|yarn\.lock|package-lock\.json|package\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock)$' \
-        || return 0
-    # Lockfile before manifest, exactly as tick.sh detect_stack orders it: a
-    # lockfile names the toolchain actually in use, a manifest only the
-    # ecosystem. Kept as its own copy rather than sourcing tick.sh — lane.sh
-    # is the write half and deliberately stands alone.
-    local cmd=""
-    if   [ -f uv.lock ];         then cmd="uv sync"
-    elif [ -f poetry.lock ];     then cmd="poetry install"
-    elif [ -f pnpm-lock.yaml ];  then cmd="pnpm install"
-    elif [ -f yarn.lock ];       then cmd="yarn install"
-    elif [ -f package-lock.json ]; then cmd="npm ci"
-    elif [ -f package.json ];    then cmd="npm install"
-    elif [ -f go.mod ];          then cmd="go mod download"
-    elif [ -f Cargo.toml ];      then cmd="cargo fetch"
-    else return 0; fi
-    cmd="${LANE_INSTALL_CMD:-$cmd}"
-    echo "lane.sh: the base merge moved a manifest or lockfile — running '$cmd' so the gate tests this worktree, not a stale one"
-    if $cmd >/dev/null 2>&1; then
-        echo "lane.sh: dependencies synced"
+    changed=$(printf '%s\n' "$changed" | grep -E '(^|/)(uv\.lock|poetry\.lock|pyproject\.toml|pnpm-lock\.yaml|yarn\.lock|package-lock\.json|package\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock)$' || true)
+    [ -n "$changed" ] || return 0
+    # EVERY ecosystem the merge moved, not just the repo root's. This used to
+    # resolve one command against the working directory, so a merge that moved
+    # `web/pnpm-lock.yaml` ran the ROOT installer (or none) and left the nested
+    # ecosystem exactly as stale as before — the gate then died on a binary
+    # that lives in `web/node_modules`. (Paid for: ai-workout build-1 #10 —
+    # merge-10 failed twice on a missing `openapi-typescript`, and the ticket
+    # never merged.)
+    local done_list="" p resolved d cmd
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        # "<install dir>\t<command>" — the directory is resolved too, because a
+        # workspace member's install belongs at the lockfile, not beside the
+        # manifest that moved.
+        resolved=$(_install_cmd_for "$(dirname "$p")")
+        [ -n "$resolved" ] || continue
+        d=${resolved%%	*}; cmd=${resolved#*	}
+        # dedupe on dir+cmd: a merge that moves both pnpm-lock.yaml and
+        # package.json in one directory is still one install, and every member
+        # of one workspace resolves to the same root install.
+        case "$done_list" in *"|$cmd@$d|"*) continue ;; esac
+        done_list="$done_list|$cmd@$d|"
+        _run_install "$cmd" "$d"
+    done <<EOF
+$changed
+EOF
+    return 0
+}
+
+# The installer for one directory: lockfile before manifest, exactly as
+# tick.sh detect_stack orders it — a lockfile names the toolchain actually in
+# use, a manifest only the ecosystem. Kept as its own copy rather than sourcing
+# tick.sh: lane.sh is the write half and deliberately stands alone.
+#
+# A manifest with no lockfile beside it is usually a workspace member (a
+# pnpm/yarn monorepo keeps one lockfile at the root), so the search walks UP to
+# the nearest ancestor that has one and installs there. Guessing `npm install`
+# inside a pnpm workspace package would write a second, wrong node_modules.
+_install_cmd_for() { # <dir> → "<install dir>\t<command>", or empty
+    local d="${1:-.}" probe
+    probe="$d"
+    while :; do
+        if   [ -f "$probe/uv.lock" ];           then printf '%s\t%s\n' "$probe" "uv sync"; return 0
+        elif [ -f "$probe/poetry.lock" ];       then printf '%s\t%s\n' "$probe" "poetry install"; return 0
+        elif [ -f "$probe/pnpm-lock.yaml" ];    then printf '%s\t%s\n' "$probe" "pnpm install"; return 0
+        elif [ -f "$probe/yarn.lock" ];         then printf '%s\t%s\n' "$probe" "yarn install"; return 0
+        elif [ -f "$probe/package-lock.json" ]; then printf '%s\t%s\n' "$probe" "npm ci"; return 0
+        elif [ -f "$probe/Cargo.lock" ];        then printf '%s\t%s\n' "$probe" "cargo fetch"; return 0
+        elif [ -f "$probe/go.sum" ];            then printf '%s\t%s\n' "$probe" "go mod download"; return 0
+        fi
+        [ "$probe" != "." ] || break
+        probe=$(dirname "$probe")
+    done
+    # No lockfile anywhere above it — fall back to the manifest in the
+    # directory that actually moved.
+    if   [ -f "$d/pyproject.toml" ]; then printf '%s\t%s\n' "$d" "uv sync"
+    elif [ -f "$d/package.json" ];   then printf '%s\t%s\n' "$d" "npm install"
+    elif [ -f "$d/go.mod" ];         then printf '%s\t%s\n' "$d" "go mod download"
+    elif [ -f "$d/Cargo.toml" ];     then printf '%s\t%s\n' "$d" "cargo fetch"
+    fi
+    # Explicit: nothing to install is not an error, and under `set -e` a
+    # falling-through `elif` would take the whole reconcile down with it.
+    return 0
+}
+
+# Never fatal: a failed install is not a failed reconcile. The tier gate is
+# the arbiter of whether this branch is mergeable, and it runs next — so this
+# reports loudly and returns, leaving the verdict where it belongs.
+_run_install() { # <cmd> <dir>
+    local cmd="${LANE_INSTALL_CMD:-$1}" d="$2"
+    echo "lane.sh: the base merge moved a manifest or lockfile under '$d' — running '$cmd' there so the gate tests this worktree, not a stale one"
+    if ( cd "$d" && $cmd >/dev/null 2>&1 ); then
+        echo "lane.sh: dependencies synced in '$d'"
     else
         # Worth saying twice: this line is what a merge-failed report should
         # quote when the gate then fails on a missing module.
-        echo "lane.sh: '$cmd' FAILED — the gate will likely go red on missing dependencies; say so in the merge-failed report" >&2
+        echo "lane.sh: '$cmd' FAILED in '$d' — the gate will likely go red on missing dependencies; say so in the merge-failed report" >&2
     fi
     return 0
 }
