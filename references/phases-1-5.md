@@ -53,8 +53,8 @@ epic cites.)* `snapshot` warns when an epic reaches probe-ready with none.
 
 ## Phase 4 · `tickets`
 
-Route to `/to-tickets` (tracer-bullet slices, blocking edges, publish in
-dependency order) **plus** the additions in
+Route to `/to-tickets` (tracer-bullet slices, blocking edges, tracker
+mechanics) **plus** the additions in
 [ticket-template.md](ticket-template.md):
 
 - **Design decisions — implement, do not relitigate** (one line each,
@@ -77,14 +77,58 @@ dependency order) **plus** the additions in
 Ambiguity found while writing a ticket is a phase-1 escape: close the decision
 in the ADR/UX spec *first*, then write the ticket.
 
-**Width is a ticket-writing output, not an afterthought.** Correct blocking
-edges are not enough — a graph that opens one ticket wide idles every lane
-however well the loop runs *(paid: a build peaked at 2 lanes of 4, its first
-hour at 0–1 startable)*. While writing the edges, ask how many tickets can
-start at once. Where a heavy blocker gates several dependents, split it with
-**Pinned interfaces**: a tiny `interface + stub` ticket that merges fast, the
-implementation behind it — the dependents need the signature, not the merged
-body. Phase 5 measures the result; this phase is where it is decided.
+**Publishing comes last.** Published one at a time, each body is composed,
+pushed and left behind before the next starts, so nothing ever holds the set —
+consistency across tickets is whatever survives in one long context. *(paid:
+nine cross-ticket ambiguities in a 54-ticket set, every one in the join
+between two tickets and invisible from inside either; four would have failed
+the build or the demo.)* So the phase drafts the whole set first:
+
+1. Read the source documents.
+2. Write every ticket body into **one draft file, one epic at a time** — a
+   single pass over the whole set drifts by the end: the last epic's
+   vocabulary wanders from the first's. Store it beside the PRD; it outlives
+   the phase — `replan` diffs against it.
+3. Re-read the whole draft **from the file**, not from memory — the only step
+   that can see across tickets.
+4. Run the check list below over the draft: the phase's single self-check.
+5. Show the human **the bodies**, not the titles, with the surviving
+   ambiguities as decisions to answer — `/lavish` carries this shape.
+6. Apply the answers to the draft file.
+7. Hand the finished set to `/to-tickets` to publish. It keeps owning slicing,
+   blocking edges and the tracker mechanics; it stops owning the order in
+   which bodies are decided.
+8. Keep the draft file.
+
+**The check list** — one gate, one list, before anything is published. Phase 5
+keeps its `graph` verdict as a backstop on the published build; it stops being
+the first time anyone finds out.
+
+*Shape* — is this set buildable at speed?
+
+- **Width**: how many tickets can start at once, and at every layer, computed
+  from the draft's own edges. A graph that opens one ticket wide idles every
+  lane however well the loop runs *(paid: a build peaked at 2 lanes of 4, its
+  first hour at 0–1 startable)*. Where a heavy blocker gates several
+  dependents, split it with **Pinned interfaces**: a tiny `interface + stub`
+  ticket that merges fast, the implementation behind it — the dependents need
+  the signature, not the merged body.
+- **Size**: no ticket whose acceptance criteria cannot plausibly be met in one
+  focused sitting — a lane's cost is fixed the moment its ticket is written,
+  not when it runs. Read the acceptance-criteria count and file surface off
+  the draft, and split with the same `interface + stub` tool width uses.
+
+*Consistency* — does the set agree with itself?
+
+- every pinned interface names its fields;
+- every field a later ticket reads exists in the ticket that pins it;
+- every capability one ticket's criteria assume has a ticket that builds it;
+- shared vocabularies — status and severity words, intent lists, state
+  names — are identical everywhere they appear;
+- no ticket's acceptance criteria contradict its own mandatory adversarial
+  tests;
+- every command a ticket's gate tier will run exists by the time that ticket
+  merges.
 
 ## Phase 5 · `build` — define or adjust the build (never starts it)
 
@@ -98,8 +142,8 @@ body. Phase 5 measures the result; this phase is where it is decided.
    its shape alongside `max_lanes` — `tick.sh snapshot | tick.sh graph` — and
    surface a `CHAIN-SHAPED`, `NARROW START` or `LIKELY DEEP` verdict as a
    reason to go back to phase 4 and split a blocker or an oversized ticket
-   (see [ticket-template.md](ticket-template.md)'s size rule), not a fact to
-   discover at wave 1. Then **stop**
+   per its check list, not a fact to discover at wave 1 — a backstop on the
+   published build, not the first time anyone looks. Then **stop**
    — tell the human the trigger is `/loom start`.
 2. **A build already defined** → the same surface, pre-filled with the current
    selection, for adjustment: add an epic (label its open tickets `build-N`),

@@ -60,16 +60,6 @@ The requirement ID(s) from the spec this ticket satisfies. The
 verification gate checks faithfulness against the requirement text — a
 ticket that passes its own criteria but not its requirement is rejected.
 
-## Size — a ticket-writing output, like width
-
-A ticket whose acceptance criteria cannot plausibly be met in one focused
-sitting is split, not implemented as written: implementation lanes are the
-majority of build spend, and a lane's cost is fixed the moment its ticket is
-written, not when it runs. **Pinned interfaces** is the same splitting tool
-width already uses — pull the shared seam into its own small
-interface-and-stub ticket, and let the implementation and its dependents run
-beside each other instead of the whole thing running alone.
-`tick.sh graph` flags an outsized one as `LIKELY DEEP` at `build` time, from
-an oversized acceptance-criteria list or file count — read it the way a
-`CHAIN-SHAPED` verdict is read: a reason to go back to phase 4 and split,
-not a build to run as-is.
+Width and size are checked over the whole drafted set at once — the phase-4
+check list in [phases-1-5.md](phases-1-5.md) owns both, before anything is
+published.
