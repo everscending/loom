@@ -880,7 +880,21 @@ cmd_tick() {
     #   tick --from-lane a lane finished — respects the switch, ignores the
     #                   gap. A handoff is work already in progress, and making
     #                   it wait would idle the build for no reason.
-    local mode="manual"
+    #
+    # Two stages (P75): _tick_gates is every refusal — mode, switch, gap, lock,
+    # quiescence — and _launch_wave is every cost. The gates report through
+    # tick_go rather than a return code so the call sits outside any condition
+    # and `set -e` keeps its teeth inside them.
+    local mode="manual" quiet="" tick_go=0
+    _tick_gates "$@"
+    [ "$tick_go" -eq 1 ] || return 0
+    _launch_wave
+}
+
+_tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
+    # quiet, and tick_go — 1 when a wave should launch, 0 when this firing
+    # already did everything it may (watch, note, event). Gate ORDER here is
+    # load-bearing; each gate's comment names the build that paid for it.
     case "${1:-}" in
         --auto) mode="auto"; shift ;;
         --from-lane) mode="lane"; shift ;;
@@ -899,7 +913,7 @@ cmd_tick() {
     unset LOOM_LANE_ID
     # WATCH FIRST — before the lock, before every gate below. Nothing here
     # spends, and it must happen even on the firings that do nothing else.
-    local quiet; quiet=$(_watch_pass)
+    quiet=$(_watch_pass)
     if [ "$mode" != manual ] && _loop_stopped; then
         echo "tick: the loop is stopped (\`/loom start\` resumes it) — watched, no wave"
         _ev tick_skipped reason loop_stopped
@@ -979,6 +993,12 @@ cmd_tick() {
                 _ev tick_skipped reason unclassified state "$quiet"
                 return 0 ;;
     esac
+    tick_go=1
+}
+
+_launch_wave() { # the spend half of cmd_tick: prompt assembly through the
+    # retry policy. Runs only after every gate in _tick_gates has passed, with
+    # the tick lock held and _tick_exit trapped.
     LOOM_SCRATCH=$(_new_scratch wave); export LOOM_SCRATCH
     # Sessions run under cfg permission_mode (see SKILL.md "Headless
     # permissions" and references/loom-config.md). Both values honor
@@ -1093,6 +1113,239 @@ _run_wave() { # _run_wave <stem> <cmd> <stream?> → the wave's exit code
     return $rc
 }
 
+# Flag parsing for spawn-lane, accepting the flags before OR after the id
+# (order-tolerant). Sets, in the caller's scope: id, on_done, cwd, merge_lock,
+# pregate, brief — and _spawn_shift, the count of arguments consumed, which
+# the caller shifts away to stand on the lane command. A malformed flag dies
+# here; the missing-id and missing-command guards are the caller's, because
+# only it sees the remainder.
+_spawn_parse_flags() {
+    _spawn_shift=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --on-done-tick) on_done=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
+            --no-tick) on_done=0; shift; _spawn_shift=$((_spawn_shift+1)) ;;
+            --pregate) shift; [ $# -gt 0 ] || die "spawn-lane: --pregate needs a tier"
+                       pregate="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --merge-lock) merge_lock=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
+            --cwd) shift; [ $# -gt 0 ] || die "spawn-lane: --cwd needs a directory"
+                   cwd="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --brief) shift; [ $# -gt 0 ] || die "spawn-lane: --brief needs a file"
+                     brief="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --) shift; _spawn_shift=$((_spawn_shift+1)); break ;;
+            --*) die "spawn-lane: unknown flag '$1'" ;;
+            *) if [ -z "$id" ]; then id="$1"; shift; _spawn_shift=$((_spawn_shift+1)); else break; fi ;;
+        esac
+    done
+    return 0
+}
+
+# P28: long briefs travel as FILES, never inline prompt arguments — the
+# CLI/permission boundary mangles or denies them (8 dead impl-1 spawns in
+# four minutes, build-1 2026-08-01, before a wave hand-invented the brief
+# file). --brief copies the file into the lane's worktree and swaps the
+# literal `@brief` placeholder after -p for a one-line pointer prompt.
+# Reads, from the caller's scope: brief, id, abs, and the lane command as
+# "$@"; leaves the command — rewritten to the pointer prompt when a brief
+# travels, untouched otherwise — in _SPAWN_ARGS for the caller to `set --`
+# back. Every die in here fires before anything destructive runs.
+_spawn_stage_brief() {
+    _SPAWN_ARGS=("$@")
+    [ -n "$brief" ] || return 0
+    local _brf=() _b=""
+    [ -f "$brief" ] && [ -s "$brief" ] || die "spawn-lane: --brief '$brief' is not a readable, non-empty file"
+    # P68: a brief may never instruct a skill invocation. A headless session
+    # has no slash commands, so "run /implement <n>" spawns a lane that can
+    # only fail — impl-2 died twice that way (ai-workout build-1) before a
+    # wave inlined the steps. The check runs on the SOURCE brief, before the
+    # rules below are appended.
+    local _slash=""
+    _slash=$(grep -oE '(^|[^A-Za-z0-9_./-])/(implement|loom|to-tickets|code-review|grilling|lavish|prototype|qa|retro|optimize|prop|fix)([^A-Za-z0-9-]|$)' "$brief" \
+             | grep -oE '/[a-z-]+' | head -1 || true)
+    [ -z "$_slash" ] || die "spawn-lane: brief '$brief' tells the session to invoke $_slash —
+  a headless session has no slash commands (P68). Inline the work that skill
+  would do into the brief instead of naming it."
+    cp "$brief" "$abs/.lane-brief-$id.md" || die "spawn-lane: cannot copy brief into $abs"
+    # P68: every lane kind — impl, gate, merge, probe — gets the headless
+    # survival rules the probe brief alone used to carry. They are facts
+    # about the execution environment, not about probing, and a wave asked
+    # to remember them forgets them: three dead or wedged spawns in
+    # ai-workout build-1, one of them ending "the harness will notify me
+    # automatically" over a background build that could never wake it.
+    cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+
+## Headless execution rules (appended by spawn-lane — they bind every lane)
+- No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns.
+- Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
+- Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
+- There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
+- Genuinely blocked? Record it with the matching lane.sh verb and exit. A lane that ends by asking a question is a dead lane.
+BRIEFEOF
+    # P31: the implementer's half of the mandatory adversarial test, stated
+    # where the implementer reads it rather than trusted to a wave. Two
+    # builds paid for these two lines: seat-reservations build-1 (4 of 5
+    # gate FAILs, converging over three rounds on "the test must actually
+    # run") and ai-workout build-1 (4 of 7, every test committed and
+    # running, none asserting its bullet — omission and partial coverage a
+    # mapping makes visible before push). #31 there also spent a full round
+    # being told its bullet was unsatisfiable, which is the one case more
+    # rounds cannot help.
+    if [ "$(_lane_type "$id")" = impl ]; then
+        cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+- Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
+- A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
+BRIEFEOF
+    fi
+    local _hit=0 _prev=""
+    for _b in "$@"; do
+        if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
+            _brf+=("Read the file .lane-brief-$id.md in your working directory and execute it as your complete brief.")
+            _hit=1
+        else
+            _brf+=("$_b")
+        fi
+        _prev="$_b"
+    done
+    [ "$_hit" -eq 1 ] || die "spawn-lane: --brief requires the command to carry '-p @brief' — the placeholder spawn-lane replaces with the pointer prompt"
+    _SPAWN_ARGS=("${_brf[@]}")
+}
+
+# What the lane does after its command exits, in order: release the merge
+# lock first so the next merge can start, then fire the next wave.
+# Event-driven ticking means the loop advances at the speed of work, not a
+# fixed timer. A fire that lands during a running wave is no longer lost: it
+# leaves the pending note and that wave re-ticks once on exit (P1), so the
+# heartbeat is a true backstop for the initial kick and post-stall resume.
+# Render BEFORE the tick fires: the wave this lane wakes up reads lane logs
+# for verdicts and crash triage, and must not race the transcript.
+# Reads, from the caller's scope: id, jsonl, stream, inject, merge_lock,
+# gate_lock_key, on_done, and the lane command as "$@"; sets epi and redirect
+# there, and leaves the (possibly flag-extended) command in _SPAWN_ARGS for
+# the caller to `set --` back. Everything the program text needs travels by
+# ENVIRONMENT (LOOM_LANE_JSONL) or as single-quoted paths this script owns —
+# never caller input spliced into the program. Pure assembly: nothing here
+# refuses, nothing here destroys.
+_spawn_build_epilogue() {
+    epi=""; redirect=""
+    local _a=""
+    if [ "$stream" -eq 1 ]; then
+        export LOOM_LANE_JSONL="$jsonl"
+        redirect=' >"$LOOM_LANE_JSONL"'      # expanded inside the lane's shell
+        # The redirect above is unconditional for a streaming lane; only the
+        # FLAGS are conditional. A caller who already asked for stream-json
+        # gets the stream file like everyone else — it just does not get the
+        # flag twice.
+        if [ "$inject" -eq 1 ]; then
+            set -- "$@" --output-format stream-json --verbose
+        fi
+        # Lanes downshift on the same policy the wave does (P14) — a limit that
+        # stops the scheduler stops the work it schedules just as hard. Skipped
+        # when the caller set their own, for the same reason as the format.
+        if [ "$(cfg usage_limit pause_and_resume)" = "downshift_model" ]; then
+            local fb has_fb=0
+            for _a in "$@"; do
+                case "$_a" in --fallback-model|--fallback-model=*) has_fb=1; break ;; esac
+            done
+            fb=$(cfg fallback_model sonnet)
+            if [ -n "$fb" ] && [ "$has_fb" -eq 0 ]; then
+                set -- "$@" --fallback-model "$fb"
+            fi
+        fi
+        epi="'$SELF_PATH' render-log '$id'; "
+    fi
+    [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
+    [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
+    [ "$on_done" -eq 1 ] && epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+    # The exit code is recorded FIRST, before the tick fires, or the wave this
+    # lane wakes would race the file it needs to read. It is how a wave tells a
+    # mechanical gate failure (7) from a crashed session (anything else), which
+    # is what makes the pregate actionable.
+    # The lane records its own exit — it is the only thing that knows the code
+    # and the moment. `$LANES_DIR/<id>.start` carries the spawn time so the
+    # duration is measured, not inferred from file mtimes the way build 2's was.
+    # The event goes immediately after the rc write, BEFORE render-log: the
+    # transcript render takes seconds, and stamping the exit after it pushed
+    # `lane_exit` well past the chained successor's `lane_spawn` — a 17s skew
+    # the ticker rendered as "gate started, then implementation ended"
+    # (observed by the human, 2026-08-02).
+    epi="printf '%s\\n' \"\$_rc\" > '$LANES_DIR/$id.rc'; '$SELF_PATH' event lane_exit id '$id' type '$(_lane_type "$id")' rc \"\$_rc\" secs \"\$(( \$(date +%s) - \$(cat '$LANES_DIR/$id.start' 2>/dev/null || date +%s) ))\" >/dev/null 2>&1 || true; $epi"
+    _SPAWN_ARGS=("$@")
+}
+
+# P12: the deterministic suite is effectively free — 868 tests in 10.6s,
+# and the merge re-gate lane took 4 SECONDS end to end — yet it currently
+# runs inside a review session that has already spent its expensive
+# reasoning. Running it first, in shell, rejects a red branch in ~15s with
+# zero model time. Roughly half of the twenty-odd full-suite runs quoted
+# across build 2's logs were re-runs against an unchanged tree.
+# A missing runner SKIPS the pregate rather than failing it: rejecting a
+# ticket because the repo has no gate script would be a false verdict, and
+# a false rejection costs far more than a review session.
+# Tier and runner reach the lane through the ENVIRONMENT, never spliced into
+# the shell program. Single-quoting them was not enough: a tier containing a
+# quote broke out and ran arbitrary commands inside the lane, and `runner`
+# comes from a config file the same way. The tier is also validated, because
+# the four names are fixed and a typo should fail at spawn rather than
+# silently run the wrong suite.
+# Reads, from the caller's scope: pregate, id, abs; sets pre there. The tier
+# die in here is the LAST refusal in spawn-lane — this function must always
+# be called before anything destructive.
+_spawn_build_pregate() {
+    local runner tiers
+    pre=""
+    if [ -n "$pregate" ]; then
+        # Validate against the tiers this repo ACTUALLY declares, not the four
+        # built-in names: `_repo_gates_tsv` accepts any `[a-z_]+` key, so a repo
+        # with a `security:` tier could pregate it — and hardcoding the four
+        # broke exactly that. Fall back to the built-ins when no repo block
+        # exists. The point of the check is catching a typo before it runs the
+        # wrong suite; injection is already impossible, since nothing below is
+        # spliced into the lane program.
+        tiers=$(_repo_gates_tsv | cut -f1 | sort -u)
+        [ -n "$tiers" ] || tiers="docs
+logic
+api
+ui"
+        printf '%s\n' "$tiers" | grep -qxF "$pregate" \
+            || die "spawn-lane: --pregate '$pregate' is not one of this repo's gate
+  tiers ($(printf '%s' "$tiers" | tr '\n' ' '))"
+        runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+        export LOOM_PREGATE_TIER="$pregate" LOOM_PREGATE_RUNNER="$runner"
+        # P31: the adversarial half, and it runs INSTEAD of the runner — the
+        # verdict is rc 7 either way, so paying for the suite first buys
+        # nothing. A gate lane only: the check reads a finished branch, and
+        # applying it to an implementer would reject the work before it starts.
+        # The paths travel by ENVIRONMENT like the tier and the runner; nothing
+        # here is spliced into the lane's shell program.
+        local adv_iid="" adv_paths=""
+        if [ "$(_lane_type "$id")" = gate ]; then
+            adv_iid="${id#gate-}"; adv_iid="${adv_iid%%-*}"
+            case "$adv_iid" in ''|*[!0-9]*) adv_iid="" ;; esac
+        fi
+        if [ -n "$adv_iid" ] && adv_paths=$(_adv_pregate_reject "$adv_iid" "$pregate" "$abs"); then
+            export LOOM_PREGATE_ADV="$adv_paths"
+            pre='echo "--- pregate: this ticket names mandatory adversarial tests and the branch changes no file under what tier $LOOM_PREGATE_TIER runs ($LOOM_PREGATE_ADV) — rejecting with no review session (P31) ---"; _rc=7; '
+        else
+            pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
+            pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
+            pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
+            pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
+            # P60: a missing runner is a DECLARED bootstrap stage, never a
+            # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
+            # skipping" on every gate all night while the runner sat in an
+            # unmerged ticket — the mechanical check ran zero times and nothing
+            # said so, and the failure surfaced as merge-lane deaths instead.
+            # The behaviour is unchanged (no false rejection for a repo without
+            # a runner); only the report is: the lane log states what was not
+            # checked and why, and a `pregate_reduced` event carries it to the
+            # ticker.
+            pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
+            pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+        fi
+    fi
+    return 0
+}
+
 cmd_spawn_lane() {
     # Self-trigger is the DEFAULT (P2). It used to be opt-in, and a wave that
     # forgot the flag said so itself: "I spawned both without --on-done-tick… So
@@ -1101,27 +1354,11 @@ cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief=""
-    # Accept the flags before OR after the id (order-tolerant), require a real
-    # id, and fail LOUDLY on a missing id or command. A malformed spawn must
-    # abort here, never produce a lane that reads as a normal dead one — that
-    # silent-stall was the build-2 wave-1 bug.
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --on-done-tick) on_done=1; shift ;;
-            --no-tick) on_done=0; shift ;;
-            --pregate) shift; [ $# -gt 0 ] || die "spawn-lane: --pregate needs a tier"
-                       pregate="$1"; shift ;;
-            --merge-lock) merge_lock=1; shift ;;
-            --cwd) shift; [ $# -gt 0 ] || die "spawn-lane: --cwd needs a directory"
-                   cwd="$1"; shift ;;
-            --brief) shift; [ $# -gt 0 ] || die "spawn-lane: --brief needs a file"
-                     brief="$1"; shift ;;
-            --) shift; break ;;
-            --*) die "spawn-lane: unknown flag '$1'" ;;
-            *) if [ -z "$id" ]; then id="$1"; shift; else break; fi ;;
-        esac
-    done
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" _spawn_shift=0
+    _spawn_parse_flags "$@"; shift "$_spawn_shift"
+    # Require a real id, and fail LOUDLY on a missing id or command. A
+    # malformed spawn must abort here, never produce a lane that reads as a
+    # normal dead one — that silent-stall was the build-2 wave-1 bug.
     [ -n "$id" ] || die "spawn-lane: missing lane id (saw flags but no id)"
     # Charset first, because `_lane_type`'s globs end in `*` and would happily
     # accept a space. `probe-<epic>` with a real epic title ("Ledger core")
@@ -1190,73 +1427,13 @@ cmd_spawn_lane() {
   kill it first. Reusing a live lane id would overwrite its pid file and rotate
   its log away, losing the work in progress."
     fi
-    # P28: long briefs travel as FILES, never inline prompt arguments — the
-    # CLI/permission boundary mangles or denies them (8 dead impl-1 spawns in
-    # four minutes, build-1 2026-08-01, before a wave hand-invented the brief
-    # file). --brief copies the file into the lane's worktree and swaps the
-    # literal `@brief` placeholder after -p for a one-line pointer prompt.
-    local _brf=() _b=""
-    if [ -n "$brief" ]; then
-        [ -f "$brief" ] && [ -s "$brief" ] || die "spawn-lane: --brief '$brief' is not a readable, non-empty file"
-        # P68: a brief may never instruct a skill invocation. A headless session
-        # has no slash commands, so "run /implement <n>" spawns a lane that can
-        # only fail — impl-2 died twice that way (ai-workout build-1) before a
-        # wave inlined the steps. The check runs on the SOURCE brief, before the
-        # rules below are appended.
-        local _slash=""
-        _slash=$(grep -oE '(^|[^A-Za-z0-9_./-])/(implement|loom|to-tickets|code-review|grilling|lavish|prototype|qa|retro|optimize|prop|fix)([^A-Za-z0-9-]|$)' "$brief" \
-                 | grep -oE '/[a-z-]+' | head -1 || true)
-        [ -z "$_slash" ] || die "spawn-lane: brief '$brief' tells the session to invoke $_slash —
-  a headless session has no slash commands (P68). Inline the work that skill
-  would do into the brief instead of naming it."
-        cp "$brief" "$abs/.lane-brief-$id.md" || die "spawn-lane: cannot copy brief into $abs"
-        # P68: every lane kind — impl, gate, merge, probe — gets the headless
-        # survival rules the probe brief alone used to carry. They are facts
-        # about the execution environment, not about probing, and a wave asked
-        # to remember them forgets them: three dead or wedged spawns in
-        # ai-workout build-1, one of them ending "the harness will notify me
-        # automatically" over a background build that could never wake it.
-        cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
-
-## Headless execution rules (appended by spawn-lane — they bind every lane)
-- No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns.
-- Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
-- Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
-- There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
-- Genuinely blocked? Record it with the matching lane.sh verb and exit. A lane that ends by asking a question is a dead lane.
-BRIEFEOF
-        # P31: the implementer's half of the mandatory adversarial test, stated
-        # where the implementer reads it rather than trusted to a wave. Two
-        # builds paid for these two lines: seat-reservations build-1 (4 of 5
-        # gate FAILs, converging over three rounds on "the test must actually
-        # run") and ai-workout build-1 (4 of 7, every test committed and
-        # running, none asserting its bullet — omission and partial coverage a
-        # mapping makes visible before push). #31 there also spent a full round
-        # being told its bullet was unsatisfiable, which is the one case more
-        # rounds cannot help.
-        if [ "$(_lane_type "$id")" = impl ]; then
-            cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
-- Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
-- A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
-BRIEFEOF
-        fi
-        local _hit=0 _prev=""
-        for _b in "$@"; do
-            if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
-                _brf+=("Read the file .lane-brief-$id.md in your working directory and execute it as your complete brief.")
-                _hit=1
-            else
-                _brf+=("$_b")
-            fi
-            _prev="$_b"
-        done
-        [ "$_hit" -eq 1 ] || die "spawn-lane: --brief requires the command to carry '-p @brief' — the placeholder spawn-lane replaces with the pointer prompt"
-        set -- "${_brf[@]}"
-    fi
+    # Brief staging (P28/P68/P31) — validates, copies and appends in
+    # _spawn_stage_brief, which hands the rewritten command back in _SPAWN_ARGS.
+    _spawn_stage_brief "$@"; set -- "${_SPAWN_ARGS[@]}"
     # Refuse inline arguments near the boundary where they actually die. The
     # cap is 1000, not lower: the working short-prompt pattern runs 400–600
     # chars and has never been denied.
-    local _maxlen="${LOOM_MAX_INLINE_ARG:-1000}"
+    local _maxlen="${LOOM_MAX_INLINE_ARG:-1000}" _b=""
     for _b in "$@"; do
         [ "${#_b}" -le "$_maxlen" ] || die "spawn-lane: an inline argument is ${#_b} chars (cap $_maxlen) —
   prompts this long die at the CLI/permission boundary (P28). Write the brief
@@ -1350,11 +1527,19 @@ BRIEFEOF
         fi
     fi
 
-    # EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE, after the last guard that
-    # can refuse. Rotating logs and clearing `<id>.rc` above the merge-lock
-    # reservation meant a spawn that lost the lock had already destroyed the
-    # previous run's transcript and exit code — harvest data for a lane that was
-    # never replaced.
+    # The lane's shell program is assembled ABOVE the destructive line, so the
+    # pregate tier check inside _spawn_build_pregate — the last guard that can
+    # refuse — fires while the previous run's log and rc are still intact.
+    local epi="" redirect="" pre=""
+    _spawn_build_epilogue "$@"; set -- "${_SPAWN_ARGS[@]}"
+    _spawn_build_pregate
+
+    # EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE — since P75 a function
+    # boundary, not just a comment: every stage that can refuse has returned by
+    # here, so nothing below may die. Rotating logs and clearing `<id>.rc`
+    # above the merge-lock reservation once meant a spawn that lost the lock
+    # had already destroyed the previous run's transcript and exit code —
+    # harvest data for a lane that was never replaced.
     # Rotate, then GUARANTEE a fresh mtime. `_rotate_log` deliberately skips an
     # empty file (there is nothing to preserve), which left the old file in
     # place carrying its old timestamp — so a lane respawned under an id whose
@@ -1374,123 +1559,6 @@ BRIEFEOF
     # report the old code — and a wave harvesting `rc` 7 posts a mechanical
     # rejection against a ticket whose lane is busy.
     rm -f "$LANES_DIR/$id.rc"
-    # What the lane does after its command exits, in order: release the merge
-    # lock first so the next merge can start, then fire the next wave.
-    # Event-driven ticking means the loop advances at the speed of work, not a
-    # fixed timer. A fire that lands during a running wave is no longer lost: it
-    # leaves the pending note and that wave re-ticks once on exit (P1), so the
-    # heartbeat is a true backstop for the initial kick and post-stall resume.
-    # Render BEFORE the tick fires: the wave this lane wakes up reads lane logs
-    # for verdicts and crash triage, and must not race the transcript.
-    local epi="" redirect=""
-    if [ "$stream" -eq 1 ]; then
-        export LOOM_LANE_JSONL="$jsonl"
-        redirect=' >"$LOOM_LANE_JSONL"'      # expanded inside the lane's shell
-        # The redirect above is unconditional for a streaming lane; only the
-        # FLAGS are conditional. A caller who already asked for stream-json
-        # gets the stream file like everyone else — it just does not get the
-        # flag twice.
-        if [ "$inject" -eq 1 ]; then
-            set -- "$@" --output-format stream-json --verbose
-        fi
-        # Lanes downshift on the same policy the wave does (P14) — a limit that
-        # stops the scheduler stops the work it schedules just as hard. Skipped
-        # when the caller set their own, for the same reason as the format.
-        if [ "$(cfg usage_limit pause_and_resume)" = "downshift_model" ]; then
-            local fb has_fb=0
-            for _a in "$@"; do
-                case "$_a" in --fallback-model|--fallback-model=*) has_fb=1; break ;; esac
-            done
-            fb=$(cfg fallback_model sonnet)
-            if [ -n "$fb" ] && [ "$has_fb" -eq 0 ]; then
-                set -- "$@" --fallback-model "$fb"
-            fi
-        fi
-        epi="'$SELF_PATH' render-log '$id'; "
-    fi
-    [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
-    [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
-    [ "$on_done" -eq 1 ] && epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
-    # The exit code is recorded FIRST, before the tick fires, or the wave this
-    # lane wakes would race the file it needs to read. It is how a wave tells a
-    # mechanical gate failure (7) from a crashed session (anything else), which
-    # is what makes the pregate below actionable.
-    # The lane records its own exit — it is the only thing that knows the code
-    # and the moment. `$LANES_DIR/<id>.start` carries the spawn time so the
-    # duration is measured, not inferred from file mtimes the way build 2's was.
-    # The event goes immediately after the rc write, BEFORE render-log: the
-    # transcript render takes seconds, and stamping the exit after it pushed
-    # `lane_exit` well past the chained successor's `lane_spawn` — a 17s skew
-    # the ticker rendered as "gate started, then implementation ended"
-    # (observed by the human, 2026-08-02).
-    epi="printf '%s\\n' \"\$_rc\" > '$LANES_DIR/$id.rc'; '$SELF_PATH' event lane_exit id '$id' type '$(_lane_type "$id")' rc \"\$_rc\" secs \"\$(( \$(date +%s) - \$(cat '$LANES_DIR/$id.start' 2>/dev/null || date +%s) ))\" >/dev/null 2>&1 || true; $epi"
-
-    # P12: the deterministic suite is effectively free — 868 tests in 10.6s,
-    # and the merge re-gate lane took 4 SECONDS end to end — yet it currently
-    # runs inside a review session that has already spent its expensive
-    # reasoning. Running it first, in shell, rejects a red branch in ~15s with
-    # zero model time. Roughly half of the twenty-odd full-suite runs quoted
-    # across build 2's logs were re-runs against an unchanged tree.
-    # A missing runner SKIPS the pregate rather than failing it: rejecting a
-    # ticket because the repo has no gate script would be a false verdict, and
-    # a false rejection costs far more than a review session.
-    # Tier and runner reach the lane through the ENVIRONMENT, never spliced into
-    # the shell program. Single-quoting them was not enough: a tier containing a
-    # quote broke out and ran arbitrary commands inside the lane, and `runner`
-    # comes from a config file the same way. The tier is also validated, because
-    # the four names are fixed and a typo should fail at spawn rather than
-    # silently run the wrong suite.
-    local pre="" runner tiers
-    if [ -n "$pregate" ]; then
-        # Validate against the tiers this repo ACTUALLY declares, not the four
-        # built-in names: `_repo_gates_tsv` accepts any `[a-z_]+` key, so a repo
-        # with a `security:` tier could pregate it — and hardcoding the four
-        # broke exactly that. Fall back to the built-ins when no repo block
-        # exists. The point of the check is catching a typo before it runs the
-        # wrong suite; injection is already impossible, since nothing below is
-        # spliced into the lane program.
-        tiers=$(_repo_gates_tsv | cut -f1 | sort -u)
-        [ -n "$tiers" ] || tiers="docs
-logic
-api
-ui"
-        printf '%s\n' "$tiers" | grep -qxF "$pregate" \
-            || die "spawn-lane: --pregate '$pregate' is not one of this repo's gate
-  tiers ($(printf '%s' "$tiers" | tr '\n' ' '))"
-        runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
-        export LOOM_PREGATE_TIER="$pregate" LOOM_PREGATE_RUNNER="$runner"
-        # P31: the adversarial half, and it runs INSTEAD of the runner — the
-        # verdict is rc 7 either way, so paying for the suite first buys
-        # nothing. A gate lane only: the check reads a finished branch, and
-        # applying it to an implementer would reject the work before it starts.
-        # The paths travel by ENVIRONMENT like the tier and the runner; nothing
-        # here is spliced into the lane's shell program.
-        local adv_iid="" adv_paths=""
-        if [ "$(_lane_type "$id")" = gate ]; then
-            adv_iid="${id#gate-}"; adv_iid="${adv_iid%%-*}"
-            case "$adv_iid" in ''|*[!0-9]*) adv_iid="" ;; esac
-        fi
-        if [ -n "$adv_iid" ] && adv_paths=$(_adv_pregate_reject "$adv_iid" "$pregate" "$abs"); then
-            export LOOM_PREGATE_ADV="$adv_paths"
-            pre='echo "--- pregate: this ticket names mandatory adversarial tests and the branch changes no file under what tier $LOOM_PREGATE_TIER runs ($LOOM_PREGATE_ADV) — rejecting with no review session (P31) ---"; _rc=7; '
-        else
-            pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
-            pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
-            pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
-            pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
-            # P60: a missing runner is a DECLARED bootstrap stage, never a
-            # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
-            # skipping" on every gate all night while the runner sat in an
-            # unmerged ticket — the mechanical check ran zero times and nothing
-            # said so, and the failure surfaced as merge-lane deaths instead.
-            # The behaviour is unchanged (no false rejection for a repo without
-            # a runner); only the report is: the lane log states what was not
-            # checked and why, and a `pregate_reduced` event carries it to the
-            # ticker.
-            pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
-            pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
-        fi
-    fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a

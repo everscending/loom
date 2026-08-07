@@ -65,7 +65,6 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100. P73 already shipped the extraction half: `_glab_list` lives in `scripts/lib.sh`, which `lane.sh` sources — so route the four reads through it and do NOT create `glab-lib.sh` (one sourced lib, not two) |
-| P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | open — proposed 2026-08-07; 430 and 220 lines, the epilogue/quoting assembly has burned twice already. Do after P71–P74 |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
 
 ## What the evidence says
@@ -370,32 +369,6 @@ counterfactual switch P49 already added).
 
 **Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
 count has grown past 100.
-
-## P75 · `cmd_spawn_lane` and `cmd_tick` decompose into named stages
-
-**Problem.** `cmd_spawn_lane` is ~430 lines (tick.sh:1092–1518) mixing flag parsing, spawn
-guards, brief staging, stream/model detection, pregate assembly and epilogue assembly;
-`cmd_tick` is ~220 (848–1071). Both are correct and heavily commented, but a change to any
-one concern is a change inside a function that does six, and the epilogue/quoting assembly
-is the precise territory where this file has been burned twice by its own account (the `_ev`
-jq rebind comment at 672 — "second time this exact trap has cost something in this file" —
-and the merge-lock stamp race at 1495).
-
-**Fix.** Mechanical extraction into stage functions with the data flow made explicit:
-`_spawn_parse_flags`, `_spawn_stage_brief`, `_spawn_build_pregate`, `_spawn_build_epilogue`
-for `cmd_spawn_lane`; `_tick_gates` (mode/switch/gap/quiet allowlist) and `_launch_wave`
-(prompt assembly through retry policy) for `cmd_tick`. No behavior change, no reordering of
-guards — the "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" boundary (1349) becomes a
-function boundary instead of a comment. Sequenced last of P71–P75: highest subtlety, and the
-ground under it (jq extraction, helpers) should be stable first.
-
-**Tests**: the existing spawn/tick planted violations are the safety net and must pass
-unchanged; add one guard-ordering pin — a spawn that fails the merge-lock reservation must
-leave the previous run's log and `.rc` untouched (the exact regression the destructive-line
-boundary exists to prevent, currently enforced by comment).
-
-**Consumer.** Every future spawn-path change, which becomes a change to one named stage; the
-suite, whose per-guard tests get functions to aim at.
 
 ## P76 · `tick-test.sh` splits into sections over a shared harness
 

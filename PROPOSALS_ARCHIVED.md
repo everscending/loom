@@ -74,6 +74,7 @@ writing a new proposal that touches the same machinery.
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | implemented 2026-08-07 (`tick.sh gate-deps` resolves every path-shaped file the tiers' gate commands — and, for repos declaring gates or a runner, the runner itself — invoke, and exits 1 naming the offending command for any not on the base branch; `references/phases-1-5.md` phase 5 runs it at definition and on every membership amendment, refusing unless a delivering ticket blocks every ticket carrying that tier; the pregate's missing-runner path now declares "tier reduced to review-only" in the lane log and emits a `pregate_reduced` event the ticker renders, instead of the silent skip; no SKILL.md change) |
 | P72 | One jq prelude both halves include | implemented 2026-08-07 (`scripts/lib.jq` — the jq counterpart of lib.sh, same *pure definitions only* entry rule — holds `epic_norm`, `orch_verdict_scan`, `hms`/`pct`/`usd` and `stage`/`ref`; all eight jq programs beside `tick.sh` open with `include "lib";` and every call site passes `jq -L <the scripts dir>`, resolved through `_jq_lib_dir` in lib.sh, which refuses by name when the prelude is missing. `lane.sh _close_epic_milestone` drops its `sed` slugify and normalizes through `epic_norm`; `cmd_verdict`'s duplicate check and snapshot.jq's `judged_at`/`rejections_of` all read the one trailer scan, so three writings became one landing site. `_lane_type` and lib.jq's `stage` now name each other. Suite 603 → 610, 0 failed; no SKILL.md change) |
 | P74 | Each copied mechanism becomes one helper | implemented 2026-08-07 (four copied mechanisms become four helpers, all local to the file that uses them: `_lock_reserve <dir>`/`_lock_owner <dir>` carry the mkdir-atomic, dead-owner-breakable lock for all three locks — `lock_acquire` keeps only its EXIT trap, the merge and gate locks keep only their names; `_pause_on_limit <stem> <first|retry>` is called from both wave attempts; `_once_per_state <sentinel> <state>` is the notify-once core for the quiet states, workspace trust, the un-armed heartbeat and the two stale flags, with `_notify_quiet`'s `unreadable` and re-arm carve-outs staying at its own site; and in lane.sh `_read_issue <iid> <refusal>` / `_open_mr_closing <iid> <refusal>` take the refusal clause from the caller so every question keeps its own fail-closed read, cache only a SUCCESSFUL body, and are forgotten by `_forget_issue` after each write. `transition` now makes one issue GET where it made two, `submit` two where it made three. Suite 610 -> 619, 0 failed; no SKILL.md change) |
+| P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | implemented 2026-08-07 (`cmd_tick` is now `_tick_gates` — every refusal: mode, switch, `_ensure_armed`, gap, lock, usage, quiescence allowlist, reporting through `tick_go` so the call sits outside any condition and `set -e` keeps its teeth inside — plus `_launch_wave`, prompt assembly through the retry policy. `cmd_spawn_lane` gets `_spawn_parse_flags` (consumed count back via `_spawn_shift`), `_spawn_stage_brief`, `_spawn_build_epilogue` and `_spawn_build_pregate`, the last two handing the rewritten command back in `_SPAWN_ARGS`; program text still takes tier/runner/adv-paths by ENVIRONMENT, never splice. Both builders now run ABOVE the destructive tail, so "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" is a function boundary: the pregate tier die, which used to fire after the logs were already rotated and the rc cleared, now refuses first — the one deliberate failure-path change. Guard-order pin added: a spawn refused at the merge-lock reservation leaves the previous run's log and rc byte-identical, with the destructive-first order re-run by hand as the planted violation. Suite 619 → 621, 0 failed; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -2987,3 +2988,29 @@ today's code).
 
 **Consumer.** The next person to fix a lock or sentinel bug (one landing site), and every
 lane's per-transition tracker latency.
+
+## P75 · `cmd_spawn_lane` and `cmd_tick` decompose into named stages
+
+**Problem.** `cmd_spawn_lane` is ~430 lines (tick.sh:1092–1518) mixing flag parsing, spawn
+guards, brief staging, stream/model detection, pregate assembly and epilogue assembly;
+`cmd_tick` is ~220 (848–1071). Both are correct and heavily commented, but a change to any
+one concern is a change inside a function that does six, and the epilogue/quoting assembly
+is the precise territory where this file has been burned twice by its own account (the `_ev`
+jq rebind comment at 672 — "second time this exact trap has cost something in this file" —
+and the merge-lock stamp race at 1495).
+
+**Fix.** Mechanical extraction into stage functions with the data flow made explicit:
+`_spawn_parse_flags`, `_spawn_stage_brief`, `_spawn_build_pregate`, `_spawn_build_epilogue`
+for `cmd_spawn_lane`; `_tick_gates` (mode/switch/gap/quiet allowlist) and `_launch_wave`
+(prompt assembly through retry policy) for `cmd_tick`. No behavior change, no reordering of
+guards — the "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" boundary (1349) becomes a
+function boundary instead of a comment. Sequenced last of P71–P75: highest subtlety, and the
+ground under it (jq extraction, helpers) should be stable first.
+
+**Tests**: the existing spawn/tick planted violations are the safety net and must pass
+unchanged; add one guard-ordering pin — a spawn that fails the merge-lock reservation must
+leave the previous run's log and `.rc` untouched (the exact regression the destructive-line
+boundary exists to prevent, currently enforced by comment).
+
+**Consumer.** Every future spawn-path change, which becomes a change to one named stage; the
+suite, whose per-guard tests get functions to aim at.

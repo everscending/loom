@@ -322,6 +322,37 @@ sleep 0.3
 "$TICK" clear-lane merge-73 >/dev/null
 rm -rf "$LOOM_HOME/tick.lock.d"
 
+# 4e3b. Guard order pin (P75): everything destructive happens below the last
+#       guard that can refuse — now a function boundary, not a comment. A
+#       spawn that loses the merge-lock reservation must leave the PREVIOUS
+#       run's transcript and exit code exactly as it found them: rotating the
+#       log and clearing `<id>.rc` before the reservation once destroyed
+#       harvest data for a lane that was never replaced.
+rm -rf "$LOOM_HOME/tick.lock.d" "$LOOM_HOME/merge.lock.d"
+"$TICK" spawn-lane merge-74 --merge-lock --no-tick -- sleep 20 >/dev/null
+printf 'previous transcript\n' > "$LOOM_HOME/logs/lane-merge-75.log"
+printf '7\n' > "$LOOM_HOME/lanes/merge-75.rc"
+"$TICK" spawn-lane merge-75 --merge-lock --no-tick -- true >/dev/null 2>&1 \
+    && bad "spawn-order: merge-75 spawned while merge-74 held the lock"
+[ "$(cat "$LOOM_HOME/logs/lane-merge-75.log" 2>/dev/null)" = "previous transcript" ] \
+    && [ "$(cat "$LOOM_HOME/lanes/merge-75.rc" 2>/dev/null)" = "7" ] \
+    && ok "spawn-order: a spawn refused at the merge lock leaves the previous run's log and rc untouched" \
+    || bad "spawn-order: the refused spawn destroyed the previous run's transcript or exit code"
+# Planted violation: the pre-boundary order — rotate, truncate, clear rc, THEN
+# reserve — re-run by hand. The assertion above must see the destruction that
+# order causes, or the pin is vacuous.
+mv "$LOOM_HOME/logs/lane-merge-75.log" "$LOOM_HOME/logs/lane-merge-75-rotated.log"
+: > "$LOOM_HOME/logs/lane-merge-75.log"
+rm -f "$LOOM_HOME/lanes/merge-75.rc"
+[ "$(cat "$LOOM_HOME/logs/lane-merge-75.log" 2>/dev/null)" = "previous transcript" ] \
+    && [ "$(cat "$LOOM_HOME/lanes/merge-75.rc" 2>/dev/null)" = "7" ] \
+    && bad "spawn-order-violation: the pin missed a destroyed transcript and rc" \
+    || ok "spawn-order-violation: destructive-first ordering is exactly what the pin catches"
+kill "$(cat "$LOOM_HOME/lanes/merge-74.pid")" 2>/dev/null; sleep 0.3
+"$TICK" clear-lane merge-74 >/dev/null
+rm -f "$LOOM_HOME/logs/lane-merge-75.log" "$LOOM_HOME/logs/lane-merge-75-rotated.log"
+rm -rf "$LOOM_HOME/merge.lock.d" "$LOOM_HOME/tick.lock.d"
+
 # 4e4. Gate lock (P67). The impl->gate chain handoff and the scheduler's own
 #      gate step can both spawn a gate for the same ticket at the same HEAD —
 #      ai-workout build-1: gate-14 and gate-14-r2 live at once, #41 gated
