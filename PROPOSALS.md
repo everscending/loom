@@ -65,6 +65,12 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100 |
+| P71 | The embedded jq programs live in files, like snapshot.jq | open — proposed 2026-08-07; ~600 lines of jq inside shell strings, unsyntax-checkable, apostrophe-hostile |
+| P72 | One jq prelude both halves include | open — proposed 2026-08-07; depends on P71. Byte-identical-by-comment becomes byte-identical-by-construction |
+| P73 | A shared bash lib for the facts every script re-derives | open — proposed 2026-08-07; widens P70's sourced-file seam. Base-branch rule written six ways, one already drifted |
+| P74 | Each copied mechanism becomes one helper | open — proposed 2026-08-07; locks ×3, usage-pause ×2, notify-once ×4, fail-closed reads ×7 (two verbs read the same issue twice per call) |
+| P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | open — proposed 2026-08-07; 430 and 220 lines, the epilogue/quoting assembly has burned twice already. Do after P71–P74 |
+| P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
 
 ## What the evidence says
 
@@ -368,3 +374,187 @@ counterfactual switch P49 already added).
 
 **Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
 count has grown past 100.
+
+## P71 · The embedded jq programs live in files, like snapshot.jq
+
+**Problem.** `tick.sh` still embeds six full jq programs as single-quoted shell strings —
+`RENDER_JQ` (tick.sh:1552), the render-events program (1657), `USAGE_JQ` (1803), `REPORT_JQ`
+(2242), `REPORT_TICKET_JQ` (2293), `RETRO_JQ` (2329) and `GRAPH_JQ` (2525) — roughly 600 lines
+of jq that cannot be syntax-checked on their own and cannot contain an apostrophe.
+`snapshot.jq`'s own header is the case for the fix, already made and already paid for: it was
+lifted out of `cmd_snapshot` because 370 lines of jq in a shell string were "too big to
+navigate, impossible to syntax-check on its own, and quietly unable to contain an apostrophe
+(one in a comment ends the shell quote mid-word and breaks the whole script — it happened)."
+Two of the remaining programs still carry the warning comment "No apostrophes in this comment:
+the whole program is a single-quoted shell string" (tick.sh:1721, snapshot.jq:263) — a rule
+readers must remember because the structure cannot enforce it.
+
+**Fix.** Move each program to its own file beside `snapshot.jq` — `render.jq`,
+`render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq`, `graph.jq` —
+loaded with `jq -f "$(dirname "$SELF_PATH")/<name>.jq"`, each behind the same missing-file die
+`SNAP_JQ` already gets (tick.sh:2027: fail naming the file, so a wave reads "file missing"
+rather than a jq error about an unreadable `-f` argument). Shell-interpolated fragments (the
+`$when` prefix spliced into the render-events program at tick.sh:1751) become `--arg`
+parameters, which they should have been anyway. No logic changes; the diff is relocation plus
+argument plumbing.
+
+**Tests** (`scripts/tick-test.sh`): a `jq -n -f` parse check per shipped `.jq` file, so a
+syntax error is caught by the suite instead of by the first wave that runs the verb; one
+planted violation — remove a `.jq` file, the owning verb dies naming it (the shape the
+`SNAP_JQ` guard already has). The existing render/report/retro/graph output-shape tests carry
+the behavior proof unchanged.
+
+**Consumer.** `qa` and `optimize`, which get checkable files instead of quoted strings; P72,
+which needs the programs to be files before anything can be shared between them; and every
+future edit to these programs.
+
+## P72 · One jq prelude both halves include
+
+**Problem.** Three facts are duplicated across the jq and shell halves and enforced today only
+by comments and discipline:
+
+- `epic_norm` (snapshot.jq:24) must stay "byte-identical to the milestone slugify in lane.sh"
+  (`_close_epic_milestone`'s `sed`, lane.sh:574) — its own comment says so, and a comment is
+  the only thing holding it.
+- The `orch-verdict` trailer regex is written three times: `judged_at` (snapshot.jq:62),
+  `rejections_of` (snapshot.jq:151), and lane.sh's duplicate-verdict check (lane.sh:259). A
+  trailer format change can half-land.
+- `hms`/`pct` are defined identically in `REPORT_JQ` and `RETRO_JQ`; the lane-id parse exists
+  in bash (`_lane_type`, tick.sh:1526; `tkey`, watch-panes.sh:165) and again in jq
+  (`stage()`, render-events).
+
+**Fix.** `scripts/lib.jq` holding `epic_norm`, one `orch_verdict_scan` def, `hms`/`pct`/`usd`,
+and `stage()`. The P71 files and `snapshot.jq` include it via `jq -L "$(dirname
+"$SELF_PATH")" 'include "lib"; …'`. `lane.sh _close_epic_milestone` drops its `sed` and
+normalizes through `jq -L … 'include "lib"; epic_norm'` — lane.sh already requires jq, and
+byte-identical becomes structural instead of disciplined. The bash lane-id parse stays bash
+(sourcing jq from bash for a hot-path string split is not worth it); `_lane_type` gains a
+cross-reference comment naming its jq mirror so a new lane kind cannot update one and miss the
+other. Depends on P71.
+
+**Tests**: a slugify-equivalence case — one fixture title (with uppercase, punctuation, and a
+leading/trailing separator) run through lane.sh's milestone-close path and snapshot.jq's
+`epic_norm` must produce the same key (today that agreement is asserted nowhere); a
+trailer-roundtrip case — a verdict written by `lane.sh verdict` is found by `judged_at` at the
+same fixture HEAD.
+
+**Consumer.** Whoever next changes the trailer format or the slugify — today a two-file,
+three-language hand-sync with no test to catch the miss.
+
+## P73 · A shared bash lib for the facts every script re-derives
+
+**Problem.** The base-branch rule — config `base`, else `develop` if `origin/develop` exists,
+else `main` — is written six times: tick.sh `cmd_sweep` (189), `_base_ref` (2883),
+`cmd_resolve_config` (3132); lane.sh `cmd_base_check` (356), `cmd_reconcile` (593),
+`cmd_submit` (800). The sixth already drifts: `submit` probes with `ls-remote` and never
+consults the config key, so a repo that sets `base:` gets MRs targeted by a different rule
+than the one its merges reconcile against. The lockfile→toolchain table exists twice
+(`detect_stack`, tick.sh:2795; `_install_cmd_for`, lane.sh:679 — "kept as its own copy" by
+its own comment); `die` three times; `_yaml_scalar`-shaped config reading twice.
+
+lane.sh's standing rationale — "deliberately stands alone" — is about not sourcing *tick.sh*,
+whose top level has side effects (mkdir, the `.orchestrator.yml` refusal, REPO_ROOT
+resolution, exit paths). It is not an argument against a side-effect-free function file, and
+P70 has already made that call: `glab-lib.sh` is a sourced shared file. This proposal widens
+that seam rather than opening a second one.
+
+**Fix.** One `scripts/lib.sh` (P70's `glab-lib.sh` becomes this file, or is folded into it if
+P70 lands first — one sourced lib, not two). Entry rule, stated in its header: pure functions
+only, nothing runs at source time, no tracker mutations ever. Contents: `_glab_list` (P70),
+`_detect_base <dir>`/`_base_ref <dir>` (all six call sites migrate, `submit` included —
+that is a behavior fix and the test below pins it), the lockfile→toolchain/installer table
+(one table serving `detect_stack`, `_derive_gates_tsv` and `_install_cmd_for`), `_lane_type`,
+`_yaml_scalar`/`cfg`/`cfg_source`, and `die` (prefix from `$0`). Resolved and sourced via the
+`dirname` pattern every script already uses to find its siblings, with a loud die when
+missing. The read/write charter is untouched: the lib mutates nothing, tick-test.sh's
+argv-scan of mutating verbs still binds on tick.sh, and lane.sh still never sources tick.sh.
+
+**Tests**: source-time purity — sourcing lib.sh in a bare environment creates no files and
+prints nothing; per-migrated-site behavior pins — sweep/resolve-config/base-check/reconcile
+against fixtures where the answer is `develop` vs `main` vs a config `base:`; and the drift
+fix — `submit` in a repo with `base:` set targets that base (a case that fails against
+today's code).
+
+**Consumer.** Every future ecosystem or base-rule change (lands once instead of six times),
+P70's four migrated reads, and P74's lane.sh helpers, which live beside these.
+
+## P74 · Each copied mechanism becomes one helper
+
+**Problem.** Four mechanisms exist as verbatim or near-verbatim copies:
+
+- **Locks ×3** — `lock_acquire` (tick.sh:541), `_merge_lock_reserve` (561),
+  `_gate_lock_reserve` (596) plus their two `_owner` twins are one mkdir-atomic,
+  dead-owner-breakable shape written three times. A future fix to the break-stale logic has
+  three places to land and can miss one.
+- **Usage-pause ×2** — the limit-hit block in `cmd_tick` (1019–1029) and its retry copy
+  (1044–1054) are eleven near-identical lines each.
+- **Notify-once ×4** — `_notify_quiet` (373), `_notify_trust` (479), `_notify_stale` (3357)
+  and the `UNARMED_STATE` handling in `_ensure_armed` (2759) each re-implement the
+  sentinel-file "once per state change" pattern.
+- **Fail-closed tracker reads ×7 (lane.sh)** — the P47 "read, rc-check, die refusing to
+  guess" pattern is hand-copied across `_blocked_guard`, `cmd_verdict`, `cmd_merge_failed`,
+  `cmd_transition`, `cmd_submit` (twice) and `cmd_close`. Worse than the duplication:
+  `cmd_transition` and `cmd_submit` each fetch the same issue **twice** per invocation — once
+  inside `_blocked_guard`, again for their own closed/label checks — a doubled tracker
+  round-trip on every state transition in every lane.
+
+**Fix.** Four local helpers, no cross-script sharing needed beyond what P73 provides:
+`_lock_reserve <dir>` / `_lock_owner <dir>` parameterized by directory (only
+`lock_acquire`'s EXIT trap stays at its call site); `_pause_on_limit <stem> <source>` called
+from both attempt paths; a `_once_per_state <sentinel> <state>` core for the three sentinels
+whose semantics match ( `_notify_quiet` keeps its `unreadable`/re-arm carve-outs locally);
+and in lane.sh `_read_issue <iid>` / `_open_mr_closing <iid>` returning the JSON so
+`_blocked_guard` and the caller share one fetch — the double read collapses to one, halving
+issue reads on `transition` and `submit`.
+
+**Tests**: the existing planted violations for lock exclusion, stale-break, pause-on-limit
+and notify-dedup already cover the behavior and must stay green across the swap; add the one
+missing pin — pause-on-limit firing on the *retry* path (the P14 crash-then-limit sequence) —
+and a call-count case asserting `transition` performs exactly one issue GET (fails against
+today's code).
+
+**Consumer.** The next person to fix a lock or sentinel bug (one landing site), and every
+lane's per-transition tracker latency.
+
+## P75 · `cmd_spawn_lane` and `cmd_tick` decompose into named stages
+
+**Problem.** `cmd_spawn_lane` is ~430 lines (tick.sh:1092–1518) mixing flag parsing, spawn
+guards, brief staging, stream/model detection, pregate assembly and epilogue assembly;
+`cmd_tick` is ~220 (848–1071). Both are correct and heavily commented, but a change to any
+one concern is a change inside a function that does six, and the epilogue/quoting assembly
+is the precise territory where this file has been burned twice by its own account (the `_ev`
+jq rebind comment at 672 — "second time this exact trap has cost something in this file" —
+and the merge-lock stamp race at 1495).
+
+**Fix.** Mechanical extraction into stage functions with the data flow made explicit:
+`_spawn_parse_flags`, `_spawn_stage_brief`, `_spawn_build_pregate`, `_spawn_build_epilogue`
+for `cmd_spawn_lane`; `_tick_gates` (mode/switch/gap/quiet allowlist) and `_launch_wave`
+(prompt assembly through retry policy) for `cmd_tick`. No behavior change, no reordering of
+guards — the "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" boundary (1349) becomes a
+function boundary instead of a comment. Sequenced last of P71–P75: highest subtlety, and the
+ground under it (jq extraction, helpers) should be stable first.
+
+**Tests**: the existing spawn/tick planted violations are the safety net and must pass
+unchanged; add one guard-ordering pin — a spawn that fails the merge-lock reservation must
+leave the previous run's log and `.rc` untouched (the exact regression the destructive-line
+boundary exists to prevent, currently enforced by comment).
+
+**Consumer.** Every future spawn-path change, which becomes a change to one named stage; the
+suite, whose per-guard tests get functions to aim at.
+
+## P76 · `tick-test.sh` splits into sections over a shared harness
+
+**Problem.** The suite is one 6,188-line file. Its sections are already numbered and
+self-contained, but running one section during development is not possible — every run is
+every test — and the global stubs at the top (glab capture, launchctl, herdr, watch-panes,
+each with a paid-for zombie-agent story) are entangled with the file rather than importable.
+
+**Fix direction.** `scripts/tests/NN-<topic>.sh` per section, a `scripts/test-lib.sh`
+holding the harness (`ok`/`bad`/counters, the stubs, fixture env), and `tick-test.sh`
+becomes the driver that runs all sections (so every existing invocation keeps working).
+Deferred, not open: the suite runs in ~10 seconds, so the split currently buys convenience,
+not capacity. Revisit when suite growth hurts a `qa` pass or P45's mutate mode wants
+per-section runs.
+
+**Consumer.** `qa` (P45's mutate mode gets addressable sections), and anyone iterating on
+one guard.
