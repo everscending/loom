@@ -54,12 +54,14 @@ writing a new proposal that touches the same machinery.
 | P59 | A pinned interface names fields, not references | implemented 2026-08-06 (`references/ticket-template.md` Pinned interfaces section and `references/phases-1-5.md` phase 4 bullet both now require fields/values/shapes, name a bare endpoint path/type name/file path as a reference not a pin, and require a shape absent from every document of record to be specified in the ticket itself) |
 | P47 | Guards fail closed | implemented 2026-08-06 (`lane.sh`'s four guard reads and `tick.sh cmd_sweep`'s merge-range check now capture the read's own exit status before touching its output, and `die` on failure instead of falling through to "not blocked" / "not closed" / "no open MR" / "no commits ahead") |
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
+| P48 | The wave prompt is generated, not hand-maintained | implemented 2026-08-07 (`tick.sh` `_lane_verbs` reads the verb roster out of `lane.sh`'s own usage line; the injected spawn line points at the ticket's `.model.effective` instead of a flat `--model <lane_model>`; the sentence telling merge lanes to finish with `lane.sh close` is gone) |
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | implemented 2026-08-07 (`lane.sh submit` opens the MR carrying `Closes #<iid>` and moves the label to `review` in one call, refusing an unpushed HEAD, a closed ticket and an already-judged one, and completing rather than duplicating an open MR; `snapshot` derives `summary.repairs` — the two stranded shapes, each with the single command that repairs it — and warns on each) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
 | P67 | One gate per commit | implemented 2026-08-07 (`tick.sh spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket+HEAD, via a `_gate_lock_reserve`/`_gate_lock_owner` pair shaped exactly like the existing merge lock but keyed per `<ticket>@<sha>` instead of one shared dir) |
+| P68 | Implementation briefs get the headless survival rules probes get | implemented 2026-08-07 (`tick.sh spawn-lane --brief` appends the headless execution rules to the lane's copy of every brief, whatever the lane kind, and refuses a brief that tells the session to invoke a skill by slash command) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
 
@@ -2145,6 +2147,47 @@ never appears; `watch-panes.sh`'s poll keeps a stale lane's pane live — no idl
 All three fail against the pre-fix code (confirmed by running them against the unmodified scripts)
 and pass against the fix. Full suite: 468 passed, 0 failed (465 → 468, three new cases).
 
+## P48 · The wave prompt is generated, not hand-maintained
+
+**Problem.** `tick.sh:885-891` composes the context injected into every wave, prefaced "trust it
+over rediscovery" — so where it contradicts `SKILL.md`, it wins, from inside the session. It
+tells every wave to spawn lanes with a flat `--model <lane_model>`, defeating P31's per-ticket
+escalation so a rework round runs on the tier that just failed; it lists the `lane.sh` verbs
+without `merge`, `merge-failed`, `fix-ticket`, `reconcile` or `probe-result`; and it instructs
+merge lanes to finish with `lane.sh close`, the build-1 merge-1 failure `cmd_merge` was written to
+end and `cmd_close` now hard-refuses.
+
+**Fix direction.** The prompt states only facts tick.sh *owns* — repo root, state dir, script
+paths, permission mode, the first action — and derives the rest instead of restating it: the verb
+roster from `lane.sh`'s own usage output, the per-ticket model from the snapshot's `.model`, and
+nothing at all about which verb finishes a merge (that is a decision, and it lives in SKILL.md).
+A suite case asserts the injected verb list equals `lane.sh`'s usage list, so the two cannot drift
+again.
+
+**More evidence (ai-workout build-1, 2026-08-07).** The same hand-maintained-prose failure shape
+reached lane briefs: a wave's brief told impl-2 to invoke `/implement` as a slash command —
+impossible in a headless session — costing two dead spawns before a later wave rewrote the brief
+inline. P68 (adopted 2026-08-07) is the brief-side companion to this proposal.
+
+**As implemented.** `_lane_verbs <lane.sh>` runs `lane.sh` bare, keeps the text after
+`usage: lane.sh `, and splits it on `" | "` — the spaced separator, so the alternatives written
+*inside* one segment (`pass|fail`, `--url <url> | -- <cmd...>`) cannot masquerade as verbs — then
+takes each segment's first token and drops anything that is not a bare lowercase word. The result
+is interpolated into the prompt where the hand-written list used to sit; if `lane.sh` is
+unreadable the clause simply collapses to "run it bare for usage" rather than inventing a roster.
+The spawn line now carries `--permission-mode <mode>` alone and sends the wave to the ticket's
+`.model.effective` for the model, so `cfg lane_model` no longer reaches the prompt at all (it is
+still read by `snapshot` and `resolve-config`, which is where the escalation chain belongs). The
+`lane.sh close` sentence is deleted outright, not reworded. The brief bullet gained one clause
+each for P68's two new behaviours, since a wave composing a brief has to know about them.
+
+**Tests.** `scripts/tick-test.sh`: the injected roster equals `lane.sh`'s own dispatch table
+compared as a set (usage order and dispatch order differ and neither is a contract); a configured
+`lane_model: sonnet` never reaches the prompt as a flat flag and `.model.effective` does; the
+prompt names no merge-finishing verb; and — the failing side — a doctored `lane.sh` beside a copy
+of `tick.sh` puts a verb this suite has never heard of into the prompt verbatim, which a
+restatement could not do. Full suite: 545 passed, 0 failed (536 → 545, shared with P68).
+
 ## P61 · Count model turns, not log lines
 
 **Problem.** `_stamp_progress` filters only `api_retry`, `rate_limit_event` and `tool_progress`
@@ -2385,6 +2428,44 @@ stamp race, and the lock it releases is genuinely free for the next round; a non
 HEAD to key on and never blocks. Full suite: 536 passed, 0 failed (529 → 536). SKILL.md:
 unchanged — the guard is transparent plumbing inside `spawn-lane`, the same class as the existing
 duplicate-live-lane-id guard, which SKILL.md also never narrates.
+
+## P68 · Implementation briefs get the headless survival rules probes get
+
+**Problem.** The probe prompt carries the headless rules paid for by dead probes — every step
+blocks, poll never await, kill before exit. Implementation and merge briefs carry none of them,
+and briefs have separately instructed slash-command invocation, which cannot work in a headless
+session.
+
+**Evidence (ai-workout build-1).** impl-2 spawned three times because its brief said to invoke
+`/implement` (two dead spawns before a wave inlined the instructions); impl-8's first run ended
+"the harness will notify me automatically" over a backgrounded docker build that could never wake
+it — #8 merged ~6h later. Companion to P48: same root (hand-maintained prompt prose), different
+artifact.
+
+**Fix.** The headless rules move into the brief template every lane kind receives — they are
+facts about the execution environment, not about probing — and a brief never instructs a skill
+invocation; it inlines the work. A suite case greps composed briefs for the slash-command shape.
+
+**As implemented.** The template is the copy `spawn-lane --brief` already makes: after copying the
+brief into the lane's worktree it appends a five-bullet **Headless execution rules** section —
+every step blocks and nothing will wake you, poll with `lane.sh wait-ready` rather than await,
+`KillShell` every background shell before exiting and keep ephemeral files in the dir
+`lane.sh scratch` prints, no slash commands so do that work inline, and record a genuine block
+with the matching verb instead of asking. Appending to the copy rather than the source matters:
+a brief reused across spawns would otherwise grow a block each time. Before the copy, the *source*
+brief is refused if it tells the session to invoke a skill — a `/`-prefixed name from this skill's
+own routing roster, bounded so `src/implement/queue.ts` is not an invocation — and nothing is
+spawned. The rules deliberately name no skill and carry no `/` token, so the composed brief is
+clean of the shape it forbids. SKILL.md's probe-prompt paragraph, which was the only place these
+rules lived, shrinks to a pointer at the appended block; step 4 now says an impl brief inlines the
+work rather than naming `/implement`.
+
+**Tests.** `scripts/tick-test.sh`: an impl brief — not a probe — comes out of `spawn-lane`
+carrying both its own text and the rules; the wave's source file is untouched; the composed brief
+greps clean of the slash-command shape; a brief saying "Run /implement 12" is refused with nothing
+spawned and no copy left behind; and a brief mentioning `src/implement/queue.ts` still spawns, so
+the refusal cannot push waves back to inline prompts. Full suite: 545 passed, 0 failed (536 → 545,
+shared with P48).
 
 ## P69 · The verdict verb enforces its own trailer
 

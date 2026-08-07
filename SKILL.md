@@ -141,10 +141,11 @@ implement → gate → merge without bouncing off the scheduler twice. Every
 handoff is allowed to fail — merge lock held, session died, a cap reached —
 and nothing depends on one: the numbered steps below do the same work next
 wave regardless. Briefs travel as files, never inline prompts:
-`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies the brief into
-the worktree and swaps the placeholder for a pointer prompt; inline arguments
-past ~1000 chars are refused. *(paid: eight dead spawns in four minutes at the
-prompt boundary.)*
+`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it in, appends
+the headless execution rules, and swaps the placeholder for a pointer prompt.
+Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
+invoke — headless has no slash commands, so inline that work instead. *(paid:
+eight dead spawns at the prompt boundary; two more on `/implement`.)*
 
 **Headless permissions.** Every spawned session — wave, implementers,
 verifiers — runs `claude -p ... --permission-mode <permission_mode>`, a config
@@ -354,11 +355,12 @@ refuses outside herdr anyway.
      *(paid: a hand-filled `.env` trapped in one worktree became hostage
      state)*;
    - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` (with the ticket's
-     `.model.effective`) a headless `/implement <ticket>` session whose prompt
-     injects the ticket body + lessons thread, **skips `/implement`'s trailing
-     self-review** (the gate owns review), runs its own tier gate and fixes
-     what it reports **before** pushing, commits with the `Assisted-by`
-     trailer, pushes, then finishes with **`lane.sh submit <ticket>`**: one
+     `.model.effective`) a headless session whose brief **inlines** the work
+     rather than naming `/implement` (headless has no slash commands): the
+     ticket body + lessons thread, no trailing self-review (the gate owns
+     review), its own tier gate with what it reports fixed **before** pushing,
+     a commit with the `Assisted-by` trailer, a push, then finishes with
+     **`lane.sh submit <ticket>`**: one
      call opens the MR (carrying the `Closes #<ticket-iid>` link the build
      reads) and moves the label to `review`. Its final act is the gate spawn
      line (step 3) the wave handed it.
@@ -463,16 +465,11 @@ refuses outside herdr anyway.
    enumerate — and it sat unclaimed while every lane idled.)* Any lane filing
    a defect mid-build uses the same verb.
 
-   **The probe prompt is the failure surface** — put these in it every time.
-   *Every step blocks*: a headless session gets no notifications or wake-ups,
-   so "I've backgrounded it and will be notified" never wakes (it killed one
-   probe outright). *Poll, never await*: run the stack as a background shell,
-   then check readiness with **`lane.sh wait-ready --timeout <secs> (--url
-   <url> | -- <cmd...>)`** — one call, deadline-bounded, never a hand-rolled
-   `curl`+`sleep` turn loop (P56). A `wait-ready` timeout is a failure to
-   report. *Kill the stack before
-   exiting* (`KillShell`); ephemeral files go in `$LOOM_SCRATCH` and are never
-   cleaned up by hand. *Report last*: fix tickets, then the epic result via
+   **The probe prompt is the failure surface.** `spawn-lane` appends the
+   headless rules to every brief — every step blocks, poll with
+   **`lane.sh wait-ready`** rather than await, kill the stack, no slash
+   commands — so never restate them; a `wait-ready` timeout is a failure to
+   report, not a longer wait. *Report last*: fix tickets, then the epic result via
    `lane.sh probe-result <build-iid> <epic-slug> pass|fail --file <report>` —
    one verb posts the report on the Build issue, feeds the outcome to the
    build ticker, and on PASS closes the epic's milestone (a combined probe

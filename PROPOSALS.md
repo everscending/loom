@@ -60,9 +60,7 @@ evidence, and implementation notes belong in this file, not there.
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
-| P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
-| P48 | The wave prompt is generated, not hand-maintained | open — proposed 2026-08-06; the injected prompt contradicts SKILL.md on models, verbs and merging, and it wins |
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | open — proposed 2026-08-06; nine cross-ticket ambiguities in a 54-ticket set, none visible from inside one ticket; folds in the width and size rules, which check the same draft |
@@ -403,28 +401,6 @@ assert only the absence of a call, and pass against a stand-in that is `exit 127
 
 **Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
 
-## P48 · The wave prompt is generated, not hand-maintained
-
-**Problem.** `tick.sh:885-891` composes the context injected into every wave, prefaced "trust it
-over rediscovery" — so where it contradicts `SKILL.md`, it wins, from inside the session. It
-tells every wave to spawn lanes with a flat `--model <lane_model>`, defeating P31's per-ticket
-escalation so a rework round runs on the tier that just failed; it lists the `lane.sh` verbs
-without `merge`, `merge-failed`, `fix-ticket`, `reconcile` or `probe-result`; and it instructs
-merge lanes to finish with `lane.sh close`, the build-1 merge-1 failure `cmd_merge` was written to
-end and `cmd_close` now hard-refuses.
-
-**Fix direction.** The prompt states only facts tick.sh *owns* — repo root, state dir, script
-paths, permission mode, the first action — and derives the rest instead of restating it: the verb
-roster from `lane.sh`'s own usage output, the per-ticket model from the snapshot's `.model`, and
-nothing at all about which verb finishes a merge (that is a decision, and it lives in SKILL.md).
-A suite case asserts the injected verb list equals `lane.sh`'s usage list, so the two cannot drift
-again.
-
-**More evidence (ai-workout build-1, 2026-08-07).** The same hand-maintained-prose failure shape
-reached lane briefs: a wave's brief told impl-2 to invoke `/implement` as a slash command —
-impossible in a headless session — costing two dead spawns before a later wave rewrote the brief
-inline. P68 (adopted 2026-08-07) is the brief-side companion to this proposal.
-
 ## P49 · Every tracker read paginates
 
 **Problem.** `_epics_unaccepted` (`tick.sh:246-247`), `_quiet_check` (`:306`) and the snapshot's
@@ -634,21 +610,3 @@ epic without one. The probe then confirms; it never discovers.
 
 **What would falsify it.** Epics whose wiring ticket passes and whose probe still fails at the
 same rate — meaning the bar transfer, not the missing owner, was the problem.
-
-
-## P68 · Implementation briefs get the headless survival rules probes get
-
-**Problem.** The probe prompt carries the headless rules paid for by dead probes — every step
-blocks, poll never await, kill before exit. Implementation and merge briefs carry none of them,
-and briefs have separately instructed slash-command invocation, which cannot work in a headless
-session.
-
-**Evidence (ai-workout build-1).** impl-2 spawned three times because its brief said to invoke
-`/implement` (two dead spawns before a wave inlined the instructions); impl-8's first run ended
-"the harness will notify me automatically" over a backgrounded docker build that could never wake
-it — #8 merged ~6h later. Companion to P48: same root (hand-maintained prompt prose), different
-artifact.
-
-**Fix.** The headless rules move into the brief template every lane kind receives — they are
-facts about the execution environment, not about probing — and a brief never instructs a skill
-invocation; it inlines the work. A suite case greps composed briefs for the slash-command shape.

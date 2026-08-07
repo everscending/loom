@@ -806,6 +806,23 @@ _watch_pass() {
     printf '%s' "$q"
 }
 
+# P48: the verb roster injected into every wave is DERIVED from lane.sh's own
+# usage line, never restated here. The hand-maintained list went five verbs
+# stale (no merge, merge-failed, fix-ticket, reconcile, probe-result) and told
+# merge lanes to finish with `close` — the build-1 merge-1 failure `cmd_merge`
+# was written to end and `cmd_close` now hard-refuses. Segments split on " | "
+# so the alternatives written INSIDE one segment (`pass|fail`, `--url <url> |
+# -- <cmd...>`) cannot masquerade as verbs, and a first token that is not a
+# bare lowercase word is dropped for the same reason.
+_lane_verbs() { # _lane_verbs <lane.sh> → "scratch, note, …"; empty if unreadable
+    [ -x "$1" ] || return 1
+    "$1" 2>&1 >/dev/null \
+      | sed -n 's/.*usage: lane\.sh //p' \
+      | awk -F' \\| ' '{for (i=1;i<=NF;i++) {split($i,w," "); print w[1]}}' \
+      | grep -E '^[a-z][a-z0-9-]*$' \
+      | awk 'NR==1{printf "%s",$0;next}{printf ", %s",$0}'
+}
+
 cmd_tick() {
     # Three callers, three contracts (see SKILL "one program, one switch"):
     #   tick            a human typed it — always runs one wave, ignores both
@@ -917,10 +934,18 @@ cmd_tick() {
     # wave and lane inherits the human's saved interactive default — which on
     # 2026-08-02 was the top tier chosen for skill-repair work, silently
     # making every worker run at max cost. Empty = inherit, deliberately.
-    local wave_model lane_model wm_flag="" lane_model_line=""
-    wave_model="$(cfg wave_model "")"; lane_model="$(cfg lane_model "")"
+    # The LANE model is deliberately absent from this prompt (P48): it is per
+    # ticket, resolved by `snapshot` into `.model.effective`, and a flat
+    # `--model <lane_model>` injected here outranked that — running a rework
+    # round on the very tier that just failed it.
+    local wave_model wm_flag=""
+    wave_model="$(cfg wave_model "")"
     [ -n "$wave_model" ] && wm_flag=" --model $wave_model"
-    [ -n "$lane_model" ] && lane_model_line=" --model $lane_model"
+    local lane_path verb_txt
+    lane_path="$(dirname "$SELF_PATH")/lane.sh"
+    verb_txt="$(_lane_verbs "$lane_path" 2>/dev/null || true)"
+    if [ -n "$verb_txt" ]; then verb_txt="verbs: $verb_txt; "
+    else verb_txt=""; fi
     # The wave prompt carries the ground truth the spawner already has. A fresh
     # headless session that must rediscover repo/state/config by shelling
     # around can get its exploratory commands denied and misread that as
@@ -934,9 +959,9 @@ Wave context from tick.sh — trust it over rediscovery:
 - tick.sh: $SELF_PATH
 - state dir: $LOOM_HOME
 - FIRST action: run \"$SELF_PATH\" snapshot — it is the entire read step. Absence of .loom.yml is normal (config resolves from derived/global layers).
-- Spawn every lane with: --permission-mode $perm_mode$lane_model_line
-- Lanes make EVERY tracker write through the verb script $(dirname "$SELF_PATH")/lane.sh (verbs: claim, submit, transition, note, mr-note, verdict, close, scratch; long bodies via stdin or --file; run it bare for usage). Merge lanes close tickets with 'lane.sh close <iid>' — it strips the state labels too.
-- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree and swaps @brief for a pointer prompt. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
+- Spawn every lane with: --permission-mode $perm_mode. The model is per ticket, not global: pass --model from that ticket's .model.effective in the snapshot, and omit the flag when it is null.
+- Lanes make EVERY tracker write through the verb script $lane_path (${verb_txt}long bodies via stdin or --file; run it bare for usage).
+- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree, appends the headless execution rules every lane needs, and swaps @brief for a pointer prompt. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
     export LOOM_WAVE_PROMPT
     local wave_cmd="${LOOM_WAVE_CMD:-claude -p \"\$LOOM_WAVE_PROMPT\" --permission-mode $perm_mode$wm_flag}"
@@ -1139,7 +1164,33 @@ cmd_spawn_lane() {
     local _brf=() _b=""
     if [ -n "$brief" ]; then
         [ -f "$brief" ] && [ -s "$brief" ] || die "spawn-lane: --brief '$brief' is not a readable, non-empty file"
+        # P68: a brief may never instruct a skill invocation. A headless session
+        # has no slash commands, so "run /implement <n>" spawns a lane that can
+        # only fail — impl-2 died twice that way (ai-workout build-1) before a
+        # wave inlined the steps. The check runs on the SOURCE brief, before the
+        # rules below are appended.
+        local _slash=""
+        _slash=$(grep -oE '(^|[^A-Za-z0-9_./-])/(implement|loom|to-tickets|code-review|grilling|lavish|prototype|qa|retro|optimize|prop|fix)([^A-Za-z0-9-]|$)' "$brief" \
+                 | grep -oE '/[a-z-]+' | head -1 || true)
+        [ -z "$_slash" ] || die "spawn-lane: brief '$brief' tells the session to invoke $_slash —
+  a headless session has no slash commands (P68). Inline the work that skill
+  would do into the brief instead of naming it."
         cp "$brief" "$abs/.lane-brief-$id.md" || die "spawn-lane: cannot copy brief into $abs"
+        # P68: every lane kind — impl, gate, merge, probe — gets the headless
+        # survival rules the probe brief alone used to carry. They are facts
+        # about the execution environment, not about probing, and a wave asked
+        # to remember them forgets them: three dead or wedged spawns in
+        # ai-workout build-1, one of them ending "the harness will notify me
+        # automatically" over a background build that could never wake it.
+        cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+
+## Headless execution rules (appended by spawn-lane — they bind every lane)
+- No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns.
+- Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
+- Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
+- There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
+- Genuinely blocked? Record it with the matching lane.sh verb and exit. A lane that ends by asking a question is a dead lane.
+BRIEFEOF
         local _hit=0 _prev=""
         for _b in "$@"; do
             if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then

@@ -5633,6 +5633,116 @@ else
 fi
 kill "$(cat "$LOOM_HOME/lanes/impl-31.pid" 2>/dev/null)" 2>/dev/null
 
+# --- P48: the wave prompt is generated, not hand-maintained ----------------
+# The injected context is prefaced "trust it over rediscovery", so wherever it
+# contradicts SKILL.md it wins, from inside the session. Hand-maintained, it
+# went five verbs stale, told merge lanes to finish with `close` (the build-1
+# merge-1 failure `cmd_merge` was written to end and `cmd_close` now refuses),
+# and pinned every lane to a flat `--model <lane_model>` — outranking the
+# per-ticket escalation `snapshot` resolves into `.model.effective`, so a
+# rework round ran on the tier that had just failed it.
+WP="$T/waveprompt"; mkdir -p "$WP/repo" "$WP/bin"
+printf 'lane_model: sonnet\n' > "$WP/repo/.loom.yml"
+wave_prompt() { # wave_prompt <tick.sh> → the context that tick injected
+    : > "$WP/prompt.txt"
+    LOOM_HOME="$WP/home" LOOM_REPO="$WP/repo" \
+      LOOM_WAVE_CMD="sh -c 'printf %s \"\$LOOM_WAVE_PROMPT\" > $WP/prompt.txt'" \
+      "$1" tick >/dev/null 2>&1
+    cat "$WP/prompt.txt"
+}
+LANE_SH="$(cd "$(dirname "$TICK")" && pwd)/lane.sh"
+WPROMPT=$(wave_prompt "$TICK")
+# The roster is read out of lane.sh, so it equals what lane.sh actually
+# dispatches. Compared as a SET: usage order and dispatch order differ and
+# neither is a contract.
+injected=$(printf '%s\n' "$WPROMPT" | sed -n 's/.*(verbs: \([^;]*\);.*/\1/p' \
+           | tr ',' '\n' | tr -d ' ' | sort | tr '\n' ' ')
+dispatched=$(grep -E '^[[:space:]]+[a-z][a-z-]*\)[[:space:]]*shift; cmd_' "$LANE_SH" \
+             | sed 's/).*//' | tr -d ' ' | sort | tr '\n' ' ')
+if [ -n "$dispatched" ] && [ "$injected" = "$dispatched" ]; then
+    ok "P48: the injected verb roster equals lane.sh's own verb list"
+else
+    bad "P48: verb roster drifted — injected [$injected] vs dispatched [$dispatched]"
+fi
+# The model is per ticket. A configured lane_model must not reach the prompt as
+# a flat flag, and the prompt must send the wave to the snapshot for it.
+case "$WPROMPT" in
+  *"--model sonnet"*) bad "P48: the flat lane_model flag is back in the wave prompt" ;;
+  *".model.effective"*) ok "P48: the prompt derives the model per ticket, not one flag for all lanes" ;;
+  *) bad "P48: the prompt names neither .model.effective nor a model at all" ;;
+esac
+# Which verb finishes a merge is a decision, and decisions live in SKILL.md.
+case "$WPROMPT" in
+  *"lane.sh close"*) bad "P48: the prompt still tells lanes how to finish a merge" ;;
+  *) ok "P48: the prompt says nothing about which verb finishes a merge" ;;
+esac
+# The failing side: with the derivation removed the list could only be a
+# restatement. A doctored lane.sh proves it is read — a verb this suite has
+# never heard of reaches the prompt intact.
+cp "$TICK" "$WP/bin/tick.sh"
+cp "$(dirname "$TICK")/snapshot.jq" "$WP/bin/snapshot.jq" 2>/dev/null || :
+cat > "$WP/bin/lane.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "lane.sh: usage: lane.sh frobnicate <iid> | verdict <iid> pass|fail <sha> | wait-ready --timeout <secs> (--url <url> | -- <cmd...>)" >&2
+exit 2
+EOF
+chmod +x "$WP/bin/lane.sh"
+FAKEP=$(wave_prompt "$WP/bin/tick.sh")
+fake=$(printf '%s\n' "$FAKEP" | sed -n 's/.*(verbs: \([^;]*\);.*/\1/p')
+if [ "$fake" = "frobnicate, verdict, wait-ready" ]; then
+    ok "P48: the roster follows lane.sh — a made-up verb list is injected verbatim"
+else
+    bad "P48: roster is not derived from lane.sh (got [$fake])"
+fi
+
+# --- P68: every brief carries the headless survival rules ------------------
+# The probe brief carried rules paid for by dead probes; impl and merge briefs
+# carried none of them. ai-workout build-1: impl-2 spawned three times off a
+# brief that said to invoke `/implement` — impossible headless — and impl-8's
+# first run ended "the harness will notify me automatically" over a backgrounded
+# docker build that could never wake it (#8 merged ~6h later).
+BR="$T/briefs"; mkdir -p "$BR/wt"
+printf 'Implement ticket 12 in this worktree. Run the tier gate before pushing.\n' > "$BR/clean.md"
+"$TICK" spawn-lane impl-71 --no-tick --cwd "$BR/wt" --brief "$BR/clean.md" -- true -p @brief >/dev/null 2>&1
+COMPOSED="$BR/wt/.lane-brief-impl-71.md"
+if [ -f "$COMPOSED" ] && grep -q 'Implement ticket 12' "$COMPOSED" \
+   && grep -q 'every step blocks' "$COMPOSED" \
+   && grep -q 'wait-ready --timeout' "$COMPOSED" \
+   && grep -q 'KillShell' "$COMPOSED"; then
+    ok "P68: an impl brief is composed with the headless rules appended to it"
+else
+    bad "P68: impl brief lacks the headless rules ($(cat "$COMPOSED" 2>/dev/null | tr '\n' ' ' | cut -c1-120))"
+fi
+# The rules are appended to the COPY. Mutating the wave's own file would make a
+# reused brief grow a block per spawn.
+grep -q 'KillShell' "$BR/clean.md" \
+    && bad "P68: spawn-lane wrote the rules back into the wave's source brief" \
+    || ok "P68: the source brief is untouched — only the lane's copy carries the rules"
+# The composed brief itself must be clean of the shape it forbids, or every
+# lane reads an instruction to do the one thing that cannot work.
+if grep -qE '(^|[^A-Za-z0-9_./-])/(implement|loom|code-review|to-tickets)([^A-Za-z0-9-]|$)' "$COMPOSED"; then
+    bad "P68: the composed brief contains a slash-command invocation"
+else
+    ok "P68: the composed brief carries no slash-command shape"
+fi
+# The failing side: the rules are not decoration, so the brief that names a
+# skill is refused outright and no lane is spawned to die on it.
+printf 'Run /implement 12 and report back.\n' > "$BR/slash.md"
+out=$("$TICK" spawn-lane impl-72 --no-tick --cwd "$BR/wt" --brief "$BR/slash.md" -- true -p @brief 2>&1); rc_code=$?
+if [ "$rc_code" -ne 0 ] && case "$out" in *"/implement"*) true;; *) false;; esac \
+   && [ ! -f "$BR/wt/.lane-brief-impl-72.md" ] && [ ! -f "$LOOM_HOME/lanes/impl-72.pid" ]; then
+    ok "P68: a brief instructing a skill invocation is refused, and nothing spawns"
+else
+    bad "P68: slash-command brief accepted (rc=$rc_code) — $out"
+fi
+# A brief that merely mentions a path or a word containing the same letters is
+# not an invocation; refusing it would push waves back to inline prompts.
+printf 'Edit src/implement/queue.ts; the loom/gate script stays as is.\n' > "$BR/pathy.md"
+"$TICK" spawn-lane impl-73 --no-tick --cwd "$BR/wt" --brief "$BR/pathy.md" -- true -p @brief >/dev/null 2>&1
+[ -f "$BR/wt/.lane-brief-impl-73.md" ] \
+    && ok "P68: a path that merely contains a skill name is not a slash command" \
+    || bad "P68: false positive — a plain path was read as a skill invocation"
+
 # Whole-suite guard, checked last because it is a property of every test above
 # it: nothing in this file may reach the pane opener. The global stub catches a
 # test that sets HERDR_ENV=1 without its own stub; a test that `unset`s the
