@@ -97,6 +97,17 @@
 #                                            invisible to the scheduler)
 #   lane.sh claim <iid>                      assign self + in-progress (the
 #                                            first write of an impl lane)
+#   lane.sh submit <iid> [--title <t>] [--file F]
+#                                            the LAST write of an impl lane:
+#                                            opens the MR (description from
+#                                            F/stdin, `Closes #<iid>` appended)
+#                                            and moves the label to `review`,
+#                                            in one call. Refuses an unpushed
+#                                            HEAD, a closed ticket, and a
+#                                            ticket the gate already passed;
+#                                            re-run after a death completes
+#                                            whichever half is missing instead
+#                                            of opening a second MR
 #
 # Long bodies: pipe them.   lane.sh note 7 <<'EOF' … EOF
 # Every verb is safe to re-run; nothing here deletes.
@@ -722,6 +733,88 @@ cmd_claim() { # <iid>
     _lane_ev ticket_claim ticket "$1"
 }
 
+cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the label
+    # P63: finishing was several writes in a row — push, open the MR, move the
+    # label — so a session death between any two of them stranded finished work
+    # in a state no scheduler step looks at, and recovery was a later wave
+    # re-deriving history from the tracker. ai-workout build-1 lost four
+    # tickets that way (#31 pushed MR !8 and died before the relabel; #26, #36
+    # and #10 the same shape), hours of latency each, three repair waves. So
+    # finishing is one verb: it refuses every half-state it can see, and
+    # re-running it completes whichever half is missing rather than doubling
+    # the half that landed.
+    local iid="${1:-}" title="" bodyargs=()
+    _check_iid "$iid"
+    set -- "${@:2}"
+    while [ $# -gt 0 ]; do case "$1" in
+        --title) title="${2:-}"; [ -n "$title" ] || die "--title needs a value"; shift 2 ;;
+        *) bodyargs+=("$1"); shift ;;
+    esac; done
+    _blocked_guard "$iid" review
+    # One issue read, three questions: is it closed, has the gate already moved
+    # it past review, and what is its title. P47: a failed read dies rather
+    # than guessing — an MR opened over a stale answer is a write nothing undoes.
+    local _issue rc istate cur
+    _issue=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read the issue (glab api failed, rc=$rc) — refusing to open an MR blind."
+    istate=$(printf '%s' "$_issue" | jq -r '.state // empty' || true)
+    [ "$istate" != closed ] \
+        || die "issue $iid is CLOSED — refusing to submit finished work. Re-read the ticket: your snapshot is stale."
+    cur=$(printf '%s' "$_issue" | jq -r '[.labels[]? | select(. == "merge-queue")] | .[0] // empty' || true)
+    [ "$cur" != merge-queue ] \
+        || die "issue $iid is already 'merge-queue' — its gate passed. Submitting again would drag a judged ticket back to review."
+    # The source branch, and proof the remote already has exactly this commit.
+    # An MR opened over an unpushed HEAD reviews work nobody can see, and the
+    # gate then judges a different tree than the lane built.
+    local branch head remote_head base
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ -n "$branch" ] && [ "$branch" != HEAD ] \
+        || die "submit: detached HEAD — an MR needs a source branch (this verb runs in the lane worktree)"
+    if git ls-remote --exit-code --heads origin develop >/dev/null 2>&1
+    then base=develop; else base=main; fi
+    [ "$branch" != "$base" ] \
+        || die "submit: the current branch IS the base branch ($base) — there is nothing to merge"
+    head=$(git rev-parse HEAD 2>/dev/null || true)
+    remote_head=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}') \
+        || remote_head=""
+    [ -n "$remote_head" ] \
+        || die "submit: branch '$branch' is not on origin — push it first: git push -u origin $branch"
+    [ "$remote_head" = "$head" ] \
+        || die "submit: origin/$branch is at ${remote_head:0:8}, this worktree is at ${head:0:8} — push before submitting, or the MR carries work the gate will never see"
+    # Already-open MR = the strand this verb exists to end. Complete the missing
+    # half; never open a second MR for the same ticket. `closed_by`, not
+    # `related_merge_requests`, for cmd_merge's reason: the looser endpoint
+    # lists any MR that merely mentions the issue.
+    local _closed_by mr
+    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] \
+        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to open an MR that may be the second one."
+    mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    if [ -n "$mr" ]; then
+        echo "lane.sh: MR !$mr is already open on issue $iid — completing the label move only"
+    else
+        [ -n "$title" ] || title=$(printf '%s' "$_issue" | jq -r '.title // empty' || true)
+        [ -n "$title" ] || die "submit: no title on issue $iid and none given — pass --title"
+        local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
+        # `Closes #<iid>` is the literal string the scheduler links MR to ticket
+        # by; an MR without it is invisible to the build. Appended here rather
+        # than asked for, exactly as verdict appends its own trailer.
+        grep -Eq "[Cc]loses #$iid([^0-9]|$)" "$f" || printf '\n\nCloses #%s\n' "$iid" >> "$f"
+        mr=$("$GLAB" api --method POST "projects/:fullpath/merge_requests" \
+            -f "source_branch=$branch" -f "target_branch=$base" -f "title=$title" \
+            --field "description=@$f" 2>/dev/null | jq -r '.iid // empty') || mr=""
+        # MR first, label second, and the label is skipped when the MR failed:
+        # an open MR with no label flip is a state the snapshot now names and a
+        # wave repairs in one call, where a `review` label with no MR is a
+        # ticket queued for a gate that has nothing to read.
+        [ -n "$mr" ] || die "submit: opening the MR failed ($branch → $base) — the label was NOT moved; fix the push or the target branch and re-run"
+        echo "lane.sh: MR !$mr opened ($branch → $base), closes #$iid"
+        _lane_ev mr_opened ticket "$iid" mr "$mr"
+    fi
+    _set_state "$iid" review
+}
+
 cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     # The second repo-side verb, for exactly the reason `reconcile` is the
     # first: the step was left to prose in a brief, and prose is not a
@@ -797,9 +890,10 @@ case "${1:-}" in
     rescope)    shift; cmd_rescope "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;
+    submit)     shift; cmd_submit "$@" ;;
     merge)      shift; cmd_merge "$@" ;;
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

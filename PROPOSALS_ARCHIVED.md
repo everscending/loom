@@ -56,6 +56,7 @@ writing a new proposal that touches the same machinery.
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
 | P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | implemented 2026-08-07 (`lane.sh merge-failed --base-red <check> --fix <iid>` marks a base-defect attempt in the trailer; `snapshot` excludes those from `merge_attempts` and derives `merge_hold` — parked while the linked fix is open, self-releasing when it closes; `lane.sh base-check` runs the failing check on a throwaway clean-base worktree; ticket-template gains a Repo-wide guards declaration) |
+| P63 | Finishing is one verb, and the snapshot spots the half-finished | implemented 2026-08-07 (`lane.sh submit` opens the MR carrying `Closes #<iid>` and moves the label to `review` in one call, refusing an unpushed HEAD, a closed ticket and an already-judged one, and completing rather than duplicating an open MR; `snapshot` derives `summary.repairs` — the two stranded shapes, each with the single command that repairs it — and warns on each) |
 | P65 | Fix tickets are born with edges and checked for twins | implemented 2026-08-07 (`lane.sh fix-ticket` gains `--blocked-by <iids>`, writing a `## Blocked by` section in the format `snapshot.jq` already parses; refuses on a near-duplicate title — word-overlap ≥ 0.5 — among open fix tickets in the same milestone unless `--force`) |
 | P66 | Reconcile re-installs every ecosystem the merge touched | implemented 2026-08-07 (`lane.sh` `_sync_deps` resolves an installer per moved manifest/lockfile and runs it in that directory; `_install_cmd_for` walks up to the workspace lockfile; dedupe per dir+command) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
@@ -2237,6 +2238,40 @@ check and fix while the fix is open, computes it to null once the fix closes, an
 real attempt sitting beside a base-red one. Full suite: 484 passed, 0 failed (471 → 484).
 SKILL.md net +9 lines, all in step 5: the held-ticket exclusion on the queue-head line, and the
 base-red procedure folded into the existing red-combined-gate sentence.
+
+## P63 · Finishing is one verb, and the snapshot spots the half-finished
+
+**Problem.** A lane finishes with several tracker writes in sequence — push, open MR, move label;
+or post verdict, move label. A session death between steps strands a finished ticket in a state
+no scheduler step looks at, and recovery is model judgment in a later wave.
+
+**Evidence (ai-workout build-1).** Four incidents: #31 pushed MR !8 then died before the relabel
+(repaired 01:55); #26's PASS was posted but the label never flipped (repaired 04:24); #36 and #10
+the same shape (repaired 06:12). Hours of latency each; three repair waves.
+
+**Fix, two halves.** *Verb*: `lane.sh submit` — opens the MR (with the required `Closes #<iid>`)
+and moves the label in one call, refusing partial state it can detect. *Detector*: `snapshot`
+deterministically flags the two stranded shapes — open MR with `Closes #n` but ticket not in
+`review`+; PASS trailer on HEAD but ticket not in `merge-queue` — as named repair items, so the
+wave reads a list instead of re-deriving history.
+
+**Implemented 2026-08-07.** `lane.sh submit <iid> [--title <t>] [--file F]` is the last write of
+an impl lane: it opens the MR (description from `--file`/stdin, `Closes #<iid>` appended by the
+verb the way `verdict` appends its trailer) and moves the label to `review`, MR first and label
+second, with the label skipped entirely when the MR did not open. It refuses a detached HEAD, a
+branch whose HEAD is not on origin, a branch that IS the base, a closed ticket, and a ticket the
+gate already moved to `merge-queue`; re-run over an already-open MR it completes the label move
+and never opens a second MR — the repair path for a death that predates the verb. `snapshot.jq`
+gains `repairs_of` and `summary.repairs`: one item per stranded shape, each carrying `iid`,
+`shape` (`mr-open-not-in-review` / `pass-not-in-merge-queue`), `state`, `mr`/`sha` and a `fix`
+string that is the single `lane.sh transition` call completing the finish; each item also becomes
+a warning line. Shape 1 reads only the MR whose description carries `Closes #<iid>` (the looser
+`related_merge_requests` lists any MR mentioning the issue), and neither shape fires for a ticket
+holding an alive lane — the same `$working` set `summary.stranded` is defined against — or for a
+`blocked` one. `gate_of`'s verdict-at-HEAD logic was lifted into a shared `judged_at`, so "already
+judged at this HEAD" has one definition and cannot drift. Full suite: 521 passed, 0 failed
+(511 → 521). SKILL.md net −1 line: step 4's impl bullet now names the one verb instead of
+narrating open-MR-then-relabel.
 
 ## P65 · Fix tickets are born with edges and checked for twins
 

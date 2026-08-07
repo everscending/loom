@@ -40,31 +40,36 @@
     # so the wave is told rather than left to work it out: gate only where
     # `gate.eligible`. The verdict trailer is what makes "this HEAD is already
     # judged" exact instead of a guess; short shas match long ones either way.
-    def gate_of($iid; $state; $mrs; $notes; $gating):
-        ($mrs | map(select((.state // "") == "opened")) | first) as $mr
-      | ($mr.sha // null) as $head
-      # Carry each verdict timestamp and sort on it. Relying on the arrival
-      # order was a real bug: notes are fetched sort=desc, so the array is
-      # newest-first and taking the LAST match returned the OLDEST verdict —
-      # a ticket rejected and then passed at an unchanged commit read as
-      # "already judged FAIL" and would never merge. Sorting here cannot be
-      # broken later by changing the query.
-      # `i` is the arrival index, and it is the tiebreaker — without it a
-      # missing `created_at` makes every verdict tie, and since jq sort is
-      # stable over a newest-first list, `last` would quietly return the OLDEST
-      # again: the original bug, restored with no signal. Notes arrive newest
-      # first, so a SMALLER index is newer; sorting on -i puts the newest last.
-      | ([$notes | to_entries[] | .key as $i | .value as $note
+    # The newest verdict trailer standing at THIS head, or null. One
+    # definition, two consumers (gate_of and repairs_of): "already judged at
+    # this HEAD" is one fact and must not acquire a second, drifting answer.
+    # Carry each verdict timestamp and sort on it. Relying on the arrival
+    # order was a real bug: notes are fetched sort=desc, so the array is
+    # newest-first and taking the LAST match returned the OLDEST verdict —
+    # a ticket rejected and then passed at an unchanged commit read as
+    # "already judged FAIL" and would never merge. Sorting here cannot be
+    # broken later by changing the query.
+    # `i` is the arrival index, and it is the tiebreaker — without it a
+    # missing `created_at` makes every verdict tie, and since jq sort is
+    # stable over a newest-first list, `last` would quietly return the OLDEST
+    # again: the original bug, restored with no signal. Notes arrive newest
+    # first, so a SMALLER index is newer; sorting on -i puts the newest last.
+    # Bind the element before comparing: `$head | startswith(.sha)` would
+    # evaluate `.sha` against $head — a string — not against the verdict.
+    def judged_at($notes; $head):
+        ([$notes | to_entries[] | .key as $i | .value as $note
           | ($note.body // "")
           | scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})")
           | {verdict: .[0], sha: .[1], at: ($note.created_at // ""), i: $i}]) as $vs
-      # Bind the element before comparing: `$head | startswith(.sha)` would
-      # evaluate `.sha` against $head — a string — not against the verdict.
-      | (if $head == null then null
-         else ($vs | map(select(. as $v | ($head | startswith($v.sha))
-                                       or ($v.sha | startswith($head))))
-                   | sort_by([.at, -.i]) | last)
-         end) as $judged
+      | if $head == null then null
+        else ($vs | map(select(. as $v | ($head | startswith($v.sha))
+                                      or ($v.sha | startswith($head))))
+                  | sort_by([.at, -.i]) | last)
+        end;
+    def gate_of($iid; $state; $mrs; $notes; $gating):
+        ($mrs | map(select((.state // "") == "opened")) | first) as $mr
+      | ($mr.sha // null) as $head
+      | judged_at($notes; $head) as $judged
       | if $state != "review" then
             {eligible: false, reason: "not in review", head: $head, last_verdict: null}
         elif $mr == null then
@@ -81,6 +86,41 @@
              head: $head, last_verdict: $judged}
         else
             {eligible: true, reason: null, head: $head, last_verdict: null}
+        end;
+    # P63: the two shapes a half-finished lane leaves behind, named here
+    # instead of re-derived from history by a later wave. ai-workout build-1
+    # stranded four tickets this way — #31 pushed MR !8 and died before the
+    # relabel; #26, #36 and #10 carried a PASS on the thread with no label
+    # flip — hours of latency each and three repair waves. `lane.sh submit`
+    # shuts the window on the MR side going forward; this is the detector for
+    # the deaths no verb can cover (a gate lane dying between its note and its
+    # label). Every item carries the ONE command that repairs it.
+    # A ticket holding an ALIVE lane is never flagged: the second write may
+    # simply not have happened yet, and $working is the same live-lane set
+    # `summary.stranded` is defined against, so the two cannot drift. Nor is a
+    # `blocked` one — a human hold outranks machine flow, and `transition`
+    # would refuse the repair anyway.
+    # Shape 1 reads the MR that carries `Closes #<iid>`, never merely the
+    # first open one: `related_merge_requests` lists any MR that MENTIONS the
+    # issue, and repairing off the wrong branch is the cmd_merge trap again.
+    def repairs_of($iid; $state; $mrs; $notes; $working):
+        ((($iid | tostring) as $i | $working | index($i)) != null) as $busy
+      | ($mrs | map(select((.state // "") == "opened"
+                           and ((.description // "")
+                                | test("(?i)\\bcloses\\s+#" + ($iid | tostring) + "\\b"))))
+              | first) as $mr
+      | ($mrs | map(select((.state // "") == "opened")) | first | .sha // null) as $head
+      | judged_at($notes; $head) as $judged
+      | if $busy or $state == "blocked" then []
+        else
+          [ (if $mr != null and (($state == "review" or $state == "merge-queue") | not)
+             then {iid: $iid, shape: "mr-open-not-in-review", state: $state, mr: $mr.iid,
+                   fix: "lane.sh transition \($iid) review"}
+             else empty end),
+            (if $judged != null and $judged.verdict == "PASS" and $state != "merge-queue"
+             then {iid: $iid, shape: "pass-not-in-merge-queue", state: $state, sha: $judged.sha,
+                   fix: "lane.sh transition \($iid) merge-queue"}
+             else empty end) ]
         end;
     # P30: the rejection history as a decision input. A FAIL trailer may name
     # its defect class (class=<slug>, written by lane.sh verdict --class);
@@ -277,6 +317,11 @@
             gate: gate_of($t.iid; state_of($lb);
                           (($M[$t.iid | tostring]) // []);
                           (($N[$t.iid | tostring]) // []); $gating) })) as $tickets
+    # Computed off $members, not off the rows above, because it needs two
+    # fields no row carries: an MR description and the note thread.
+    | ([$members[] | . as $t | ($t.labels // []) as $lb
+        | repairs_of($t.iid; state_of($lb); (($M[$t.iid | tostring]) // []);
+                     (($N[$t.iid | tostring]) // []); $working)[]]) as $repairs
     | ([$tickets[] | .epic | select(. != null)] | group_by(.)
        | map({name: .[0], open_tickets: length, complete: false, source: "open-members"})) as $epics_open
     # An epic whose last ticket closed is invisible in an open-issue payload,
@@ -371,6 +416,16 @@
           | "ticket #\(.iid): `ready-for-agent` but still assigned to "
             + "\(.assignees | join(", ")) — invisible to the ready set AND to "
             + "`summary.stranded`. Clear it: lane.sh transition \(.iid) ready-for-agent"]
+       # Loud as well as listed: a stranded finish is invisible to every other
+       # step (harvest reads lanes, gate needs `review`, fill needs unclaimed),
+       # which is exactly how four of them sat for hours.
+       + [$repairs[] | if .shape == "mr-open-not-in-review"
+          then "ticket #\(.iid): MR !\(.mr) is open and closes it, but the "
+               + "ticket is `\(.state // "unlabeled")` — a lane died between "
+               + "opening the MR and moving the label. Repair: \(.fix)"
+          else "ticket #\(.iid): the gate PASSed at \(.sha) but the ticket is "
+               + "`\(.state // "unlabeled")`, not `merge-queue` — the verdict "
+               + "note landed and the label flip did not. Repair: \(.fix)" end]
        + [$tickets[] | select(.blocked_by | any(.closed == null))
           | "ticket #\(.iid): blocker closed-state unknown (cross-project link) — treated as not closed"]
        + (if ($bi != null and ($items | length) == 0)
@@ -457,5 +512,10 @@
                        | map(select(.state == "in-progress"
                               and (((.iid | tostring) as $i
                                     | $working | index($i)) | not)))
-                       | map(.iid)) },
+                       | map(.iid)),
+            # P63: tickets whose finishing lane wrote one half of a two-write
+            # finish and died. Each item names its shape and the single
+            # command that completes it, so the wave repairs from a list
+            # instead of reconstructing the history. Empty is the normal case.
+            repairs: $repairs },
         warnings: $warnings }

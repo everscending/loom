@@ -358,11 +358,10 @@ refuses outside herdr anyway.
      injects the ticket body + lessons thread, **skips `/implement`'s trailing
      self-review** (the gate owns review), runs its own tier gate and fixes
      what it reports **before** pushing, commits with the `Assisted-by`
-     trailer, pushes, opens the MR **whose description contains
-     `Closes #<ticket-iid>`** — the literal string the scheduler links MR to
-     ticket by, and an MR without it is invisible to the build — moves the
-     label to `review`, and as its final act runs the gate spawn line
-     (step 3) the wave handed it.
+     trailer, pushes, then finishes with **`lane.sh submit <ticket>`**: one
+     call opens the MR (carrying the `Closes #<ticket-iid>` link the build
+     reads) and moves the label to `review`. Its final act is the gate spawn
+     line (step 3) the wave handed it.
 
 5. **Merge queue** — never inline:
 

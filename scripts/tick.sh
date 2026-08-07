@@ -901,7 +901,7 @@ Wave context from tick.sh — trust it over rediscovery:
 - state dir: $LOOM_HOME
 - FIRST action: run \"$SELF_PATH\" snapshot — it is the entire read step. Absence of .loom.yml is normal (config resolves from derived/global layers).
 - Spawn every lane with: --permission-mode $perm_mode$lane_model_line
-- Lanes make EVERY tracker write through the verb script $(dirname "$SELF_PATH")/lane.sh (verbs: claim, transition, note, mr-note, verdict, close, scratch; long bodies via stdin or --file; run it bare for usage). Merge lanes close tickets with 'lane.sh close <iid>' — it strips the state labels too.
+- Lanes make EVERY tracker write through the verb script $(dirname "$SELF_PATH")/lane.sh (verbs: claim, submit, transition, note, mr-note, verdict, close, scratch; long bodies via stdin or --file; run it bare for usage). Merge lanes close tickets with 'lane.sh close <iid>' — it strips the state labels too.
 - Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree and swaps @brief for a pointer prompt. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
     export LOOM_WAVE_PROMPT

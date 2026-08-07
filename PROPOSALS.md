@@ -59,7 +59,6 @@ evidence, and implementation notes belong in this file, not there.
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
-| P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P67 | One gate per commit | open — adopted 2026-08-07, ai-workout build-1: 3 duplicate gate sessions; tranche 2 |
 | P68 | Implementation briefs get the headless survival rules probes get | open — adopted 2026-08-07, ai-workout build-1: 3 dead or wedged spawns; tranche 2 |
@@ -617,22 +616,6 @@ silent skip, so the log says what is not being checked and why.
 **What would falsify it.** A refused build definition whose named cycle a human then shows to be
 spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
 at definition time is cheaper than an hour's stall, but not free.
-
-## P63 · Finishing is one verb, and the snapshot spots the half-finished
-
-**Problem.** A lane finishes with several tracker writes in sequence — push, open MR, move label;
-or post verdict, move label. A session death between steps strands a finished ticket in a state
-no scheduler step looks at, and recovery is model judgment in a later wave.
-
-**Evidence (ai-workout build-1).** Four incidents: #31 pushed MR !8 then died before the relabel
-(repaired 01:55); #26's PASS was posted but the label never flipped (repaired 04:24); #36 and #10
-the same shape (repaired 06:12). Hours of latency each; three repair waves.
-
-**Fix, two halves.** *Verb*: `lane.sh submit` — opens the MR (with the required `Closes #<iid>`)
-and moves the label in one call, refusing partial state it can detect. *Detector*: `snapshot`
-deterministically flags the two stranded shapes — open MR with `Closes #n` but ticket not in
-`review`+; PASS trailer on HEAD but ticket not in `merge-queue` — as named repair items, so the
-wave reads a list instead of re-deriving history.
 
 ## P64 · Every epic ends with a wiring ticket
 

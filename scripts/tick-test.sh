@@ -5306,6 +5306,198 @@ else
     bad "guards fail closed: sweep worktree present=$([ -e "$SWF/repo-wt-9" ] && echo yes || echo no) ($(head -1 "$SWF/out"))"
 fi
 
+# --- P63 submit: finishing is ONE verb ------------------------------------
+# An impl lane finished with three writes in a row — push, open the MR, move
+# the label — and a session death between any two of them stranded finished
+# work where no scheduler step looks. ai-workout build-1 lost four tickets that
+# way (#31 pushed MR !8 and died before the relabel), hours each.
+SB="$T/submitverb"; mkdir -p "$SB"
+git -c init.defaultBranch=main init -q --bare "$SB/origin.git"
+git clone -q "$SB/origin.git" "$SB/repo" 2>/dev/null
+git -C "$SB/repo" config user.email t@t; git -C "$SB/repo" config user.name t
+echo base > "$SB/repo/f"; git -C "$SB/repo" add f
+git -C "$SB/repo" commit -qm base; git -C "$SB/repo" push -q origin main
+git -C "$SB/repo" checkout -qb ticket-41
+echo work > "$SB/repo/g"; git -C "$SB/repo" add g; git -C "$SB/repo" commit -qm work
+git -C "$SB/repo" push -q -u origin ticket-41
+cat > "$SB/glab-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+for a in "$@"; do case "$a" in
+  description=@*) cat "${a#description=@}" >> "${STUB_BODY:-/dev/null}" ;;
+esac; done
+case "$*" in
+  *"POST projects/:fullpath/merge_requests"*)
+      [ -n "${STUB_MR_FAIL:-}" ] && exit 1
+      echo '{"iid":9}' ;;
+  *"closed_by"*)  cat "${STUB_CLOSEDBY:-/dev/null}" 2>/dev/null; echo ;;
+  *"issues/44"*)  echo '{"state":"opened","title":"Already judged","labels":["build-2","merge-queue"]}' ;;
+  *"issues/"*)    echo '{"state":"opened","title":"Add ledger table","labels":["build-2","in-progress"]}' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$SB/glab-stub.sh"
+: > "$SB/calls"; : > "$SB/body"
+( cd "$SB/repo" && GLAB_CMD="$SB/glab-stub.sh" STUB_LOG="$SB/calls" STUB_BODY="$SB/body" \
+    "$LANE" submit 41 <<'EOB'
+Implements the ledger table.
+EOB
+) >"$SB/o1" 2>&1; rc_s1=$?
+if [ "$rc_s1" = 0 ] && grep -q 'source_branch=ticket-41' "$SB/calls" \
+   && grep -q 'target_branch=main' "$SB/calls" \
+   && grep -q 'add_labels=review' "$SB/calls" \
+   && grep -q 'Closes #41' "$SB/body"; then
+    ok "submit: one call opens the MR carrying 'Closes #41' AND moves the label to review"
+else
+    bad "submit: rc=$rc_s1, out=$(head -1 "$SB/o1"), calls=$(tr '\n' ';' < "$SB/calls")"
+fi
+# The write order is the whole point: MR first, label second, and NO label when
+# the MR did not open. A `review` label with no MR queues a gate against
+# nothing; an MR with no label is what the snapshot detector below repairs.
+: > "$SB/calls2"
+( cd "$SB/repo" && GLAB_CMD="$SB/glab-stub.sh" STUB_LOG="$SB/calls2" STUB_MR_FAIL=1 \
+    "$LANE" submit 41 <<'EOB'
+body
+EOB
+) >"$SB/o2" 2>&1; rc_s2=$?
+if [ "$rc_s2" != 0 ] && grep -q 'opening the MR failed' "$SB/o2" \
+   && ! grep -q 'add_labels' "$SB/calls2"; then
+    ok "submit: a failed MR creation leaves the label exactly where it was"
+else
+    bad "submit: label moved over a failed MR (rc=$rc_s2, $(head -1 "$SB/o2"))"
+fi
+# An MR opened over an unpushed HEAD reviews work nobody can see. Shown BOTH
+# ways: refused while the branch is local, accepted the moment it is pushed.
+git -C "$SB/repo" checkout -q -b ticket-42
+echo more > "$SB/repo/h"; git -C "$SB/repo" add h; git -C "$SB/repo" commit -qm work42
+: > "$SB/calls3"
+( cd "$SB/repo" && GLAB_CMD="$SB/glab-stub.sh" STUB_LOG="$SB/calls3" "$LANE" submit 42 <<'EOB'
+body
+EOB
+) >"$SB/o3" 2>&1; rc_s3=$?
+if [ "$rc_s3" != 0 ] && grep -q 'not on origin' "$SB/o3" \
+   && ! grep -q 'merge_requests' "$SB/calls3" && ! grep -q 'add_labels' "$SB/calls3"; then
+    ok "submit: refuses an unpushed branch, and writes nothing at all"
+else
+    bad "submit: unpushed branch rc=$rc_s3, out=$(head -1 "$SB/o3")"
+fi
+git -C "$SB/repo" push -q -u origin ticket-42
+: > "$SB/calls4"
+( cd "$SB/repo" && GLAB_CMD="$SB/glab-stub.sh" STUB_LOG="$SB/calls4" "$LANE" submit 42 <<'EOB'
+body
+EOB
+) >"$SB/o4" 2>&1; rc_s4=$?
+if [ "$rc_s4" = 0 ] && grep -q 'add_labels=review' "$SB/calls4"; then
+    ok "submit: the same branch submits once it is pushed"
+else
+    bad "submit: guard fired on a pushed branch (rc=$rc_s4, $(head -1 "$SB/o4"))"
+fi
+# Re-running after a death completes the missing half instead of doubling the
+# half that landed: MR !8 is already open, so only the label moves.
+printf '[{"iid":8,"state":"opened"}]\n' > "$SB/closedby.json"
+: > "$SB/calls5"
+( cd "$SB/repo" && git checkout -q ticket-41 && GLAB_CMD="$SB/glab-stub.sh" \
+    STUB_LOG="$SB/calls5" STUB_CLOSEDBY="$SB/closedby.json" "$LANE" submit 41 <<'EOB'
+body
+EOB
+) >"$SB/o5" 2>&1; rc_s5=$?
+if [ "$rc_s5" = 0 ] && grep -q 'already open' "$SB/o5" \
+   && ! grep -q 'merge_requests' "$SB/calls5" && grep -q 'add_labels=review' "$SB/calls5"; then
+    ok "submit: re-run over an open MR moves only the label — never a second MR"
+else
+    bad "submit: re-run mishandled (rc=$rc_s5, $(head -1 "$SB/o5"), $(tr '\n' ';' < "$SB/calls5"))"
+fi
+# A ticket the gate already passed must not be dragged back to review.
+: > "$SB/calls6"
+( cd "$SB/repo" && GLAB_CMD="$SB/glab-stub.sh" STUB_LOG="$SB/calls6" "$LANE" submit 44 <<'EOB'
+body
+EOB
+) >"$SB/o6" 2>&1; rc_s6=$?
+if [ "$rc_s6" != 0 ] && grep -q "already 'merge-queue'" "$SB/o6" \
+   && ! grep -q 'add_labels' "$SB/calls6"; then
+    ok "submit: refuses a ticket the gate already moved to merge-queue"
+else
+    bad "submit: dragged a judged ticket back (rc=$rc_s6, $(head -1 "$SB/o6"))"
+fi
+
+# --- P63 detector: the snapshot names the half-finished --------------------
+# The verb above cannot cover a death mid-verdict, or a lane older than it. So
+# both stranded shapes are derived: an open MR that closes a ticket sitting
+# short of `review`, and a PASS standing at HEAD on a ticket that never reached
+# `merge-queue`. Each item carries the one command that repairs it.
+RP="$T/repairfx"; mkdir -p "$RP"
+cat > "$RP/open.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 3","project_id":1,"labels":[],"assignees":[],
+  "description":"**Selected epics**\n\n- Ledger core (#31)\n"},
+ {"iid":31,"title":"Pushed, then died","project_id":1,"labels":["build-3","in-progress"],
+  "assignees":[],"description":"## Risk tier\n\napi\n"},
+ {"iid":26,"title":"Verdict posted, label not flipped","project_id":1,
+  "labels":["build-3","review"],"assignees":[],"description":"## Risk tier\n\napi\n"},
+ {"iid":36,"title":"Healthy, queued","project_id":1,"labels":["build-3","merge-queue"],
+  "assignees":[],"description":"## Risk tier\n\napi\n"},
+ {"iid":10,"title":"An MR that merely mentions another ticket","project_id":1,
+  "labels":["build-3","in-progress"],"assignees":[],"description":"## Risk tier\n\napi\n"}
+]
+EOF
+printf '[{"iid":8,"state":"opened","description":"Closes #31","sha":"aaa1111000000000000000000000000000000000"}]\n' > "$RP/mrs-31.json"
+printf '[{"iid":5,"state":"opened","description":"Closes #26","sha":"bbb2222000000000000000000000000000000000"}]\n' > "$RP/mrs-26.json"
+printf '[{"iid":6,"state":"opened","description":"Closes #36","sha":"ccc3333000000000000000000000000000000000"}]\n' > "$RP/mrs-36.json"
+printf '[{"iid":7,"state":"opened","description":"Related to Closes #31 work","sha":"ddd4444000000000000000000000000000000000"}]\n' > "$RP/mrs-10.json"
+printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"green\\n\\n<!-- orch-verdict PASS bbb2222 -->"}]\n' > "$RP/notes-26.json"
+printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"green\\n\\n<!-- orch-verdict PASS ccc3333 -->"}]\n' > "$RP/notes-36.json"
+cat > "$RP/glab-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+FX="$(cd "$(dirname "$0")" && pwd)"
+case "$*" in
+  *"state=opened"*) cat "$FX/open.json" ;;
+  *"related_merge_requests"*) n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/related.*#\1#p')
+                    cat "$FX/mrs-$n.json" 2>/dev/null || echo '[]' ;;
+  *"/notes"*)       n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/notes.*#\1#p')
+                    cat "$FX/notes-$n.json" 2>/dev/null || echo '[]' ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$RP/glab-stub.sh"
+GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap.json" 2>"$RP/err"
+qr() { jq -r "$1" "$RP/snap.json"; }
+if [ "$(qr '[.summary.repairs[] | select(.iid==31)] | length')" = "1" ] \
+   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .shape')" = "mr-open-not-in-review" ] \
+   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .mr')" = "8" ] \
+   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .fix')" = "lane.sh transition 31 review" ] \
+   && qr '.warnings[]' | grep -q 'MR !8 is open and closes it'; then
+    ok "repairs: an open MR closing an in-progress ticket is named, with its repair command"
+else
+    bad "repairs: MR-open shape missed ($(qr '.summary.repairs | tostring'), $(head -2 "$RP/err"))"
+fi
+if [ "$(qr '.summary.repairs[] | select(.iid==26) | .shape')" = "pass-not-in-merge-queue" ] \
+   && [ "$(qr '.summary.repairs[] | select(.iid==26) | .fix')" = "lane.sh transition 26 merge-queue" ] \
+   && qr '.warnings[]' | grep -q 'the verdict note landed and the label flip did not'; then
+    ok "repairs: a PASS standing at HEAD on a non-queued ticket is named, with its repair command"
+else
+    bad "repairs: PASS shape missed ($(qr '.summary.repairs | tostring'))"
+fi
+# The failing side of both guards, in one document: #36 carries the SAME open
+# MR and the SAME PASS and is correctly in `merge-queue`, and #10's open MR
+# mentions another ticket's `Closes` line rather than its own — repairing off
+# that MR would relabel a ticket over someone else's branch.
+if [ "$(qr '[.summary.repairs[] | select(.iid==36 or .iid==10)] | length')" = "0" ]; then
+    ok "repairs: a queued ticket and a mentions-only MR produce no repair item"
+else
+    bad "repairs: false positive ($(qr '[.summary.repairs[] | select(.iid==36 or .iid==10)] | tostring'))"
+fi
+# A ticket whose lane is still ALIVE is never flagged: the second write may
+# simply not have happened yet. Same live-lane set `summary.stranded` uses.
+"$TICK" spawn-lane impl-31 -- sleep 30 >/dev/null
+GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap2.json" 2>/dev/null
+if [ "$(jq -r '[.summary.repairs[] | select(.iid==31)] | length' "$RP/snap2.json")" = "0" ] \
+   && [ "$(jq -r '[.summary.repairs[] | select(.iid==26)] | length' "$RP/snap2.json")" = "1" ]; then
+    ok "repairs: a ticket holding an alive lane is not flagged mid-write"
+else
+    bad "repairs: live-lane race guard wrong ($(jq -c '.summary.repairs' "$RP/snap2.json"))"
+fi
+kill "$(cat "$LOOM_HOME/lanes/impl-31.pid" 2>/dev/null)" 2>/dev/null
+
 # Whole-suite guard, checked last because it is a property of every test above
 # it: nothing in this file may reach the pane opener. The global stub catches a
 # test that sets HERDR_ENV=1 without its own stub; a test that `unset`s the
