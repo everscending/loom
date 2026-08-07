@@ -57,7 +57,6 @@ evidence, and implementation notes belong in this file, not there.
 | ID | Proposal | Status |
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
-| P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
@@ -156,101 +155,6 @@ transcripts; waves 1h21m / 35%, one 57m blackout, peak concurrency 2 of 4, a sch
 suites differ too much for the spans to be compared directly.
 
 ---
-
-## P31 · Make the mandatory adversarial test a checkable deliverable
-
-`references/ticket-template.md` asks every ticket for "Mandatory adversarial tests". The gate then
-enforces that in prose, one expensive review round at a time.
-
-**Evidence (seat-reservations build-1).** Five gate FAILs in the build. **Four were the same
-family** — the mandatory adversarial test was not real, enforced coverage:
-
-| Ticket | Round | Class the gate named |
-|---|---|---|
-| #2 | 1 | `missing-adversarial-test` |
-| #2 | 2 | `adversarial-test-not-wired-to-gate` |
-| #21 | 1 | `missing-adversarial-test` |
-| #21 | 2 | `adversarial-test-skipped-in-ci` |
-| #4 | 1 | `scope-creep` (the odd one out) |
-
-Each round produced a *nearer miss*: absent → present but not on the tier's command list → on the
-list but silently skipped in CI. Three rounds to converge on "the test must actually run." Total
-rework was **11 lanes, 55m40s, 26.5% of all lane time**; #2 and #21 alone account for 5 gate lanes
-and 5 impl lanes of it.
-
-**Fix, in two halves.** *Ticket side* (`references/ticket-template.md`, this skill's own layer):
-the section stops being prose and states the three conditions the implementer must satisfy — the
-test is committed, it is **named in the tier's command list in `.loom.yml`**, and it is
-demonstrated to fail when its subject is broken. *Pregate side* (`tick.sh --pregate`): when the
-ticket body carries a non-empty adversarial-test section, check mechanically that the branch's diff
-adds or modifies at least one file named in that tier's command list, and exit 7 if not.
-
-That mechanical check would have caught three of the four — #2 r1, #21 r1, #2 r2 — at rc 7 in
-seconds instead of spending **787s (13m07s)** of review-session time on `gate-2`, `gate-21` and
-`gate-2-r2`. It cannot catch the fourth (`adversarial-test-skipped-in-ci`); judging whether a test
-that runs actually asserts anything stays a review job.
-
-**One limit worth recording, which is not a fix.** The `same_class_tail` ≥ 2 rule never fired,
-because each round's gate coined a fresh slug for what a human reads as one problem. Here that was
-the right outcome — round 3 passed on both tickets, so blocking at round 3 would have been strictly
-worse. Do not tighten slug matching on this evidence.
-
-**Reproduced 2026-08-06 in a second repo, in a shape the pregate half cannot see.**
-ai-workout-generator-copilot build-1, first 20 gate verdicts: 13 PASS, 7 FAIL. **Four of the seven
-are this same family** — and unlike seat-reservations, every one of the four *did* commit a test
-that `pytest` already runs.
-
-| Ticket | Class the gate named | What was actually wrong |
-|---|---|---|
-| #3 | `adversarial-test-mismatch` | test present, asserting a different thing than the bullet |
-| #25 | `missing-adversarial-check` | one of the ticket's bullets had no test at all |
-| #31 | `duration-budget-both-ends` | two-sided bound, only the upper half asserted |
-| #5 | *(no slug — see below)* | boundary test written for `/api/plan`, not for `/api/plan/adjust` |
-
-This is a different failure shape from the first build's. There the family was *absent → not on the
-command list → skipped in CI*; the mechanical pregate check catches all three of those. Here the
-test is committed, is on the tier's command list, does run, and passes — it just does not assert
-what the bullet says. **The proposed pregate check would have caught none of the four**, because
-"the diff adds or modifies a file on the tier's command list" is true for every one of them. The
-four cost `gate-3` 201s, `gate-25` 291s, `gate-31` 253s and `gate-5` 370s — **1115s (18m35s)** of
-review-session time, plus four rework rounds.
-
-Note the pregate did not run at all in this build: `scripts/gate.sh` is itself a build-1 ticket
-(#7, "Gate runner and CI"), and a missing runner is skipped rather than failed. So this build tests
-the *ticket-side* half of the fix and says nothing either way about the rc-7 saving.
-
-**What the second build adds to the fix — a third condition on the ticket side.** Committing a test
-is not the deliverable; covering each bullet is. Require the implementer to state the mapping —
-each bullet in `## Mandatory adversarial tests` → the name of the test function that asserts it —
-in
-the MR description, and to treat a bullet with no name beside it as unfinished work rather than a
-lane note. That makes both omission (#25, #5) and partial coverage (#31, #3) visible to the
-implementer before push, without asking a script to judge whether an assertion is meaningful. It
-also stays inside this skill's layer: the section wording is `references/ticket-template.md`, and
-the mapping requirement is one line in the implementer brief the wave already composes.
-
-**And a named path for an unsatisfiable bullet.** #31's mandatory test was not skipped out of
-haste — it is *unsatisfiable* against the constants ADR-0015 pins: the required band could not be
-met for 162 of 166 accepted inputs. The lane diagnosed that correctly, disclosed it in both the
-test docstring and the MR description, and deferred — and still spent a full gate round to be told
-so. A bullet the implementer can prove cannot be satisfied should end the lane in `blocked` with
-that proof, not in `review`. Cheap to state, and it is the one case where more rounds cannot help.
-
-**One more limit, consistent with the first build's.** #5's FAIL verdict carried no `class=` slug
-at all, so `same_class_tail` had nothing to match on. Two builds now show the same-class stop
-failing to engage for two different reasons — fresh slug per round there, no slug here. Neither is
-an argument for tightening slug matching; both are arguments for not relying on it as the backstop
-for this family.
-
-**What would falsify it.** A build where re-gate lane count does not drop, or where the pregate
-check exits 7 on a branch the review gate would have passed — a false rc 7 is more expensive than
-the round it saves. For the ticket-side half specifically: a build where implementers publish the
-bullet-to-test mapping and this family still accounts for over half the rejections, which would
-mean the gap is comprehension of the bullet rather than accounting for it.
-
-**Final build-1 tally (ai-workout, 2026-08-07).** The build finished its run at 11 first-round
-FAILs in 41 verdicts; the family held at 4 of 11 (#3, #25, #31, #5) plus one late relative, #13's
-`adversarial-test-gap`. No change to the fix; the evidence base is now three builds.
 
 ## P18 · Use a cheaper model for scheduling
 

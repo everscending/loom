@@ -36,6 +36,18 @@ instead of ahead of them.
 Inputs that must be **rejected**, one per line, ending with:
 "fix the rule, not my examples."
 
+State the three conditions the implementer must satisfy, not prose: the
+test is **committed**, it is **named in this tier's command list in
+`.loom.yml`**, and it is **demonstrated to fail** when its subject is
+broken. Each bullet is answered by name — bullet → the test function
+asserting it — in the MR description; a bullet with no name beside it is
+unfinished work, not a lane note. A bullet the implementer can *prove*
+unsatisfiable ends the lane `blocked` with that proof, never in `review`.
+*(paid: seat-reservations build-1 — 4 of 5 gate FAILs were this one
+family, three rounds converging on "the test must actually run";
+ai-workout build-1 — 4 of 7, every test committed and running, none
+asserting its bullet.)*
+
 ## Repo-wide guards
 
 Only when a deliverable asserts over the **whole tree** — a lint rule, a

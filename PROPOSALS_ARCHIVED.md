@@ -35,6 +35,7 @@ writing a new proposal that touches the same machinery.
 | P30 (rejections) | Same-class rejection detection: design-decision block at 2, not cap-exhaustion at 3 | implemented 2026-08-03 (`verdict --class` trailer, snapshot `rejections.same_class_tail`, notes fetched for all active tickets, SKILL rework rule) |
 | P30 (trust guard) | The trust guard walks the wrong ancestry for a lane worktree | implemented 2026-08-03 (`_trust_check_dir` asks the git repo root too, three-valued `_nearest_trust`, `tick.sh trust-check`, bootstrap treats untrusted as incomplete). **The number is reused** — two different proposals were filed as P30 on the same day; code comments citing P30 mean this one |
 | P31 | Rework model escalation: manual `model::<tier>` label + automatic `rework_model` | implemented 2026-08-03 (`model::<tier>` labels, `rework_model` config key, snapshot `.model` chain, ticker + `report --ticket` name the model) |
+| P31 (adversarial tests) | Make the mandatory adversarial test a checkable deliverable | implemented 2026-08-07 (`references/ticket-template.md` states the three conditions and the bullet→test-name mapping; `spawn-lane` appends both implementer lines to every impl brief; the gate pregate exits 7 when a ticket demanding adversarial tests meets a branch that changes nothing under the paths its tier runs). **The number is reused** — the P31 above is a different proposal, and both are cited in the scripts; see the section note |
 | P22 | Make a new repo zero-setup | implemented 2026-08-01 (`resolve-config`, generated allowlist, `bootstrap.sh` on first tick; acceptance test passed on `orchestrate-test`) |
 | P23 | Make the evidence for the next round fall out of running a build | implemented 2026-08-01 (`events.jsonl` written by the machinery; `tick.sh report` and `report --ticket <n>`) |
 | P25 | Give the skill a maintenance verb that does not trust its own tests | implemented 2026-08-01 (`references/qa.md`; `qa` verb routes to it) |
@@ -1503,6 +1504,107 @@ fell out: the bootstrap label table had to move from `:` to `|` separators
 (a scoped label's name *contains* a colon, and all four would have been
 created mangled), and the test suite turned out to read the developer's own
 `~/.loom/config.yml` for every `cfg` lookup — now a fixture.
+
+## P31 (adversarial tests) · Make the mandatory adversarial test a checkable deliverable
+
+*Implemented 2026-08-07. Note the ID collision: rework model escalation, above, was
+also filed as P31, and both are cited in the scripts. A `P31` about models, labels or
+the escalation chain (`snapshot.jq`, `bootstrap.sh`'s label table, the model lines in
+`tick.sh`) means that one; a `P31` about adversarial tests — the pregate rejection and
+the two implementer brief lines — means this one.*
+
+`references/ticket-template.md` asks every ticket for "Mandatory adversarial tests". The gate then
+enforces that in prose, one expensive review round at a time.
+
+**Evidence (seat-reservations build-1).** Five gate FAILs in the build. **Four were the same
+family** — the mandatory adversarial test was not real, enforced coverage:
+
+| Ticket | Round | Class the gate named |
+|---|---|---|
+| #2 | 1 | `missing-adversarial-test` |
+| #2 | 2 | `adversarial-test-not-wired-to-gate` |
+| #21 | 1 | `missing-adversarial-test` |
+| #21 | 2 | `adversarial-test-skipped-in-ci` |
+| #4 | 1 | `scope-creep` (the odd one out) |
+
+Each round produced a *nearer miss*: absent → present but not on the tier's command list → on the
+list but silently skipped in CI. Three rounds to converge on "the test must actually run." Total
+rework was **11 lanes, 55m40s, 26.5% of all lane time**; #2 and #21 alone account for 5 gate lanes
+and 5 impl lanes of it.
+
+**Fix, in two halves.** *Ticket side* (`references/ticket-template.md`, this skill's own layer):
+the section stops being prose and states the three conditions the implementer must satisfy — the
+test is committed, it is **named in the tier's command list in `.loom.yml`**, and it is
+demonstrated to fail when its subject is broken. *Pregate side* (`tick.sh --pregate`): when the
+ticket body carries a non-empty adversarial-test section, check mechanically that the branch's diff
+adds or modifies at least one file named in that tier's command list, and exit 7 if not.
+
+That mechanical check would have caught three of the four — #2 r1, #21 r1, #2 r2 — at rc 7 in
+seconds instead of spending **787s (13m07s)** of review-session time on `gate-2`, `gate-21` and
+`gate-2-r2`. It cannot catch the fourth (`adversarial-test-skipped-in-ci`); judging whether a test
+that runs actually asserts anything stays a review job.
+
+**One limit worth recording, which is not a fix.** The `same_class_tail` ≥ 2 rule never fired,
+because each round's gate coined a fresh slug for what a human reads as one problem. Here that was
+the right outcome — round 3 passed on both tickets, so blocking at round 3 would have been strictly
+worse. Do not tighten slug matching on this evidence.
+
+**Reproduced 2026-08-06 in a second repo, in a shape the pregate half cannot see.**
+ai-workout-generator-copilot build-1, first 20 gate verdicts: 13 PASS, 7 FAIL. **Four of the seven
+are this same family** — and unlike seat-reservations, every one of the four *did* commit a test
+that `pytest` already runs.
+
+| Ticket | Class the gate named | What was actually wrong |
+|---|---|---|
+| #3 | `adversarial-test-mismatch` | test present, asserting a different thing than the bullet |
+| #25 | `missing-adversarial-check` | one of the ticket's bullets had no test at all |
+| #31 | `duration-budget-both-ends` | two-sided bound, only the upper half asserted |
+| #5 | *(no slug — see below)* | boundary test written for `/api/plan`, not for `/api/plan/adjust` |
+
+This is a different failure shape from the first build's. There the family was *absent → not on the
+command list → skipped in CI*; the mechanical pregate check catches all three of those. Here the
+test is committed, is on the tier's command list, does run, and passes — it just does not assert
+what the bullet says. **The proposed pregate check would have caught none of the four**, because
+"the diff adds or modifies a file on the tier's command list" is true for every one of them. The
+four cost `gate-3` 201s, `gate-25` 291s, `gate-31` 253s and `gate-5` 370s — **1115s (18m35s)** of
+review-session time, plus four rework rounds.
+
+Note the pregate did not run at all in this build: `scripts/gate.sh` is itself a build-1 ticket
+(#7, "Gate runner and CI"), and a missing runner is skipped rather than failed. So this build tests
+the *ticket-side* half of the fix and says nothing either way about the rc-7 saving.
+
+**What the second build adds to the fix — a third condition on the ticket side.** Committing a test
+is not the deliverable; covering each bullet is. Require the implementer to state the mapping —
+each bullet in `## Mandatory adversarial tests` → the name of the test function that asserts it —
+in
+the MR description, and to treat a bullet with no name beside it as unfinished work rather than a
+lane note. That makes both omission (#25, #5) and partial coverage (#31, #3) visible to the
+implementer before push, without asking a script to judge whether an assertion is meaningful. It
+also stays inside this skill's layer: the section wording is `references/ticket-template.md`, and
+the mapping requirement is one line in the implementer brief the wave already composes.
+
+**And a named path for an unsatisfiable bullet.** #31's mandatory test was not skipped out of
+haste — it is *unsatisfiable* against the constants ADR-0015 pins: the required band could not be
+met for 162 of 166 accepted inputs. The lane diagnosed that correctly, disclosed it in both the
+test docstring and the MR description, and deferred — and still spent a full gate round to be told
+so. A bullet the implementer can prove cannot be satisfied should end the lane in `blocked` with
+that proof, not in `review`. Cheap to state, and it is the one case where more rounds cannot help.
+
+**One more limit, consistent with the first build's.** #5's FAIL verdict carried no `class=` slug
+at all, so `same_class_tail` had nothing to match on. Two builds now show the same-class stop
+failing to engage for two different reasons — fresh slug per round there, no slug here. Neither is
+an argument for tightening slug matching; both are arguments for not relying on it as the backstop
+for this family.
+
+**What would falsify it.** A build where re-gate lane count does not drop, or where the pregate
+check exits 7 on a branch the review gate would have passed — a false rc 7 is more expensive than
+the round it saves. For the ticket-side half specifically: a build where implementers publish the
+bullet-to-test mapping and this family still accounts for over half the rejections, which would
+mean the gap is comprehension of the bullet rather than accounting for it.
+
+**Final build-1 tally (ai-workout, 2026-08-07).** The build finished its run at 11 first-round
+FAILs in 41 verdicts; the family held at 4 of 11 (#3, #25, #31, #5) plus one late relative, #13's
+`adversarial-test-gap`. No change to the fix; the evidence base is now three builds.
 
 ## P30 (trust guard) · The trust guard walks the wrong ancestry for a lane worktree
 

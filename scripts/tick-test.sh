@@ -1194,6 +1194,127 @@ fi
     || bad "live-lane-violation: the running lane's pid file was overwritten"
 kill "$livepid" 2>/dev/null; "$TICK" clear-lane impl-48 >/dev/null
 
+# --- 4i9. P31: the mandatory adversarial test is a checkable deliverable ----
+# seat-reservations build-1 rejected the same shape three times in prose — the
+# test absent, then not on the tier's command list, then skipped in CI — at 787s
+# of review-session time. A ticket that names inputs which must be rejected, and
+# a branch that changes nothing under the paths its tier actually runs, is
+# decidable in shell. Strictly one-directional: every unknown skips, because a
+# false rc 7 costs more than the round it saves.
+ADVR="$T/adv-repo"; mkdir -p "$ADVR/src" "$ADVR/tests/unit" "$ADVR/scripts"
+git -c init.defaultBranch=main init -q "$ADVR" 2>/dev/null
+git -C "$ADVR" config user.email t@t; git -C "$ADVR" config user.name t
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest tests/unit"\n' > "$ADVR/.loom.yml"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ADVR/scripts/gate.sh"; chmod +x "$ADVR/scripts/gate.sh"
+: > "$ADVR/src/app.py"; git -C "$ADVR" add -A >/dev/null 2>&1; git -C "$ADVR" commit -qm base >/dev/null 2>&1
+git -C "$ADVR" checkout -qb feat-adv 2>/dev/null
+printf 'x = 1\n' > "$ADVR/src/app.py"
+git -C "$ADVR" add -A >/dev/null 2>&1; git -C "$ADVR" commit -qm work >/dev/null 2>&1
+# The tracker stub serves one issue body. Its description is the only input the
+# check reads, so each case swaps it rather than the branch.
+ADVG="$T/adv-glab"
+cat > "$ADVG" <<'EOF'
+#!/bin/sh
+echo "$@" >> "${STUB_LOG:-/dev/null}"
+[ "${STUB_FAIL:-0}" = 1 ] && exit 1
+printf '%s\n' "${STUB_BODY:-}"
+EOF
+chmod +x "$ADVG"
+ADV_MANDATORY='{"description":"## Mandatory adversarial tests\n\n- an empty seat id must be rejected\n\n## Risk tier\n\nlogic\n"}'
+ADV_SILENT='{"description":"## Design decisions\n\n- keep the reader dumb\n"}'
+adv_spawn() { # <lane> <log> <issue-body-json> [fail]
+    rm -f "$T/adv-ran-$1" "$LOOM_HOME/lanes/$1.rc"; : > "$2"
+    LOOM_REPO="$ADVR" GLAB_CMD="$ADVG" STUB_LOG="$2" STUB_BODY="$3" STUB_FAIL="${4:-0}" \
+        "$TICK" spawn-lane "$1" --no-tick --pregate logic --cwd "$ADVR" -- touch "$T/adv-ran-$1" >/dev/null 2>&1
+    for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/$1.rc" ] && break; sleep 0.1; done
+}
+
+# The rejection itself: no review session, rc 7 like any other mechanical
+# failure, and a lane log that names the tier's paths so the wave's rejection
+# comment can say what is missing.
+adv_spawn gate-61 "$T/adv-calls-61" "$ADV_MANDATORY"
+if [ ! -f "$T/adv-ran-gate-61" ] && [ "$(cat "$LOOM_HOME/lanes/gate-61.rc" 2>/dev/null)" = "7" ]; then
+    ok "adversarial-pregate: a branch touching nothing the tier runs is rejected at rc 7, no review session"
+else
+    bad "adversarial-pregate: expected rc 7 with no session (rc=$(cat "$LOOM_HOME/lanes/gate-61.rc" 2>/dev/null), ran=$([ -f "$T/adv-ran-gate-61" ] && echo yes || echo no))"
+fi
+if grep -q "mandatory adversarial tests" "$LOOM_HOME/logs/lane-gate-61.log" 2>/dev/null \
+   && grep -q "tests/unit" "$LOOM_HOME/logs/lane-gate-61.log" 2>/dev/null; then
+    ok "adversarial-pregate: the lane log names the reason and the paths the tier runs"
+else
+    bad "adversarial-pregate: the rejection does not say what is missing"
+fi
+
+# The holding side. Add a file under the tier's own path and the identical
+# ticket passes through to the review session — which is also where the
+# judgement it cannot make (does the test assert the bullet?) still lives.
+printf 'def test_rejects_empty_seat_id():\n    assert True\n' > "$ADVR/tests/unit/test_adv.py"
+git -C "$ADVR" add -A >/dev/null 2>&1; git -C "$ADVR" commit -qm adv >/dev/null 2>&1
+adv_spawn gate-62 "$T/adv-calls-62" "$ADV_MANDATORY"
+if [ -f "$T/adv-ran-gate-62" ] && [ "$(cat "$LOOM_HOME/lanes/gate-62.rc" 2>/dev/null)" = "0" ]; then
+    ok "adversarial-pregate: a branch that adds a test under the tier's path reaches the review session"
+else
+    bad "adversarial-pregate: FALSE REJECTION — the adversarial test was there (rc=$(cat "$LOOM_HOME/lanes/gate-62.rc" 2>/dev/null))"
+fi
+# The tracker read is last, only for a candidate rejection: a branch that
+# already touches the suite must not cost a round trip on every gate spawn.
+[ -s "$T/adv-calls-62" ] \
+    && bad "adversarial-pregate: a passing branch still paid for a tracker read ($(cat "$T/adv-calls-62"))" \
+    || ok "adversarial-pregate: a passing branch costs no tracker read — the local checks answer first"
+git -C "$ADVR" rm -q "$ADVR/tests/unit/test_adv.py" >/dev/null 2>&1
+git -C "$ADVR" commit -qm drop >/dev/null 2>&1
+
+# Gated on the ticket, not on the branch: a ticket that demands no adversarial
+# test says nothing about which files the branch should touch.
+adv_spawn gate-63 "$T/adv-calls-63" "$ADV_SILENT"
+[ -f "$T/adv-ran-gate-63" ] \
+    && ok "adversarial-pregate: a ticket with no adversarial section is never rejected for one" \
+    || bad "adversarial-pregate: a ticket that asked for no adversarial test was rejected anyway"
+
+# An unreadable tracker is not evidence about the branch — the same rule the
+# missing runner follows.
+adv_spawn gate-64 "$T/adv-calls-64" "$ADV_MANDATORY" 1
+[ -f "$T/adv-ran-gate-64" ] \
+    && ok "adversarial-pregate: an unreadable ticket skips the check rather than rejecting" \
+    || bad "adversarial-pregate: a tracker failure produced a false rejection"
+
+# Gate lanes only. The check reads a finished branch; run against an
+# implementer it would reject the work before the lane had written any of it.
+adv_spawn impl-65 "$T/adv-calls-65" "$ADV_MANDATORY"
+[ -f "$T/adv-ran-impl-65" ] \
+    && ok "adversarial-pregate: an impl lane is never rejected for a test it has not written yet" \
+    || bad "adversarial-pregate: the check fired on an implementer"
+
+# The gate runner is excluded from the paths. Every tier invokes it and no
+# ticket branch changes it, so counting it would reject every branch in a repo
+# whose tier is one runner call — the commonest shape there is.
+ADVR2="$T/adv-repo-runner-only"; mkdir -p "$ADVR2/src" "$ADVR2/scripts"
+git -c init.defaultBranch=main init -q "$ADVR2" 2>/dev/null
+git -C "$ADVR2" config user.email t@t; git -C "$ADVR2" config user.name t
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n' > "$ADVR2/.loom.yml"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ADVR2/scripts/gate.sh"; chmod +x "$ADVR2/scripts/gate.sh"
+: > "$ADVR2/src/app.py"; git -C "$ADVR2" add -A >/dev/null 2>&1; git -C "$ADVR2" commit -qm base >/dev/null 2>&1
+git -C "$ADVR2" checkout -qb feat-adv2 2>/dev/null
+printf 'y = 2\n' > "$ADVR2/src/app.py"
+git -C "$ADVR2" add -A >/dev/null 2>&1; git -C "$ADVR2" commit -qm work >/dev/null 2>&1
+rm -f "$T/adv-ran-gate-66" "$LOOM_HOME/lanes/gate-66.rc"
+LOOM_REPO="$ADVR2" GLAB_CMD="$ADVG" STUB_BODY="$ADV_MANDATORY" STUB_LOG="$T/adv-calls-66" \
+    "$TICK" spawn-lane gate-66 --no-tick --pregate logic --cwd "$ADVR2" -- touch "$T/adv-ran-gate-66" >/dev/null 2>&1
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-66.rc" ] && break; sleep 0.1; done
+[ -f "$T/adv-ran-gate-66" ] \
+    && ok "adversarial-pregate: a tier whose only path is the gate runner checks nothing" \
+    || bad "adversarial-pregate: a runner-only tier rejected every branch in the repo"
+
+# Planted violation: take the path token out of the tier's command list — the
+# mechanism the check reads — and the identical branch, on the identical
+# ticket, spends the review session the guard exists to save.
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest -q"\n' > "$ADVR/.loom.yml"
+adv_spawn gate-67 "$T/adv-calls-67" "$ADV_MANDATORY"
+[ -f "$T/adv-ran-gate-67" ] \
+    && ok "adversarial-pregate-violation: with no path on the tier's command list the branch burns the session" \
+    || bad "adversarial-pregate-violation: something else rejected the branch, so the guard proves nothing"
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest tests/unit"\n' > "$ADVR/.loom.yml"
+
 # --- 4h. P13: a busy lane must not read as a dead one ----------------------
 # `claude -p` writes nothing until it exits, so log mtime — the liveness
 # signal — stays frozen while a lane works. A healthy lane past the staleness
@@ -5960,6 +6081,29 @@ printf 'Edit src/implement/queue.ts; the loom/gate script stays as is.\n' > "$BR
 [ -f "$BR/wt/.lane-brief-impl-73.md" ] \
     && ok "P68: a path that merely contains a skill name is not a slash command" \
     || bad "P68: false positive — a plain path was read as a skill invocation"
+
+# P31: the implementer's half of the adversarial deliverable rides the same
+# append, so a wave cannot forget it. ai-workout build-1: four of seven gate
+# FAILs were tests that ran and passed without asserting the bullet they were
+# written for, and #31 spent a whole round being told its bullet was
+# unsatisfiable — the one case more rounds cannot help.
+if grep -q 'Mandatory adversarial tests' "$COMPOSED" \
+   && grep -q 'the test function that asserts it' "$COMPOSED" \
+   && grep -q 'unfinished work' "$COMPOSED" \
+   && grep -q 'unsatisfiable ends the lane blocked' "$COMPOSED"; then
+    ok "P31: an impl brief carries the bullet-to-test mapping and the unsatisfiable-bullet path"
+else
+    bad "P31: the impl brief does not require the bullet-to-test mapping"
+fi
+# Implementer instructions, and only the implementer's: a reviewer told to
+# publish the mapping would be reading someone else's job off its own brief.
+"$TICK" spawn-lane gate-74 --no-tick --cwd "$BR/wt" --brief "$BR/clean.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'every step blocks' "$BR/wt/.lane-brief-gate-74.md" 2>/dev/null \
+   && ! grep -q 'the test function that asserts it' "$BR/wt/.lane-brief-gate-74.md" 2>/dev/null; then
+    ok "P31: a gate brief gets the headless rules and not the implementer's mapping duty"
+else
+    bad "P31: the mapping requirement leaked into a non-impl brief"
+fi
 
 # --- P60 gate-deps: a gate command may never depend on an unmerged deliverable
 # ai-workout build-1: the ticket graph was acyclic, but the GATE graph was not —

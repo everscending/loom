@@ -1221,6 +1221,21 @@ cmd_spawn_lane() {
 - There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
 - Genuinely blocked? Record it with the matching lane.sh verb and exit. A lane that ends by asking a question is a dead lane.
 BRIEFEOF
+        # P31: the implementer's half of the mandatory adversarial test, stated
+        # where the implementer reads it rather than trusted to a wave. Two
+        # builds paid for these two lines: seat-reservations build-1 (4 of 5
+        # gate FAILs, converging over three rounds on "the test must actually
+        # run") and ai-workout build-1 (4 of 7, every test committed and
+        # running, none asserting its bullet — omission and partial coverage a
+        # mapping makes visible before push). #31 there also spent a full round
+        # being told its bullet was unsatisfiable, which is the one case more
+        # rounds cannot help.
+        if [ "$(_lane_type "$id")" = impl ]; then
+            cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+- Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
+- A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
+BRIEFEOF
+        fi
         local _hit=0 _prev=""
         for _b in "$@"; do
             if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
@@ -1440,20 +1455,37 @@ ui"
   tiers ($(printf '%s' "$tiers" | tr '\n' ' '))"
         runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
         export LOOM_PREGATE_TIER="$pregate" LOOM_PREGATE_RUNNER="$runner"
-        pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
-        pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
-        pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
-        pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
-        # P60: a missing runner is a DECLARED bootstrap stage, never a silent
-        # skip. ai-workout build-1 logged "no scripts/gate.sh here, skipping"
-        # on every gate all night while the runner sat in an unmerged ticket —
-        # the mechanical check ran zero times and nothing said so, and the
-        # failure surfaced as merge-lane deaths instead. The behaviour is
-        # unchanged (no false rejection for a repo without a runner); only the
-        # report is: the lane log states what was not checked and why, and a
-        # `pregate_reduced` event carries it to the ticker.
-        pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
-        pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+        # P31: the adversarial half, and it runs INSTEAD of the runner — the
+        # verdict is rc 7 either way, so paying for the suite first buys
+        # nothing. A gate lane only: the check reads a finished branch, and
+        # applying it to an implementer would reject the work before it starts.
+        # The paths travel by ENVIRONMENT like the tier and the runner; nothing
+        # here is spliced into the lane's shell program.
+        local adv_iid="" adv_paths=""
+        if [ "$(_lane_type "$id")" = gate ]; then
+            adv_iid="${id#gate-}"; adv_iid="${adv_iid%%-*}"
+            case "$adv_iid" in ''|*[!0-9]*) adv_iid="" ;; esac
+        fi
+        if [ -n "$adv_iid" ] && adv_paths=$(_adv_pregate_reject "$adv_iid" "$pregate" "$abs"); then
+            export LOOM_PREGATE_ADV="$adv_paths"
+            pre='echo "--- pregate: this ticket names mandatory adversarial tests and the branch changes no file under what tier $LOOM_PREGATE_TIER runs ($LOOM_PREGATE_ADV) — rejecting with no review session (P31) ---"; _rc=7; '
+        else
+            pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
+            pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
+            pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
+            pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
+            # P60: a missing runner is a DECLARED bootstrap stage, never a
+            # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
+            # skipping" on every gate all night while the runner sat in an
+            # unmerged ticket — the mechanical check ran zero times and nothing
+            # said so, and the failure surfaced as merge-lane deaths instead.
+            # The behaviour is unchanged (no false rejection for a repo without
+            # a runner); only the report is: the lane log states what was not
+            # checked and why, and a `pregate_reduced` event carries it to the
+            # ticker.
+            pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
+            pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+        fi
     fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
@@ -2843,6 +2875,96 @@ _repo_gates_tsv() {
       }' "$CONFIG"
 }
 
+# The ref a branch is measured against: the repo's declared base, else develop
+# where it exists, else main — preferring the remote ref, then a local branch,
+# then HEAD. <dir> is asked the question so a lane worktree can answer for
+# itself; HEAD means "no base here", and a caller measuring a diff must treat
+# that as unknown rather than as an empty diff.
+_base_ref() { # <dir> → ref name
+    local dir="$1" base
+    base=$(_yaml_scalar "$CONFIG" base)
+    if [ -n "$base" ]; then :
+    elif git -C "$dir" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
+    else base=main; fi
+    if git -C "$dir" show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then printf 'origin/%s\n' "$base"
+    elif git -C "$dir" show-ref --verify --quiet "refs/heads/$base" 2>/dev/null; then printf '%s\n' "$base"
+    else printf 'HEAD\n'; fi
+}
+
+# P31: the mandatory adversarial test, made checkable. A ticket's
+# `## Mandatory adversarial tests` section is enforced today in prose, one
+# expensive review round at a time — seat-reservations build-1 spent 787s of
+# review-session time on three rejections of one shape (absent, then not on the
+# tier's command list, then skipped in CI). Whether the branch touches anything
+# the tier actually runs is decidable in shell, so it costs an rc-7 spawn
+# instead of a round.
+# The paths are the path-shaped tokens the tier's own commands invoke, minus the
+# gate runner: every tier invokes the runner and no ticket branch changes it, so
+# counting it would reject every branch in a repo whose gates are one runner
+# call. Same token filter as gate-deps — safe charset, at least one slash,
+# relative — so flags, env words, URLs and $-words are skipped.
+_adv_tier_paths() { # <tier> → space-separated paths that tier's commands invoke
+    local tier="$1" gates runner t cmdline tok out="" seen=" "
+    runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+    runner="${runner#./}"
+    gates=$(_repo_gates_tsv); [ -n "$gates" ] || gates=$(_derive_gates_tsv)
+    set -f  # a glob token must never expand against the caller's cwd
+    while IFS="$(printf '\t')" read -r t cmdline; do
+        [ "$t" = "$tier" ] || continue
+        for tok in $cmdline; do
+            case "$tok" in -*) continue ;; esac
+            tok="${tok#./}"; tok="${tok%/}"
+            case "$tok" in
+                *[!A-Za-z0-9_./-]*) continue ;;
+                /*) continue ;;
+                "$runner") continue ;;
+                */*) : ;;
+                *) continue ;;
+            esac
+            case "$seen" in *" $tok "*) continue ;; esac
+            seen="$seen$tok "
+            out="$out$tok "
+        done
+    done < <(printf '%s\n' "$gates")
+    set +f
+    printf '%s' "${out% }"
+    return 0
+}
+
+# Strictly one-directional, because a false rc 7 costs more than the round it
+# saves (this proposal's own falsifier): it rejects ONLY a branch that changed
+# nothing under those paths, on a ticket that demands adversarial tests. Every
+# unknown skips and the runner decides as before — a tier with no path token, a
+# worktree with no base ref, an empty or unreadable diff, an unreadable ticket,
+# a ticket with no adversarial section. It says nothing about whether a test
+# that IS there asserts what the bullet says; that stays a review job.
+# The tracker read happens LAST, only once the local checks have found a
+# candidate, so a branch that touches the suite never pays for it.
+_adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reject
+    local iid="$1" tier="$2" dir="$3" paths ref changed f p body sect
+    paths=$(_adv_tier_paths "$tier"); [ -n "$paths" ] || return 1
+    ref=$(_base_ref "$dir"); [ "$ref" != HEAD ] || return 1
+    changed=$(git -C "$dir" diff --name-only "$ref...HEAD" 2>/dev/null) || return 1
+    [ -n "$changed" ] || return 1
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        for p in $paths; do
+            case "$f" in "$p"|"$p"/*) return 1 ;; esac
+        done
+    done <<EOF
+$changed
+EOF
+    body=$("$GLAB_CMD" api "projects/:fullpath/issues/$iid" 2>/dev/null \
+           | jq -r '.description // empty' 2>/dev/null) || return 1
+    sect=$(printf '%s\n' "$body" | awk '
+        tolower($0) ~ /^#+[[:space:]]*mandatory adversarial test/ { f=1; next }
+        f && /^#/ { f=0 }
+        f && NF   { print }')
+    [ -n "$sect" ] || return 1
+    printf '%s' "$paths"
+    return 0
+}
+
 # P60: the ticket graph can be acyclic while the GATE graph is not — a tier's
 # command invoking a file another ticket delivers is a dependency that runs
 # through a shell command, so no link-based closure check can see it.
@@ -2860,16 +2982,10 @@ _repo_gates_tsv() {
 # relative — so flags, env words, URLs, globs and $-words are skipped. A false
 # refusal at definition time is cheaper than an hour's stall, but not free.
 cmd_gate_deps() { # gate-deps — exit 1 naming each gate command whose file is not on base
-    local runner base ref gates repo_gates explicit_runner
+    local runner ref gates repo_gates explicit_runner
     explicit_runner=$(_yaml_scalar "$CONFIG" runner)
     runner="$explicit_runner"; [ -n "$runner" ] || runner="scripts/gate.sh"
-    base=$(_yaml_scalar "$CONFIG" base)
-    if [ -n "$base" ]; then :
-    elif git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
-    else base=main; fi
-    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then ref="origin/$base"
-    elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$base" 2>/dev/null; then ref="$base"
-    else ref="HEAD"; fi
+    ref=$(_base_ref "$REPO_ROOT")
     repo_gates=$(_repo_gates_tsv)
     gates="$repo_gates"; [ -n "$gates" ] || gates=$(_derive_gates_tsv)
     # The runner is what the pregate and the merge re-gate execute, so it is a
