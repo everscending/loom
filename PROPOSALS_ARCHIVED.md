@@ -67,6 +67,7 @@ writing a new proposal that touches the same machinery.
 | P38 | One way for a lane to fire the next wave, not two | implemented 2026-08-07 (`tick.sh cmd_tick` refuses a bare `tick` when `LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error; SKILL.md step 5 no longer tells the merge lane to fire its own tick) |
 | P49 | Every tracker read paginates | implemented 2026-08-07 (`tick.sh` gains `_glab_list [--capped] <path>`, which paginates and folds glab's one-array-per-page output; all nine tracker reads go through it — the acceptance gate, the quiescence count, the snapshot's stage-1, milestone and closed-member reads — and only the two `sort=desc` notes reads stay capped on purpose) |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | implemented 2026-08-07 (`references/phases-1-5.md` phase 4 drafts every ticket body into one draft file, one epic at a time, re-reads it from the file, and runs a single check list — width and size read off the draft, plus six consistency checks — before the human reviews the bodies and `/to-tickets` publishes; the standalone width prose and `ticket-template.md`'s Size section fold into that list; phase 5's `graph` verdict becomes the backstop; the draft lives beside the PRD and `replan` diffs against it; no SKILL.md change) |
+| P60 | A gate command may never depend on an unmerged ticket's deliverable | implemented 2026-08-07 (`tick.sh gate-deps` resolves every path-shaped file the tiers' gate commands — and, for repos declaring gates or a runner, the runner itself — invoke, and exits 1 naming the offending command for any not on the base branch; `references/phases-1-5.md` phase 5 runs it at definition and on every membership amendment, refusing unless a delivering ticket blocks every ticket carrying that tier; the pregate's missing-runner path now declares "tier reduced to review-only" in the lane log and emits a `pregate_reduced` event the ticker renders, instead of the silent skip; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -2345,6 +2346,35 @@ paginated and `halted` truncated; the snapshot reports `epics_awaiting_probe: ["
 surface"]` paginated and `[]` truncated. The snapshot case also pins the call shape both ways —
 the closed-member read carries `--paginate`, the `sort=desc` notes read does not. Full suite: 553
 passed, 0 failed (547 → 553).
+
+## P60 · A gate command may never depend on an unmerged ticket's deliverable
+
+**Problem.** ai-workout build-1's `.loom.yml` tiers invoke `scripts/gate.sh` (ticket #7's
+deliverable), `scripts/gen_openapi_client.py` (#6's) and the `web/` toolchain (#2's). The ticket
+graph was acyclic, but the *gate* graph was not: #2's own `ui` tier needs #6's script while #6 is
+blocked by #2, and every ticket's merge gate needed #7's runner. No link-based closure check can
+see this class — the cycle runs through a shell command's file dependency, not a blocking edge.
+The pregate's behaviour on a missing runner (skip, silently) meant the mechanical check ran zero
+times all build, and the failure surfaced instead as merge-lane deaths.
+
+**Evidence (2026-08-06/07).** merge-2 died on missing `gen_openapi_client.py` (00:38), merge-5 on
+missing `gate.sh` (00:44); a wave then traced the loop, mass-blocked #2, #5, #10, #32, #36, and the
+build stalled ~1h for a human waiver — the largest single stall of the run. Every gate all night
+logged `pregate: no scripts/gate.sh here, skipping`.
+
+**Fix, two halves.** *Definition side*: when a build is defined (phase 5) — and again whenever
+membership is amended — resolve every file/script the tiers' gate commands invoke; each must
+either exist on the base branch or be delivered by a ticket that blocks every ticket carrying that
+tier, else the definition is refused naming the offending command. P58 already carries this as a
+phase-4 draft-check line ("every command a ticket's gate tier will run exists by the time that
+ticket merges"); this proposal is that rule with teeth at the two later layers, where tickets
+arrive by amendment rather than drafting. *Runtime side*: a missing gate dependency becomes a
+declared bootstrap stage — the pregate reports "tier reduced to X until #n merges" instead of a
+silent skip, so the log says what is not being checked and why.
+
+**What would falsify it.** A refused build definition whose named cycle a human then shows to be
+spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
+at definition time is cheaper than an hour's stall, but not free.
 
 ## P61 · Count model turns, not log lines
 

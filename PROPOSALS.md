@@ -58,7 +58,6 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
-| P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
@@ -431,35 +430,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P60 · A gate command may never depend on an unmerged ticket's deliverable
-
-**Problem.** ai-workout build-1's `.loom.yml` tiers invoke `scripts/gate.sh` (ticket #7's
-deliverable), `scripts/gen_openapi_client.py` (#6's) and the `web/` toolchain (#2's). The ticket
-graph was acyclic, but the *gate* graph was not: #2's own `ui` tier needs #6's script while #6 is
-blocked by #2, and every ticket's merge gate needed #7's runner. No link-based closure check can
-see this class — the cycle runs through a shell command's file dependency, not a blocking edge.
-The pregate's behaviour on a missing runner (skip, silently) meant the mechanical check ran zero
-times all build, and the failure surfaced instead as merge-lane deaths.
-
-**Evidence (2026-08-06/07).** merge-2 died on missing `gen_openapi_client.py` (00:38), merge-5 on
-missing `gate.sh` (00:44); a wave then traced the loop, mass-blocked #2, #5, #10, #32, #36, and the
-build stalled ~1h for a human waiver — the largest single stall of the run. Every gate all night
-logged `pregate: no scripts/gate.sh here, skipping`.
-
-**Fix, two halves.** *Definition side*: when a build is defined (phase 5) — and again whenever
-membership is amended — resolve every file/script the tiers' gate commands invoke; each must
-either exist on the base branch or be delivered by a ticket that blocks every ticket carrying that
-tier, else the definition is refused naming the offending command. P58 already carries this as a
-phase-4 draft-check line ("every command a ticket's gate tier will run exists by the time that
-ticket merges"); this proposal is that rule with teeth at the two later layers, where tickets
-arrive by amendment rather than drafting. *Runtime side*: a missing gate dependency becomes a
-declared bootstrap stage — the pregate reports "tier reduced to X until #n merges" instead of a
-silent skip, so the log says what is not being checked and why.
-
-**What would falsify it.** A refused build definition whose named cycle a human then shows to be
-spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
-at definition time is cheaper than an hour's stall, but not free.
 
 ## P64 · Every epic ends with a wiring ticket
 

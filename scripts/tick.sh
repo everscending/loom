@@ -1443,7 +1443,16 @@ ui"
         pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
         pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
         pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
-        pre="$pre"' else echo "--- pregate: no $LOOM_PREGATE_RUNNER here, skipping ---"; fi; '
+        # P60: a missing runner is a DECLARED bootstrap stage, never a silent
+        # skip. ai-workout build-1 logged "no scripts/gate.sh here, skipping"
+        # on every gate all night while the runner sat in an unmerged ticket —
+        # the mechanical check ran zero times and nothing said so, and the
+        # failure surfaced as merge-lane deaths instead. The behaviour is
+        # unchanged (no false rejection for a repo without a runner); only the
+        # report is: the lane log states what was not checked and why, and a
+        # `pregate_reduced` event carries it to the ticker.
+        pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
+        pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
     fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
@@ -1695,6 +1704,9 @@ fromjson? // empty | . as $e
   # every wave not to.
   elif $e.ev == "wave_note" then
     "wave: " + (($e.note // "") | sub("(?i)^\\s*wave\\s*:\\s*"; ""))
+  elif $e.ev == "pregate_reduced" then
+    $warn + "⚠ " + (stage($e.id // "") | "\(.t) — \(.s)")
+    + ": \($e.runner // "the gate runner") missing — tier \($e.tier // "?") reduced to review-only (bootstrap not merged)" + $rst
   elif $e.ev == "viewer_note" then "viewer: \($e.note // "")"
   elif $e.ev == "notify" then
     (if (($e.event // "") | test("complete")) then $good else $warn end)
@@ -2799,6 +2811,79 @@ _repo_gates_tsv() {
       }' "$CONFIG"
 }
 
+# P60: the ticket graph can be acyclic while the GATE graph is not — a tier's
+# command invoking a file another ticket delivers is a dependency that runs
+# through a shell command, so no link-based closure check can see it.
+# ai-workout build-1: the tiers invoked `scripts/gate.sh` (#7's deliverable)
+# and `scripts/gen_openapi_client.py` (#6's); merge lanes died on the missing
+# files, a wave mass-blocked five tickets, and the build stalled ~1h for a
+# human waiver. This verb is the definition-time half: resolve every file the
+# gate commands invoke and check each against the base branch, so phase 5
+# refuses a build definition (or amendment) before a merge lane dies on it.
+# A missing file is acceptable ONLY when a ticket delivering it blocks every
+# ticket carrying that tier — deliverables live in ticket bodies, so that half
+# of the judgement stays with the phase-5 session; this verb names what is
+# missing and which command needs it.
+# Only path-shaped tokens are resolved — safe charset, at least one slash,
+# relative — so flags, env words, URLs, globs and $-words are skipped. A false
+# refusal at definition time is cheaper than an hour's stall, but not free.
+cmd_gate_deps() { # gate-deps — exit 1 naming each gate command whose file is not on base
+    local runner base ref gates repo_gates explicit_runner
+    explicit_runner=$(_yaml_scalar "$CONFIG" runner)
+    runner="$explicit_runner"; [ -n "$runner" ] || runner="scripts/gate.sh"
+    base=$(_yaml_scalar "$CONFIG" base)
+    if [ -n "$base" ]; then :
+    elif git -C "$REPO_ROOT" show-ref --verify --quiet refs/remotes/origin/develop 2>/dev/null; then base=develop
+    else base=main; fi
+    if git -C "$REPO_ROOT" show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then ref="origin/$base"
+    elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$base" 2>/dev/null; then ref="$base"
+    else ref="HEAD"; fi
+    repo_gates=$(_repo_gates_tsv)
+    gates="$repo_gates"; [ -n "$gates" ] || gates=$(_derive_gates_tsv)
+    # The runner is what the pregate and the merge re-gate execute, so it is a
+    # dependency of every tier — but only for a repo that MEANS to have one (a
+    # `gates:` block or an explicit `runner:`). Refusing a derived-gates repo
+    # for lacking a file it never uses would be a standing false refusal.
+    local all=""
+    if [ -n "$repo_gates" ] || [ -n "$explicit_runner" ]; then
+        all=$(printf '@runner\t%s' "$runner")
+    fi
+    [ -n "$gates" ] && all=$(printf '%s\n%s' "$all" "$gates")
+    local missing=0 checked=0 seen=" " tier cmdline tok
+    set -f  # a glob token must never expand against the caller's cwd
+    while IFS="$(printf '\t')" read -r tier cmdline; do
+        { [ -n "$tier" ] && [ -n "$cmdline" ]; } || continue
+        for tok in $cmdline; do
+            case "$tok" in -*) continue ;; esac
+            tok="${tok#./}"; tok="${tok%/}"
+            case "$tok" in
+                *[!A-Za-z0-9_./-]*) continue ;;
+                /*) continue ;;
+                */*) : ;;
+                *) continue ;;
+            esac
+            case "$seen" in *" $tier:$tok "*) continue ;; esac
+            seen="$seen$tier:$tok "
+            checked=$((checked+1))
+            if ! git -C "$REPO_ROOT" cat-file -e "$ref:$tok" 2>/dev/null; then
+                missing=$((missing+1))
+                if [ "$tier" = "@runner" ]; then
+                    echo "gate-deps: MISSING $tok — the gate runner; every tier's pregate and merge re-gate runs it, and it is not on $ref"
+                else
+                    echo "gate-deps: MISSING $tok — invoked by tier '$tier' gate \`$cmdline\`, and it is not on $ref"
+                fi
+            fi
+        done
+    done < <(printf '%s\n' "$all")
+    set +f
+    if [ "$missing" -gt 0 ]; then
+        echo "gate-deps: refuse this build definition unless every missing file is delivered by a ticket that blocks every ticket carrying its tier (P60)."
+        return 1
+    fi
+    echo "gate-deps: every file the gate commands invoke exists on $ref ($checked checked)"
+    return 0
+}
+
 # The rule a command needs in permissions.allow. An `FOO=1 uv run ...` command
 # does NOT match `Bash(uv *)` — that mismatch is P4, and it cost a completed
 # gate review its verdict. Keep every leading VAR=VALUE word, then the command.
@@ -3198,6 +3283,7 @@ case "${1:-}" in
     kill-lane)    shift; cmd_kill_lane "$@" ;;
     snapshot)     shift; cmd_snapshot "$@" ;;
     graph)        shift; cmd_graph "$@" ;;
+    gate-deps)    shift; cmd_gate_deps "$@" ;;
     resolve-config)   shift; cmd_resolve_config "$@" ;;
     trust-check)      shift; cmd_trust_check "$@" ;;
     install-settings) shift; cmd_install_settings "$@" ;;
@@ -3207,5 +3293,5 @@ case "${1:-}" in
     agent-status) shift; cmd_agent_status "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
-    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | graph [file] | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
+    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
 esac

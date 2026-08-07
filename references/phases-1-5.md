@@ -152,6 +152,20 @@ the first time anyone finds out.
    build is allowed — the next wave simply schedules the new ready set. Still
    starts nothing.
 
+**Gate closure is checked in both modes.** Run `tick.sh gate-deps` when the
+build is defined and again on every membership amendment: it resolves every
+file the tiers' gate commands (and the runner) invoke and checks each against
+the base branch. A file it names as missing must be delivered by a ticket that
+**blocks every ticket carrying that tier** — verify that against the blocking
+edges, else refuse the definition (or the amendment) naming the offending
+command. An acyclic ticket graph proves nothing here: the cycle runs through a
+shell command's file dependency, which no link-based closure check can see. At
+runtime the pregate declares the gap ("reduced to review-only") instead of
+silently skipping, but by then merge lanes are already dying on it. *(paid:
+ai-workout build-1 — merge lanes died on missing `gate.sh` and
+`gen_openapi_client.py`, five tickets mass-blocked, ~1h stall for a human
+waiver.)*
+
 `build` never loads the agent and never spends; the deliberate trigger is a
 separate verb.
 
