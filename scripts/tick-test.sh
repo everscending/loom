@@ -709,6 +709,29 @@ else
 fi
 rm -f "$MT/home/loop.stopped"
 
+# P38: a lane must hand off through its own epilogue ('tick --from-lane'),
+# never call a bare 'tick' itself — that takes the manual, always-runs
+# contract in the foreground and can deadlock on its own pending replay.
+# (build-3 2026-08-04, merge-68.)
+: > "$MWAVES"
+export LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'"
+out=$(LOOM_LANE_ID=merge-9 MENV "$TICK" tick 2>&1); rc_lane=$?
+export LOOM_WAVE_CMD="true"
+if [ "$rc_lane" != 0 ] && [ ! -d "$MT/home/tick.lock.d" ] && [ "$(_mwaves)" = 0 ] \
+   && printf '%s' "$out" | grep -q -- "--from-lane"; then
+    ok "tick: a lane self-invoking a bare tick is refused, no lock, no wave"
+else
+    bad "tick: lane self-invoke rc=$rc_lane lock=$([ -d "$MT/home/tick.lock.d" ] && echo held) waves=$(_mwaves) out=$out"
+fi
+
+# ...but the SAME environment through the epilogue's own contract still runs:
+# the refusal must catch the wrong call, not the lane's environment itself.
+export LOOM_LANE_ID=merge-9
+MTICK tick --from-lane
+unset LOOM_LANE_ID
+[ "$(_mwaves)" != 0 ] && ok "tick: --from-lane still runs from inside a lane's own environment" \
+                       || bad "tick: --from-lane was refused too — the epilogue itself would deadlock"
+
 # BUT watching still happens on the silenced firings — that is the whole point
 # of merging. A stopped auto-tick must still record that it looked.
 rm -f "$MT/home/events.jsonl"; : > "$MT/home/loop.stopped"

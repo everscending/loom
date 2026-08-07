@@ -372,9 +372,7 @@ refuses outside herdr anyway.
    which holds the single-writer merge lock for that lane alone, so scheduling
    continues while it runs and a second merge is refused (skip this step when
    `summary.merge_in_flight`). It comes *after* filling lanes: a ticket ready
-   at wave start must not wait out a whole merge before its worktree exists,
-   and the merge lane fires its own tick when it lands, picking up whatever it
-   newly unblocked.
+   at wave start must not wait out a whole merge before its worktree exists.
 
    The lane does, for the oldest `merge-queue` ticket whose `.merge_hold` is
    null (a held ticket is parked behind an open base-red fix) only:

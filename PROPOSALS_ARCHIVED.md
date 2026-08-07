@@ -64,6 +64,7 @@ writing a new proposal that touches the same machinery.
 | P68 | Implementation briefs get the headless survival rules probes get | implemented 2026-08-07 (`tick.sh spawn-lane --brief` appends the headless execution rules to the lane's copy of every brief, whatever the lane kind, and refuses a brief that tells the session to invoke a skill by slash command) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
+| P38 | One way for a lane to fire the next wave, not two | implemented 2026-08-07 (`tick.sh cmd_tick` refuses a bare `tick` when `LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error; SKILL.md step 5 no longer tells the merge lane to fire its own tick) |
 
 ## Independent review round (2026-08-01)
 
@@ -1607,6 +1608,31 @@ session sees the same history any wave does:
 **Tests.** A ticket with three FAIL trailers and a newer reset marker reads `total: 0`; the same
 ticket with the marker older than one of the FAILs still counts that one; a lane calling `rescope`
 is refused and writes nothing.
+
+## P38 · One way for a lane to fire the next wave, not two
+
+**Evidence.** build-3, 2026-08-04 14:19:48. The merge lane for #68 merged MR !65, closed the
+ticket, and then ran `tick.sh tick` itself in the foreground — pid 26952 — instead of letting its
+exit epilogue fire one. It took the tick lock and then waited on itself. The wave that noticed
+logged it verbatim: *"self-invoked tick.sh tick directly … waiting for that nested wave to release
+the tick lock before proceeding."* Cost was a few minutes, not correctness, but it recurs at every
+merge and the loop is the one thing that must not deadlock.
+
+**Root cause.** Two mechanisms produce the same effect. `spawn-lane` already appends the epilogue
+`( "$SELF_PATH" tick --from-lane … & )` to a lane's command (`scripts/tick.sh:1143`), and
+`_tick_exit` replays a pending tick on the way out (`:656`). Meanwhile SKILL.md step 5 tells the
+reader *"the merge lane fires its own tick when it lands"* (`SKILL.md:350`) — an invitation a model
+takes literally. It then reaches for the wrong verb: `tick` is the human contract (always runs,
+ignores switch and gap), where a lane handoff is `tick --from-lane` (respects the switch, ignores
+the gap). Foreground, wrong contract, wrong pacing.
+
+**Fix.** Make the wrong call impossible rather than discouraged: `cmd_tick` refuses when
+`LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error. Then delete the sentence
+in step 5 that invites it — the epilogue already does this work, and a rule the scripts enforce
+does not need restating in prose (this file's own "Keep SKILL.md small").
+
+**Tests.** `LOOM_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
+`tick --from-lane` from the same environment still runs.
 
 ## P39 · A viewer that cannot open a pane must say so and exit
 

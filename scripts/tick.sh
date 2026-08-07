@@ -832,15 +832,23 @@ cmd_tick() {
     #   tick --from-lane a lane finished — respects the switch, ignores the
     #                   gap. A handoff is work already in progress, and making
     #                   it wait would idle the build for no reason.
-    # A tick fired from a lane's epilogue inherits that lane's environment, but
-    # the wave it launches is the scheduler, not a lane — and must not have its
-    # own spawns read as chained handoffs.
-    unset LOOM_LANE_ID
     local mode="manual"
     case "${1:-}" in
         --auto) mode="auto"; shift ;;
         --from-lane) mode="lane"; shift ;;
     esac
+    # A lane hands off through its own epilogue ('tick --from-lane'), never by
+    # calling a bare 'tick' itself: that takes the manual, always-runs
+    # contract in the foreground, and a lane that self-invokes it takes the
+    # tick lock and then waits on its own epilogue to release it. Refuse
+    # before the lock is even reached. (P38: merge-68, build-3 2026-08-04.)
+    if [ "$mode" = manual ] && [ -n "${LOOM_LANE_ID:-}" ]; then
+        die "tick: refusing a bare 'tick' from inside lane '$LOOM_LANE_ID' — use 'tick --from-lane', which the lane's own epilogue already runs on exit."
+    fi
+    # A tick fired from a lane's epilogue inherits that lane's environment, but
+    # the wave it launches is the scheduler, not a lane — and must not have its
+    # own spawns read as chained handoffs.
+    unset LOOM_LANE_ID
     # WATCH FIRST — before the lock, before every gate below. Nothing here
     # spends, and it must happen even on the firings that do nothing else.
     local quiet; quiet=$(_watch_pass)

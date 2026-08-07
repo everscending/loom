@@ -64,7 +64,6 @@ evidence, and implementation notes belong in this file, not there.
 | P49 | Every tracker read paginates | open — proposed 2026-08-06; acceptance and quiescence truncate at 100 issues, which can close a build over an unprobed epic |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P58 | Phase 4 drafts the whole set, then checks its own output once | open — proposed 2026-08-06; nine cross-ticket ambiguities in a 54-ticket set, none visible from inside one ticket; folds in the width and size rules, which check the same draft |
-| P38 | One way for a lane to fire the next wave, not two | open — proposed 2026-08-04; merge-68 self-invoked `tick` in the foreground and blocked on its own lock |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
 | P20 | Parallelise the human-gated front half | open |
@@ -255,31 +254,6 @@ mean the gap is comprehension of the bullet rather than accounting for it.
 **Final build-1 tally (ai-workout, 2026-08-07).** The build finished its run at 11 first-round
 FAILs in 41 verdicts; the family held at 4 of 11 (#3, #25, #31, #5) plus one late relative, #13's
 `adversarial-test-gap`. No change to the fix; the evidence base is now three builds.
-
-## P38 · One way for a lane to fire the next wave, not two
-
-**Evidence.** build-3, 2026-08-04 14:19:48. The merge lane for #68 merged MR !65, closed the
-ticket, and then ran `tick.sh tick` itself in the foreground — pid 26952 — instead of letting its
-exit epilogue fire one. It took the tick lock and then waited on itself. The wave that noticed
-logged it verbatim: *"self-invoked tick.sh tick directly … waiting for that nested wave to release
-the tick lock before proceeding."* Cost was a few minutes, not correctness, but it recurs at every
-merge and the loop is the one thing that must not deadlock.
-
-**Root cause.** Two mechanisms produce the same effect. `spawn-lane` already appends the epilogue
-`( "$SELF_PATH" tick --from-lane … & )` to a lane's command (`scripts/tick.sh:1143`), and
-`_tick_exit` replays a pending tick on the way out (`:656`). Meanwhile SKILL.md step 5 tells the
-reader *"the merge lane fires its own tick when it lands"* (`SKILL.md:350`) — an invitation a model
-takes literally. It then reaches for the wrong verb: `tick` is the human contract (always runs,
-ignores switch and gap), where a lane handoff is `tick --from-lane` (respects the switch, ignores
-the gap). Foreground, wrong contract, wrong pacing.
-
-**Fix.** Make the wrong call impossible rather than discouraged: `cmd_tick` refuses when
-`LOOM_LANE_ID` is set, naming `--from-lane` and the epilogue in the error. Then delete the sentence
-in step 5 that invites it — the epilogue already does this work, and a rule the scripts enforce
-does not need restating in prose (this file's own "Keep SKILL.md small").
-
-**Tests.** `LOOM_LANE_ID=merge-9 tick.sh tick` exits non-zero, writes no lock and starts no wave;
-`tick --from-lane` from the same environment still runs.
 
 ## P18 · Use a cheaper model for scheduling
 
