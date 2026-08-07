@@ -60,7 +60,6 @@ evidence, and implementation notes belong in this file, not there.
 | P31 | Make the mandatory adversarial test a checkable deliverable | open — reproduced 2026-08-06 in a second, unrelated repo: 4 of 7 gate rejections, in a new sub-shape the proposed pregate check cannot see |
 | P60 | A gate command may never depend on an unmerged ticket's deliverable | open — adopted 2026-08-07, ai-workout build-1: ~8 incidents, ~1h halt; tranche 3 (before next ticket generation) |
 | P62 | A repo-wide guard test is a contract change, and a red base never costs a merge attempt | open — adopted 2026-08-07, ai-workout build-1: ~7 incidents, #26/#15 cap-blocked; merge-side rule is tranche 1 (before restart) |
-| P61 | Count model turns, not log lines | open — adopted 2026-08-07, ai-workout build-1: two healthy lanes killed at 4 min on ~7× inflated counts; tranche 1 |
 | P63 | Finishing is one verb, and the snapshot spots the half-finished | open — adopted 2026-08-07, ai-workout build-1: 4 stranded finished tickets; tranche 2 |
 | P64 | Every epic ends with a wiring ticket | open — adopted 2026-08-07, ai-workout build-1: E1 probe found the epic's whole point unwired; tranche 3 |
 | P65 | Fix tickets are born with edges and checked for twins | open — adopted 2026-08-07, ai-workout build-1: one duplicate, two undeclared dependencies; tranche 1 |
@@ -669,23 +668,6 @@ silent skip, so the log says what is not being checked and why.
 **What would falsify it.** A refused build definition whose named cycle a human then shows to be
 spurious (e.g. the command exists behind a generator the resolver could not see) — a false refusal
 at definition time is cheaper than an hour's stall, but not free.
-
-## P61 · Count model turns, not log lines
-
-**Problem.** `_stamp_progress` filters only `api_retry`, `rate_limit_event` and `tool_progress`
-before counting stream events as "turns". A thinking-enabled lane emits mostly `thinking_tokens`
-system events, so the count the staleness clock, `lane_turn_cap` and every wave's judgment read is
-inflated ~7×. This is a measurement defect inside the mechanisms P27 (progress, not bytes) and
-P52 (a runaway lane is stopped) shipped: both assume the stamp means turns.
-
-**Evidence (ai-workout build-1).** impl-25's stream at kill time: 204 lines, 163 `system` events
-(160 of them `thinking_tokens`), 23 real assistant turns — reported as 162 against a 150 cap.
-impl-2 and impl-25, both ~4 minutes old and healthy, were killed and blocked at 23:16–23:19; the
-human unblock note reads "resume — the blocking reason was a bad measurement." Wave turn
-commentary stayed corrupted all night ("206 turns, well under cap").
-
-**Fix.** The stamp counts only assistant-message events. One fixture test replays a captured
-stream (163 thinking events, 23 turns) and asserts 23.
 
 ## P62 · A repo-wide guard test is a contract change, and a red base never costs a merge attempt
 

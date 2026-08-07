@@ -1688,7 +1688,7 @@ cmd_lane_status() {
         # P27: and staleness counts PROGRESS, not stream bytes — api_retry
         # chatter kept a wedged lane's jsonl mtime fresh for 2h40m (build-1
         # gate-1-r2). quiet-tick maintains <id>.progress, touched only when
-        # the filtered event count grows; when present it IS the clock.
+        # the assistant-event count grows; when present it IS the clock.
         [ -f "$LANES_DIR/$id.progress" ] && log="$LANES_DIR/$id.progress"
         if ! kill -0 "$pid" 2>/dev/null; then
             state="dead"
@@ -1700,7 +1700,7 @@ cmd_lane_status() {
         # New columns go on the END: existing readers index state at $3, type
         # at $4. `rc` is `-` until the lane exits; 7 means its pregate rejected
         # the branch before any review session ran (P12). `turns` (P52) is the
-        # same filtered event count `.progress` already stamps for staleness —
+        # same assistant-event count `.progress` already stamps for staleness —
         # a spend signal, not a liveness one — `-` when no stamp exists yet.
         # `cost` (P55) is priced straight off the session log's own
         # `message.usage`, so a running build shows spend next to progress.
@@ -2858,31 +2858,43 @@ _retire_watcher() {  # unload the old watcher agent and forget it ever ran
     rm -f "$LANES_DIR"/*.progress "$LOOM_HOME/wave.progress" 2>/dev/null || true
 }
 
-# P27: the progress stamp. Filtered event count = lines that are NOT
-# api_retry / rate_limit / tool_progress chatter; the stamp file is touched
-# only when the count grows, so its mtime means "time of last real progress".
-# All THREE wedge shapes freeze it: a silent API gap adds no lines at all, a
-# retry storm adds only retry lines, and a lane blocked on a polling tool adds
-# only tool_progress. (Paid for: build-1 2026-08-02 — gate-1-r2's retry
-# chatter kept its mtime fresh through 2h40m of zero progress, and the
-# 27–77-minute silent gaps in wave-015558 had no staleness signal at all.
-# Then build-3 2026-08-03 — merge-50's `gate.sh` was auto-backgrounded by the
-# harness, the lane blocked on `TaskOutput` to wait for it, pytest deadlocked
-# at 0% CPU, and the poll's own tool_progress records kept the lane reading
-# `running` for 33 minutes while the whole merge queue stood still behind it.)
-#
-# What survives the filter is a MODEL TURN — a new assistant message or tool
-# call. That is the signal: a lane whose model has not moved in the staleness
-# window is wedged, however busy its current tool looks. A genuinely slow
-# foreground command is not a false positive here, because the lane still
+# P27: the progress stamp. A MODEL TURN is an `assistant` stream event — a new
+# assistant message or tool call — and the count is of those alone; the stamp
+# file is touched only when the count grows, so its mtime means "time of last
+# real progress". That is the signal: a lane whose model has not moved in the
+# staleness window is wedged, however busy its current tool looks. A genuinely
+# slow foreground command is not a false positive here, because the lane still
 # takes a turn when it returns; one that never returns is exactly what this
 # must catch.
+#
+# Every wedge shape freezes it: a silent API gap adds no lines at all, a retry
+# storm adds only `api_retry` lines, a lane blocked on a polling tool adds only
+# `tool_progress`, and a thinking-heavy lane adds only `thinking_tokens` system
+# events. (Paid for: build-1 2026-08-02 — gate-1-r2's retry chatter kept its
+# mtime fresh through 2h40m of zero progress, and the 27–77-minute silent gaps
+# in wave-015558 had no staleness signal at all. Then build-3 2026-08-03 —
+# merge-50's `gate.sh` was auto-backgrounded by the harness, the lane blocked
+# on `TaskOutput` to wait for it, pytest deadlocked at 0% CPU, and the poll's
+# own tool_progress records kept the lane reading `running` for 33 minutes
+# while the whole merge queue stood still behind it. Then P61, ai-workout
+# build-1 2026-08-07 — the count was a NOT-chatter denylist, so `thinking_tokens`
+# fell through it: impl-25's 23 real turns read as 162 against a 150 cap, and
+# two healthy four-minute lanes were killed and blocked on the inflated number.
+# An allowlist of one event type cannot be outgrown by a new event type.)
+#
+# Truncated trailing lines are normal in a stream being written to right now,
+# so parse per line and drop what does not parse, rather than failing the count.
+_turn_count() {
+    jq -R -r 'fromjson? | select(.type == "assistant") | 1' "$1" 2>/dev/null \
+        | wc -l | tr -d ' '
+}
+
 _stamp_progress() {
     local id pid state type rc jsonl prog n prev
     cmd_lane_status 2>/dev/null | while read -r id pid state type rc; do
         case "$state" in running|stale) ;; *) continue ;; esac
         jsonl="$LOGS_DIR/lane-$id.jsonl"; [ -f "$jsonl" ] || continue
-        n=$(grep -cv '"subtype":"api_retry"\|"type":"rate_limit_event"\|"type":"tool_progress"' "$jsonl" 2>/dev/null || echo 0)
+        n=$(_turn_count "$jsonl")
         prog="$LANES_DIR/$id.progress"
         prev=$(cat "$prog" 2>/dev/null || echo -1)
         [ "$n" = "$prev" ] || printf '%s\n' "$n" > "$prog"
@@ -2892,7 +2904,7 @@ _stamp_progress() {
     if [ -d "$LOCK_DIR" ]; then
         local wj; wj=$(ls -t "$LOGS_DIR"/wave-*.jsonl 2>/dev/null | head -1)
         if [ -n "$wj" ]; then
-            n=$(grep -cv '"subtype":"api_retry"\|"type":"rate_limit_event"\|"type":"tool_progress"' "$wj" 2>/dev/null || echo 0)
+            n=$(_turn_count "$wj")
             prev=$(cat "$LOOM_HOME/wave.progress" 2>/dev/null || echo -1)
             [ "$n" = "$prev" ] || printf '%s\n' "$n" > "$LOOM_HOME/wave.progress"
         fi

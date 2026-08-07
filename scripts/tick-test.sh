@@ -1050,6 +1050,52 @@ p2=$(cat "$PS" 2>/dev/null || echo missing)
 kill "$(cat "$LOOM_HOME/lanes/gate-34.pid")" 2>/dev/null
 "$TICK" clear-lane gate-34 >/dev/null 2>&1
 
+# 4h4b. P61: the stamp counts MODEL TURNS, so a thinking-heavy lane's
+#       `thinking_tokens` system events are worth zero. The old count was a
+#       denylist of known chatter, so every event type nobody had thought of
+#       counted as progress: ai-workout build-1, impl-25's stream held 23 real
+#       assistant turns among 163 system events and reported 162 against a
+#       `lane_turn_cap` of 150. Two healthy lanes four minutes old were killed
+#       and blocked on that number (2026-08-07 23:16–23:19), and every wave's
+#       turn commentary was wrong all night. The fixture is that stream's
+#       shape: assert the number, 23, not merely that it is smaller.
+"$TICK" spawn-lane gate-61 --no-tick -- sleep 30 >/dev/null
+PJ="$LOOM_HOME/logs/lane-gate-61.jsonl"; PS="$LOOM_HOME/lanes/gate-61.progress"
+: > "$PJ"
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"s61"}' >> "$PJ"
+for i in $(seq 1 23); do
+    # Each real turn arrives behind a burst of thinking-token records; the
+    # interleaving is what a denylist filter cannot see past.
+    for _ in $(seq 1 7); do
+        printf '%s\n' '{"type":"system","subtype":"thinking_tokens","thinking_tokens":128}' >> "$PJ"
+    done
+    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"echo $i\"}}]}}" >> "$PJ"
+    printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}' >> "$PJ"
+done
+printf '%s\n' '{"type":"system","subtype":"thinking_tokens","thinking_tokens":64}' >> "$PJ"
+printf '%s\n' '{"type":"system","subtype":"thinking_tokens","thinking_tokens":64}' >> "$PJ"
+WATCH
+p61=$(cat "$PS" 2>/dev/null || echo missing)
+[ "$p61" = "23" ] \
+    && ok "turns: 163 thinking events among 23 assistant turns stamp 23" \
+    || bad "turns: stamped '$p61' for a 23-turn stream — the cap and the staleness clock both read it"
+# Planted violation: count everything that is not known chatter — the shipped
+# behaviour — and the same stream reads far over a 150-turn cap.
+old=$(grep -cv '"subtype":"api_retry"\|"type":"rate_limit_event"\|"type":"tool_progress"' "$PJ")
+[ "$old" -gt 150 ] \
+    && ok "turns-violation: the old not-chatter count reads $old on the same 23 turns" \
+    || bad "turns-violation: the fixture no longer reproduces the inflation ($old)"
+# A truncated final line is normal mid-write and must not zero the count —
+# a zeroed stamp is a frozen clock, which reads every live lane as stale.
+printf '%s' '{"type":"assis' >> "$PJ"
+WATCH
+p61b=$(cat "$PS" 2>/dev/null || echo missing)
+[ "$p61b" = "23" ] \
+    && ok "turns: a half-written trailing line is skipped, not fatal" \
+    || bad "turns: a truncated line moved the stamp to '$p61b'"
+kill "$(cat "$LOOM_HOME/lanes/gate-61.pid")" 2>/dev/null
+"$TICK" clear-lane gate-61 >/dev/null 2>&1
+
 # 4h5. The quiescence watcher must not call an UNACCEPTED build complete.
 #      Zero open tickets is "all the work merged", not "the product was
 #      accepted" — and `complete` here both notifies and (step 8) tears the

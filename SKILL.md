@@ -238,13 +238,15 @@ refuses outside herdr anyway.
    file is gone the ticket cannot be gated again.
 
    Staleness counts *model turns*, not log bytes: the watcher stamps
-   `<id>.progress` from the filtered event count (retry, rate-limit and
-   tool-poll chatter excluded) and `lane-status` clocks off the stamp, so all
-   three wedge shapes read as `stale` — silent API gaps, retry storms, and a
-   lane blocked on a polling tool whose child will never return. *(paid: retry
-   chatter kept a zero-progress gate "fresh" for 2h40m; then a merge lane whose
-   gate run the harness auto-backgrounded blocked on `TaskOutput` over a
-   deadlocked pytest and read `running` for 33 minutes.)*
+   `<id>.progress` with the count of `assistant` stream events alone — every
+   other record is chatter — and `lane-status` clocks off the stamp, so all
+   wedge shapes read as `stale`: silent API gaps, retry storms, a lane blocked
+   on a polling tool whose child will never return, and a thinking-heavy lane
+   emitting nothing but `thinking_tokens`. *(paid: retry chatter kept a
+   zero-progress gate "fresh" for 2h40m; a merge lane whose gate run the
+   harness auto-backgrounded blocked on `TaskOutput` over a deadlocked pytest
+   and read `running` for 33 minutes; 23 turns read as 162 and killed two
+   healthy lanes.)*
 
    A lane can also be `running` — genuinely making turns — and still be a
    problem: past `lane_turn_cap` (`lane-status`'s `turns` column, the same

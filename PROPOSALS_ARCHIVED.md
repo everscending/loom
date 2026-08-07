@@ -53,6 +53,7 @@ writing a new proposal that touches the same machinery.
 | P59 | A pinned interface names fields, not references | implemented 2026-08-06 (`references/ticket-template.md` Pinned interfaces section and `references/phases-1-5.md` phase 4 bullet both now require fields/values/shapes, name a bare endpoint path/type name/file path as a reference not a pin, and require a shape absent from every document of record to be specified in the ticket itself) |
 | P47 | Guards fail closed | implemented 2026-08-06 (`lane.sh`'s four guard reads and `tick.sh cmd_sweep`'s merge-range check now capture the read's own exit status before touching its output, and `die` on failure instead of falling through to "not blocked" / "not closed" / "no open MR" / "no commits ahead") |
 | P46 | `stale` means alive — one liveness reader, not four | implemented 2026-08-06 (`tick.sh` gains `_lanes_alive` + a `lanes-alive` CLI verb; `cmd_sweep`, `_quiet_check` and `watch-panes.sh`'s pane poll all read it instead of filtering `lane-status` on `running` by hand) |
+| P61 | Count model turns, not log lines | implemented 2026-08-07 (`tick.sh` gains `_turn_count`, which counts `assistant` stream events alone via `jq -R 'fromjson?'` and skips unparseable trailing lines; both the per-lane and wave progress stamps go through it, so `lane_turn_cap` and the staleness clock stop counting `thinking_tokens`; SKILL.md's staleness paragraph rewritten in place) |
 
 ## Independent review round (2026-08-01)
 
@@ -2078,3 +2079,41 @@ ever calling `glab`, proven by a stub that plants a marker on any call and asser
 never appears; `watch-panes.sh`'s poll keeps a stale lane's pane live — no idle rename, no close.
 All three fail against the pre-fix code (confirmed by running them against the unmodified scripts)
 and pass against the fix. Full suite: 468 passed, 0 failed (465 → 468, three new cases).
+
+## P61 · Count model turns, not log lines
+
+**Problem.** `_stamp_progress` filters only `api_retry`, `rate_limit_event` and `tool_progress`
+before counting stream events as "turns". A thinking-enabled lane emits mostly `thinking_tokens`
+system events, so the count the staleness clock, `lane_turn_cap` and every wave's judgment read is
+inflated ~7×. This is a measurement defect inside the mechanisms P27 (progress, not bytes) and
+P52 (a runaway lane is stopped) shipped: both assume the stamp means turns.
+
+**Evidence (ai-workout build-1).** impl-25's stream at kill time: 204 lines, 163 `system` events
+(160 of them `thinking_tokens`), 23 real assistant turns — reported as 162 against a 150 cap.
+impl-2 and impl-25, both ~4 minutes old and healthy, were killed and blocked at 23:16–23:19; the
+human unblock note reads "resume — the blocking reason was a bad measurement." Wave turn
+commentary stayed corrupted all night ("206 turns, well under cap").
+
+**Fix.** The stamp counts only assistant-message events. One fixture test replays a captured
+stream (163 thinking events, 23 turns) and asserts 23.
+
+**Implementation (2026-08-07).** The denylist became an allowlist of one event type: `tick.sh`
+gains `_turn_count <file>`, which counts `.type == "assistant"` records and nothing else, and both
+call sites — the per-lane stamp and the wave stamp — go through it. The count parses line by line
+(`jq -R 'fromjson?'`) and drops what does not parse, because the trailing line of a stream being
+written to right now is routinely half-written and the old `grep -c` would have counted it while a
+whole-file `jq` would have failed the count to zero — a zeroed stamp freezes the clock and reads
+every live lane as stale.
+
+The evidence no longer reproduces from the file on disk: `lane-impl-25.jsonl` in the ai-workout run
+directory is a later re-run of that lane (176 lines, 61 assistant events, 65 `thinking_tokens`),
+not the stream captured at kill time. The *shape* reproduces exactly — system events outnumber real
+turns, and `thinking_tokens` is the bulk of them — so the fixture is written to the proposal's
+numbers rather than replayed from the file.
+
+Three suite cases: a 23-turn stream interleaved with 163 `thinking_tokens` records stamps `23`; the
+planted violation runs the shipped not-chatter count over the same fixture and asserts it reads
+over the 150-turn cap (it reads 210); and a truncated trailing line leaves the stamp at 23 rather
+than zeroing it. Full suite: 471 passed, 0 failed (468 → 471, three new cases). SKILL.md's
+staleness paragraph was rewritten in place — no net new lines — because it described the old filter
+by name.
