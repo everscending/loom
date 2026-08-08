@@ -104,9 +104,11 @@ which governs this file too. Re-scope into this skill's own layer or stop.
 ### Tests
 
 *"A fix is not done until a test fails without it"* — the file's own rule.
-The entry's **Test** line names what's missing; add that case to
-`scripts/tick-test.sh` in its house style, asserting the guard both holding
-and failing with the fix reverted.
+The entry's **Test** line names what's missing; add that case to the section
+it belongs to — `scripts/tests/NN-<topic>.sh`, one process each over
+`scripts/test-lib.sh` — in its house style, asserting the guard both holding
+and failing with the fix reverted. While iterating, run that section alone
+(`bash scripts/tick-test.sh <name>`, seconds rather than minutes).
 
 Run `scripts/tick-test.sh` in full and report the counts, pass and fail. It
 is the only executable check this skill has. A fix that lands with no new

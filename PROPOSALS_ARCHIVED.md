@@ -76,6 +76,7 @@ writing a new proposal that touches the same machinery.
 | P72 | One jq prelude both halves include | implemented 2026-08-07 (`scripts/lib.jq` — the jq counterpart of lib.sh, same *pure definitions only* entry rule — holds `epic_norm`, `orch_verdict_scan`, `hms`/`pct`/`usd` and `stage`/`ref`; all eight jq programs beside `tick.sh` open with `include "lib";` and every call site passes `jq -L <the scripts dir>`, resolved through `_jq_lib_dir` in lib.sh, which refuses by name when the prelude is missing. `lane.sh _close_epic_milestone` drops its `sed` slugify and normalizes through `epic_norm`; `cmd_verdict`'s duplicate check and snapshot.jq's `judged_at`/`rejections_of` all read the one trailer scan, so three writings became one landing site. `_lane_type` and lib.jq's `stage` now name each other. Suite 603 → 610, 0 failed; no SKILL.md change) |
 | P74 | Each copied mechanism becomes one helper | implemented 2026-08-07 (four copied mechanisms become four helpers, all local to the file that uses them: `_lock_reserve <dir>`/`_lock_owner <dir>` carry the mkdir-atomic, dead-owner-breakable lock for all three locks — `lock_acquire` keeps only its EXIT trap, the merge and gate locks keep only their names; `_pause_on_limit <stem> <first|retry>` is called from both wave attempts; `_once_per_state <sentinel> <state>` is the notify-once core for the quiet states, workspace trust, the un-armed heartbeat and the two stale flags, with `_notify_quiet`'s `unreadable` and re-arm carve-outs staying at its own site; and in lane.sh `_read_issue <iid> <refusal>` / `_open_mr_closing <iid> <refusal>` take the refusal clause from the caller so every question keeps its own fail-closed read, cache only a SUCCESSFUL body, and are forgotten by `_forget_issue` after each write. `transition` now makes one issue GET where it made two, `submit` two where it made three. Suite 610 -> 619, 0 failed; no SKILL.md change) |
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | implemented 2026-08-07 (`cmd_tick` is now `_tick_gates` — every refusal: mode, switch, `_ensure_armed`, gap, lock, usage, quiescence allowlist, reporting through `tick_go` so the call sits outside any condition and `set -e` keeps its teeth inside — plus `_launch_wave`, prompt assembly through the retry policy. `cmd_spawn_lane` gets `_spawn_parse_flags` (consumed count back via `_spawn_shift`), `_spawn_stage_brief`, `_spawn_build_epilogue` and `_spawn_build_pregate`, the last two handing the rewritten command back in `_SPAWN_ARGS`; program text still takes tier/runner/adv-paths by ENVIRONMENT, never splice. Both builders now run ABOVE the destructive tail, so "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" is a function boundary: the pregate tier die, which used to fire after the logs were already rotated and the rc cleared, now refuses first — the one deliberate failure-path change. Guard-order pin added: a spawn refused at the merge-lock reservation leaves the previous run's log and rc byte-identical, with the destructive-first order re-run by hand as the planted violation. Suite 619 → 621, 0 failed; no SKILL.md change) |
+| P76 | `tick-test.sh` splits into sections over a shared harness | implemented 2026-08-08 (the 7,422-line suite becomes 27 files: `scripts/tests/NN-<topic>.sh`, one process each over `scripts/test-lib.sh`, with `tick-test.sh` the driver that runs them all and takes a name filter — `tick-test.sh snapshot` is seconds against 2m25s for the whole run. The harness holds the fixture env, the global stubs, `ok`/`bad` and `test_finish`, plus `make_glab_fixture` and `make_wave_stub`, the two fixtures more than one section needs. The pane-opener guard is now per section and names the section that escaped. New section 27 covers the driver itself: a section that dies before reporting counts is a failure, never a silent zero, and a filter matching nothing exits 2 rather than reporting a clean run. Suite 671 → 703, 0 failed; no SKILL.md change) |
 | P78 | `triage` — decide every blocked ticket on one surface | implemented 2026-08-08 (`triage` verb + `references/triage.md`; `lane.sh transition --note`, `blocked-report`, `model-tier`; `snapshot.jq` `blocked_report`) |
 
 ## Independent review round (2026-08-01)
@@ -3051,6 +3052,45 @@ boundary exists to prevent, currently enforced by comment).
 
 **Consumer.** Every future spawn-path change, which becomes a change to one named stage; the
 suite, whose per-guard tests get functions to aim at.
+
+## P76 · `tick-test.sh` splits into sections over a shared harness
+
+**Problem.** The suite is one 7,137-line file. Its sections are already numbered and
+self-contained, but running one section during development is not possible — every run is
+every test, and there is no filter of any kind: no positional argument, no `TEST_FILTER`
+environment variable. The global stubs at the top (glab capture, launchctl, herdr,
+watch-panes, each with a paid-for zombie-agent story) are entangled with the file rather
+than importable.
+
+**Evidence.** Measured 2026-08-08, two consecutive runs on the same machine: **636 tests,
+0 failed, 151s and 148s of wall clock** — call it 2m30s. CPU time was 82s, so utilization
+is 54% and roughly half the wall clock is the suite waiting on real `sleep` calls rather
+than computing. The cost is a long tail, not one hotspot: the twenty slowest tests account
+for about 45s and are all timing or concurrency guards (lock overlap, kill-lane
+descendants, the watch-panes pane lifecycle, pending-kick replay); the remaining ~600 run
+at 0.1–0.3s each.
+
+This supersedes the original deferral, which was written against a claimed ~10 second
+runtime. That figure was stale by roughly fifteen times, and the file has grown from 6,188
+lines to 7,137 since.
+
+**Fix direction.** `scripts/tests/NN-<topic>.sh` per section, a `scripts/test-lib.sh`
+holding the harness (`ok`/`bad`/counters, the stubs, fixture env), and `tick-test.sh`
+becomes the driver that runs all sections (so every existing invocation keeps working).
+
+Be honest about what this buys, because it is easy to sell it as the wrong thing. The
+split does **not** make a full run faster — the driver still runs every section, so the
+total stays at 2m30s. What it buys is that editing one guard costs seconds instead of
+2m30s, which is the cost actually paid during iteration.
+
+It also makes running sections concurrently *possible*, and the 54% utilization says there
+is real headroom there. That is separate work, not part of this proposal, and it carries a
+specific hazard: several tests assert on wall clock — "snapshot: fan-out is concurrent (2s
+for 6 x 0.6s calls)" is the clearest — and those go flaky under load. Any parallel driver
+must pin the timing-sensitive sections to a serial run.
+
+**Consumer.** `qa` (P45's mutate mode gets addressable sections), and anyone iterating on
+one guard.
 
 ## P78 · `triage` — decide every blocked ticket on one surface
 

@@ -1,0 +1,219 @@
+# Shared harness for the section files in scripts/tests/. Sourced, never run.
+#
+# Every section gets its OWN process and its own $T, so a section is a
+# standalone suite: `bash scripts/tests/07-snapshot.sh` proves the snapshot
+# without paying for the other twenty-six. scripts/tick-test.sh is the driver
+# that runs them all.
+#
+# Everything below was the top of tick-test.sh when the suite was one file.
+set -uo pipefail
+
+TICK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
+T=$(mktemp -d)
+export LOOM_HOME="$T/home" LOOM_REPO="$T/repo"
+mkdir -p "$LOOM_REPO"
+# Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
+# lane below it spawns without an entry of its own, exactly as a real worktree
+# relies on its parent directory.
+export LOOM_TRUST_FILE="$T/claude.json"
+printf '{"projects":{"%s":{"hasTrustDialogAccepted":true}}}\n' "$T" > "$LOOM_TRUST_FILE"
+# The GLOBAL config layer is a fixture too, and an empty one by default.
+# Without this the suite fell through to the developer's own
+# ~/.loom/config.yml: every `cfg` lookup in every section resolved
+# against whatever that machine happened to say, so a run could pass here and
+# fail on another laptop. Found by P31's chain test, which asserts the
+# unconfigured case and got the human's `lane_model: sonnet` instead.
+# Sections that need a global layer still point at their own file.
+export LOOM_GLOBAL_CONFIG="$T/global.yml"
+: > "$LOOM_GLOBAL_CONFIG"
+# Self-trigger is the DEFAULT now (P2), so every lane below fires a tick when it
+# exits. Two consequences this file must own rather than discover:
+#   * a harmless default wave command, or those ticks would launch real `claude`
+#     sessions — tests that care about the wave still override it inline;
+#   * bootstrap off by default, since it is now paid on many more ticks. Section
+#     9 tests bootstrap itself and switches it back on via BOOTENV.
+export LOOM_WAVE_CMD="true"
+export LOOM_SKIP_BOOTSTRAP=1
+# launchd is stubbed GLOBALLY, like glab: any test path that reaches
+# watcher-arm or install must capture argv, never mutate real launchd.
+# (Paid for: 2026-08-02 — the suite armed a real watcher agent per run;
+# 26 zombie agents accumulated, firing exit-78 every 60s against deleted
+# mktemp dirs.) `print` exits 1 (= not armed) so arm paths proceed to the
+# stubbed bootstrap instead of short-circuiting on the idempotence check.
+export LAUNCHCTL_CMD="$T/launchctl-stub.sh" LOOM_PLIST_DIR="$T/plists"
+LCTL_CALLS="$T/launchctl-calls"
+cat > "$LAUNCHCTL_CMD" <<STUBEOF
+#!/bin/sh
+echo "\$@" >> "$LCTL_CALLS"
+[ "\$1" = print ] && exit 1
+exit 0
+STUBEOF
+chmod +x "$LAUNCHCTL_CMD"
+# The pane opener, stubbed GLOBALLY for the same reason and by the same
+# lesson. `install` now raises the viewer, so every test path through it opens
+# real herdr panes whenever the suite runs from inside the multiplexer — which
+# is where it is always run, since HERDR_ENV is inherited. (Paid for:
+# 2026-08-04 — four suite runs left four orphan viewers polling deleted mktemp
+# dirs and eight stacked panes on the human's screen.) Belt and braces:
+# HERDR_ENV is cleared too, so _raise_viewer returns before it reaches the
+# stub. Tests that exercise the raise set both deliberately and RESTORE these
+# afterwards — never `unset`, which would disarm the guard for every test after
+# them.
+export WATCH_PANES_CMD="$T/watch-panes-stub.sh"
+WP_GLOBAL_CALLS="$T/watch-panes-calls"
+printf '#!/bin/sh\necho "$@" >> "%s"\n' "$WP_GLOBAL_CALLS" > "$WATCH_PANES_CMD"
+chmod +x "$WATCH_PANES_CMD"
+WP_GLOBAL_STUB="$WATCH_PANES_CMD"
+export HERDR_ENV=
+PASS=0; FAIL=0
+ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
+bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
+
+cat > "$LOOM_REPO/.loom.yml" <<'EOF'
+heartbeat_stale_minutes: 30
+ntfy:
+  topic: "test-topic"
+  push: [build_complete, ticket_blocked]
+EOF
+
+# Paths every section resolves the same way. They lived mid-file when the suite
+# was one process and the later sections inherited them by falling through.
+SNAPJQ="$(dirname "$TICK")/snapshot.jq"
+LANE="$(dirname "$TICK")/lane.sh"
+LIBSH="$(dirname "$TICK")/lib.sh"
+
+# The canned tracker every snapshot test reads through: a `glab` stub serving
+# fixed JSON and logging every invocation, so both the CONTENT of the document
+# and the SHAPE of the call pattern are assertable. Two sections need it — the
+# snapshot section, which owns the fixtures, and the ticker section, whose P72
+# test copies it to prove snapshot.jq and lane.sh slugify a milestone title the
+# same way.
+make_glab_fixture() { # <dir>
+    local FX="$1"
+    mkdir -p "$FX"
+cat > "$FX/open.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics** (4 tickets, ~6h):\n- Ledger core (#10, #11, #12) — 4h\n- Reporting surface (#13) — 2h\n\n**Deliberately dropped** (remain unlabeled):\n- Archive sweep\n\nConfig snapshot:\n\n- max_lanes: 4\n"},
+ {"iid":10,"title":"Add ledger table","project_id":1,"web_url":"https://x/10",
+  "labels":["build-2","ready-for-agent"],"assignees":[],"updated_at":"2026-07-28T10:00:00Z",
+  "milestone":{"title":"Ledger core"},
+  "description":"## Risk tier\n\napi\n\n## Blocked by\n\n- #7 schema groundwork\n"},
+ {"iid":11,"title":"Wire ledger API","project_id":1,"web_url":"https://x/11",
+  "labels":["build-2","ready-for-agent","fix"],"assignees":[],"updated_at":"2026-07-28T11:00:00Z",
+  "milestone":{"title":"Ledger core"},
+  "description":"## Risk tier\n\nlogic\n\n## Blocked by\n\n- #10 ledger table\n- #13 seed data\n"},
+ {"iid":12,"title":"Ledger report view","project_id":1,"web_url":"https://x/12",
+  "labels":["build-2","review"],"assignees":[{"username":"agent-a"}],"updated_at":"2026-07-28T12:00:00Z",
+  "milestone":{"title":"Ledger core"},"description":"## Blocked by\n\nNone - can start immediately\n"},
+ {"iid":20,"title":"Unrelated open issue","project_id":1,"labels":["chore"],"assignees":[],"description":"noise"}
+]
+EOF
+echo '[]' > "$FX/links-10.json"
+cat > "$FX/links-11.json" <<'EOF'
+[{"iid":10,"state":"opened","project_id":1,"link_type":"is_blocked_by"},
+ {"iid":14,"state":"closed","project_id":1,"link_type":"is_blocked_by"},
+ {"iid":21,"state":"opened","project_id":1,"link_type":"relates_to"}]
+EOF
+cat > "$FX/links-12.json" <<'EOF'
+[{"iid":500,"project_id":42,"link_type":"is_blocked_by"}]
+EOF
+cat > "$FX/mrs-12.json" <<'EOF'
+[{"iid":77,"title":"Ledger report view","state":"opened","draft":false,"web_url":"https://x/mr/77","source_branch":"t12","sha":"e52b7c1000000000000000000000000000000000"}]
+EOF
+cat > "$FX/notes.json" <<'EOF'
+[{"system":true,"created_at":"2026-07-28T09:00:00Z","author":{"username":"bot"},"body":"added ~in-progress label"},
+ {"system":false,"created_at":"2026-07-28T09:05:00Z","author":{"username":"wave"},"body":"W3: ui gates need the stack up first."}]
+EOF
+# P30 fixtures: #12 rejected twice for the SAME class (newest first, as the
+# API returns them); #11 rejected twice for DIFFERENT classes.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"gate"},"body":"r2: same trap again\n\n<!-- orch-verdict FAIL bbbb2222 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1: FIFO pairing\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"}]
+EOF
+cat > "$FX/notes-12-changed-class.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=missing-tests -->"},
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"}]
+EOF
+cat > "$FX/glab-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+FX="$(cd "$(dirname "$0")" && pwd)"
+echo "$*" >> "${STUB_LOG:-/dev/null}"
+[ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
+case "$*" in
+  *"state=opened"*) [ -n "${STUB_FAIL_STAGE1:-}" ] && { echo "500 boom" >&2; exit 1; }
+                    cat "${STUB_OPEN:-$FX/open.json}" ;;
+  *"state=closed"*) cat "${STUB_CLOSED:-$FX/closed-none.json}" 2>/dev/null || echo '[]' ;;
+  *"/links"*)       [ -n "${STUB_403_LINKS:-}" ] && { echo "403 Forbidden" >&2; exit 1; }
+                    n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/links.*#\1#p')
+                    cat "$FX/links-$n.json" 2>/dev/null || echo '[]' ;;
+  *"related_merge_requests"*) n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/related.*#\1#p')
+                    cat "$FX/mrs-$n.json" 2>/dev/null || echo '[]' ;;
+  *"/notes"*)       n=$(echo "$*" | sed -n 's#.*issues/\([0-9]*\)/notes.*#\1#p')
+                    if [ -f "$FX/notes-$n.json" ]; then cat "$FX/notes-$n.json"
+                    else cat "$FX/notes.json"; fi ;;
+  *"milestones"*)   cat "${STUB_MILESTONES:-$FX/milestones.json}" 2>/dev/null || echo '[]' ;;
+  *) echo "[]" ;;
+esac
+EOF
+chmod +x "$FX/glab-stub.sh"
+echo '[]' > "$FX/closed-none.json"
+}
+
+# The fake `claude` the wave tests run instead of a real session. The basename
+# is what makes tick treat it as a claude session, so the stub exercises the
+# real streaming path; it counts its own invocations, which is how "retries
+# exactly once" becomes observable. Two sections need it — the usage-limit
+# section, which owns every mode, and P74's consolidation test, which reuses
+# `crash_then_limit` — so it lives here rather than in whichever runs first.
+make_wave_stub() { # <path>
+cat > "$1" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "$@" >> "${WAVE_ARGV:-/dev/null}"
+n=$(cat "$WAVE_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$WAVE_COUNT"
+DONE='{"type":"result","subtype":"success","is_error":false,"result":"wave done"}'
+case "${WAVE_MODE:-ok}" in
+  ok)    printf '%s\n' "$DONE" ;;
+  crash) echo "Execution error" >&2; exit 1 ;;
+  flaky) if [ "$n" -ge 2 ]; then printf '%s\n' "$DONE"
+         else echo "Execution error" >&2; exit 1; fi ;;
+  limit) printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":${WAVE_RESET:-0},\"rateLimitType\":\"five_hour\"}}"
+         echo "You've hit your session limit · resets 10pm" >&2; exit 1 ;;
+  quiet_limit)                       # a limit with no resetsAt to read
+         echo "You've hit your usage limit" >&2; exit 1 ;;
+  crash_then_limit)                  # crashes once, then meets the wall
+         if [ "$n" -ge 2 ]; then
+           printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":${WAVE_RESET:-0},\"rateLimitType\":\"five_hour\"}}"
+           echo "You have hit your session limit" >&2
+         else echo "Execution error" >&2; fi
+         exit 1 ;;
+  healthy_limit_event)               # a NORMAL wave that merely reports capacity
+         printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}'
+         printf '%s\n' "$DONE" ;;
+esac
+STUBEOF
+chmod +x "$1"
+}
+
+# Whole-section guard, checked last because it is a property of every test in
+# the section: nothing may reach the pane opener. The global stub catches a
+# test that sets HERDR_ENV=1 without its own stub; a test that `unset`s the
+# seam instead of restoring it escapes to the real script, which is why the two
+# blocks that touch it restore. (Paid for: 2026-08-04, eight orphan panes.)
+# One process per section means this now names the section that escaped.
+test_finish() {
+    local sec; sec=$(basename "$0" .sh)
+    if [ ! -s "$WP_GLOBAL_CALLS" ]; then
+        ok "$sec: no test reached the pane opener — this section opens no real panes"
+    else
+        bad "$sec: $(wc -l < "$WP_GLOBAL_CALLS" | tr -d ' ') call(s) escaped to the pane opener"
+    fi
+
+    # The driver reads exact counts from here rather than parsing output.
+    [ -n "${LOOM_TEST_COUNTS:-}" ] && printf '%s %s\n' "$PASS" "$FAIL" > "$LOOM_TEST_COUNTS"
+    if [ -z "${LOOM_TEST_QUIET:-}" ]; then
+        echo; echo "== $PASS passed, $FAIL failed =="
+    fi
+    rm -rf "$T"
+    exit $((FAIL > 0))
+}

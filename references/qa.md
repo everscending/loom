@@ -63,7 +63,10 @@ this file is worth reading on its own: read each `//` and name the value it actu
 (P72), so the drift to look for is a program that re-declares one of them locally instead of
 using the shared def — a second answer to a question that must have one.
 
-### `scripts/tick-test.sh` — the suite
+### `scripts/tests/*.sh` and `scripts/test-lib.sh` — the suite
+
+`tick-test.sh` itself is only the driver now; the tests are one file per section over a shared
+harness, and a section is reviewable on its own.
 
 Assume it is lying. Find: assertions that **cannot fail** — `ok` called in both branches, or a
 planted-violation partner that passes vacuously on an empty file; fixtures too simple to exercise
