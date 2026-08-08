@@ -198,6 +198,41 @@ include "lib";
       | if ($held | length) == 0 then null
         else {checks: ($held | map(.check) | unique),
               fixes: ($held | map(.fix) | unique)} end;
+    # P78: the blocked report `lane.sh blocked-report` wrote — the one comment
+    # that says why a human is being asked for a decision. Located by its
+    # `orch-blocked` trailer, like every other fact mined out of this thread;
+    # before that trailer existed the report was unmarked prose and nothing
+    # could find it.
+    #
+    # `released` is what makes a re-run safe on the write side: an
+    # `orch-unblock` trailer newer than this one means the decision has already
+    # been posted, so `transition --note` completes the label half without
+    # doubling the comment. Computed here as well as in `lane.sh` because the
+    # human's surface needs to show it — a ticket still labelled `blocked` but
+    # already carrying its release note is a half-applied batch, and the only
+    # honest thing to do with it is say so rather than ask for the decision
+    # twice.
+    #
+    # The body is carried WHOLE. Every other parser here extracts a field; this
+    # one exists so a human can read the report without opening the tracker, so
+    # summarising it in jq would defeat the point. It lands only on tickets
+    # that have one, and `--brief` drops blocked tickets to bare iids anyway.
+    def blocked_report_of($notes):
+        ([$notes | to_entries[]
+          | select((.value.body // "") | test("orch-blocked"))
+          | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
+         | sort_by([.at, -.i]) | last) as $r
+      | if $r == null then null
+        else
+          ([$notes[] | select((.body // "") | test("orch-unblock"))
+            | .created_at // ""] | sort | last) as $u
+        | { at: $r.at,
+            category: ($r.body | (capture("orch-blocked category=(?<c>[A-Za-z0-9._-]+)").c // null)),
+            # The trailer is machinery, not report: a human reading this field
+            # on a surface should see what the lane wrote and nothing else.
+            body: ($r.body | sub("\\n*<!-- orch-blocked[^>]*-->\\n*"; "") | ltrimstr("\n") | rtrimstr("\n")),
+            released: ($u != null and $u > $r.at) }
+        end;
     # P31: which model this ticket next IMPLEMENTATION lane gets. The chain is
     # deterministic, so it is resolved here rather than reasoned about in each
     # wave: ticket `model::` label > `rework_model` (round 2 and later) >
@@ -316,6 +351,7 @@ include "lib";
             related_merge_requests: ((($M[$t.iid | tostring]) // [])
                 | map({iid, title, state, draft, web_url, source_branch, sha})),
             rejections: $rej,
+            blocked_report: blocked_report_of((($N[$t.iid | tostring]) // [])),
             merge_attempts: merge_attempts_of((($N[$t.iid | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.iid | tostring]) // []); $open_iids),
             model: model_of($lb; $rej; $config),

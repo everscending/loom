@@ -52,6 +52,7 @@ technique of its own.
 | `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
 | `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
+| `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
 | `replan` | any | Diff amended PRD, regenerate only affected tickets |
 | `qa` | any | Review this skill's own files; report defects, never fix |
@@ -545,19 +546,26 @@ alone. Never hand the human a command to paste when it can just be run.
 
 ### `unblock <n> [--to-review]`
 
-Post the human's decision with `lane.sh note <n>`, then requeue with
-**`lane.sh transition <n> ready-for-agent --release-hold`** — that verb removes
-`blocked` and clears the assignee in one write. Never compose the relabel by
-hand: the unassign is the half that gets dropped, and a claimed
-`ready-for-agent` ticket is invisible to *both* fill paths (see failure policy)
-*(paid: a hand-composed unblock left #47 unschedulable for 90 minutes after its
-decision landed)*. `--to-review` → `lane.sh transition <n> review
---release-hold` (human completed the work; it takes the same gate as agent work
-— no bypass), assignee kept.
+**`lane.sh transition <n> ready-for-agent --release-hold --note`**, decision on
+stdin — one verb posts it, removes `blocked` and clears the assignee. Never
+compose those writes by hand: the unassign is the half that gets dropped, and a
+claimed `ready-for-agent` ticket is invisible to *both* fill paths (see failure
+policy) *(paid: hand-composed unblock, #47 unschedulable for 90 minutes)*.
+Re-running after a failed write completes the missing half without doubling the
+note. `--to-review` → the same with `review` (human completed the work; it takes
+the same gate as agent work — no bypass), assignee kept.
 
 `--release-hold` is refused outright inside a lane or a wave, so this verb is
 only ever reachable from a human's own session. That is the point: see the
 ticket-text rule in the failure policy.
+
+### `triage`
+
+Every blocked ticket on one `/lavish` surface — six actions each (requeue, to
+review, `rescope`, `model-tier`, leave, close), applied as a batch. Human-run,
+never invoked by a wave; `unblock <n>` is unchanged and still the one-ticket
+path. Population, the two rules the surface must hold that no script can
+enforce, and the apply order: [references/triage.md](references/triage.md).
 
 ### `replan`
 
@@ -615,11 +623,14 @@ Resolution, the test bar and the close step:
   into different work** keeps the old scope's rejections until a human retires
   them with `lane.sh rescope <n>` — refused inside a lane or a wave, like
   `--release-hold`. *(paid: a spent cap against deleted code.)*
-- Blocking writes a **blocked report** comment: category, what each attempt
-  tried, branch/MR links, and *the single decision or action needed* — then
-  fires the `ticket_blocked` ntfy push and moves on.
+- Blocking writes a **blocked report** with
+  **`lane.sh blocked-report <n> --category <slug>`** (body on stdin): what each
+  attempt tried, branch/MR links, *the single decision or action needed*. Never
+  a plain `note` — the verb writes the trailer `snapshot` finds it by, and an
+  unmarked report is invisible to `triage`. Then `transition <n> blocked`, fire
+  the `ticket_blocked` ntfy push, move on.
 - **Unblock = decision posted + `blocked` removed + assignee cleared**, in one
-  write: `lane.sh transition <n> ready-for-agent --release-hold`. A ticket left holding the
+  write: `lane.sh transition <n> ready-for-agent --release-hold --note`. A ticket left holding the
   assignee its lane wrote is invisible to **both** fill paths — the ready set
   requires *unclaimed*, and `summary.stranded` only looks at `in-progress` —
   so a build with nothing else outstanding reports `build_complete` and tears
