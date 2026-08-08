@@ -903,3 +903,35 @@ section 7f8 asserts the warning fires, and plants two violations beside it: a FA
 commit must stay gateable (or every rework round false-alarms), and a PASS at HEAD must keep only
 its existing repair warning. Removing the new block alone turns the suite red on exactly that
 case (633 passed, 1 failed).
+
+### D-TICK-16 · the "poll, never await" rule is prose only, and lanes keep breaking it
+*Closed 2026-08-08.*
+
+The P68 headless rules appended to every lane brief forbade "I backgrounded it and will be
+notified" in prose, and lanes did it anyway: a lane started a long-running job in the background,
+called `ScheduleWakeup` — a main-loop tool with nothing behind it in a headless `claude -p` — and
+exited. The session ended for good, the lane died **rc 0** (neither the crash path nor the
+rejection path) with its ticket still holding a dead lane and never reaching `review`, and its
+background children were left alive and unreaped. Paid for twice in one day, boostlingo build-4
+2026-08-08: impl-96 dead rc 0 at 162 turns over a live 300s run, impl-98 dead rc 0 at 91 turns
+over a background retry loop. Two waves independently proposed a third restatement of the same
+prose rule; the prose never named the tool, so a lane thinking "I'll schedule a wakeup" sailed
+past a rule it had technically read.
+
+**Shipped:** the rule moved into the plumbing. `_spawn_build_epilogue` in `scripts/tick.sh` now
+appends `--disallowedTools ScheduleWakeup` to a lane's command line, so the tool is denied where a
+model cannot read past it. Gated on a new `is_claude` flag rather than `stream` — `stream` answers
+"does stdout go to the .jsonl?" and is turned back off for a caller-set non-streaming
+`--output-format`, while the lane is still a real session that can strand itself. Appended last,
+because `--disallowedTools` is variadic and would otherwise eat the next injected flag as a second
+tool name; skipped whole when the caller passed their own deny list, the same rule as
+`--output-format` and `--fallback-model`. The P68 brief block also names `ScheduleWakeup`
+explicitly on its first bullet now, as the cheap second half of the fix. Zero `SKILL.md` lines.
+`tick-test.sh` adds four cases: the flag is injected on a claude lane, it ends the command line,
+a caller's own deny list is left alone and not doubled, and the appended brief names the tool.
+Reverting the fix turns three of the four red (671 passed, 0 failed with it in place).
+
+**Not shipped:** the entry's "also worth catching" note — naming a lane that dies rc 0 before
+`review` as its own shape instead of lumping it into "crash" — was left out deliberately. It is a
+harvest-classification change costing `SKILL.md` prose, not part of the fix, and the plumbing deny
+removes the failure that motivated it.

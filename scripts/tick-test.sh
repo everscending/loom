@@ -1510,6 +1510,37 @@ for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
     && ok "stream: the flag is not duplicated for a caller who set it" \
     || bad "stream: --output-format appears $(grep -o -- '--output-format' "$ARGV" | wc -l | tr -d ' ') times"
 
+# 4h1b. D-TICK-16: ScheduleWakeup is denied on the lane's command line. It is a
+#       main-loop tool, so a headless lane that schedules a wakeup instead of
+#       waiting ends its session for good — dead rc 0, ticket unreviewed,
+#       background children unreaped (boostlingo build-4 2026-08-08: impl-96 at
+#       162 turns, impl-98 at 91). The P68 brief already forbade the shape in
+#       prose and both lanes did it anyway, so the rule lives in the flags.
+rm -f "$ARGV"
+STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-37 --no-tick -- "$FAKE" -p "x" >/dev/null
+for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
+grep -q -- "--disallowedTools ScheduleWakeup" "$ARGV" \
+    && ok "D-TICK-16: spawn-lane denies ScheduleWakeup on a claude lane's command line" \
+    || bad "D-TICK-16: lane spawned able to ScheduleWakeup ($(cat "$ARGV" 2>/dev/null))"
+# --disallowedTools is variadic: put anywhere but last it eats whatever follows
+# as a second tool name, so the flag it precedes is silently denied instead of
+# passed. The deny list must therefore END the command line.
+grep -q -- "--disallowedTools ScheduleWakeup$" "$ARGV" \
+    && ok "D-TICK-16: the variadic deny list ends the command line, swallowing nothing" \
+    || bad "D-TICK-16: a flag follows the deny list and would be eaten as a tool name ($(cat "$ARGV" 2>/dev/null))"
+# A caller who set their own deny list owns it whole — a second copy would have
+# the lane arguing with itself, same rule as --output-format and --fallback-model.
+rm -f "$ARGV"
+STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-38 --no-tick -- \
+    "$FAKE" -p "x" --disallowedTools "WebSearch" >/dev/null
+for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
+if [ "$(grep -o -- "--disallowedTools" "$ARGV" | wc -l | tr -d ' ')" = "1" ] \
+   && ! grep -q -- "ScheduleWakeup" "$ARGV"; then
+    ok "D-TICK-16: a caller's own --disallowedTools is left alone, not doubled"
+else
+    bad "D-TICK-16: injected over the caller's deny list ($(cat "$ARGV" 2>/dev/null))"
+fi
+
 # 4h2. The fix itself, under the REAL 30-minute window rather than a contrived
 #      zero: a lane whose .log has not moved since 2020 — which is what a
 #      buffered `claude -p` looks like — reads `running`, because the stream is
@@ -6769,6 +6800,12 @@ if [ -f "$COMPOSED" ] && grep -q 'Implement ticket 12' "$COMPOSED" \
 else
     bad "P68: impl brief lacks the headless rules ($(cat "$COMPOSED" 2>/dev/null | tr '\n' ' ' | cut -c1-120))"
 fi
+# D-TICK-16: the rule names the tool it is about. "I backgrounded it and will be
+# notified" was already forbidden, but a lane that thinks of it as "I'll schedule
+# a wakeup" sails past a rule it technically read — two lanes did, in one day.
+grep -q 'ScheduleWakeup' "$COMPOSED" \
+    && ok "D-TICK-16: the appended brief names ScheduleWakeup as the thing not to reach for" \
+    || bad "D-TICK-16: the headless rules never name ScheduleWakeup, only the shape"
 # The rules are appended to the COPY. Mutating the wave's own file would make a
 # reused brief grow a block per spawn.
 grep -q 'KillShell' "$BR/clean.md" \

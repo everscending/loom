@@ -1175,7 +1175,7 @@ _spawn_stage_brief() {
     cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
 
 ## Headless execution rules (appended by spawn-lane — they bind every lane)
-- No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns.
+- No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns, and ScheduleWakeup is denied on your command line — there is no main loop to resume you, so scheduling a wakeup ends the session with the job unfinished.
 - Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
 - Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
 - There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
@@ -1218,10 +1218,10 @@ BRIEFEOF
 # heartbeat is a true backstop for the initial kick and post-stall resume.
 # Render BEFORE the tick fires: the wave this lane wakes up reads lane logs
 # for verdicts and crash triage, and must not race the transcript.
-# Reads, from the caller's scope: id, jsonl, stream, inject, merge_lock,
-# gate_lock_key, on_done, and the lane command as "$@"; sets epi and redirect
-# there, and leaves the (possibly flag-extended) command in _SPAWN_ARGS for
-# the caller to `set --` back. Everything the program text needs travels by
+# Reads, from the caller's scope: id, jsonl, stream, is_claude, inject,
+# merge_lock, gate_lock_key, on_done, and the lane command as "$@"; sets epi
+# and redirect there, and leaves the (possibly flag-extended) command in
+# _SPAWN_ARGS for the caller to `set --` back. Everything the program text needs travels by
 # ENVIRONMENT (LOOM_LANE_JSONL) or as single-quoted paths this script owns —
 # never caller input spliced into the program. Pure assembly: nothing here
 # refuses, nothing here destroys.
@@ -1252,6 +1252,35 @@ _spawn_build_epilogue() {
             fi
         fi
         epi="'$SELF_PATH' render-log '$id'; "
+    fi
+    # D-TICK-16: `ScheduleWakeup` is a main-loop tool — nothing resumes a
+    # headless `claude -p`, so a lane that schedules a wakeup instead of
+    # waiting ends its session for good. It dies rc 0, which is neither the
+    # crash path nor the rejection path, with its ticket still unreviewed and
+    # its background children alive and unreaped. Paid for twice in one day
+    # (boostlingo build-4, 2026-08-08): impl-96 dead rc 0 at 162 turns over a
+    # live 300s run, impl-98 dead rc 0 at 91 turns over a background retry
+    # loop. The P68 brief already forbids the shape in prose and both lanes
+    # read it anyway, so the durable fix goes in the plumbing: deny the tool
+    # on the command line, where a model cannot read past it.
+    # Gated on is_claude, not `stream` — `stream` answers "does stdout go to
+    # the .jsonl?" and a caller who set `--output-format json` turns it off
+    # while still running a session that can strand itself.
+    # Appended LAST: --disallowedTools is variadic, so it must never sit where
+    # the next token is another injected flag's value.
+    if [ "$is_claude" -eq 1 ]; then
+        local has_dt=0
+        for _a in "$@"; do
+            case "$_a" in
+                --disallowedTools|--disallowedTools=*|--disallowed-tools|--disallowed-tools=*)
+                    has_dt=1; break ;;
+            esac
+        done
+        # A caller who set their own deny list owns it whole — the lane must
+        # not argue with itself, same rule as the format and the fallback.
+        if [ "$has_dt" -eq 0 ]; then
+            set -- "$@" --disallowedTools ScheduleWakeup
+        fi
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
@@ -1439,7 +1468,7 @@ cmd_spawn_lane() {
   prompts this long die at the CLI/permission boundary (P28). Write the brief
   to a file and spawn with:  --brief <file> ... -- claude -p @brief ..."
     done
-    local log="$LOGS_DIR/lane-$id.log" jsonl="$LOGS_DIR/lane-$id.jsonl" stream=0 _a=""
+    local log="$LOGS_DIR/lane-$id.log" jsonl="$LOGS_DIR/lane-$id.jsonl" stream=0 is_claude=0 _a=""
     # P13: liveness is judged by log mtime, and `claude -p` writes nothing until
     # it exits — so a healthy lane working past `heartbeat_stale_minutes` looks
     # silent, is classified wedged, and is killed with all its work. Streaming is
@@ -1451,7 +1480,10 @@ cmd_spawn_lane() {
     # P2 — a flag whose omission silently breaks the loop must not be optional.
     # A command that only reaches claude indirectly (`bash -c "claude …"`) is not
     # detected, and does not need to be: SKILL.md spawns claude directly.
-    case "$(basename "${1:-}")" in claude) stream=1 ;; esac
+    # `is_claude` is the same detection kept as its own answer, because
+    # `stream` is turned back off below for a non-streaming format while the
+    # lane is still a real session (D-TICK-16 reads it).
+    case "$(basename "${1:-}")" in claude) stream=1; is_claude=1 ;; esac
     # Two SEPARATE decisions, and conflating them cost a build day. `inject`
     # is "do I add the flags?" — no, if the caller already set
     # `--output-format`, or the lane would argue with itself over a flag set
