@@ -110,31 +110,6 @@ input line and exits 0, so the ticker loses the line rather than failing loudly.
 line (`:2167`) report too small a number, which can invert the conclusion printed at `:2168-2169`
 on a build that really was graph-bound.
 
-### D-TICK-14 · the adversarial pregate reads a declared "none" as a demand for tests
-`_adv_pregate_reject`, `tick.sh:2589-2592` — the section extractor prints every non-blank line
-under `## Mandatory adversarial tests` and the check is `[ -n "$sect" ]`. It tests for *text*,
-not for a *list*. A ticket that answers the template's question with "None of its own — this
-ticket verifies, it does not build" therefore reads as a ticket demanding adversarial tests.
-**Failure:** rc 7 with no review session, on every round, forever. The section lives in the
-ticket body, so no implementation branch can change it — the rejection is unsatisfiable rather
-than merely wrong, and each respawn burns a full round producing the identical rc 7. This
-contradicts the function's own stated contract three lines above it (`:2565-2571`): "strictly
-one-directional… every unknown skips", which already lists "a ticket with no adversarial
-section" as a skip. A ticket that *says* it has none is the same case, spelled out.
-**Reproduced:** boostlingo build-4, 2026-08-08, ticket #97 (E12 wiring, a verification-only
-ticket), gate-97, class `missing-required-tier-tests`. Sibling ticket #87 in the same epic left
-the section blank and passed — so the check rewards silence and punishes the explicit answer the
-template asks for. Worked around by blanking #97's section by hand; the prose is restored when
-this is fixed.
-**Fix:** reject only when the section contains at least one bullet line (`- ` / `* `). Every real
-adversarial section in that build (#90, #91, #92, #94, #95, #96) is bullets — `ticket-template.md`
-mandates "one per line" — and #97's is a prose paragraph. This needs no keyword list, so it also
-covers "N/A", "none required" and any future phrasing. A prose-formatted *real* section would then
-skip the pregate, which is the cheap direction the contract already chooses.
-**Test:** `tick-test.sh` could not have caught it — section 4i9 covers a populated section
-(`ADV_MANDATORY`) and an absent one (`ADV_SILENT`), but no case for a section that declares none.
-Add `ADV_NONE` beside them.
-
 ---
 
 ## `scripts/snapshot.jq`
@@ -876,6 +851,31 @@ own `wave` row in the spend-by-kind breakdown and in the grand total — never f
 total, since a wave is the one session kind that writes no code. `tick-test.sh` case 12a2b plants
 one lane log and one wave log in a fixture build and asserts both are priced and the rows sum to
 the total.
+
+### D-TICK-14 · the adversarial pregate reads a declared "none" as a demand for tests
+*Closed 2026-08-08.*
+
+`_adv_pregate_reject` extracted every non-blank line under `## Mandatory adversarial tests` and
+gated on `[ -n "$sect" ]` — a test for *text*, not for a *list*. A ticket answering the template's
+question with "None of its own — this ticket verifies, it does not build" therefore read as a
+ticket demanding adversarial tests, and was rejected at rc 7 with no review session on every
+round, forever: the section lives in the ticket body, so no implementation branch could ever
+satisfy it. It contradicted the function's own contract three lines above, which already treats a
+ticket with no adversarial section as a skip. The check rewarded silence and punished the explicit
+answer the template asks for.
+
+**Shipped:** the guard in `scripts/tick.sh` now rejects only when the section contains at least one
+bullet line — `printf '%s\n' "$sect" | grep -Eq '^[[:space:]]*[-*][[:space:]]'` — with a comment
+tying it back to that contract. `references/ticket-template.md` mandates "one per line" and every
+real section is bulleted, so this needs no keyword list and covers "N/A", "none required" and any
+future phrasing; an absent section still skips, since the grep fails on empty input too. A
+prose-formatted *real* section now skips the pregate, which is the cheap direction the contract
+already chooses. Zero `SKILL.md` lines, no new machine contract. `tick-test.sh` section 4i9 gains
+`ADV_NONE` beside `ADV_MANDATORY` and `ADV_SILENT`, plus a mutant case that runs a copy of
+`tick.sh` with the old text-only guard restored against the same fixture and asserts it rejects at
+rc 7 — the red proof lives inside the suite rather than needing a hand revert. That mutant needs
+`lib.sh` and its sibling scripts linked beside the copy, or it dies at source time and proves
+nothing.
 
 ### D-TICK-15 · `unblock --to-review` strands a ticket whose HEAD already carries a verdict
 *Closed 2026-08-08.*

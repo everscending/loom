@@ -2590,7 +2590,12 @@ EOF
         tolower($0) ~ /^#+[[:space:]]*mandatory adversarial test/ { f=1; next }
         f && /^#/ { f=0 }
         f && NF   { print }')
-    [ -n "$sect" ] || return 1
+    # A ticket that answers the template's question with prose ("None of its
+    # own — this ticket verifies, it does not build") is not demanding tests;
+    # it is declaring it has none, which the contract above already treats as
+    # a skip. Only a bulleted line — the template's own "one per line" format
+    # for the inputs that must be rejected — counts as a demand.
+    printf '%s\n' "$sect" | grep -Eq '^[[:space:]]*[-*][[:space:]]' || return 1
     printf '%s' "$paths"
     return 0
 }

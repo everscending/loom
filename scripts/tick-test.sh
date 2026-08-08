@@ -1253,6 +1253,7 @@ EOF
 chmod +x "$ADVG"
 ADV_MANDATORY='{"description":"## Mandatory adversarial tests\n\n- an empty seat id must be rejected\n\n## Risk tier\n\nlogic\n"}'
 ADV_SILENT='{"description":"## Design decisions\n\n- keep the reader dumb\n"}'
+ADV_NONE='{"description":"## Mandatory adversarial tests\n\nNone of its own — this ticket verifies, it does not build.\n\n## Risk tier\n\nlogic\n"}'
 adv_spawn() { # <lane> <log> <issue-body-json> [fail]
     rm -f "$T/adv-ran-$1" "$LOOM_HOME/lanes/$1.rc"; : > "$2"
     LOOM_REPO="$ADVR" GLAB_CMD="$ADVG" STUB_LOG="$2" STUB_BODY="$3" STUB_FAIL="${4:-0}" \
@@ -1301,6 +1302,54 @@ adv_spawn gate-63 "$T/adv-calls-63" "$ADV_SILENT"
 [ -f "$T/adv-ran-gate-63" ] \
     && ok "adversarial-pregate: a ticket with no adversarial section is never rejected for one" \
     || bad "adversarial-pregate: a ticket that asked for no adversarial test was rejected anyway"
+
+# D-TICK-14: a ticket that ANSWERS the section with prose declaring it has
+# none ("None of its own — this ticket verifies, it does not build") is the
+# same case as ADV_SILENT, spelled out. The section has text, but no bullet —
+# so it must skip exactly like the blank section does, not read as a demand.
+adv_spawn gate-70 "$T/adv-calls-70" "$ADV_NONE"
+[ -f "$T/adv-ran-gate-70" ] \
+    && ok "adversarial-pregate: a ticket that declares no adversarial tests in prose is never rejected for one" \
+    || bad "adversarial-pregate: a ticket's prose declaration of 'none' was read as a demand for tests"
+
+# Planted violation: revert the guard to "any text counts" — the mechanism
+# D-TICK-14 removed — and the identical ADV_NONE ticket, on a branch that
+# touches none of the tier's paths, is rejected at rc 7 with no session. This
+# is the exact failure reproduced against boostlingo build-4 #97: rc 7 forever,
+# unsatisfiable because the section lives in the ticket body.
+ADVM2="$T/adv-textonly"; mkdir -p "$ADVM2"
+# tick.sh dies at source time without lib.sh beside it (P73), and spawn-lane
+# needs lane.sh and the jq helpers too — every sibling file it reads at
+# startup, not just the one line under test, or the mutant never reaches the
+# pregate at all.
+for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
+    ln -sf "$(dirname "$TICK")/$jf" "$ADVM2/$jf"
+done
+ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM2/lib.sh"
+ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM2/lane.sh"
+adv_guard_line=$(grep -Fn '[[:space:]]*[-*][[:space:]]' "$TICK" | cut -d: -f1)
+if [ -n "$adv_guard_line" ]; then
+    sed "${adv_guard_line}s#.*#    [ -n \"\$sect\" ] || return 1#" "$TICK" > "$ADVM2/tick.sh"
+else
+    cp "$TICK" "$ADVM2/tick.sh"
+fi
+if ! diff -q "$TICK" "$ADVM2/tick.sh" >/dev/null 2>&1; then
+    chmod +x "$ADVM2/tick.sh"
+    adv_spawn2() { # <lane> <tick-binary> <log> <issue-body-json>
+        rm -f "$T/adv-ran-$1" "$LOOM_HOME/lanes/$1.rc"
+        LOOM_REPO="$ADVR" GLAB_CMD="$ADVG" STUB_LOG="$3" STUB_BODY="$4" \
+            "$2" spawn-lane "$1" --no-tick --pregate logic --cwd "$ADVR" -- touch "$T/adv-ran-$1" >/dev/null 2>&1
+        for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/$1.rc" ] && break; sleep 0.1; done
+    }
+    adv_spawn2 gate-71 "$ADVM2/tick.sh" "$T/adv-calls-71" "$ADV_NONE"
+    if [ ! -f "$T/adv-ran-gate-71" ] && [ "$(cat "$LOOM_HOME/lanes/gate-71.rc" 2>/dev/null)" = "7" ]; then
+        ok "adversarial-pregate-violation: reverting to a text-only check rejects the prose 'none' declaration, unsatisfiable forever"
+    else
+        bad "adversarial-pregate-violation: the mutant did not reject, so the fix proves nothing (rc=$(cat "$LOOM_HOME/lanes/gate-71.rc" 2>/dev/null))"
+    fi
+else
+    bad "adversarial-pregate-violation: sed did not match the guard line, mutant is identical to the fix"
+fi
 
 # An unreadable tracker is not evidence about the branch — the same rule the
 # missing runner follows.
