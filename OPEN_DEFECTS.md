@@ -110,6 +110,60 @@ input line and exits 0, so the ticker loses the line rather than failing loudly.
 line (`:2167`) report too small a number, which can invert the conclusion printed at `:2168-2169`
 on a build that really was graph-bound.
 
+### D-TICK-14 · the adversarial pregate reads a declared "none" as a demand for tests
+`_adv_pregate_reject`, `tick.sh:2589-2592` — the section extractor prints every non-blank line
+under `## Mandatory adversarial tests` and the check is `[ -n "$sect" ]`. It tests for *text*,
+not for a *list*. A ticket that answers the template's question with "None of its own — this
+ticket verifies, it does not build" therefore reads as a ticket demanding adversarial tests.
+**Failure:** rc 7 with no review session, on every round, forever. The section lives in the
+ticket body, so no implementation branch can change it — the rejection is unsatisfiable rather
+than merely wrong, and each respawn burns a full round producing the identical rc 7. This
+contradicts the function's own stated contract three lines above it (`:2565-2571`): "strictly
+one-directional… every unknown skips", which already lists "a ticket with no adversarial
+section" as a skip. A ticket that *says* it has none is the same case, spelled out.
+**Reproduced:** boostlingo build-4, 2026-08-08, ticket #97 (E12 wiring, a verification-only
+ticket), gate-97, class `missing-required-tier-tests`. Sibling ticket #87 in the same epic left
+the section blank and passed — so the check rewards silence and punishes the explicit answer the
+template asks for. Worked around by blanking #97's section by hand; the prose is restored when
+this is fixed.
+**Fix:** reject only when the section contains at least one bullet line (`- ` / `* `). Every real
+adversarial section in that build (#90, #91, #92, #94, #95, #96) is bullets — `ticket-template.md`
+mandates "one per line" — and #97's is a prose paragraph. This needs no keyword list, so it also
+covers "N/A", "none required" and any future phrasing. A prose-formatted *real* section would then
+skip the pregate, which is the cheap direction the contract already chooses.
+**Test:** `tick-test.sh` could not have caught it — section 4i9 covers a populated section
+(`ADV_MANDATORY`) and an absent one (`ADV_SILENT`), but no case for a section that declares none.
+Add `ADV_NONE` beside them.
+
+### D-TICK-15 · `unblock --to-review` strands a ticket whose HEAD already carries a verdict
+`SKILL.md` `### unblock`, against `gate_of` in `snapshot.jq:75-94`. `--to-review` transitions to
+`review` and stops. But `gate_of` refuses any ticket whose current MR head already has an
+`orch-verdict` trailer — `eligible: false, reason: "already judged <V> at this HEAD"`. When the
+verdict standing at that head is a **FAIL**, `--to-review` therefore produces a ticket that no
+step will ever act on again.
+**Failure:** a silent, permanent stall. `review` is invisible to the fill step (needs
+`ready-for-agent` + unclaimed), invisible to `summary.stranded` (looks only at `in-progress`),
+and has no lane for harvest to find. Unlike the assignee-held case, `snapshot` emits no warning.
+The build simply carries a ticket that appears to be progressing and is not. `SKILL.md` promises
+`--to-review` "takes the same gate as agent work — no bypass"; in this case it takes no gate at
+all, which is a bypass in the one direction nobody would look for.
+**Reproduced:** boostlingo build-4, 2026-08-08, ticket #97. Its rc 7 pregate rejection (D-TICK-14)
+posted `FAIL` at `979f34f`, still the branch HEAD. `/loom unblock 97 --to-review` moved it to
+`review`; the very next `snapshot` read `gate.eligible: false — already judged FAIL at this HEAD`.
+Recovered by transitioning to `ready-for-agent` instead, so an impl lane can move HEAD.
+**Why it bites hardest after a pregate FAIL:** the normal FAIL path sends the ticket to
+`in-progress`, where rework pushes a commit and HEAD moves on its own. A pregate rejection can be
+caused by something *outside* the branch — D-TICK-14's ticket-body misfire is exactly that — and
+then there is nothing legitimate to commit, so the human reaches for `--to-review` precisely when
+it is least safe.
+**Fix:** `unblock --to-review` must check `gate.eligible` after the transition and refuse (or warn
+loudly and requeue `ready-for-agent` instead) when the current head carries a standing verdict.
+The data is already in the snapshot; nothing new needs computing. Cheaper alternative worth
+considering: have `snapshot` warn on any `review` ticket that is gate-ineligible with no live
+gate lane — that catches this shape whatever produced it, the way it already warns on an
+assignee-held `ready-for-agent`.
+**Test:** none today. `unblock` has no coverage in `tick-test.sh` at all.
+
 ---
 
 ## `scripts/snapshot.jq`
