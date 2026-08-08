@@ -67,10 +67,15 @@ skill's own layer or stop; do not reach across.
 
 ## Step 3 — tests
 
-A proposal's **Tests** section is its acceptance criteria. They go into
-`scripts/tick-test.sh` in that file's house style: every guard shown both
-holding *and* failing once its mechanism is removed. A fix that lands in
-`tick.sh` or `lane.sh` with no test in that suite is not finished.
+A proposal's **Tests** section is its acceptance criteria. They go into the
+section they belong to — the tests live in `scripts/tests/NN-<topic>.sh`, one
+process each over the harness in `scripts/test-lib.sh` — in that file's house
+style: every guard shown both holding *and* failing once its mechanism is
+removed. A fix that lands in `tick.sh` or `lane.sh` with no test in that suite
+is not finished.
+
+While iterating, run the one section: `bash scripts/tick-test.sh snapshot`
+takes seconds where the whole suite takes minutes (`--list` names them all).
 
 Run `scripts/tick-test.sh` in full and report the counts, pass and fail. It is
 the only executable check this skill has. `SKILL.md` and `references/` have

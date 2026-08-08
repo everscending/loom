@@ -24,6 +24,10 @@ just disagrees with it.
 **A fix is not done until a test fails without it.** Each entry records whether `tick-test.sh`
 should have caught it; almost none of them could have.
 
+A `tick-test.sh:<line>` citation below predates P76, which split the suite into
+`scripts/tests/NN-<topic>.sh` over `scripts/test-lib.sh`. Those line numbers no longer resolve —
+find the test by the string it asserts, which is what the citation was really pointing at.
+
 ---
 
 ## `scripts/tick.sh`

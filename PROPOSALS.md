@@ -65,7 +65,6 @@ evidence, and implementation notes belong in this file, not there.
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
 | P77 | The snapshot's per-ticket fan-out grows with the board | open — proposed 2026-08-07; two reads per open member plus one per active member, eight at a time, so ~250 calls per snapshot at 100 tickets and two snapshots per wave. `--brief` trimmed the output, not the reads. Structural finding, never measured — the biggest build on disk is 7 tickets |
-| P76 | `tick-test.sh` splits into sections over a shared harness | open — deferred 2026-08-07 on a claimed ~10s runtime; measured 2026-08-08 at **2m30s for 636 tests**, so the deferral's premise is gone. The split does not make the full run faster — it makes one section runnable in seconds instead of 2m30s |
 
 ## What the evidence says
 
@@ -261,6 +260,11 @@ assert only the absence of a call, and pass against a stand-in that is `exit 127
 `ok`-in-both-branches pattern killed in the ntfy block on 2026-08-01 survived at
 `tick-test.sh:2361-2363`.
 
+The `tick-test.sh:<line>` citations above are from 2026-08-06, when the suite was one file at 430
+tests. They no longer resolve — the suite grew, and P76 then split it into
+`scripts/tests/NN-<topic>.sh`. Find each test by the string it asserts; the sections are named
+after their subject, so the search is narrow.
+
 **Fix direction.** Make vacuity mechanically detectable rather than a review finding:
 
 - A `--mutate` mode that, for a named set of production lines (the guards, the destructive
@@ -334,45 +338,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P76 · `tick-test.sh` splits into sections over a shared harness
-
-**Problem.** The suite is one 7,137-line file. Its sections are already numbered and
-self-contained, but running one section during development is not possible — every run is
-every test, and there is no filter of any kind: no positional argument, no `TEST_FILTER`
-environment variable. The global stubs at the top (glab capture, launchctl, herdr,
-watch-panes, each with a paid-for zombie-agent story) are entangled with the file rather
-than importable.
-
-**Evidence.** Measured 2026-08-08, two consecutive runs on the same machine: **636 tests,
-0 failed, 151s and 148s of wall clock** — call it 2m30s. CPU time was 82s, so utilization
-is 54% and roughly half the wall clock is the suite waiting on real `sleep` calls rather
-than computing. The cost is a long tail, not one hotspot: the twenty slowest tests account
-for about 45s and are all timing or concurrency guards (lock overlap, kill-lane
-descendants, the watch-panes pane lifecycle, pending-kick replay); the remaining ~600 run
-at 0.1–0.3s each.
-
-This supersedes the original deferral, which was written against a claimed ~10 second
-runtime. That figure was stale by roughly fifteen times, and the file has grown from 6,188
-lines to 7,137 since.
-
-**Fix direction.** `scripts/tests/NN-<topic>.sh` per section, a `scripts/test-lib.sh`
-holding the harness (`ok`/`bad`/counters, the stubs, fixture env), and `tick-test.sh`
-becomes the driver that runs all sections (so every existing invocation keeps working).
-
-Be honest about what this buys, because it is easy to sell it as the wrong thing. The
-split does **not** make a full run faster — the driver still runs every section, so the
-total stays at 2m30s. What it buys is that editing one guard costs seconds instead of
-2m30s, which is the cost actually paid during iteration.
-
-It also makes running sections concurrently *possible*, and the 54% utilization says there
-is real headroom there. That is separate work, not part of this proposal, and it carries a
-specific hazard: several tests assert on wall clock — "snapshot: fan-out is concurrent (2s
-for 6 x 0.6s calls)" is the clearest — and those go flaky under load. Any parallel driver
-must pin the timing-sensitive sections to a serial run.
-
-**Consumer.** `qa` (P45's mutate mode gets addressable sections), and anyone iterating on
-one guard.
 
 ## P77 · The snapshot's per-ticket fan-out grows with the board
 
