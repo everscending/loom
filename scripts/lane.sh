@@ -554,13 +554,17 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     # The build label is DERIVED, never asked for: the scheduler's universe is
     # "open issues labeled build-N" for the highest open `Build N` issue, and a
     # lane that had to name it could name last week's.
+    # P70: through `_glab_list`, like every other list read in this skill. A
+    # bare `per_page=100` is page 1 and says nothing about the rest, so on a
+    # board with more than 100 open issues the `Build N` issue itself can fall
+    # off the read and every filing die "no open Build N issue".
     local blabel
-    blabel=$("$GLAB" api "projects/:fullpath/issues?state=opened&per_page=100" 2>/dev/null \
+    blabel=$(_glab_list "projects/:fullpath/issues?state=opened&per_page=100" 2>/dev/null \
         | jq -r '[.[] | select((.title // "") | test("^Build [0-9]+$"))]
                  | sort_by(.iid) | last | (.title // "") | sub("^Build "; "build-")')
     case "$blabel" in build-[0-9]*) ;; *) die "fix-ticket: no open \`Build N\` issue — cannot derive the build label" ;; esac
     local mid
-    mid=$("$GLAB" api "projects/:fullpath/milestones?per_page=100" 2>/dev/null \
+    mid=$(_glab_list "projects/:fullpath/milestones?per_page=100" 2>/dev/null \
         | jq -r --arg t "$ms" '.[] | select(.title == $t) | .id' | head -1)
     [ -n "$mid" ] || die "fix-ticket: no milestone titled '$ms'"
     if ! $force; then
@@ -568,9 +572,11 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
         # open fix ticket in the same milestone. A heuristic, like tier_of's
         # and graph's in snapshot.jq — cheap enough to run on every filing,
         # and wrong only in the direction that costs a --force flag, never
-        # the direction that silently ships a twin.
+        # the direction that silently ships a twin. Paginated (P70): a missed
+        # page reads as "no twin" and files the duplicate this check exists to
+        # stop.
         local dups
-        dups=$("$GLAB" api "projects/:fullpath/issues?state=opened&labels=fix&per_page=100" 2>/dev/null \
+        dups=$(_glab_list "projects/:fullpath/issues?state=opened&labels=fix&per_page=100" 2>/dev/null \
             | jq -c --arg ms "$ms" --arg newt "$title" '
                 def words: ascii_downcase | gsub("[^a-z0-9]+"; " ") | split(" ") | map(select(length > 0));
                 ($newt | words) as $nw
@@ -630,7 +636,10 @@ _close_epic_milestone() { # <slug> — close active milestones matching the slug
     # writes the acceptance to one key and reads it from another. lane.sh
     # already requires jq, so the shared def costs nothing but a process.
     local jqd; jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
-    "$GLAB" api "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null \
+    # P70: paginated, like the snapshot's own active-milestone read. On the
+    # unpaginated read an epic past page 1 is simply not seen, and the probe
+    # reports PASS while its milestone stays open forever.
+    _glab_list "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null \
     | jq -r '.[] | [.id, .title] | @tsv' 2>/dev/null \
     | while IFS=$'\t' read -r mid title; do
         # "E5 · Cascade mode" normalizes to e5-cascade-mode, so both the full

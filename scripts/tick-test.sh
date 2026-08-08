@@ -5492,6 +5492,108 @@ echo "different work" | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-dup-stub.sh" ACAP=
     && ok "fix-ticket: a dissimilar title in the same milestone is not blocked" \
     || bad "fix-ticket: an unrelated title was refused as a duplicate"
 
+# 16a-3d. P70: lane.sh's own list reads paginate. P49 routed tick.sh's nine
+#      reads through `_glab_list`; lane.sh is a separate script and kept four
+#      plain `per_page=100` GETs, each of which silently sees only page 1.
+#      Every fixture below puts the one item that matters on page 2, and each
+#      is shown failing once `--paginate` is stripped (STUB_NOPAGE) — the
+#      counterfactual switch P49's own stub already uses.
+#      The `notes?sort=desc` read at `verdict` is deliberately capped and is
+#      NOT in scope here: it wants the newest 100, not the whole thread.
+cat > "$FX/p70-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${ACAP:?}"
+paged=no
+case "$*" in *--paginate*) paged=yes ;; esac
+[ -n "${STUB_NOPAGE:-}" ] && paged=no
+case "$*" in
+  *"--method POST"*"issues"*) echo '{"iid":200}'; exit 0 ;;
+  *"milestones?state=active"*)
+      # Filler titles normalize to legacy-epic-N, so none of them can match
+      # the e5 slug the probe closes on.
+      jq -nc '[range(1;101) | {id: ., title: "Legacy epic \(.)"}]'
+      [ "$paged" = yes ] && jq -nc '[{id: 555, title: "E5 · Cascade mode"}]'
+      exit 0 ;;
+  *"milestones"*)
+      jq -nc '[range(1;101) | {id: ., title: "Legacy epic \(.)"}]'
+      if [ -n "${STUB_MS_P1:-}" ]; then jq -nc '[{id: 31, title: "E4 · Realtime mode"}]'
+      elif [ "$paged" = yes ]; then jq -nc '[{id: 31, title: "E4 · Realtime mode"}]'; fi
+      exit 0 ;;
+  *"issues?state=opened&labels=fix"*)
+      jq -nc '[range(1;101) | {iid: ., title: "Filler fix \(.)", milestone: {title: "E9 · Other epic"}}]'
+      [ "$paged" = yes ] && jq -nc '[{iid: 167, title: "Wire probe result into dashboard", milestone: {title: "E4 · Realtime mode"}}]'
+      exit 0 ;;
+  *"issues?state=opened"*)
+      jq -nc '[range(1;101) | {iid: ., title: "Filler ticket \(.)"}]'
+      if [ -n "${STUB_BUILD_P1:-}" ]; then jq -nc '[{iid: 136, title: "Build 3"}]'
+      elif [ "$paged" = yes ]; then jq -nc '[{iid: 136, title: "Build 3"}]'; fi
+      exit 0 ;;
+esac
+echo '{}'
+EOF
+chmod +x "$FX/p70-stub.sh"
+P70RUN() { # <capture-file> -- <lane.sh args...>
+    local cap="$1"; shift; shift
+    : > "$cap"
+    echo "p70" | LOOM_HOME="$EVH" GLAB_CMD="$FX/p70-stub.sh" ACAP="$cap" "$LANE" "$@"
+}
+# (a) the build label: past 100 open issues the `Build N` issue itself is on
+#     page 2, and without it fix-ticket cannot derive the label at all.
+P70A="$T/p70-blabel"
+P70RUN "$P70A" -- fix-ticket --title "Add retry backoff to websocket client" \
+    --tier logic --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q 'labels=build-3,' "$P70A" \
+    && ok "P70: fix-ticket finds a Build issue that only page 2 of the open read holds" \
+    || bad "P70: build label not derived ($(grep -o 'labels=[^ ]*' "$P70A" | head -1))"
+STUB_NOPAGE=1 P70RUN "$P70A" -- fix-ticket --title "Add retry backoff to websocket client" \
+    --tier logic --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q -- '--method POST' "$P70A" \
+    && bad "P70-violation: an unpaginated open read still found the Build issue — fixture no longer exceeds one page" \
+    || ok "P70-violation: strip --paginate and every fix filing dies with no Build N issue"
+# (b) the milestone id: the epic's own milestone is on page 2. A milestone-less
+#     fix ticket is what lets an epic close over an open defect, so this read
+#     truncating is the failure `fix-ticket` exists to make impossible.
+P70B="$T/p70-milestone"
+STUB_BUILD_P1=1 P70RUN "$P70B" -- fix-ticket --title "Add retry backoff to websocket client" \
+    --tier logic --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q 'milestone_id=31' "$P70B" \
+    && ok "P70: fix-ticket resolves a milestone that only page 2 holds" \
+    || bad "P70: milestone_id not resolved ($(grep -o 'milestone_id=[0-9]*' "$P70B" | head -1))"
+STUB_BUILD_P1=1 STUB_NOPAGE=1 P70RUN "$P70B" -- fix-ticket \
+    --title "Add retry backoff to websocket client" --tier logic \
+    --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q -- '--method POST' "$P70B" \
+    && bad "P70-violation: an unpaginated milestone read still found E4 — fixture no longer exceeds one page" \
+    || ok "P70-violation: strip --paginate and the epic's own milestone reads as missing"
+# (c) the duplicate scan: the twin is on page 2, so a truncated read reports
+#     "no twin" and files the duplicate P65's check exists to stop.
+P70C="$T/p70-dup"
+STUB_BUILD_P1=1 STUB_MS_P1=1 P70RUN "$P70C" -- fix-ticket \
+    --title "Wire probe results into dashboard" --tier logic \
+    --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q -- '--method POST' "$P70C" \
+    && bad "P70: the duplicate scan missed a twin sitting on page 2 and filed anyway" \
+    || ok "P70: fix-ticket refuses a near-duplicate that only page 2 of the fix read holds"
+STUB_BUILD_P1=1 STUB_MS_P1=1 STUB_NOPAGE=1 P70RUN "$P70C" -- fix-ticket \
+    --title "Wire probe results into dashboard" --tier logic \
+    --milestone "E4 · Realtime mode" >/dev/null 2>&1
+grep -q -- '--method POST' "$P70C" \
+    && ok "P70-violation: an unpaginated fix read files the twin it was meant to catch" \
+    || bad "P70-violation: unpaginated scan still refused — fixture no longer exceeds one page"
+# (d) epic acceptance: `probe-result … pass` closes the epic's milestone, and
+#     on a truncated active-milestone read a passed epic simply stays open.
+P70D="$T/p70-msclose"
+P70RUN "$P70D" -- probe-result 36 e5 pass >/dev/null 2>&1
+if grep -q 'milestones/555' "$P70D" && grep -q 'state_event=close' "$P70D"; then
+    ok "P70: probe-result closes a milestone that only page 2 of the active read holds"
+else
+    bad "P70: passed epic's milestone never closed ($(grep -o 'milestones/[0-9]*' "$P70D" | head -2 | tr '\n' ' '))"
+fi
+STUB_NOPAGE=1 P70RUN "$P70D" -- probe-result 36 e5 pass >/dev/null 2>&1
+grep -q 'state_event=close' "$P70D" \
+    && bad "P70-violation: an unpaginated active-milestone read still found E5 — fixture no longer exceeds one page" \
+    || ok "P70-violation: strip --paginate and a passed epic's milestone is never closed"
+
 # 16b. lane.sh reconcile: reconciliation is a SCRIPT so a merge lane cannot
 #      choose rebase. Two lanes chose it off the skill prose and dead-ended
 #      at the force-push guardrail (build-1 2026-08-02; merge-21 build-3

@@ -65,6 +65,7 @@ writing a new proposal that touches the same machinery.
 | P67 | One gate per commit | implemented 2026-08-07 (`tick.sh spawn-lane` refuses a gate lane when a live gate lane already holds the same ticket+HEAD, via a `_gate_lock_reserve`/`_gate_lock_owner` pair shaped exactly like the existing merge lock but keyed per `<ticket>@<sha>` instead of one shared dir) |
 | P68 | Implementation briefs get the headless survival rules probes get | implemented 2026-08-07 (`tick.sh spawn-lane --brief` appends the headless execution rules to the lane's copy of every brief, whatever the lane kind, and refuses a brief that tells the session to invoke a skill by slash command) |
 | P69 | The verdict verb enforces its own trailer | implemented 2026-08-07 (`lane.sh verdict` refuses a FAIL with no `--class`, strips a stray `--class` from a PASS trailer, and refuses a second identical ticket+SHA+outcome trailer via a fail-closed read of the ticket's existing notes) |
+| P70 | `lane.sh`'s own tracker reads paginate too | implemented 2026-08-07 (`lane.sh`'s four plain `per_page=100` GETs — the build-label derivation, the milestone-id lookup and the near-duplicate scan in `fix-ticket`, and the active-milestone read `_close_epic_milestone` walks — now go through lib.sh's `_glab_list`, so all four paginate. No new lib: P73 had already moved `_glab_list` into `scripts/lib.sh`, which `lane.sh` sources, so `glab-lib.sh` was not created. The capped `notes?sort=desc` read at `verdict` stays capped. Suite 621 → 629, 0 failed; no SKILL.md change) |
 | P71 | The embedded jq programs live in files, like snapshot.jq | implemented 2026-08-07 (the seven jq programs `tick.sh` embedded as single-quoted shell strings ship as `render.jq`, `render-events.jq`, `usage.jq`, `report.jq`, `report-ticket.jq`, `retro.jq` and `graph.jq` beside `snapshot.jq`, each loaded with `jq -f` behind a missing-file die; the ticker's spliced `$when` fragment became an `--arg`; tick.sh −497 lines) |
 | P73 | A shared bash lib for the facts every script re-derives | implemented 2026-08-07 (`scripts/lib.sh` — entry rule *pure functions only, nothing runs at source time* — holds `die` (prefix from `$0`, rc from `DIE_RC`), `_glab_list`, `_yaml_scalar`/`cfg`/`cfg_source`, `_detect_base`/`_base_ref`, one lockfile→toolchain table behind `_stack_for` (tick.sh's `detect_stack`, and through it `_derive_gates_tsv`) and `_install_cmd_for` (lane.sh's second copy of that table is gone), and `_lane_type`; sourced by `tick.sh`, `lane.sh` and `bootstrap.sh` off their own directory with a named die when missing. All six base-branch call sites migrate, so `lane.sh` `base-check`, `reconcile` and `submit` now honour a declared `base:` — `submit` used to probe `ls-remote` for develop and target a branch its own merges never reconciled against. P70's four un-paginated lane.sh reads stay open. SKILL.md: one line corrected in place (reconcile's base rule), none added. Suite 590 → 603, 0 failed) |
 | P56 | A probe that cannot finish fails fast | implemented 2026-08-07 (`lane.sh wait-ready --timeout <secs> [--interval <secs>] (--url <url> \| -- <cmd...>)`; SKILL.md's probe-prompt "Poll, never await" bullet points at it in place of a hand-rolled curl+sleep loop) |
@@ -2847,6 +2848,41 @@ a `curl` + `sleep` loop" (net near-zero — an existing line rewritten in place,
 never-ready command returns 1 at the deadline (bounded, not before and not hung); `--timeout`
 is required; needs `--url` or `-- <cmd...>`; the two together are refused; `--url` invokes
 `curl` against that URL. Full suite: 511 passed, 0 failed (505 → 511).
+
+## P70 · `lane.sh`'s own tracker reads paginate too
+
+**Problem.** P49 routed `tick.sh`'s nine tracker reads through one pagination helper,
+`_glab_list`. `lane.sh` is a separate script with no shared library, and P49 didn't touch it —
+it still has four plain `glab api … per_page=100` reads with no `--paginate`, so each silently
+sees only the first 100 items.
+
+**Evidence** (`scripts/lane.sh`, 2026-08-07, post P67/P68/P69):
+- line 500 — lists open issues to find the build's label; breaks past 100 open issues.
+- line 505 — lists milestones to find the current epic's; breaks past 100 milestones.
+- line 515 — scans open `fix`-labeled issues for a near-duplicate before filing a new one; a
+  missed page means a duplicate fix ticket for a defect already tracked.
+- line 569 — lists active milestones to close one out on epic acceptance; could silently fail to
+  find/close the right one.
+
+(A fifth read, line 255 — the verdict-duplicate-trailer notes check — is deliberately one page
+of the newest 100 comments, the same `--capped` shape P49 already names; it's correct as-is and
+out of scope here.)
+
+**Fix.** Extract `tick.sh`'s `_glab_list` into a small sourced file, `scripts/glab-lib.sh`,
+unchanged in behavior (`[--capped] <api-path>` → one JSON array, using `${GLAB_CMD:-glab}`
+internally so it works under either script's local var name). `tick.sh` sources it and drops its
+local copy; `lane.sh` sources it too and routes the four reads above through it, keeping their
+`--capped` status as none (all four want the full set). No behavior change for the
+already-correct paths.
+
+**Tests** (`scripts/tick-test.sh`, `lane.sh` section): the existing paginating-`glab`-stub
+fixture from P49's tests, reused against `lane.sh`'s `fix-ticket` duplicate-scan and
+label/milestone lookups — over-100-item fixtures for each of the four reads, each shown finding
+an item that only a second page holds, and failing to find it with `--paginate` stripped (the
+counterfactual switch P49 already added).
+
+**Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
+count has grown past 100.
 
 ## P71 · The embedded jq programs live in files, like snapshot.jq
 

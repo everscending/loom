@@ -64,7 +64,6 @@ evidence, and implementation notes belong in this file, not there.
 | P20 | Parallelise the human-gated front half | open |
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
-| P70 | `lane.sh`'s own tracker reads paginate too | open — proposed 2026-08-07, following P49: four reads still cap at one page of 100. P73 already shipped the extraction half: `_glab_list` lives in `scripts/lib.sh`, which `lane.sh` sources — so route the four reads through it and do NOT create `glab-lib.sh` (one sourced lib, not two) |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
 
 ## What the evidence says
@@ -334,41 +333,6 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
-
-## P70 · `lane.sh`'s own tracker reads paginate too
-
-**Problem.** P49 routed `tick.sh`'s nine tracker reads through one pagination helper,
-`_glab_list`. `lane.sh` is a separate script with no shared library, and P49 didn't touch it —
-it still has four plain `glab api … per_page=100` reads with no `--paginate`, so each silently
-sees only the first 100 items.
-
-**Evidence** (`scripts/lane.sh`, 2026-08-07, post P67/P68/P69):
-- line 500 — lists open issues to find the build's label; breaks past 100 open issues.
-- line 505 — lists milestones to find the current epic's; breaks past 100 milestones.
-- line 515 — scans open `fix`-labeled issues for a near-duplicate before filing a new one; a
-  missed page means a duplicate fix ticket for a defect already tracked.
-- line 569 — lists active milestones to close one out on epic acceptance; could silently fail to
-  find/close the right one.
-
-(A fifth read, line 255 — the verdict-duplicate-trailer notes check — is deliberately one page
-of the newest 100 comments, the same `--capped` shape P49 already names; it's correct as-is and
-out of scope here.)
-
-**Fix.** Extract `tick.sh`'s `_glab_list` into a small sourced file, `scripts/glab-lib.sh`,
-unchanged in behavior (`[--capped] <api-path>` → one JSON array, using `${GLAB_CMD:-glab}`
-internally so it works under either script's local var name). `tick.sh` sources it and drops its
-local copy; `lane.sh` sources it too and routes the four reads above through it, keeping their
-`--capped` status as none (all four want the full set). No behavior change for the
-already-correct paths.
-
-**Tests** (`scripts/tick-test.sh`, `lane.sh` section): the existing paginating-`glab`-stub
-fixture from P49's tests, reused against `lane.sh`'s `fix-ticket` duplicate-scan and
-label/milestone lookups — over-100-item fixtures for each of the four reads, each shown finding
-an item that only a second page holds, and failing to find it with `--paginate` stripped (the
-counterfactual switch P49 already added).
-
-**Consumer.** `lane.sh fix-ticket`, and any lane running in a repo whose open-issue or milestone
-count has grown past 100.
 
 ## P76 · `tick-test.sh` splits into sections over a shared harness
 
