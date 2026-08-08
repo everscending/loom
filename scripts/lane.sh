@@ -503,6 +503,81 @@ cmd_rescope() { # <iid> [--file F]
     echo "lane.sh: issue $iid re-scoped — rejections recorded before this note no longer count"
 }
 
+cmd_blocked_report() { # <iid> [--category <slug>] [--file F]
+    # P78: the blocked report used to be a hand-composed comment. SKILL.md
+    # described its CONTENTS — category, what each attempt tried, branch/MR
+    # links, the one decision needed — and nothing wrote it, so nothing could
+    # find it again. Every other fact `snapshot.jq` mines out of a thread has a
+    # trailer to locate it by (`orch-verdict`, `orch-merge-attempt`,
+    # `orch-scope-reset`); this one had none, which is why the human triaging a
+    # blocked ticket had to read the whole thread by eye.
+    #
+    # Recording only, exactly like `merge-failed`: this verb writes the report,
+    # it does not judge. The wave still calls `transition <n> blocked` — which
+    # `_blocked_guard` always permits, since blocking is the direction nothing
+    # needs protecting from.
+    local iid="${1:-}" category="" bodyargs=()
+    _check_iid "$iid"
+    set -- "${@:2}"
+    while [ $# -gt 0 ]; do case "$1" in
+        --category) category="${2:-}"; [ -n "$category" ] || die "--category needs a value"; shift 2 ;;
+        *) bodyargs+=("$1"); shift ;;
+    esac; done
+    # A label-safe slug, for the same reason `verdict --class` takes one: it is
+    # read back by a parser, and a category carrying a `-->` or a newline ends
+    # the trailer early and takes the rest of the comment with it.
+    case "$category" in
+        ''|*[!A-Za-z0-9._-]*) [ -z "$category" ] \
+            || die "blocked-report: --category must be a slug (letters, digits, . _ -), got '$category'" ;;
+    esac
+    # Mandatory body, as `rescope` has: the comment IS the report, and a bare
+    # trailer blocks a ticket while telling the human nothing.
+    local f; f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
+    printf '\n\n<!-- orch-blocked%s %s -->\n' \
+        "${category:+ category=$category}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issues "$iid" "$f"
+    _lane_ev ticket_blocked_report ticket "$iid" ${category:+category "$category"}
+    echo "lane.sh: blocked report posted on issue $iid${category:+ (category: $category)}"
+}
+
+cmd_model_tier() { # <iid> <tier>
+    # P78: `snapshot.jq`'s `model_of` has read `model::<tier>` since P31, and
+    # nothing has ever written one — a human escalation meant editing labels in
+    # the tracker UI. `triage` offers escalation as one of its six actions, so
+    # it needs a command.
+    #
+    # Refused for automated callers, like `rescope` and `--release-hold`: which
+    # model a ticket deserves is a human's read of why the last round failed,
+    # and a lane that could escalate itself has no chain.
+    local iid="${1:-}" tier="${2:-}"
+    _check_iid "$iid"
+    [ -n "$tier" ] || die "usage: lane.sh model-tier <iid> <tier>"
+    if _automated_caller; then
+        die "model-tier is refused in an automated session (${LOOM_LANE_ID:-wave}): escalating a ticket's model is a human's judgement about why the last round failed, never a lane's or a wave's."
+    fi
+    case "$tier" in *[!A-Za-z0-9._-]*|'') die "model-tier: '$tier' is not a label-safe tier (letters, digits, . _ -)" ;; esac
+    # Deliberately NOT restricted to the four `model_rank` knows: that ranking
+    # exists only to break the two-labels case, and its comment is explicit
+    # that a human may name any model the CLI accepts. An unknown tier resolves
+    # and ranks below the known ones, so the only thing worth doing here is
+    # saying so out loud.
+    case "$tier" in haiku|sonnet|fable|opus) ;; *)
+        echo "lane.sh: note — '$tier' is not one of haiku|sonnet|fable|opus; it will resolve but ranks below all of them" >&2 ;;
+    esac
+    # One `model::` label at a time. Two would resolve (the higher rank wins)
+    # but the board would show a ticket claiming both, and the next human to
+    # read it cannot tell which one is the live decision.
+    _read_issue "$iid" "refusing to guess which model labels it already carries."
+    local drop
+    drop=$(printf '%s' "$_ISSUE_JSON" \
+        | jq -r '[.labels[]? | select(startswith("model::"))] | join(",")' || true)
+    "$GLAB" api --method PUT "projects/:fullpath/issues/$iid" \
+        -f "add_labels=model::$tier" ${drop:+-f "remove_labels=$drop"} >/dev/null
+    _forget_issue
+    _lane_ev ticket_model_tier ticket "$iid" tier "$tier"
+    echo "lane.sh: issue $iid → model::$tier"
+}
+
 cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F]
     # P33: a fix ticket needs FIVE things to be schedulable — `build-N`, `fix`,
     # a `tier::` label, the defective epic's milestone, AND a state label. The
@@ -760,16 +835,28 @@ _run_install() { # <cmd> <dir>
     return 0
 }
 
-cmd_transition() { # <iid> <state> [--release-hold]
-    local iid="${1:-}" state="${2:-}" ok=0 s istate
+cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
+    local iid="${1:-}" state="${2:-}" ok=0 s istate note=0 bodyargs=()
     _check_iid "$iid"
     # P36: the only way out of a human hold, and deliberately unpleasant to
     # reach by accident — see `_blocked_guard`.
     set -- "${@:3}"
     while [ $# -gt 0 ]; do case "$1" in
         --release-hold) RELEASE_HOLD=1; shift ;;
+        # P78: the decision and the relabel are ONE verb. Releasing a hold was
+        # two commands — `note` then `transition` — and the batch path in
+        # `triage` runs that pair once per ticket, so a session death mid-batch
+        # strands some tickets with a decision comment and no release and
+        # others with neither. Exactly the shape P63 turned `submit` into one
+        # verb over, after ai-workout build-1 lost four tickets to it. The note
+        # goes FIRST: a released ticket carrying no reason is the half a later
+        # reader cannot reconstruct.
+        --note) note=1; shift ;;
+        --file) bodyargs+=("$1" "${2:-}"); shift 2 ;;
         *) die "transition: unknown option '$1'" ;;
     esac; done
+    [ "$note" = 1 ] || [ ${#bodyargs[@]} -eq 0 ] \
+        || die "transition: --file needs --note (the body is the decision note)"
     for s in $STATES; do [ "$s" = "$state" ] && ok=1; done
     [ "$ok" = 1 ] || die "unknown state '$state' (one of: $STATES)"
     # A closed ticket is finished; state labels on it are pure misinformation.
@@ -786,9 +873,50 @@ cmd_transition() { # <iid> <state> [--release-hold]
     istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
     [ "$istate" != closed ] \
         || die "issue $iid is CLOSED — refusing to set '$state' on finished work. Re-read the ticket: your snapshot is stale."
+    if [ "$note" = 1 ]; then
+        local f; f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
+        # Re-run safety. The label half can fail after the note half has landed
+        # (a dropped connection, a 500), and the human's fix is to run the same
+        # command again — which must complete the missing half without doubling
+        # the one that stuck. `submit` asks "is there an MR already"; a comment
+        # has no such question, so the note carries its own trailer and this
+        # asks the thread.
+        #
+        # The window is bounded by the block it answers: an `orch-unblock`
+        # trailer NEWER than the newest `orch-blocked` one is this release's
+        # note. Without that bound, a ticket blocked and released twice would
+        # see round one's trailer and silently drop round two's decision —
+        # losing the record, which is the half that cannot be reconstructed.
+        # A thread with no `orch-blocked` trailer (blocked by hand, or before
+        # this verb existed) has no bound to compute, so it posts: a duplicate
+        # comment is noise, a missing decision is not.
+        if _release_noted "$iid"; then
+            echo "lane.sh: issue $iid already carries a release note for this block — not posting a second one"
+        else
+            printf '\n\n<!-- orch-unblock %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+            _post_note issues "$iid" "$f"
+        fi
+    fi
     if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" -f assignee_ids=0
     else _set_state "$iid" "$state"; fi
     _lane_ev ticket_transition ticket "$iid" state "$state"
+}
+
+# True when this ticket already carries a release note for the block it is
+# currently under. Fails CLOSED in the P47 sense inverted: a read that fails
+# returns false, so the note posts. Refusing the whole transition over an
+# unreadable thread would leave the human unable to release a hold at all, and
+# the cost of the wrong answer here is one duplicate comment, not a lost write.
+_release_noted() { # <iid>
+    local iid="$1" body rc
+    body=$("$GLAB" api "projects/:fullpath/issues/$iid/notes?sort=desc&order_by=created_at&per_page=30" 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s' "$body" | jq -e '
+        def newest($pat): [.[] | select((.body // "") | test($pat)) | .created_at // ""]
+                          | sort | last;
+        (newest("orch-blocked")) as $b
+        | (newest("orch-unblock")) as $u
+        | $b != null and $u != null and $u > $b' >/dev/null 2>&1
 }
 
 cmd_claim() { # <iid>
@@ -956,6 +1084,8 @@ case "${1:-}" in
     mr-note)    shift; cmd_mr_note "$@" ;;
     verdict)    shift; cmd_verdict "$@" ;;
     merge-failed) shift; cmd_merge_failed "$@" ;;
+    blocked-report) shift; cmd_blocked_report "$@" ;;
+    model-tier) shift; cmd_model_tier "$@" ;;
     base-check) shift; cmd_base_check "$@" ;;
     wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
@@ -967,5 +1097,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
 esac

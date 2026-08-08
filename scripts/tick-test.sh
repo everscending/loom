@@ -2247,6 +2247,69 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-rescope-mid.json")" = "1/marks-attribution/1" ] \
     && ok "snapshot: rejections newer than the reset marker still count" \
     || bad "snapshot: the reset swallowed a later rejection ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-rescope-mid.json"))"
+# 7a5c. P78: the blocked report is located by its `orch-blocked` trailer and
+#      carried WHOLE, so the human triaging a blocked ticket reads why without
+#      opening the tracker. Every other parser here extracts a field; this one
+#      exists to be read, so summarising it in jq would defeat the point.
+cat > "$FX/notes-12-blocked.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent on the pairing race.\n\nAttempt 3 tried the adapter seam and failed the same class.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"}]
+EOF
+cp "$FX/notes-12-blocked.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedrep" "$TICK" snapshot > "$T/snap-blockedrep.json" 2>/dev/null
+br() { jq -r ".tickets[] | select(.iid==12) | .blocked_report | $1" "$T/snap-blockedrep.json"; }
+[ "$(br .category)" = "rejection-cap" ] \
+    && ok "snapshot: the blocked report's category is read off its trailer" \
+    || bad "snapshot: category missing ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedrep.json"))"
+case "$(br .body)" in *"Attempt 3 tried the adapter seam"*) \
+    ok "snapshot: the report body is carried whole, not summarised";; \
+    *) bad "snapshot: report body lost ($(br .body))";; esac
+case "$(br .body)" in *orch-blocked*) \
+    bad "snapshot: the trailer leaked into the human-readable body";; \
+    *) ok "snapshot: the trailer is stripped from the body a human reads";; esac
+[ "$(br .released)" = "false" ] \
+    && ok "snapshot: a block with no release note reads as not yet decided" \
+    || bad "snapshot: released was $(br .released) with no orch-unblock in the thread"
+# The half-applied batch: the decision note landed and the relabel did not, so
+# the ticket is still `blocked` but the decision already exists. `triage` must
+# show that as work to finish, never ask the human to decide it twice.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T12:00:00Z","author":{"username":"human"},"body":"Decision: resume on the old seam.\n\n<!-- orch-unblock 2026-07-28T12:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedrel" "$TICK" snapshot > "$T/snap-blockedrel.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.iid==12) | .blocked_report.released' "$T/snap-blockedrel.json")" = "true" ] \
+    && ok "snapshot: a release note newer than the block reads as already decided" \
+    || bad "snapshot: a posted decision was not seen ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedrel.json"))"
+# Planted violation: `released` must be bounded by the NEWEST block. A ticket
+# blocked, released, then blocked again would otherwise read as already decided
+# forever, and its second decision would never be asked for.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T13:00:00Z","author":{"username":"wave"},"body":"Blocked again, external dependency.\n\n<!-- orch-blocked category=external-dep 2026-07-28T13:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T12:00:00Z","author":{"username":"human"},"body":"Decision: resume.\n\n<!-- orch-unblock 2026-07-28T12:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedre" "$TICK" snapshot > "$T/snap-blockedre.json" 2>/dev/null
+rb() { jq -r ".tickets[] | select(.iid==12) | .blocked_report | $1" "$T/snap-blockedre.json"; }
+[ "$(rb .released)" = "false" ] && [ "$(rb .category)" = "external-dep" ] \
+    && ok "snapshot: a re-blocked ticket asks for its second decision" \
+    || bad "snapshot: stale release note swallowed the new block ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedre.json"))"
+# A thread with no trailer yields null rather than guessing which comment was
+# the report — the state every ticket blocked before this verb existed is in.
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockednone" "$TICK" snapshot > "$T/snap-blockednone.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockednone.json")" = "null" ] \
+    && ok "snapshot: an unmarked thread yields no report rather than a guess" \
+    || bad "snapshot: invented a blocked report from an unmarked thread"
+# The new parser shares one thread with three others. The blocked-report
+# fixture above carries an `orch-verdict` FAIL alongside its `orch-blocked`
+# trailer, so this reads back the count the SAME thread must still produce —
+# a blocked ticket whose rejection history stopped counting is #47 again.
+[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)"' "$T/snap-blockedrep.json")" \
+  = "1/marks-attribution" ] \
+    && ok "snapshot: a blocked report does not disturb the rejection parser beside it" \
+    || bad "snapshot: blocked_report shifted the rejection read ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-blockedrep.json"))"
+
 # 7a6. P31: the model escalation chain is RESOLVED in the snapshot, not
 #      reasoned about per wave — ticket `model::` label > rework_model (a
 #      round following a rejection) > lane_model > the session default.
@@ -5525,6 +5588,191 @@ LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed abc </dev/null >/dev/null 2>&1 \
     && bad "merge-failed: accepted a non-numeric iid" \
     || ok "merge-failed: a bad iid is refused"
+
+# 16a4c. P78: the three writes `triage` stands on.
+#
+#   `blocked-report` — the blocked report used to be a hand-composed comment.
+#   SKILL.md described its CONTENTS and nothing wrote it, so nothing could find
+#   it again: every other fact snapshot.jq mines out of a thread has a trailer
+#   (orch-verdict, orch-merge-attempt, orch-scope-reset) and this one had none.
+#   Recording only, like merge-failed — the wave still transitions to blocked.
+VCAP6="$T/blocked-report-bodies"; : > "$VCAP6"
+printf 'Cap spent. Attempt 3 tried the adapter seam.\n' | LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" blocked-report 8 --category rejection-cap >/dev/null 2>&1
+grep -qE "orch-blocked category=rejection-cap [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAP6" \
+    && grep -q "Attempt 3 tried the adapter seam" "$VCAP6" \
+    && ok "blocked-report: the report and its locating trailer post together" \
+    || bad "blocked-report: trailer or body missing ($(tail -3 "$VCAP6" 2>/dev/null))"
+printf 'no category given\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" \
+    VCAP="$VCAP6" "$LANE" blocked-report 8 >/dev/null 2>&1
+grep -qE "orch-blocked [0-9]{4}-" "$VCAP6" \
+    && ok "blocked-report: the category is optional, the trailer is not" \
+    || bad "blocked-report: a category-less report lost its trailer"
+# The category is read back by a parser, so it takes a slug for the same reason
+# `verdict --class` does: a `-->` or a newline inside it ends the trailer early
+# and takes the rest of the comment with it.
+printf 'x\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" blocked-report 8 --category "not a slug" >/dev/null 2>&1 \
+    && bad "blocked-report: accepted a category that can break its own trailer" \
+    || ok "blocked-report: a non-slug category is refused"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" blocked-report 8 </dev/null >/dev/null 2>&1 \
+    && bad "blocked-report: posted an empty report" \
+    || ok "blocked-report: an empty body is refused — the comment IS the report"
+# Planted violation: recording, not judging. A verb that also set the label
+# would make the wave's own `transition <n> blocked` a double write.
+ACAP6="$T/blocked-report-calls"; : > "$ACAP6"
+printf 'records only\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-argv-stub.sh" \
+    ACAP="$ACAP6" "$LANE" blocked-report 8 >/dev/null 2>&1
+grep -qE "add_labels|remove_labels|state_event" "$ACAP6" \
+    && bad "blocked-report: changed ticket state ($(grep -m1 -E 'add_labels|state_event' "$ACAP6"))" \
+    || ok "blocked-report: records only — the wave still owns the transition"
+
+#   `model-tier` — snapshot.jq's model_of has read `model::<tier>` since P31 and
+#   nothing has ever written one, so a human escalation meant editing labels in
+#   the tracker UI. Refused for automated callers like rescope: a lane that can
+#   escalate itself has no chain.
+cat > "$T/glab-tier-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+    *"--method PUT"*) echo "$*" >> "${TCAP:?}"; echo '{}' ;;
+    *"issues/8"*) echo '{"iid":8,"labels":["build-3","blocked","model::haiku"]}' ;;
+    *) echo '{}' ;;
+esac
+STUB
+chmod +x "$T/glab-tier-stub.sh"
+TCAP="$T/tier-calls"; : > "$TCAP"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP" \
+    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    && ok "model-tier: a human can escalate a ticket's model" \
+    || bad "model-tier: refused a human caller"
+grep -q "add_labels=model::opus" "$TCAP" \
+    && ok "model-tier: the new tier is written as a label" \
+    || bad "model-tier: no label write reached the tracker ($(tail -1 "$TCAP"))"
+# One `model::` label at a time. Two resolve (the higher rank wins) but the
+# board then shows a ticket claiming both, and the next human to read it cannot
+# tell which is the live decision.
+grep -q "remove_labels=model::haiku" "$TCAP" \
+    && ok "model-tier: the tier it replaces is removed in the same write" \
+    || bad "model-tier: left two model:: labels on the ticket ($(tail -1 "$TCAP"))"
+# Planted violation: both automated callers, each naming a real tier.
+TCAP2="$T/tier-auto-calls"; : > "$TCAP2"
+LOOM_LANE_ID=impl-8 LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP2" \
+    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    && bad "model-tier: a lane escalated its own model" \
+    || ok "model-tier: a lane cannot escalate its own model"
+LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP2" \
+    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    && bad "model-tier: a wave escalated a ticket's model" \
+    || ok "model-tier: a wave cannot escalate a ticket's model"
+[ -s "$TCAP2" ] \
+    && bad "model-tier: an automated escalation still reached the tracker ($(head -1 "$TCAP2"))" \
+    || ok "model-tier: no automated escalation write reached the tracker"
+# NOT restricted to the four model_rank knows — its comment is explicit that a
+# human may name any model the CLI accepts, and an unknown tier still resolves.
+# It warns rather than refusing; refusing would break that documented affordance.
+TCAP3="$T/tier-unknown"; : > "$TCAP3"
+out=$(LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP3" \
+    "$LANE" model-tier 8 some-new-model 2>&1)
+case "$out" in *"ranks below"*) \
+    ok "model-tier: an unrecognised tier is allowed and said out loud";; \
+    *) bad "model-tier: an unknown tier was refused or passed silently ($out)";; esac
+case "$out" in *"issue 8 → model::some-new-model"*) \
+    ok "model-tier: the warning does not stop the label being written";; \
+    *) bad "model-tier: warning replaced the write ($out)";; esac
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP3" \
+    "$LANE" model-tier 8 "bad tier" >/dev/null 2>&1 \
+    && bad "model-tier: accepted a tier that is not label-safe" \
+    || ok "model-tier: a tier that cannot be a label is refused"
+
+#   `transition --note` — the decision and the relabel are ONE verb. The pair
+#   was two commands, and `triage` runs that pair once per ticket across a whole
+#   batch, so a death mid-batch strands some tickets with a comment and no
+#   release. Same shape P63 turned `submit` into one verb over.
+cat > "$T/glab-note-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${NCAP:?}" ;; esac; done
+echo "$*" >> "${NARGV:?}"
+case "$*" in
+    *"issues/60/notes"*) cat "${NTHREAD:-/dev/null}" 2>/dev/null || echo '[]' ;;
+    *"issues/60"*) echo '{"iid":60,"state":"opened","labels":["build-3","blocked"]}' ;;
+    *) echo '{}' ;;
+esac
+STUB
+chmod +x "$T/glab-note-stub.sh"
+NCAP="$T/note-bodies"; NARGV="$T/note-argv"; : > "$NCAP"; : > "$NARGV"
+echo '[]' > "$T/thread-empty.json"
+printf 'Decision: the adapter is out of scope, resume on the old seam.\n' \
+    | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+      NTHREAD="$T/thread-empty.json" \
+      "$LANE" transition 60 ready-for-agent --release-hold --note >/dev/null 2>&1
+grep -q "resume on the old seam" "$NCAP" \
+    && grep -qE "orch-unblock [0-9]{4}-[0-9]{2}-[0-9]{2}T" "$NCAP" \
+    && ok "transition --note: the decision posts with its own trailer" \
+    || bad "transition --note: body or trailer missing ($(tail -3 "$NCAP" 2>/dev/null))"
+grep -q "add_labels=ready-for-agent" "$NARGV" && grep -q "assignee_ids=0" "$NARGV" \
+    && ok "transition --note: one verb posts the decision AND clears the assignee" \
+    || bad "transition --note: the relabel half did not run ($(tail -1 "$NARGV"))"
+# Re-run after a failed label write must complete the missing half without
+# doubling the note. The window is bounded by the block it answers: an
+# orch-unblock trailer NEWER than the newest orch-blocked one is this
+# release'"'"'s note.
+cat > "$T/thread-noted.json" <<'STUB'
+[{"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-08-08T10:00:00Z -->\n",
+  "created_at":"2026-08-08T10:00:00Z"},
+ {"body":"Decision: resume.\n\n<!-- orch-unblock 2026-08-08T11:00:00Z -->\n",
+  "created_at":"2026-08-08T11:00:00Z"}]
+STUB
+: > "$NCAP"; : > "$NARGV"
+printf 'Decision: resume.\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" \
+    NCAP="$NCAP" NARGV="$NARGV" NTHREAD="$T/thread-noted.json" \
+    "$LANE" transition 60 ready-for-agent --release-hold --note >/dev/null 2>&1
+[ -s "$NCAP" ] \
+    && bad "transition --note: a re-run posted a second decision note" \
+    || ok "transition --note: a re-run does not double the note it already posted"
+grep -q "add_labels=ready-for-agent" "$NARGV" \
+    && ok "transition --note: a re-run still completes the missing label half" \
+    || bad "transition --note: a re-run skipped the half that had not landed"
+# Planted violation: the bound must be the newest block, not the mere presence
+# of a trailer. A ticket blocked and released TWICE would otherwise see round
+# one'"'"'s trailer and silently drop round two'"'"'s decision.
+cat > "$T/thread-reblocked.json" <<'STUB'
+[{"body":"Round one.\n\n<!-- orch-unblock 2026-08-08T11:00:00Z -->\n",
+  "created_at":"2026-08-08T11:00:00Z"},
+ {"body":"Blocked again.\n\n<!-- orch-blocked category=external-dep 2026-08-08T12:00:00Z -->\n",
+  "created_at":"2026-08-08T12:00:00Z"}]
+STUB
+: > "$NCAP"
+printf 'Round two decision.\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" \
+    NCAP="$NCAP" NARGV="$NARGV" NTHREAD="$T/thread-reblocked.json" \
+    "$LANE" transition 60 ready-for-agent --release-hold --note >/dev/null 2>&1
+grep -q "Round two decision" "$NCAP" \
+    && ok "transition --note: a second block gets its own decision note" \
+    || bad "transition --note: round one'"'"'s trailer swallowed round two'"'"'s decision"
+# --note does not buy a way past the hold guard: releasing still needs
+# --release-hold, and an automated caller still cannot say it.
+: > "$NARGV"
+printf 'sneaking past\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" \
+    NCAP="$NCAP" NARGV="$NARGV" NTHREAD="$T/thread-empty.json" \
+    "$LANE" transition 60 ready-for-agent --note >/dev/null 2>&1 \
+    && bad "transition --note: --note released a hold without --release-hold" \
+    || ok "transition --note: --note is not a way past the hold guard"
+printf 'lane sneaking past\n' | LOOM_LANE_ID=impl-60 LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    NTHREAD="$T/thread-empty.json" \
+    "$LANE" transition 60 ready-for-agent --release-hold --note >/dev/null 2>&1 \
+    && bad "transition --note: a lane released a hold by attaching a note" \
+    || ok "transition --note: a lane still cannot release a hold"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    NTHREAD="$T/thread-empty.json" \
+    "$LANE" transition 60 ready-for-agent --release-hold --note </dev/null >/dev/null 2>&1 \
+    && bad "transition --note: released a hold with an empty decision note" \
+    || ok "transition --note: an empty decision note is refused"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    "$LANE" transition 60 review --file /dev/null >/dev/null 2>&1 \
+    && bad "transition --note: --file was accepted without --note" \
+    || ok "transition --note: --file alone is refused, not silently ignored"
 
 # 16a-3. P33: `fix-ticket` applies all FIVE things a schedulable fix ticket
 #      needs, or refuses. The skill prose enumerated four — build-N, fix,

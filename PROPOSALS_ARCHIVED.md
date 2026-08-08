@@ -76,6 +76,7 @@ writing a new proposal that touches the same machinery.
 | P72 | One jq prelude both halves include | implemented 2026-08-07 (`scripts/lib.jq` — the jq counterpart of lib.sh, same *pure definitions only* entry rule — holds `epic_norm`, `orch_verdict_scan`, `hms`/`pct`/`usd` and `stage`/`ref`; all eight jq programs beside `tick.sh` open with `include "lib";` and every call site passes `jq -L <the scripts dir>`, resolved through `_jq_lib_dir` in lib.sh, which refuses by name when the prelude is missing. `lane.sh _close_epic_milestone` drops its `sed` slugify and normalizes through `epic_norm`; `cmd_verdict`'s duplicate check and snapshot.jq's `judged_at`/`rejections_of` all read the one trailer scan, so three writings became one landing site. `_lane_type` and lib.jq's `stage` now name each other. Suite 603 → 610, 0 failed; no SKILL.md change) |
 | P74 | Each copied mechanism becomes one helper | implemented 2026-08-07 (four copied mechanisms become four helpers, all local to the file that uses them: `_lock_reserve <dir>`/`_lock_owner <dir>` carry the mkdir-atomic, dead-owner-breakable lock for all three locks — `lock_acquire` keeps only its EXIT trap, the merge and gate locks keep only their names; `_pause_on_limit <stem> <first|retry>` is called from both wave attempts; `_once_per_state <sentinel> <state>` is the notify-once core for the quiet states, workspace trust, the un-armed heartbeat and the two stale flags, with `_notify_quiet`'s `unreadable` and re-arm carve-outs staying at its own site; and in lane.sh `_read_issue <iid> <refusal>` / `_open_mr_closing <iid> <refusal>` take the refusal clause from the caller so every question keeps its own fail-closed read, cache only a SUCCESSFUL body, and are forgotten by `_forget_issue` after each write. `transition` now makes one issue GET where it made two, `submit` two where it made three. Suite 610 -> 619, 0 failed; no SKILL.md change) |
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | implemented 2026-08-07 (`cmd_tick` is now `_tick_gates` — every refusal: mode, switch, `_ensure_armed`, gap, lock, usage, quiescence allowlist, reporting through `tick_go` so the call sits outside any condition and `set -e` keeps its teeth inside — plus `_launch_wave`, prompt assembly through the retry policy. `cmd_spawn_lane` gets `_spawn_parse_flags` (consumed count back via `_spawn_shift`), `_spawn_stage_brief`, `_spawn_build_epilogue` and `_spawn_build_pregate`, the last two handing the rewritten command back in `_SPAWN_ARGS`; program text still takes tier/runner/adv-paths by ENVIRONMENT, never splice. Both builders now run ABOVE the destructive tail, so "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" is a function boundary: the pregate tier die, which used to fire after the logs were already rotated and the rc cleared, now refuses first — the one deliberate failure-path change. Guard-order pin added: a spawn refused at the merge-lock reservation leaves the previous run's log and rc byte-identical, with the destructive-first order re-run by hand as the planted violation. Suite 619 → 621, 0 failed; no SKILL.md change) |
+| P78 | `triage` — decide every blocked ticket on one surface | implemented 2026-08-08 (`triage` verb + `references/triage.md`; `lane.sh transition --note`, `blocked-report`, `model-tier`; `snapshot.jq` `blocked_report`) |
 
 ## Independent review round (2026-08-01)
 
@@ -3050,3 +3051,86 @@ boundary exists to prevent, currently enforced by comment).
 
 **Consumer.** Every future spawn-path change, which becomes a change to one named stage; the
 suite, whose per-guard tests get functions to aim at.
+
+## P78 · `triage` — decide every blocked ticket on one surface
+
+**Problem.** A blocked ticket is the one thing in this system that only a human can move, and
+the only verb that moves it takes a single iid. A human returning to a build with six blocked
+tickets runs `unblock` six times, and before each one goes hunting through the ticket's comment
+thread for the blocked report a lane wrote. Nothing collects them; nothing shows the six side by
+side; and the decisions available are wider than `unblock` implements — retiring a spent cap
+(`rescope`), escalating the model tier, closing work that should not be done — so the human
+bounces between verbs mid-decision.
+
+**Evidence.** Four facts off the code, checked 2026-08-08:
+
+1. `unblock` is `<n>`-only (`SKILL.md` verb table). Six blocked tickets is six invocations.
+2. The blocked report is **free prose with no marker**. `SKILL.md`'s failure policy says
+   blocking writes "category, what each attempt tried, branch/MR links, and the single decision
+   or action needed", but nothing in `scripts/` writes or marks it — unlike every other fact
+   `snapshot.jq` mines out of a thread, each of which has a trailer to find it by
+   (`orch-verdict`, `orch-merge-attempt`, `orch-scope-reset`). So the report cannot be located
+   programmatically at all today.
+3. The `model::<tier>` escalation label has **no writer**. `snapshot.jq`'s `model_of` reads it;
+   `grep -n 'model::' scripts/lane.sh scripts/tick.sh` returns nothing. A human sets it by hand
+   in the tracker UI.
+4. Comment threads are **already fetched for every build member** — `review_iids="$member_iids"`
+   in `cmd_snapshot`, widened twice on purpose. So parsing one more trailer out of them costs
+   zero tracker calls.
+
+**Fix.** A new human-run verb, `triage`, that reads every blocked ticket onto one `/lavish`
+surface and applies the human's decisions in a batch. Eleven decisions, settled 2026-08-08:
+
+1. **Population.** Acts on the `blocked` label only. Dependency-waiting (`unblocked: false`) and
+   stranded tickets appear as read-only context — the first resolves itself when its blocker
+   merges, and the second is machine-state repair, not a human decision.
+2. **Six actions per ticket**: requeue · send to gate · `rescope` · escalate model tier · leave
+   blocked · close as won't-do.
+3. **The model may recommend, badged as a model read, never pre-selected and never
+   auto-applied.** This is the `#67` rule (build-3, 2026-08-04) one step removed: the surface is
+   *built by reading* blocked reports, which are prose written for people. A pre-selected action
+   derived from that prose is the same laundering the hold guard refuses at the write layer.
+   No script can enforce this — it lives in the generated HTML — so it is a rule in
+   `references/triage.md` and nothing stronger. Named here because it is load-bearing.
+4. **The note draft is always pre-filled by the model, and the human must edit it to send.**
+   An untouched draft cannot become the record; later waves read that thread as decision history.
+5. **Block detail is parsed in `snapshot.jq`** as `blocked_report`, off the comment thread
+   already in hand. This requires evidence 2 to be fixed first: blocking must write a trailer.
+6. **At apply, one issue read per ticket** — still open, still carrying `blocked` — then skip and
+   report anything that moved. A wave cannot drift these tickets (`_blocked_guard` refuses an
+   automated caller outright, and `repairs_of` skips `blocked`), so the only unfenced writers are
+   a second human session and the tracker UI. One label read covers both.
+7. **One verb per ticket, not two.** `transition <n> <state> --release-hold --note <body>` posts
+   the decision and moves the label, with an `orch-unblock` trailer so a re-run after a failure
+   detects its own note and does not double it. Same shape as `cmd_submit` (P63), whose comment
+   records what the two-write version cost: four tickets stranded in ai-workout build-1.
+8. **Batch order**: blockers before dependents, sequential, stop on first failure, report exactly
+   which tickets landed and which were not attempted.
+9. **Closing takes a typed reason and its own confirm**, applied after the other five. It is the
+   only action of the six that a human cannot walk back with one command.
+10. **No `/lavish` → refuse**, naming `unblock <n>` as the single-ticket path. One code path.
+11. **Build it now.** D-TICK-15 closed 2026-08-08 with a `snapshot` warning and `tick-test.sh`
+    section 7f8, so the stranding case this would have multiplied is already covered.
+
+Two script changes fall out of the evidence and are part of this proposal:
+
+- **`lane.sh blocked-report <iid> [--category <slug>] [--file F]`** — posts the report and writes
+  an `orch-blocked` trailer, exactly as `merge-failed` does for `orch-merge-attempt`. This is the
+  only part that touches the wave's path: the failure policy's "Blocking writes a blocked report
+  comment" becomes this verb rather than a hand-composed note. Without it, decision 5 has nothing
+  to parse.
+- **`lane.sh model-tier <iid> <tier>`** — writes the `model::<tier>` label, refused for automated
+  callers like `rescope` and `--release-hold`, because an escalation is a human's judgement about
+  a ticket. Without it, decision 2's fifth action has no command.
+
+**Tests.** In `scripts/tick-test.sh`, each guard shown holding and failing:
+
+- `blocked-report` writes the `orch-blocked` trailer and its category; `snapshot` surfaces it as
+  `blocked_report` on the ticket row; a thread with no trailer yields `null` rather than guessing.
+- `transition --note` posts the body, moves the label, and writes `orch-unblock`; a re-run against
+  a thread already carrying its trailer posts no second note but still completes the label half;
+  `--note` without `--release-hold` on a blocked ticket is still refused by `_blocked_guard`.
+- `model-tier` writes the label, refuses an automated caller, and refuses a tier that is not one
+  of the four `model_rank` knows.
+- `blocked_report` parsing survives the newest-30-comments cap and does not disturb
+  `rejections_of`, `merge_attempts_of` or `merge_hold_of` on the same thread.
