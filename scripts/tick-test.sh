@@ -1346,6 +1346,57 @@ adv_spawn gate-67 "$T/adv-calls-67" "$ADV_MANDATORY"
     || bad "adversarial-pregate-violation: something else rejected the branch, so the guard proves nothing"
 printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest tests/unit"\n' > "$ADVR/.loom.yml"
 
+# The tier's command list is read from the BRANCH's checkout, not the repo's.
+# ai-interpreter-workbench build-4 #90: the branch wired its mandatory test in
+# by ADDING a command to the logic tier. That line lives only on the branch, so
+# a check reading the repo's .loom.yml derived main's paths, saw the branch
+# touch none of them, and rejected rc 7 — for doing exactly the thing the
+# ticket pinned it to do. Deterministic on every respawn, and unpassable by
+# construction for any ticket that adds a brand-new gate command.
+ADVR3="$T/adv-repo-newcmd"; mkdir -p "$ADVR3/tests/unit" "$ADVR3/scripts"
+git -c init.defaultBranch=main init -q "$ADVR3" 2>/dev/null
+git -C "$ADVR3" config user.email t@t; git -C "$ADVR3" config user.name t
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest tests/unit"\n' > "$ADVR3/.loom.yml"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ADVR3/scripts/gate.sh"; chmod +x "$ADVR3/scripts/gate.sh"
+: > "$ADVR3/tests/unit/.keep"
+git -C "$ADVR3" add -A >/dev/null 2>&1; git -C "$ADVR3" commit -qm base >/dev/null 2>&1
+# The repo root stays on main; the lane runs in a worktree, as a real wave does.
+ADVW3="$T/adv-wt-newcmd"
+git -C "$ADVR3" worktree add -q -b feat-newcmd "$ADVW3" main >/dev/null 2>&1
+mkdir -p "$ADVW3/scripts/lib"
+printf 'export const ok = 1;\n' > "$ADVW3/scripts/lib/report.test.mjs"
+printf 'base: main\ngates:\n  logic:\n    - "bash scripts/gate.sh logic"\n    - "pytest tests/unit"\n    - "node --test scripts/lib/report.test.mjs"\n' > "$ADVW3/.loom.yml"
+git -C "$ADVW3" add -A >/dev/null 2>&1; git -C "$ADVW3" commit -qm newcmd >/dev/null 2>&1
+adv_newcmd_spawn() { # <lane> <tick-binary>
+    rm -f "$T/adv-ran-$1" "$LOOM_HOME/lanes/$1.rc"; rm -rf "$LOOM_HOME/tick.lock.d"
+    LOOM_REPO="$ADVR3" GLAB_CMD="$ADVG" STUB_BODY="$ADV_MANDATORY" STUB_LOG="$T/adv-calls-$1" \
+        "$2" spawn-lane "$1" --no-tick --pregate logic --cwd "$ADVW3" -- touch "$T/adv-ran-$1" >/dev/null 2>&1
+    for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/$1.rc" ] && break; sleep 0.1; done
+}
+adv_newcmd_spawn gate-68 "$TICK"
+[ -f "$T/adv-ran-gate-68" ] \
+    && ok "adversarial-pregate: a branch that adds a NEW gate command reaches the review session" \
+    || bad "adversarial-pregate: FALSE REJECTION — the branch wired its own test into the tier (rc=$(cat "$LOOM_HOME/lanes/gate-68.rc" 2>/dev/null))"
+
+# Planted violation: read the tier's commands from the repo's .loom.yml instead
+# of the branch's — the exact shape that blocked #90 — and the identical branch
+# is rejected without a session.
+ADVM="$T/adv-mainonly"; mkdir -p "$ADVM"
+for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
+    ln -sf "$(dirname "$TICK")/$jf" "$ADVM/$jf"
+done
+ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM/lib.sh"
+ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM/lane.sh"
+sed 's|^    \[ -n "\$dir" \] && \[ -f "\$dir/.loom.yml" \] && cfg="\$dir/.loom.yml"$|    :|' \
+    "$TICK" > "$ADVM/tick.sh"
+chmod +x "$ADVM/tick.sh"
+adv_newcmd_spawn gate-69 "$ADVM/tick.sh"
+if [ ! -f "$T/adv-ran-gate-69" ] && [ "$(cat "$LOOM_HOME/lanes/gate-69.rc" 2>/dev/null)" = "7" ]; then
+    ok "adversarial-pregate-violation: reading the repo's command list rejects a branch that added its own gate command"
+else
+    bad "adversarial-pregate-violation: the mutant did not reject, so the branch-side read proves nothing (rc=$(cat "$LOOM_HOME/lanes/gate-69.rc" 2>/dev/null))"
+fi
+
 # --- 4h. P13: a busy lane must not read as a dead one ----------------------
 # `claude -p` writes nothing until it exits, so log mtime — the liveness
 # signal — stays frozen while a lane works. A healthy lane past the staleness

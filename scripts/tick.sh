@@ -2482,8 +2482,9 @@ _derive_gates_tsv() {
 
 # A repo `gates:` block overrides the derived pack wholesale — the repo layer
 # always wins, including for a suite a detector would have guessed differently.
-_repo_gates_tsv() {
-    [ -f "$CONFIG" ] || return 0
+_repo_gates_tsv() { # [<config-file>] — defaults to the repo's own .loom.yml
+    local cfg="${1:-$CONFIG}"
+    [ -f "$cfg" ] || return 0
     awk '
       { sub(/[[:space:]]*#.*$/, "") }
       /^gates:[[:space:]]*$/ { f=1; next }
@@ -2495,7 +2496,7 @@ _repo_gates_tsv() {
           sub(/[[:space:]]+$/, "", line)
           gsub(/^"|"$/, "", line)
           if (tier != "" && line != "") print tier "\t" line
-      }' "$CONFIG"
+      }' "$cfg"
 }
 
 # The ref a branch is measured against lives in lib.sh now, shared with
@@ -2514,11 +2515,29 @@ _repo_gates_tsv() {
 # counting it would reject every branch in a repo whose gates are one runner
 # call. Same token filter as gate-deps — safe charset, at least one slash,
 # relative — so flags, env words, URLs and $-words are skipped.
-_adv_tier_paths() { # <tier> → space-separated paths that tier's commands invoke
-    local tier="$1" gates runner t cmdline tok out="" seen=" "
-    runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+# The tier's commands are read from the BRANCH's `.loom.yml`, not the repo's —
+# the one read in this file that deliberately follows the directory, and the
+# opposite of `_base_ref` above for a reason. The base branch is a property of
+# the REPO, so a branch must not get to redeclare it. The gate command list is
+# a property of the CHECKOUT: `scripts/gate.sh` resolves `.loom.yml` from the
+# root it runs in, so the branch's copy is literally the list the pregate is
+# about to execute. Reading the repo's copy asked a question about a different
+# file than the one that runs.
+# ai-interpreter-workbench build-4, ticket #90: the branch wired a new
+# mandatory test in by ADDING `node --test scripts/lib/latency_report.test.mjs`
+# to the `logic` tier. That line exists only on the branch, so the derived path
+# list came back as main's three paths, the branch touched none of them, and
+# the ticket was rejected rc 7 for doing exactly what it was pinned to do —
+# deterministically, on every respawn. Any ticket that adds a brand-new gate
+# command hit this; none could ever pass. A branch can now name a path that
+# suits it, which the one-directional design already tolerates: the check only
+# ever declines to reject, and the runner still decides.
+_adv_tier_paths() { # <tier> [<worktree>] → space-separated paths that tier's commands invoke
+    local tier="$1" dir="${2:-}" cfg="$CONFIG" gates runner t cmdline tok out="" seen=" "
+    [ -n "$dir" ] && [ -f "$dir/.loom.yml" ] && cfg="$dir/.loom.yml"
+    runner=$(_yaml_scalar "$cfg" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
     runner="${runner#./}"
-    gates=$(_repo_gates_tsv); [ -n "$gates" ] || gates=$(_derive_gates_tsv)
+    gates=$(_repo_gates_tsv "$cfg"); [ -n "$gates" ] || gates=$(_derive_gates_tsv)
     set -f  # a glob token must never expand against the caller's cwd
     while IFS="$(printf '\t')" read -r t cmdline; do
         [ "$t" = "$tier" ] || continue
@@ -2553,7 +2572,7 @@ _adv_tier_paths() { # <tier> → space-separated paths that tier's commands invo
 # candidate, so a branch that touches the suite never pays for it.
 _adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reject
     local iid="$1" tier="$2" dir="$3" paths ref changed f p body sect
-    paths=$(_adv_tier_paths "$tier"); [ -n "$paths" ] || return 1
+    paths=$(_adv_tier_paths "$tier" "$dir"); [ -n "$paths" ] || return 1
     ref=$(_base_ref "$dir" "$CONFIG"); [ "$ref" != HEAD ] || return 1
     changed=$(git -C "$dir" diff --name-only "$ref...HEAD" 2>/dev/null) || return 1
     [ -n "$changed" ] || return 1
