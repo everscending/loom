@@ -34,7 +34,7 @@ negotiable in either direction:
 | this session | the subagent |
 |---|---|
 | step 0 (resolve, refuse a `Covered by`) | steps 2–3 (reproduce, fix, test) |
-| steps 3–4 (close the entry, commit) | nothing in `OPEN_DEFECTS.md`, no commit |
+| step 3 (**run the suite**, close, commit) | nothing in `OPEN_DEFECTS.md`, no commit |
 
 The subagent reports; it does not close and it does not commit. Closing is a
 judgment about whether the fix is whole (step 3's partial-fix rule), and the
@@ -63,6 +63,21 @@ line each, the `SKILL.md` line delta if any, the new test case name, full
 If the report says the described behaviour is no longer in the code, stop —
 do not close an entry that no longer matches. Say what changed and let the
 human re-decide.
+
+**Green is the one claim you never take on trust.** The subagent runs the
+suite while it works, but this session runs `bash scripts/tick-test.sh` again
+itself before step 3 — the counts are what the whole verb rests on, and a
+subagent has every incentive to report the run it meant to finish rather than
+the one it finished. Read the `FAIL:` lines, not just the total. *(paid:
+D-TICK-14's subagent reported done across three idle cycles without ever
+sending counts; the suite showed its own planted-violation case failing with
+an empty `rc=`, because it had copied `tick.sh` into a scratch directory
+without `lib.sh` beside it — the mutant died at source time and the case
+proved nothing. Left alone it would have passed vacuously the moment the
+fixture drifted.)*
+
+Two runs that disagree mean a flaky test, not a fixed one: name it before
+dismissing it, and say so when reporting the counts.
 
 ## Step 2 — the entry is the diagnosis, not the starting point
 
@@ -99,12 +114,14 @@ red-then-green case in that suite is not finished.
 
 Never run a real build to verify. It costs hours and real money.
 
-## Step 3 — close the entry
+## Step 3 — run the suite, then close the entry
 
-Back in this session, on the subagent's report.
+Back in this session. `bash scripts/tick-test.sh` first, per step 1 — a red
+suite means the fix is not finished, and the failing case is usually the
+subagent's own new one. Send it the failing lines and have it fix them; do
+not repair its test yourself, and do not close over a red run.
 
-
-Per `OPEN_DEFECTS.md`'s own rule — never delete a row, never renumber:
+Then, per `OPEN_DEFECTS.md`'s own rule — never delete a row, never renumber:
 
 - cut the `### D-<FILE>-<nn> · …` entry from its file section, append it
   under `## Closed` in key order (after the last closed entry);
@@ -124,7 +141,8 @@ the house style: `"fixes D-LANE-02"` per the file's own convention).
 
 ## Deliver
 
-Relay the subagent's report — do not re-run its work to confirm it:
+Relay the subagent's report — the counts are your own from step 3, the rest
+is its work and does not need re-deriving:
 
 - what changed, one line per file
 - the `SKILL.md` line delta, and the reason for each line added
