@@ -421,6 +421,30 @@ include "lib";
           | "ticket #\(.iid): `ready-for-agent` but still assigned to "
             + "\(.assignees | join(", ")) — invisible to the ready set AND to "
             + "`summary.stranded`. Clear it: lane.sh transition \(.iid) ready-for-agent"]
+       # The same shape one state along, and it has no warning of its own until
+       # here: `review` with a verdict already standing at HEAD. `gate_of` calls
+       # that ticket ineligible ("already judged"), and nothing else in the wave
+       # reads `review` at all — fill needs `ready-for-agent` AND unclaimed,
+       # `summary.stranded` only looks at `in-progress`, harvest reads lanes. So
+       # the ticket parks forever while the board shows it progressing.
+       # `unblock --to-review` is the short road in: a pregate rejection can be
+       # caused by something OUTSIDE the branch, so there is nothing legitimate
+       # to commit, HEAD never moves, and the human reaches for `--to-review`
+       # exactly when it strands the ticket (boostlingo build-4 #97, its rc-7
+       # FAIL still standing at the branch head, 2026-08-08). The recovery is
+       # `ready-for-agent`: an impl lane is what moves HEAD, and only a moved
+       # HEAD makes the gate eligible again.
+       # Scoped to FAIL because a PASS at HEAD is already named, with its own
+       # command, by the `pass-not-in-merge-queue` repair below — warning twice
+       # on one ticket is noise. A live gate lane is excluded for free:
+       # `gate_of` answers $gating before $judged, so such a ticket reads
+       # `last_verdict: null` and never reaches this select.
+       + [$tickets[] | select(.state == "review"
+                              and (.gate.last_verdict.verdict // "") == "FAIL")
+          | "ticket #\(.iid): `review` with a FAIL verdict standing at "
+            + "\(.gate.head) — \(.gate.reason), and no gate lane is running, so "
+            + "no step will ever pick it up again. Requeue it: "
+            + "lane.sh transition \(.iid) ready-for-agent"]
        # Loud as well as listed: a stranded finish is invisible to every other
        # step (harvest reads lanes, gate needs `review`, fill needs unclaimed),
        # which is exactly how four of them sat for hours.

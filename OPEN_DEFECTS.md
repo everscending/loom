@@ -135,35 +135,6 @@ skip the pregate, which is the cheap direction the contract already chooses.
 (`ADV_MANDATORY`) and an absent one (`ADV_SILENT`), but no case for a section that declares none.
 Add `ADV_NONE` beside them.
 
-### D-TICK-15 · `unblock --to-review` strands a ticket whose HEAD already carries a verdict
-`SKILL.md` `### unblock`, against `gate_of` in `snapshot.jq:75-94`. `--to-review` transitions to
-`review` and stops. But `gate_of` refuses any ticket whose current MR head already has an
-`orch-verdict` trailer — `eligible: false, reason: "already judged <V> at this HEAD"`. When the
-verdict standing at that head is a **FAIL**, `--to-review` therefore produces a ticket that no
-step will ever act on again.
-**Failure:** a silent, permanent stall. `review` is invisible to the fill step (needs
-`ready-for-agent` + unclaimed), invisible to `summary.stranded` (looks only at `in-progress`),
-and has no lane for harvest to find. Unlike the assignee-held case, `snapshot` emits no warning.
-The build simply carries a ticket that appears to be progressing and is not. `SKILL.md` promises
-`--to-review` "takes the same gate as agent work — no bypass"; in this case it takes no gate at
-all, which is a bypass in the one direction nobody would look for.
-**Reproduced:** boostlingo build-4, 2026-08-08, ticket #97. Its rc 7 pregate rejection (D-TICK-14)
-posted `FAIL` at `979f34f`, still the branch HEAD. `/loom unblock 97 --to-review` moved it to
-`review`; the very next `snapshot` read `gate.eligible: false — already judged FAIL at this HEAD`.
-Recovered by transitioning to `ready-for-agent` instead, so an impl lane can move HEAD.
-**Why it bites hardest after a pregate FAIL:** the normal FAIL path sends the ticket to
-`in-progress`, where rework pushes a commit and HEAD moves on its own. A pregate rejection can be
-caused by something *outside* the branch — D-TICK-14's ticket-body misfire is exactly that — and
-then there is nothing legitimate to commit, so the human reaches for `--to-review` precisely when
-it is least safe.
-**Fix:** `unblock --to-review` must check `gate.eligible` after the transition and refuse (or warn
-loudly and requeue `ready-for-agent` instead) when the current head carries a standing verdict.
-The data is already in the snapshot; nothing new needs computing. Cheaper alternative worth
-considering: have `snapshot` warn on any `review` ticket that is gate-ineligible with no live
-gate lane — that catches this shape whatever produced it, the way it already warns on an
-assignee-held `ready-for-agent`.
-**Test:** none today. `unblock` has no coverage in `tick-test.sh` at all.
-
 ---
 
 ## `scripts/snapshot.jq`
@@ -905,3 +876,30 @@ own `wave` row in the spend-by-kind breakdown and in the grand total — never f
 total, since a wave is the one session kind that writes no code. `tick-test.sh` case 12a2b plants
 one lane log and one wave log in a fixture build and asserts both are priced and the rows sum to
 the total.
+
+### D-TICK-15 · `unblock --to-review` strands a ticket whose HEAD already carries a verdict
+*Closed 2026-08-08.*
+
+`gate_of` in `snapshot.jq` refuses any ticket whose current MR head already carries an
+`orch-verdict` trailer. When that standing verdict is a **FAIL**, `unblock --to-review` moved the
+ticket to `review` and no step would ever act on it again: `review` is invisible to the fill step
+(needs `ready-for-agent` + unclaimed), invisible to `summary.stranded` (reads `in-progress`), and
+has no lane for harvest to find. Unlike the assignee-held case, nothing warned — the board showed
+a ticket progressing that was permanently parked. It bites hardest right after a pregate
+rejection, because a rejection caused from outside the branch leaves nothing legitimate to commit,
+so HEAD never moves and the human reaches for `--to-review` exactly when it is least safe.
+
+**Shipped:** a new `snapshot` warning in `scripts/snapshot.jq`, immediately after the assignee-held
+warning it mirrors: a ticket in `review` whose `.gate.last_verdict.verdict` is `FAIL` is named
+along with its head, its `gate.reason`, and the command that recovers it —
+`lane.sh transition <n> ready-for-agent`, since only an implementation lane moves HEAD and only a
+moved HEAD restores gate eligibility. Chosen over a refusal inside `unblock`, which is prose with
+no script behind it: the warning costs no tracker calls and also catches the same stall when a
+gate lane dies between posting its FAIL and moving the label. Scoped to `FAIL` because a PASS at
+HEAD is already named, with its own command, by the `pass-not-in-merge-queue` repair; a live or
+stale gate lane is excluded for free, since `gate_of` answers the running-lane branch before the
+already-judged one and so reports `last_verdict: null`. Zero `SKILL.md` lines. `tick-test.sh`
+section 7f8 asserts the warning fires, and plants two violations beside it: a FAIL at an *older*
+commit must stay gateable (or every rework round false-alarms), and a PASS at HEAD must keep only
+its existing repair warning. Removing the new block alone turns the suite red on exactly that
+case (633 passed, 1 failed).

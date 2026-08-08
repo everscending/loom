@@ -3052,6 +3052,57 @@ PSNAP > "$T/p11f.json"
     && ok "gate-violation: with the lane cleared the ticket is gateable again" \
     || bad "gate-violation: ticket stayed suppressed after its gate lane ended"
 
+# 7f8. D-TICK-15: `review` + a FAIL standing at HEAD + no gate lane is a
+#      permanent, silent stall — ineligible for the gate, invisible to fill
+#      (needs `ready-for-agent` + unclaimed), invisible to `summary.stranded`
+#      (reads `in-progress`), and no lane for harvest to find. `unblock
+#      --to-review` walks a ticket straight into it after a pregate rejection,
+#      because a rejection from outside the branch leaves nothing to commit and
+#      HEAD never moves (boostlingo build-4 #97, 2026-08-08). Nothing warned.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T13:00:00Z","author":{"username":"gate"},
+  "body":"Pregate rejected: ticket body names the wrong module.\n\n<!-- orch-verdict FAIL e52b7c1 class=wrong-scope -->"}]
+EOF
+PSNAP > "$T/p11j.json"
+jq -e '[.warnings[] | select(test("#12") and test("FAIL verdict standing at")
+                             and test("lane.sh transition 12 ready-for-agent"))] | length == 1' \
+    "$T/p11j.json" >/dev/null \
+    && ok "gate: a review ticket stalled behind a standing FAIL is warned about, with the requeue command" \
+    || bad "gate: no stall warning for #12 ($(jq -c .warnings "$T/p11j.json"))"
+# Planted violation: the warning must key on a verdict standing at THIS head,
+# not on `review` plus any FAIL in the history. #12 was rejected at an older
+# commit and re-pushed — it is genuinely gateable, and warning on it would
+# push every rework round through a false stall.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T13:00:00Z","author":{"username":"gate"},
+  "body":"Rejected.\n\n<!-- orch-verdict FAIL 9999999 class=wrong-scope -->"}]
+EOF
+PSNAP > "$T/p11k.json"
+if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11k.json")" = "true" ] \
+   && jq -e '[.warnings[] | select(test("#12") and test("FAIL verdict standing at"))] | length == 0' \
+        "$T/p11k.json" >/dev/null; then
+    ok "gate-violation: a FAIL on an older commit does not read as a stall"
+else
+    bad "gate-violation: stall warning fired on a gateable ticket ($(jq -c .warnings "$T/p11k.json"))"
+fi
+# Planted violation: a PASS at HEAD is the same ineligibility and NOT this
+# stall — the `pass-not-in-merge-queue` repair already names it, with its own
+# command. Two warnings on one ticket is noise the human has to reconcile.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T13:00:00Z","author":{"username":"gate"},
+  "body":"Passed.\n\n<!-- orch-verdict PASS e52b7c1 -->"}]
+EOF
+PSNAP > "$T/p11l.json"
+if jq -e '[.warnings[] | select(test("#12") and test("FAIL verdict standing at"))] | length == 0' \
+        "$T/p11l.json" >/dev/null \
+   && jq -e '[.warnings[] | select(test("#12") and test("not `merge-queue`"))] | length == 1' \
+        "$T/p11l.json" >/dev/null; then
+    ok "gate-violation: a PASS at HEAD keeps its own repair warning and does not double up"
+else
+    bad "gate-violation: PASS-at-HEAD warnings wrong ($(jq -c .warnings "$T/p11l.json"))"
+fi
+rm -f "$FX/notes-12.json"
+
 # --- 7g. P8: is there parallelism to exploit at all? -----------------------
 # Build 2 had four lanes and spent its first hour with zero or one startable
 # ticket; peak concurrency for the whole run was 2. That is decided when the
