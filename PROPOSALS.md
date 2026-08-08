@@ -64,6 +64,7 @@ evidence, and implementation notes belong in this file, not there.
 | P20 | Parallelise the human-gated front half | open |
 | P24 | Supervised lanes (part B of "watch a lane") | open — staged behind evidence: build only if watching leaves a real intervention gap; part A archived 2026-08-02 |
 | P29 | Model-level observability: LangFuse ingest of lane OTel exhaust | open — proposed 2026-08-02 |
+| P77 | The snapshot's per-ticket fan-out grows with the board | open — proposed 2026-08-07; two reads per open member plus one per active member, eight at a time, so ~250 calls per snapshot at 100 tickets and two snapshots per wave. `--brief` trimmed the output, not the reads. Structural finding, never measured — the biggest build on disk is 7 tickets |
 | P76 | `tick-test.sh` splits into sections over a shared harness | deferred 2026-08-07 — no current pain; the suite runs in ~10s. Revisit when its size hurts a `qa` pass or P45's mutate mode wants per-section runs |
 
 ## What the evidence says
@@ -350,3 +351,47 @@ per-section runs.
 
 **Consumer.** `qa` (P45's mutate mode gets addressable sections), and anyone iterating on
 one guard.
+
+## P77 · The snapshot's per-ticket fan-out grows with the board
+
+**Problem.** `cmd_snapshot` makes three kinds of per-ticket read: one `links` call for every
+open build member, one `notes` call for every open build member, and one
+`related_merge_requests` call for every *active* member. They run eight at a time
+(`SNAP_BATCH`, `tick.sh:101`). The count is therefore linear in board size, and P51's `--brief`
+did not touch it — `--brief` trims what the snapshot *prints*, not what it *reads*, and the
+notes scope was deliberately widened to full membership twice (the comment at the
+`review_iids="$member_iids"` assignment records both reasons, the second being #47's lost
+rejection history). So a 100-ticket board costs roughly 250 calls per snapshot, and a wave takes
+at least two snapshots — the second is mandatory after the wave's own writes.
+
+**Evidence.** Structural, not measured: this is read off the call structure in `cmd_snapshot`,
+not off a timed run. The largest measured build on disk is seat-reservations build-1 at 7
+tickets. Nothing here has ever been exercised near 100 members, so the cost is a prediction and
+the first job of any implementation is to measure it. Say so rather than quoting a number.
+
+**Fix direction.** Cache the two per-member reads in the run directory, keyed on the issue's
+own `updated_at` — which the open-issues list read already returns, at no extra call. A ticket
+whose `updated_at` has not moved since the last snapshot cannot have gained a comment, so its
+cached `notes` payload is exact rather than heuristic, and the read is skipped entirely. On a
+board where most tickets are quiet between waves this collapses the fan-out to the handful that
+actually changed.
+
+Two things to settle *before* writing code, both cheap to check against a live tracker:
+
+1. Does adding or removing an issue **link** bump the issue's `updated_at`? Notes certainly do.
+   If links do not, the links cache needs a different key — or links stay uncached and only the
+   notes half is cached, which is still half the calls.
+2. What the cache costs on a cold run, and whether the win survives the extra file I/O at small
+   board sizes. If it does not, gate it on member count.
+
+The cheap partial, if the cache proves not to be worth it: raise `SNAP_BATCH` from 8. It is
+already an environment override, so this is a default change, not new machinery — but it trades
+wall clock for rate-limit exposure and should not be raised blind.
+
+Constitution note: the cache is disposable derived data and belongs in `~/.loom/<repo>/` beside
+the other run-directory plumbing, never in the tracker. A missing or stale cache must always
+degrade to the read it replaced — the snapshot already has that shape in `_snap_api`, which
+falls back to `[]` with a warning rather than failing the document.
+
+**Consumer.** Every wave, on any build big enough to matter; and `watch`, which takes the full
+snapshot rather than `--brief`.

@@ -65,19 +65,6 @@ correctly skipped at `:843`, but `_prune_scratch` and `cmd_sweep` already ran, w
 origin` having failed at `:161`, so D-TICK-02's merge judgement is made against stale on-disk refs.
 **Test:** no case runs `tick --auto` in the `unreadable` state with a sweepable worktree present.
 
-### D-TICK-07 · acceptance and quiescence reads truncate at one page
-`tick.sh:246`, `:247`, `:306`, `:1889-1890` — `per_page=100` with no `--paginate`, unlike `:1775`
-and `:1798`.
-**Failure:** a build accumulates 120 closed members and its last open ticket merges.
-`_epics_unaccepted` sees only the 100 most recently closed, so epic E2 — whose members all closed
-early — contributes no milestone title, its still-active milestone matches nothing, the function
-returns false, `_quiet_check` prints `complete`, `build_complete` is pushed and the completion wave
-tears the agent down with E2 never probed. That is the build-2 failure the gate was written for.
-The snapshot's `closed.json` truncates identically, so `epics_awaiting_probe` cannot recover it.
-Secondary: >100 open members caps `count`, so `blocked == count` at `:323` compares a truncated set.
-**Test:** no fixture anywhere in the suite exceeds one page of issues.
-**Covered by:** P49.
-
 ### D-TICK-08 · `--brief` copies the file into the worktree before the guard that refuses
 `tick.sh:1094` — `cp` writes the brief at `:1094`; the guard at `:1105` can still die.
 **Failure:** `spawn-lane impl-60 --brief /tmp/b.md --cwd …/repo-wt-60 -- claude -p "implement #60"`
@@ -831,6 +818,23 @@ have kept the build alive.
 `halted`/`complete` classification runs. `tick-test.sh` forces a lane `stale` and asserts
 `_quiet_check` returns `active` without ever touching the tracker (proven by absence: `glab` is
 stubbed to leave a marker on any call, and the marker never appears).
+
+### D-TICK-07 · acceptance and quiescence reads truncate at one page
+*Closed 2026-08-07.*
+
+`per_page=100` with no `--paginate` on the acceptance read, the quiescence read and the
+snapshot's `closed.json`: past 100 closed members an epic whose tickets all closed early
+contributed no milestone title, `_epics_unaccepted` answered false, `_quiet_check` printed
+`complete`, and the completion wave tore the agent down with that epic never probed — the
+build-2 failure the acceptance gate exists to prevent, reachable again by board size alone.
+
+**Shipped:** P49 (archived) put every `per_page=` list read in `tick.sh` behind one helper,
+`_glab_list`, which paginates and folds `--paginate`'s one-array-per-page output into a single
+array; `--capped` stays explicit for the two newest-N notes reads that genuinely want one page.
+P73 moved that helper into `scripts/lib.sh` and P70 routed `lane.sh`'s own four reads through it,
+so no list read in this skill truncates at a page boundary now. `tick-test.sh` cases 4h5p and 7f2
+carry over-100-item fixtures whose decisive item sits on page 2, each shown failing once
+`--paginate` is stripped.
 
 ### D-TICK-13 · retro's spend report cannot see wave sessions
 *Closed 2026-08-06.*
