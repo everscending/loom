@@ -82,4 +82,33 @@ else
     bad "P31: the mapping requirement leaked into a non-impl brief"
 fi
 
+# D-TICK-18: the brief plumbing is a pair of halves, and only one half was
+# guarded. `--brief` with no `-p @brief` placeholder already died; `-p @brief`
+# with no `--brief` sailed through and the lane was launched with the literal
+# string `@brief` as its whole prompt — an @-mention of a file that does not
+# exist. The pregate runs first, so the discovery costs a whole gate:
+# boostlingo build-4 gate-98-r3 printed `gate[ui]: PASS`, then asked three times
+# which of six brief-shaped files it meant to read and exited rc 0 with no
+# verdict posted.
+out=$("$TICK" spawn-lane gate-75 --no-tick --cwd "$BR/wt" -- true -p @brief 2>&1); rc_code=$?
+if [ "$rc_code" -ne 0 ] && case "$out" in *"no --brief"*) true;; *) false;; esac \
+   && [ ! -f "$LOOM_HOME/lanes/gate-75.pid" ]; then
+    ok "D-TICK-18: '-p @brief' with no --brief is refused, and nothing spawns"
+else
+    bad "D-TICK-18: a placeholder with no file behind it was accepted (rc=$rc_code) — $out"
+fi
+# The refusal it mirrors, which had no test of its own either.
+out=$("$TICK" spawn-lane gate-76 --no-tick --cwd "$BR/wt" --brief "$BR/clean.md" -- true -p 'do the thing' 2>&1); rc_code=$?
+if [ "$rc_code" -ne 0 ] && case "$out" in *"-p @brief"*) true;; *) false;; esac; then
+    ok "D-TICK-18: --brief with no '-p @brief' placeholder is still refused"
+else
+    bad "D-TICK-18: a brief with nowhere to go was accepted (rc=$rc_code) — $out"
+fi
+# A lane that carries its own prompt and never mentions the placeholder is the
+# ordinary case, and refusing it would be worse than the defect.
+"$TICK" spawn-lane gate-77 --no-tick --cwd "$BR/wt" -- true -p 'do the thing' >/dev/null 2>&1
+[ -f "$LOOM_HOME/lanes/gate-77.pid" ] \
+    && ok "D-TICK-18: a command with no placeholder and no brief still spawns" \
+    || bad "D-TICK-18: false positive — a plain prompt was refused"
+
 test_finish

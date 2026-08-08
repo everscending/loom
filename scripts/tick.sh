@@ -239,14 +239,42 @@ cmd_sweep() {
             # this, i.e. the common case. (Paid for: build-1 2026-08-03 — sweep
             # had never once succeeded; a wave burned 80s under `bash -x` and
             # removed the worktree by hand.)
-            st=$(git -C "$dir" status --porcelain 2>/dev/null | grep -v '^??' | head -1 || true)
+            #
+            # D-TICK-17: that `grep -v '^??'` used to filter out UNTRACKED files
+            # too, and untracked is where a lane's unsaved work lives. A lane
+            # that has not committed yet is zero commits ahead of the base and
+            # every new file it wrote is untracked, so filtering `??` made a
+            # worktree full of work look exactly like an empty merged one and
+            # armed `rm -rf` over it (boostlingo build-4 #98 — ~100 turns of
+            # work gone). Only the hold marker below is filtered now. Untracked
+            # here means untracked AND NOT IGNORED: `git status --porcelain`
+            # never lists ignored paths, so node_modules, .venv and dist stay
+            # invisible and the common tidy case still sweeps.
+            st=$(git -C "$dir" status --porcelain 2>/dev/null | grep -vxF '?? .loom-sweep-hold' | head -1 || true)
             if [ -n "$st" ]; then
-                echo "sweep: $dir merged but has modified tracked files — kept, needs a human"
+                case "$st" in
+                    '??'*) echo "sweep: $dir merged but holds untracked work git does not ignore (${st#\?\? }) — kept, needs a human" ;;
+                    *)     echo "sweep: $dir merged but has modified tracked files — kept, needs a human" ;;
+                esac
                 continue
             fi
             _sweep_env_backup "$dir"
-            git -C "$REPO_ROOT" worktree remove --force "$dir_p" 2>/dev/null \
-                || { echo "sweep: git refused to remove $dir — kept"; continue; }
+            if ! git -C "$REPO_ROOT" worktree remove --force "$dir_p" 2>/dev/null; then
+                # D-TICK-17: `worktree remove` is not atomic, so "kept" was a
+                # promise sweep broke about sixty seconds later. By the time it
+                # fails on a root-owned node_modules or .venv it has usually
+                # already dropped `.git/worktrees/<name>`, and the `worktree
+                # prune` at the bottom of this function finishes that off — so
+                # the next pass sees this very directory as an orphaned corpse
+                # and deletes it down a path carrying none of the guards above.
+                # The marker is the promise, written where the corpse path
+                # reads it. It is filtered out of the status check above so a
+                # later pass can still retry the removal it is holding.
+                printf 'kept by sweep: git worktree remove failed here; do not delete without a human\n' \
+                    > "$dir/.loom-sweep-hold" 2>/dev/null || true
+                echo "sweep: git refused to remove $dir — kept"
+                continue
+            fi
             [ -d "$dir" ] && rm -rf "$dir"
             git -C "$REPO_ROOT" branch -d "$branch" >/dev/null 2>&1 || true
             echo "sweep: removed merged worktree $dir (branch $branch)"
@@ -256,9 +284,26 @@ cmd_sweep() {
             case "$gd" in
                 "$REPO_ROOT/.git/worktrees/"*|"$root_p/.git/worktrees/"*)
                     [ -d "$gd" ] && continue # metadata still live — not a corpse
+                    # D-TICK-17: a corpse sweep made itself is not a corpse.
+                    # This path has none of the merged path's guards — no ahead
+                    # check, no dirty check — and it cannot re-derive them,
+                    # because the gitdir it would need is exactly what is gone.
+                    # So an earlier pass's "kept" is the only thing standing
+                    # here, and it stands.
+                    if [ -e "$dir/.loom-sweep-hold" ]; then
+                        echo "sweep: $dir held from an earlier failed removal — kept, needs a human"
+                        continue
+                    fi
                     _sweep_env_backup "$dir"
-                    rm -rf "$dir"
-                    echo "sweep: removed orphaned worktree corpse $dir" ;;
+                    # `rm -rf`'s status used to be thrown away, so a partial
+                    # delete — root-owned node_modules, an unwritable .venv —
+                    # was announced as a completed one, in the one place in the
+                    # program that destroys work.
+                    if rm -rf "$dir" 2>/dev/null && [ ! -e "$dir" ]; then
+                        echo "sweep: removed orphaned worktree corpse $dir"
+                    else
+                        echo "sweep: could not fully remove orphaned worktree corpse $dir — what is left needs a human"
+                    fi ;;
                 *) : ;;                      # not provably ours — never touch
             esac
         fi
@@ -1151,7 +1196,25 @@ _spawn_parse_flags() {
 # back. Every die in here fires before anything destructive runs.
 _spawn_stage_brief() {
     _SPAWN_ARGS=("$@")
-    [ -n "$brief" ] || return 0
+    if [ -z "$brief" ]; then
+        # D-TICK-18: the mirror of the refusal at the bottom of this function.
+        # A `-p @brief` with no `--brief` behind it passed every guard, and the
+        # lane was handed the literal string `@brief` as its whole prompt — an
+        # @-mention of a file that does not exist. It runs its pregate to
+        # completion first, so the discovery costs a full gate: boostlingo
+        # build-4 gate-98-r3 printed `gate[ui]: PASS`, then asked three times
+        # which of six brief-shaped files it was meant to read and exited rc 0
+        # with no verdict. A lane that asks a question is a dead lane (P68).
+        local _a=""
+        for _a in "$@"; do
+            [ "$_a" = "@brief" ] || continue
+            die "spawn-lane: the command carries '@brief' but no --brief <file> was given —
+  the placeholder has nothing behind it, so the lane would be launched with the
+  literal string '@brief' as its entire prompt. Pass --brief <file>, or drop the
+  placeholder and give the command a real prompt."
+        done
+        return 0
+    fi
     local _brf=() _b=""
     [ -f "$brief" ] && [ -s "$brief" ] || die "spawn-lane: --brief '$brief' is not a readable, non-empty file"
     # P68: a brief may never instruct a skill invocation. A headless session

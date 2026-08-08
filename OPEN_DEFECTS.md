@@ -939,3 +939,66 @@ Reverting the fix turns three of the four red (671 passed, 0 failed with it in p
 `review` as its own shape instead of lumping it into "crash" — was left out deliberately. It is a
 harvest-classification change costing `SKILL.md` prose, not part of the fix, and the plumbing deny
 removes the failure that motivated it.
+
+### D-TICK-17 · a refused `worktree remove` became a "corpse" the next pass deleted with no guards at all
+*Closed 2026-08-08.*
+
+`cmd_sweep` had two delete paths and only one of them checked anything. The merged path armed on
+"no commits ahead of `origin/$base`" plus "no modified **tracked** files", and its status check
+filtered `??` lines out — so a lane that had not committed yet looked exactly like an empty merged
+worktree: zero commits ahead, and every file it had written invisible because untracked. When
+`git worktree remove --force` then failed on a root-owned `node_modules` or `.venv`, sweep printed
+"kept" — but `worktree remove` is not atomic, `.git/worktrees/<name>` was already gone, and the
+trailing `worktree prune` finished the job. The next pass read its own leftover as an orphaned
+corpse and `rm -rf`'d it down a path with no ahead check, no dirty check and no merged check, with
+`rm`'s status thrown away so a partial delete announced itself as a completed one. Confirmed live,
+boostlingo build-4 #98 2026-08-08: ~100 turns of uncommitted work and an in-flight gate run gone,
+the ticket's third dead lane, with five `rm` failures printed immediately above "removed".
+
+**Shipped:** three changes in `cmd_sweep`, one per link in that chain.
+
+* The merged path no longer filters untracked files out of its status check. Untracked here means
+  untracked **and not ignored** — `git status --porcelain` never lists ignored paths, so
+  `node_modules`, `.venv` and `dist/` stay invisible and the common tidy case still sweeps, while a
+  lane's unsaved work keeps the worktree. The message names which of the two it found.
+* A refused removal writes a `.loom-sweep-hold` marker into the directory before printing "kept",
+  and the corpse path refuses any directory carrying one. The corpse path cannot re-derive the
+  merged path's guards — the gitdir it would need is exactly what is gone — so an earlier pass's
+  promise is the only thing that can stand there. The marker is filtered out of the merged path's
+  status check, so a later pass can still retry the removal it is holding.
+* The corpse path's `rm -rf` is checked, and a directory that survives it is reported as partly
+  removed rather than removed.
+
+`SKILL.md`'s one-line description of what sweep never touches now says uncommitted work of any
+kind rather than "modified tracked files". Section 17 of the suite gains four cases: untracked
+non-ignored work is kept, a refused removal leaves the marker, the corpse path honours it, and a
+partial corpse delete is reported as partial. Its existing "leftovers are all untracked" case now
+gitignores its debris, which is what that case always meant. Reverting the fix turns all four red
+(710 passed, 0 failed with it in place) — and the failure output reproduces the live log exactly,
+down to the "removed merged worktree" line printed over a file that was still needed.
+
+**Not shipped:** nothing further. The two unremovable-directory cases cannot be staged as root,
+where permissions do not bind; the section says so rather than asserting something weaker.
+
+### D-TICK-18 · `-p @brief` with no `--brief` was accepted, and the lane was handed the literal string
+*Closed 2026-08-08.*
+
+`_spawn_stage_brief` refused one direction of the brief-plumbing mistake — `--brief <file>` with no
+`-p @brief` placeholder in the command — and nothing asked the mirror question, so a literal
+`@brief` with no file behind it passed every guard and became the session's entire prompt: an
+@-mention of a file that does not exist. The pregate runs to completion first, so the discovery
+costs a whole gate. Confirmed live, boostlingo build-4 #98 2026-08-08: gate-98-r3 printed
+`gate[ui]: PASS` over the full `ui` tier, then asked three times which of six brief-shaped files it
+was meant to read and exited rc 0 with no verdict posted.
+
+**Shipped:** the mirror guard, in the branch of `_spawn_stage_brief` that used to return
+immediately when no `--brief` was given. Any argument equal to `@brief` with no brief file dies
+before anything spawns, with a message that says what the placeholder is for and names both ways
+out. It matches a bare `@brief` anywhere in the command rather than only after `-p`, because an
+argument that is exactly the placeholder is never anything else. `SKILL.md`'s brief paragraph now
+says the flag and the placeholder are a pair. Section 23 gains three cases: the new refusal, the
+refusal it mirrors (which had no test of its own either), and an ordinary command carrying its own
+prompt, which must still spawn. Reverting the fix turns the first red.
+
+**Not shipped:** the orphan briefs that gave gate-98-r3 six files to be confused by are
+D-TICK-08's subject and stay open there.

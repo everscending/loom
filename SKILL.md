@@ -145,8 +145,11 @@ wave regardless. Briefs travel as files, never inline prompts:
 `spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it in, appends
 the headless execution rules, and swaps the placeholder for a pointer prompt.
 Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
-invoke — headless has no slash commands, so inline that work instead. *(paid:
-eight dead spawns at the prompt boundary; two more on `/implement`.)*
+invoke — headless has no slash commands, so inline that work instead. The flag
+and the placeholder are a pair: either one without the other is refused, since
+a lone `@brief` reaches the session as an @-mention of a file that is not
+there. *(paid: eight dead spawns at the prompt boundary; two more on
+`/implement`; one full `ui` gate thrown away for a missing `--brief`.)*
 
 **Headless permissions.** Every spawned session — wave, implementers,
 verifiers — runs `claude -p ... --permission-mode <permission_mode>`, a config
@@ -419,7 +422,8 @@ refuses outside herdr anyway.
    standing `rm -rf` to-dos)*. The sweeper runs inside every tick:
    deterministic, scoped to this skill's own `<repo>-wt-<n>` naming and merged
    branches, backing up `.env` to the state dir first, never touching a live
-   lane's cwd or modified tracked files. Repos with a non-git `worktree_cmd`
+   lane's cwd and never a worktree holding uncommitted work — untracked files
+   git does not ignore are a lane's unsaved work, not debris. Repos with a non-git `worktree_cmd`
    tear down via their own mechanism in the wave. Plain GitLab auto-merge is
    **not** this queue — with parallel lanes it merges MRs that were never
    gate-tested together; use merge trains or let this step own merging.
