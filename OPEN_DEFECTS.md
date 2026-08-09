@@ -487,56 +487,12 @@ PASS prints.
 and never written by anything. It passes because the directory is empty, not because arming was
 removed, and would pass identically if `watcher-arm` wrote a plist elsewhere.
 
-### D-TEST-12 · the concurrency test's window is inside its own measurement error
-`tick-test.sh:1750-1757` — `elapsed < 3` measured with integer `date +%s` (±1s truncation at each
-end) against a claimed serial cost of "~4s" for what is actually 11 stub calls. A partially
-serialised fan-out (two sequential concurrent stages) lands inside the window.
-
-**Now observed, 2026-08-09.** `snapshot: fan-out ran serially (3s — a serial run costs ~4s)` failed
-on the second of two back-to-back full-suite runs and passed 4/4 when section 07 was run alone. The
-window is not merely narrow in theory — a loaded machine crosses it, so the suite is not reliably
-green even with nothing wrong. It fails in the *safe* direction (a false alarm, never a false
-pass), which is why it has survived: it reads as a real regression and is dismissed as noise, and
-those are the same signal. Any fix has to assert the shape of the concurrency rather than its
-wall-clock cost — count overlapping stub invocations, not elapsed seconds.
-
 ### D-TEST-13 · a false rule recorded in the suite
 `tick-test.sh:594-595` — the comment states "a prefix on a function call is not passed through to
 the command the function runs". Verified false in bash: `ZZZ=hello f` reaches a grandchild process.
 Sections at `:1057`, `:1111`, `:1128`, `:1167` depend on the prefix form working, so the comment
 invites a future "fix" that would rewrite working tests. Not a test defect; a trap for the next
 maintainer.
-
-### D-TEST-14 · the P72 trailer violation is defeated by the directory the suite runs from
-`scripts/tests/16-ticker-and-lane-verbs.sh`, the test asserting *"one edit to the shared scan blinds
-the snapshot read AND lane.sh's duplicate refusal together"*. The planted violation builds a
-directory of symlinks to every script plus a **real, mutated `lib.jq`**, then runs `lane.sh verdict`
-out of it and expects the duplicate refusal to go blind.
-
-`cmd_verdict` reaches the prelude with `jq -L "$jqd" … 'include "lib"; …'`, and jq resolves a
-relative `include` against the **current working directory** before that `-L` directory is reached.
-So when the suite is run from `scripts/` — where the real `lib.jq` sits — every mutated copy is
-shadowed by the unmutated original, the refusal keeps working, and the violation cannot fail.
-
-**Failure:** the outcome depends on nothing but cwd, in both directions.
-
-```
-cd scripts && bash tick-test.sh ticker   → 139 passed, 1 failed
-cd ..       && bash scripts/tick-test.sh ticker → 140 passed, 0 failed
-```
-
-The production claim is fine — verified by hand: with the mutation genuinely loaded, both readers do
-go blind together. What is broken is the fixture, and it is broken twice over: it reports a
-regression that does not exist from one directory, and from the other it proves the right thing only
-by accident of where it was launched. A test whose verdict is set by the caller's cwd is asserting
-about the caller.
-
-Whichever way it is fixed, the mutated prelude has to be the one jq actually loads — an absolute
-`include` path, a cwd the harness controls, or a `-L` directory that cannot be shadowed — and the
-fix is not done until the test fails from **both** directories with the mutation in place.
-
-Should the suite have caught it? It is the suite. Section 27 checks that every section sources the
-harness and ends at `test_finish`; nothing checks that a section's verdict is independent of cwd.
 
 ---
 
@@ -769,6 +725,43 @@ and the value passes straight to `claude --model`, so nothing breaks.
 ---
 
 ## Closed
+
+### D-TEST-12 · the concurrency test's window is inside its own measurement error
+*Closed 2026-08-09.*
+
+`snapshot: fan-out is concurrent` asserted `elapsed < 3` from integer `date +%s` — ±1s truncation at
+each end — against a claimed serial cost of "~4s" for 11 stub calls, so the window sat inside its own
+measurement error. Observed failing on the second of two back-to-back full-suite runs while passing
+4/4 in isolation: a false alarm on a correct fan-out, indistinguishable from a real regression and
+therefore dismissed as noise.
+
+**Shipped:** the measure is now overlap, not elapsed time, and is load-independent. The shared glab
+stub keeps a marker file for exactly as long as a call is in flight (`STUB_INFLIGHT_DIR`), and each
+call records how many it saw (`STUB_PEAK_LOG`); the highest count is peak concurrency. A concurrent
+fan-out measures 9, a serial one cannot exceed 1 however slow the machine. The planted violation
+forces `SNAP_BATCH=1` and asserts the overlap *collapses* rather than reaching exactly 1 — one pair
+genuinely overlaps at any batch size, because the gate waits after launching, so the last job of a
+batch can still be in flight as the next starts. 10 of 11 calls see a single caller. Section 07:
+124 → 125.
+
+### D-TEST-14 · the P72 trailer violation is defeated by the directory the suite runs from
+*Closed 2026-08-09.*
+
+The planted violation built a directory of symlinks plus a real mutated `lib.jq` and ran `lane.sh`
+out of it, expecting the duplicate-verdict refusal to go blind. But `cmd_verdict` reaches the prelude
+through `jq -L "$jqd" 'include "lib"; …'`, and jq resolves a relative include against the **current
+working directory** before that `-L` directory. Run from `scripts/`, where the real `lib.jq` lives,
+every mutated copy was shadowed: the refusal kept working and the violation could not fail. The
+section's verdict was set by nothing but the caller's cwd — 139/1 from `scripts/`, 140/0 from the
+repo root, and wrong both ways.
+
+**Shipped:** two halves, because either alone rots. Every command in the violation now runs with
+`cwd = $V72`, so the mutated prelude wins by cwd *and* by `-L`. And a sentinel asserts the mutation
+is the prelude jq actually loads — it scans a real trailer with the loaded `orch_verdict_scan` and
+fails loudly if it still matches, turning "the mutation silently did not apply" from invisible into
+a named failure. Verified against the bar this entry set: 141 passed, 0 failed from **both**
+directories, and the sentinel confirmed to fire when the mutation is shadowed. The production claim
+was never at fault — with the mutation genuinely loaded, both readers do go blind together.
 
 ### D-BOOT-01 · `_require_repo` proves "inside a repo", not "at a repo root"
 *Closed 2026-08-06.*
