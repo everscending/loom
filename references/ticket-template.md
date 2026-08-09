@@ -61,6 +61,47 @@ an undeclared model-literal scan of all of `src`; it matched `"60s/side"`,
 `"text/event-stream"` and `EMBEDDING_MODEL_NAME`, and merges started
 failing on defects already on `origin/main`.)*
 
+## Live check — running-app claims
+
+Only when the deliverable claims something about the **running app**: one
+acceptance criterion exercised against the running app, scoped to *this
+ticket's* claim — never the epic's criteria, which stay with the wiring
+ticket. Reuse the epic's wiring script where one exists, or write the
+check the wiring ticket will later absorb.
+
+The check runs in the **implementation lane** and records an artifact — a
+log or run file, named in the criterion — which the gate then reads. Gates
+never call live providers; this moves first contact earlier in the lane's
+work, not into the gate.
+
+A ticket whose live check needs billable provider spend may defer to the
+wiring ticket, as a written decision in **Design decisions**. Silence is
+not deferral. *(paid: boostlingo build-4 — #106, the turn render
+disagreeing with the wire frame, surfaced only while running wiring ticket
+#98's script, after every E10 implementation member had merged; #105, a
+balance-check script crashing on a missing dependency, surfaced the first
+time #102's preflight actually ran it. Each needed its own subject run
+once, live — not the assembled epic.)*
+
+## Terminal condition — `fix` tickets only
+
+Where the defect ends, in the acceptance criteria, one of exactly two
+shapes: **zero** — the measured count reaches zero — or an **accepted
+residue** threshold carrying its number, how that number is measured, and
+why that much is tolerable. "Reduce" and "improve" are not terminal
+conditions; a fix ticket without one is a phase-4 defect, not something a
+lane discovers at gate time.
+
+The threshold is the escape valve, not a loophole. Closing over residue
+stays legal; it stops being *silent* — at or under the threshold the gate
+demands a filed, linked follow-up before it passes the ticket (SKILL.md
+step 3). *(paid: boostlingo build-4 #101 cut speech-end mark
+misattribution from 64.9% to 35.4% of turns and closed with the remainder
+accepted and nothing tracking it; build-5's audit re-found it and spent
+three of its nine tickets — #107 to finish the fix, #110 and #112 to
+re-measure the two numbers it had corrupted — plus the audit time to
+rediscover a figure the closing lane already knew.)*
+
 ## Risk tier
 
 `docs | logic | api | ui` — one word. Selects the gate suite from

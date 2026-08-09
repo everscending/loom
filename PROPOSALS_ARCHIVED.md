@@ -78,6 +78,8 @@ writing a new proposal that touches the same machinery.
 | P75 | `cmd_spawn_lane` and `cmd_tick` decompose into named stages | implemented 2026-08-07 (`cmd_tick` is now `_tick_gates` — every refusal: mode, switch, `_ensure_armed`, gap, lock, usage, quiescence allowlist, reporting through `tick_go` so the call sits outside any condition and `set -e` keeps its teeth inside — plus `_launch_wave`, prompt assembly through the retry policy. `cmd_spawn_lane` gets `_spawn_parse_flags` (consumed count back via `_spawn_shift`), `_spawn_stage_brief`, `_spawn_build_epilogue` and `_spawn_build_pregate`, the last two handing the rewritten command back in `_SPAWN_ARGS`; program text still takes tier/runner/adv-paths by ENVIRONMENT, never splice. Both builders now run ABOVE the destructive tail, so "EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE" is a function boundary: the pregate tier die, which used to fire after the logs were already rotated and the rc cleared, now refuses first — the one deliberate failure-path change. Guard-order pin added: a spawn refused at the merge-lock reservation leaves the previous run's log and rc byte-identical, with the destructive-first order re-run by hand as the planted violation. Suite 619 → 621, 0 failed; no SKILL.md change) |
 | P76 | `tick-test.sh` splits into sections over a shared harness | implemented 2026-08-08 (the 7,422-line suite becomes 27 files: `scripts/tests/NN-<topic>.sh`, one process each over `scripts/test-lib.sh`, with `tick-test.sh` the driver that runs them all and takes a name filter — `tick-test.sh snapshot` is seconds against 2m25s for the whole run. The harness holds the fixture env, the global stubs, `ok`/`bad` and `test_finish`, plus `make_glab_fixture` and `make_wave_stub`, the two fixtures more than one section needs. The pane-opener guard is now per section and names the section that escaped. New section 27 covers the driver itself: a section that dies before reporting counts is a failure, never a silent zero, and a filter matching nothing exits 2 rather than reporting a clean run. Suite 671 → 703, 0 failed; no SKILL.md change) |
 | P78 | `triage` — decide every blocked ticket on one surface | implemented 2026-08-08 (`triage` verb + `references/triage.md`; `lane.sh transition --note`, `blocked-report`, `model-tier`; `snapshot.jq` `blocked_report`) |
+| P79 | A fix ticket cannot close over untracked residue | implemented 2026-08-08 (`references/ticket-template.md` gains a **Terminal condition** block required of every `fix` ticket — zero, or an accepted-residue threshold carrying its number, its measurement and its reason; the phase-4 check list gains an *Ends* bucket that catches a fix ticket without one; SKILL.md step 3 makes the gate read it — residue above the threshold is a FAIL, at or under it a PASS requires the follow-up already filed with `lane.sh fix-ticket` and its IID named in that same verdict comment, and a fix ticket stating no terminal condition FAILs as a phase-4 escape. Docs only; nothing in `tick.sh`) |
+| P80 | First live contact happens inside the epic, not after it | implemented 2026-08-08 (`references/ticket-template.md` gains a **Live check** block: a ticket claiming something about the running app carries one acceptance criterion exercised against it, scoped to that ticket's own claim, run in the implementation lane and recording the artifact the gate reads — gates still never call live providers. Deferral for billable provider spend stays legal as a written decision; silence is not deferral. `references/phases-1-5.md` adds the block to the phase-4 list and the *Ends* check, and the wiring-ticket rule now says it is the epic's last proof, not its first live contact. Docs only; nothing in `tick.sh`) |
 
 ## Independent review round (2026-08-01)
 
@@ -3174,3 +3176,84 @@ Two script changes fall out of the evidence and are part of this proposal:
   of the four `model_rank` knows.
 - `blocked_report` parsing survives the newest-30-comments cap and does not disturb
   `rejections_of`, `merge_attempts_of` or `merge_hold_of` on the same thread.
+
+## P79 · A fix ticket cannot close over untracked residue
+
+**Problem.** A fix ticket that improves its metric without eliminating it can pass its gate and
+close, and the measured remainder is then owned by nothing — it sits invisible until the next
+audit re-finds it and pays for it again. The skill already refuses exactly this shape for its own
+defects — `references/fix.md` step 3: "if the fix is partial, nothing moves" — but no equivalent
+rule binds the target repo's tickets, so whether residue gets tracked is left to whatever the
+gate happens to accept.
+
+**Evidence (boostlingo build-4 → build-5, 2026-08-08).** Ticket #101 narrowed realtime's
+speech-end mark misattribution from 64.9% to 35.4% of turns and closed with the remainder
+accepted; build-5's own build issue records the cost: "nothing has tracked it since." The next
+audit re-found it and spent three of build-5's nine tickets on it — #107 (finish the fix), #110
+(re-run the drift check it had corrupted), #112 (re-measure the latency it had corrupted) — plus
+the audit time to rediscover a number the closing lane already knew.
+
+**Fix direction.** Two small additions at existing seams, nothing in `tick.sh`:
+
+- `references/ticket-template.md` gains one block for `fix`-labeled tickets: acceptance criteria
+  must state the terminal condition — the defect count reaches zero, or an explicit
+  accepted-residue threshold with its reason. A fix ticket with no stated terminal condition is a
+  phase-4 defect, caught by the same cross-set check that owns width and size.
+- The gate rule, stated where the wave composes gate briefs: a PASS on a fix ticket whose result
+  leaves measured residue above the ticket's stated threshold is a FAIL; a PASS at or under the
+  threshold requires the follow-up ticket filed and linked **in the same verdict** — the verdict
+  comment names the new ticket's IID. `lane.sh fix-ticket` already exists, so the gate lane has
+  the verb; this is a rule, not machinery.
+
+The threshold is the escape valve: closing over residue stays legal — build-4 was right that
+35.4% was not worth blocking on that day — it just can't be *silent* anymore. The rule is "name
+your leftover and give it an owner," not "be perfect."
+
+**What would falsify it.** A build where gates start failing fix tickets over residue the
+acceptance criteria genuinely accepted (rule written too tight), or where the filed follow-ups
+are noise nobody schedules (the ownership was already implicit and the rule only added tickets).
+
+**Consumer.** The gate lane (one more check per fix-ticket verdict), phase 4 (one more cross-set
+check), and the next build's audit, which should stop re-discovering known remainders.
+
+## P80 · First live contact happens inside the epic, not after it
+
+**Problem.** Phase 4 ends every epic with a wiring ticket blocked by every other member
+(`references/phases-1-5.md`), so all verification against the running app lands after the whole
+epic has merged. Defects only a live run can show therefore surface at the very end, each one
+becoming a new mid-build fix ticket — and by then every dependent has already built on the
+unverified claim. The wiring ticket is doing its job; the problem is that it is the *first* live
+contact any of the epic's claims ever get.
+
+**Evidence (boostlingo build-4).** Six fix tickets were filed mid-build (#101–#106). The ones
+that needed a live run arrived exactly when the design says they must — at the end: #106 (the
+turn render disagrees with the wire frame for mark-misattributed turns) was found while running
+wiring ticket #98's verification script, after E10's implementation members had merged; #105 (a
+balance-check script crashes on a missing dependency) was found the first time #102's preflight
+actually executed it. Neither needed the whole epic merged to be findable — each needed only its
+own subject run once, live, when it was written.
+
+**Fix direction.** Shift where the first live check happens; keep the wiring ticket as the
+epic-level final proof. In `references/ticket-template.md` + the phase-4 checklist in
+`references/phases-1-5.md`:
+
+- An implementation ticket whose deliverable *claims something about the running app* carries one
+  acceptance criterion exercised against the running app — reusing the epic's wiring script where
+  one exists, or a check the wiring ticket will later absorb. Scope it to the ticket's own claim,
+  not the epic's criteria; the wiring ticket keeps the whole-epic pass.
+- The check runs in the **implementation lane**, which records the artifact (log, run file) the
+  gate then reads. Gates never call live providers (the target repos' gate design, e.g.
+  ADR-0010 in boostlingo) and this proposal does not change that — it moves live contact earlier
+  in the *lane's* work, not into the gate.
+- Phase 4 owns the judgment call: a ticket whose live check needs billable provider spend can
+  defer to the wiring ticket *explicitly*, as a stated decision in the ticket — the default just
+  stops being "defer everything."
+
+**What would falsify it.** A build where the per-ticket live checks add provider spend and lane
+time without reducing end-of-epic fix tickets — the defects were genuinely emergent from the
+assembled epic, not visible per-ticket — or where impl lanes start burning turns fighting live
+environments the wiring ticket would have handled once.
+
+**Consumer.** Phase 4, every implementation lane whose ticket makes a running-app claim, and the
+end of every build, where the wiring tickets should go back to confirming rather than
+discovering.

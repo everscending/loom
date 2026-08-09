@@ -311,6 +311,21 @@ refuses outside herdr anyway.
    `class=<slug>` into the trailer. Reuse the previous rejection's slug when
    it is the same class — that match is what stops round 3.
 
+   **A `fix` ticket's verdict reads its terminal condition** — the block
+   `references/ticket-template.md` requires in every fix ticket. Measured
+   residue **above** the stated threshold is a FAIL however much the metric
+   improved. **At or under** it,
+   a PASS requires the follow-up already filed — `lane.sh fix-ticket --title
+   <t> --tier <tier> --milestone <epic>`, the same verb probes use — and its
+   IID named **in that verdict comment**; a PASS promising a follow-up
+   instead of naming one is not a PASS. A fix ticket that states no terminal
+   condition is a phase-4 escape: FAIL it as one rather than inventing the
+   threshold here. *(paid: boostlingo build-4 #101 narrowed speech-end mark
+   misattribution from 64.9% to 35.4% of turns, closed with the remainder
+   accepted, and nothing tracked it; build-5's audit re-found it and spent
+   three of its nine tickets finishing the fix and re-measuring the two
+   numbers it had corrupted.)*
+
    Hand the session its merge spawn line (step 5) to run on a PASS, so a
    passing gate reaches the merge queue with no wave in between. The chained
    lane merges **the oldest `merge-queue` ticket**, exactly as step 5 does —

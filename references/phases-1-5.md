@@ -69,6 +69,15 @@ mechanics) **plus** the additions in
 - **Repo-wide guards**: a test asserting over the whole tree is a contract
   change for every later ticket — it must be declared in the ticket body,
   and phase 4 surfaces the declaration across the set.
+- **Live check**: a ticket claiming something about the *running app* carries
+  one acceptance criterion run against the running app — in the
+  implementation lane, recording the artifact the gate reads — scoped to its
+  own claim. Deferring that contact to the wiring ticket is allowed and must
+  be written down as a decision; the default stops being "defer everything".
+- **Terminal condition** (`fix` tickets): zero, or an accepted-residue
+  threshold with its number, its measurement and its reason. The gate turns
+  a stated threshold into a filed follow-up; it cannot do that for a ticket
+  that only says "reduce".
 - **Risk tier**: `docs | logic | api | ui` — selects the gate suite from
   `.loom.yml`.
 - **PRD requirement**: the requirement ID this ticket satisfies; the gate
@@ -87,6 +96,16 @@ three fix tickets. E0's probe failed twice on the same kind of gap.)* The probe
 then confirms; it never discovers. `tick.sh graph` refuses a build definition
 whose epics lack one, so a missing wiring ticket costs a phase-5 rerun, not an
 epic.
+
+**It is the epic's last proof, not its first live contact.** Blocked by every
+member, it lands after the whole epic has merged — so anything only a live run
+can show surfaces at the very end, by which time every dependent has already
+built on the unverified claim. Each member making a running-app claim therefore
+runs its own scoped live check first (**Live check** above), and the wiring
+ticket goes back to confirming the assembled epic instead of discovering it.
+*(paid: boostlingo build-4 — #106 and #105 were both found by end-of-epic live
+runs; neither needed the assembled epic to be findable, only its own subject
+run once, live, when it was written.)*
 
 Ambiguity found while writing a ticket is a phase-1 escape: close the decision
 in the ADR/UX spec *first*, then write the ticket.
@@ -143,6 +162,18 @@ the first time anyone finds out.
   tests;
 - every command a ticket's gate tier will run exists by the time that ticket
   merges.
+
+*Ends* — does every ticket say where it stops?
+
+- every `fix` ticket states a terminal condition: zero, or a residue threshold
+  with its number, its measurement and its reason. "Reduce" is not a terminal
+  condition, and a fix ticket that closes over unstated residue leaves the
+  remainder owned by nobody until the next build's audit pays to re-find it
+  *(paid: boostlingo #101 closed at 35.4% residual; build-5 spent three of its
+  nine tickets on the leftover)*;
+- every ticket claiming something about the running app either carries its own
+  live acceptance criterion or says, in writing, why it defers that contact to
+  the epic's wiring ticket.
 
 ## Phase 5 · `build` — define or adjust the build (never starts it)
 
