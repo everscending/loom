@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P84 | Branch hygiene is owned, not inherited | open — proposed 2026-08-09; the remote stayed clean only because this GitLab project happens to set `remove_source_branch_after_merge`, which loom neither sets nor checks. Locally nothing prunes: 51 `ticket-*` branches and 122 stale `origin/ticket-*` tracking refs after five builds |
 | P85 | Sweep reports what it kept | open — proposed 2026-08-09; sweep prints "kept, needs a human" to the wave log, emits no event, and reaches no human surface. It announced this problem on every tick for five builds and nobody saw it |
 | P81 | The wave's scheduling is a pure function of the snapshot | open — proposed 2026-08-08; steps 2–6 read fields `snapshot.jq` already derives and add no information. A ticket becoming ready waits one whole wave (2m28s average, 36 of them, 57.5% of the seat-reservations span) for a model to re-derive a decision the document already contains. Supersedes the scheduling half of P18 |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
@@ -178,64 +177,6 @@ both are paid for by real incidents. What is wrong is that the loop *manufacture
 that trip them, so the guards fire on every worktree rather than on the rare unsafe one. P82 and
 P83 remove those two conditions. P84 covers branches, which no step owns at all. P85 is why it
 stayed invisible for five builds.
-
-## P84 · Branch hygiene is owned, not inherited
-
-**Problem.** No step in the loop deletes a branch. `lane.sh cmd_merge` (`lane.sh:1016`) merges the
-MR, waits for GitLab to report `merged`, closes the ticket and strips its labels — it never sets
-`remove_source_branch`. Local branches are deleted only as a side effect of a successful
-`worktree remove` in sweep, so with sweep held by P82 and P83, none of them were either.
-
-The remote side survived this anyway, and the reason is worth stating precisely because it looks
-like a non-problem: `ai-interpreter-workbench`'s GitLab project has
-`remove_source_branch_after_merge: true`, so the server cleaned up on every merge. After five
-builds the remote holds exactly **3** `ticket-*` branches, and all three are genuinely unmerged
-(two superseded `-v1` branches from a rework, one abandoned). That is a **per-project setting loom
-neither sets nor reads**. A repo bootstrapped without it accumulates every branch it ever merges,
-and nothing in this skill would notice.
-
-Locally there is no such safety net, and two things piled up:
-
-- **51 `ticket-*` branches.** Cleaning them by hand needed `git branch -D` for 29 of them, because
-  `-d` refuses a branch holding the unpushed reconcile merge from P83 — the same commit, biting a
-  second tool.
-- **122 stale `origin/ticket-*` tracking refs**, pointing at branches the server deleted long ago.
-  `tick.sh:191` fetches with `git fetch origin --quiet` and no `--prune`, so nothing ever expires
-  them. They are what made the remote *look* like it held 122 branches; the count came from
-  `git branch -r` and was wrong by a factor of 40. Any future measurement of this must use
-  `git ls-remote --heads`.
-
-All the counts above were measured **2026-08-09, before that day's hand-cleanup**. The repo now
-holds 0 local `ticket-*` branches and 3 tracking refs, `git remote prune origin` having expired the
-other 119. They are the record of what five unswept builds accumulate, not something a reader can
-re-run.
-
-**Fix direction.** Own the outcome instead of inheriting it:
-
-- Set `remove_source_branch` on the merge call in `cmd_merge` — one field, on a request the verb
-  already makes, at the one moment the branch is provably disposable. Then the behaviour holds on
-  every repo rather than the ones whose project settings happen to agree. Bootstrap could also
-  assert the project setting and say so if it is off.
-- Add `--prune` to sweep's fetch (`tick.sh:191`), so remote-tracking refs expire with the branches
-  they track. A one-word change that also stops the next person measuring this from getting the
-  wrong number.
-- Once P82 and P83 unblock sweep, its existing `git branch -d` covers the local side going forward;
-  clearing an accumulated backlog needs `-D` for exactly the P83 reason above.
-
-**Tests.**
-
-- `cmd_merge`'s captured argv carries `remove_source_branch` on the merge request, and on no other
-  request the verb makes; shown failing when the field is dropped.
-- The field is set on the merge call only — `close`, the label strip and the verification poll are
-  unchanged.
-- Sweep's fetch passes `--prune`; a fixture with a remote-tracking ref whose upstream is gone has
-  that ref expire on one sweep pass, shown failing without the flag.
-- Sweep's existing local `git branch -d` still runs after a successful `worktree remove`, and still
-  declines a branch that is genuinely unmerged.
-
-**Consumer.** Anyone reading `git branch -r` in a repo this skill has built, every future
-`spawn-lane` picking a non-colliding branch name, and any repo whose GitLab project does not
-already clean up after itself.
 
 ## P85 · Sweep reports what it kept
 

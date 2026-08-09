@@ -205,7 +205,13 @@ cmd_sweep() {
     # different cause, so it has its own regression test.
     root_p=$(cd "$REPO_ROOT" 2>/dev/null && pwd -P) || root_p="$REPO_ROOT"
     base=$(_detect_base "$REPO_ROOT" "$CONFIG")
-    git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
+    # P84: --prune, so a remote-tracking ref expires with the branch it tracks.
+    # Without it nothing ever expires them: five builds left 122 stale
+    # `origin/ticket-*` refs pointing at branches the server had deleted, which
+    # is also what made the remote LOOK like it held 122 branches when
+    # `git ls-remote --heads` said 3. Any measurement of this must use
+    # ls-remote, not `git branch -r`.
+    git -C "$REPO_ROOT" fetch origin --prune --quiet 2>/dev/null || true
     # cwd of every ALIVE lane (running or stale) — never sweep ground a live
     # process stands on. A `stale` lane is quiet, not gone (P46).
     local live_cwds="" pid live_n=0

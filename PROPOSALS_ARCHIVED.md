@@ -82,6 +82,7 @@ writing a new proposal that touches the same machinery.
 | P80 | First live contact happens inside the epic, not after it | implemented 2026-08-08 (`references/ticket-template.md` gains a **Live check** block: a ticket claiming something about the running app carries one acceptance criterion exercised against it, scoped to that ticket's own claim, run in the implementation lane and recording the artifact the gate reads — gates still never call live providers. Deferral for billable provider spend stays legal as a written decision; silence is not deferral. `references/phases-1-5.md` adds the block to the phase-4 list and the *Ends* check, and the wiring-ticket rule now says it is the epic's last proof, not its first live contact. Docs only; nothing in `tick.sh`) |
 | P82 | The lane brief does not live in the working tree | implemented 2026-08-09 (`spawn-lane` writes the composed brief to `$LOOM_HOME/briefs/<lane-id>.md` instead of `<cwd>/.lane-brief-<id>.md`, and the pointer prompt names it by absolute path — so a lane worktree is no longer untracked-dirty by construction and D-TICK-17's guard stops firing on every one of them. The other half of the cause is closed in the same function: a `--brief` whose path resolves inside `$REPO_ROOT` or inside the lane's own `--cwd` is refused, naming `lane.sh scratch` — that is where `.gate-brief-114.md` and `.impl-brief-128.md` came from, neither of which `spawn-lane` could produce. Both refusals sit above the destructive line (P75). Suite 717 → 724 in section 23; one SKILL.md line edited, none added) |
 | P83 | "Merged" is a tracker fact, not a commit-range guess | implemented 2026-08-09 (sweep asks the tracker whether **this branch's own MR** is `merged` — new read-only `_branch_merged`, rc 0/1/2 so an unreadable board is never mistaken for a decision. Merged → sweepable regardless of local topology, which is the 15-worktree unpushed-reconcile case. No merged MR → the commit range decides, and only in the safe direction: empty means nothing to lose, anything ahead of base is kept. Never keyed on ticket state — the #67 shape is a test, with the squash-merge fixture that makes a branch permanently ahead. P47's exit-status handling intact; a dead `glab` falls back to the range test. Section 17: 7 → 14; no SKILL.md change) |
+| P84 | Branch hygiene is owned, not inherited | implemented 2026-08-09 (`lane.sh merge` passes `should_remove_source_branch=true` on the merge request it already makes, so the remote branch dies at the one moment it is provably disposable — rather than surviving unless the project happens to set `remove_source_branch_after_merge`, which this skill neither reads nor writes. Sweep's fetch gains `--prune`, so a tracking ref expires with the branch it tracks; without it five builds left 122 stale `origin/ticket-*` refs, which is also what made `git branch -r` report 122 remote branches when `ls-remote` said 3. Section 18: 3 → 8, including a fixture that deletes server-side because `push --delete` updates the local ref and would never leave one stale. No SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -3402,4 +3403,61 @@ signal:
   when the separate exit-status capture is collapsed back into the pipeline.
 
 **Consumer.** `tick.sh sweep`.
+## P84 · Branch hygiene is owned, not inherited
+
+**Problem.** No step in the loop deletes a branch. `lane.sh cmd_merge` (`lane.sh:1016`) merges the
+MR, waits for GitLab to report `merged`, closes the ticket and strips its labels — it never sets
+`remove_source_branch`. Local branches are deleted only as a side effect of a successful
+`worktree remove` in sweep, so with sweep held by P82 and P83, none of them were either.
+
+The remote side survived this anyway, and the reason is worth stating precisely because it looks
+like a non-problem: `ai-interpreter-workbench`'s GitLab project has
+`remove_source_branch_after_merge: true`, so the server cleaned up on every merge. After five
+builds the remote holds exactly **3** `ticket-*` branches, and all three are genuinely unmerged
+(two superseded `-v1` branches from a rework, one abandoned). That is a **per-project setting loom
+neither sets nor reads**. A repo bootstrapped without it accumulates every branch it ever merges,
+and nothing in this skill would notice.
+
+Locally there is no such safety net, and two things piled up:
+
+- **51 `ticket-*` branches.** Cleaning them by hand needed `git branch -D` for 29 of them, because
+  `-d` refuses a branch holding the unpushed reconcile merge from P83 — the same commit, biting a
+  second tool.
+- **122 stale `origin/ticket-*` tracking refs**, pointing at branches the server deleted long ago.
+  `tick.sh:191` fetches with `git fetch origin --quiet` and no `--prune`, so nothing ever expires
+  them. They are what made the remote *look* like it held 122 branches; the count came from
+  `git branch -r` and was wrong by a factor of 40. Any future measurement of this must use
+  `git ls-remote --heads`.
+
+All the counts above were measured **2026-08-09, before that day's hand-cleanup**. The repo now
+holds 0 local `ticket-*` branches and 3 tracking refs, `git remote prune origin` having expired the
+other 119. They are the record of what five unswept builds accumulate, not something a reader can
+re-run.
+
+**Fix direction.** Own the outcome instead of inheriting it:
+
+- Set `remove_source_branch` on the merge call in `cmd_merge` — one field, on a request the verb
+  already makes, at the one moment the branch is provably disposable. Then the behaviour holds on
+  every repo rather than the ones whose project settings happen to agree. Bootstrap could also
+  assert the project setting and say so if it is off.
+- Add `--prune` to sweep's fetch (`tick.sh:191`), so remote-tracking refs expire with the branches
+  they track. A one-word change that also stops the next person measuring this from getting the
+  wrong number.
+- Once P82 and P83 unblock sweep, its existing `git branch -d` covers the local side going forward;
+  clearing an accumulated backlog needs `-D` for exactly the P83 reason above.
+
+**Tests.**
+
+- `cmd_merge`'s captured argv carries `remove_source_branch` on the merge request, and on no other
+  request the verb makes; shown failing when the field is dropped.
+- The field is set on the merge call only — `close`, the label strip and the verification poll are
+  unchanged.
+- Sweep's fetch passes `--prune`; a fixture with a remote-tracking ref whose upstream is gone has
+  that ref expire on one sweep pass, shown failing without the flag.
+- Sweep's existing local `git branch -d` still runs after a successful `worktree remove`, and still
+  declines a branch that is genuinely unmerged.
+
+**Consumer.** Anyone reading `git branch -r` in a repo this skill has built, every future
+`spawn-lane` picking a non-colliding branch name, and any repo whose GitLab project does not
+already clean up after itself.
 
