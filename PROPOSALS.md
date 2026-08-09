@@ -273,10 +273,18 @@ branch in this repo proves it. Ticket #67 shipped as `bbac984` from `ticket-67-p
 (MR !66). A separate branch, `ticket-67-realtime-turn-mark-pairing`, carried three commits and a
 238-line variant of that fix which never merged in any form — `2 files changed, 238 insertions(+),
 1 deletion(-)` against its merge-base, measured 2026-08-09. The range test sees those three commits,
-declines, and is **right** to — that is the guard doing its job, and the work is real.
+declines, and is **right** to — that is the guard doing its job.
 
-That branch was queued for deletion in the hand-cleanup the same day, so the numbers above are the
-record. This section stands on them, not on anyone being able to reproduce the branch later.
+Diffed before deletion, those three commits turned out to be a rejected first draft of the *same*
+fix: `MAX_PENDING_TURN_AGE_MS = 30000` with a per-record timeout, against main's
+`PENDING_TURN_BOUND_MS = 30_000` — same day, same ticket, same bound, rewritten. So the claim here
+is **not** that valuable work was at stake. It is that the lines were unmerged in any form, and
+that **nothing available at sweep time can tell a discarded draft from live work**: both are
+commits on a branch with no merged MR of its own. That is the whole argument for keying on the
+branch, and for the guard staying conservative when it cannot tell.
+
+The branch was deleted in the hand-cleanup the same day (it was `b146fe1`), so the numbers above are
+the record. This section stands on them, not on anyone reproducing the branch later.
 
 So the tracker's answer here is not "this branch is disposable". The tracker knows #67 is closed; it
 does not know that this particular branch was the abandoned attempt. Any fix keyed on *ticket*
@@ -344,6 +352,11 @@ Locally there is no such safety net, and two things piled up:
   `git branch -r` and was wrong by a factor of 40. Any future measurement of this must use
   `git ls-remote --heads`.
 
+All the counts above were measured **2026-08-09, before that day's hand-cleanup**. The repo now
+holds 0 local `ticket-*` branches and 3 tracking refs, `git remote prune origin` having expired the
+other 119. They are the record of what five unswept builds accumulate, not something a reader can
+re-run.
+
 **Fix direction.** Own the outcome instead of inheriting it:
 
 - Set `remove_source_branch` on the merge call in `cmd_merge` — one field, on a request the verb
@@ -387,6 +400,14 @@ P84, where the 122 turn out to be tracking refs rather than branches.)
 
 This is the reason P82, P83 and P84 went unnoticed rather than being fixed after build-1.
 
+**And a third failure mode outlives both fixes.** `ai-interpreter-workbench-wt-26` survives the
+cleanup as a 12 KB husk: the worktree is merged, clean, and correctly identified, and removal still
+fails because `web/node_modules` and `server/.venv` are empty directories that refuse `rmdir` with
+EPERM despite being user-owned and unflagged — almost certainly stale Docker Desktop mounts. Sweep
+already handles this correctly, printing "git refused to remove — kept". P82 and P83 do not touch
+it, and nothing else will: after they land, this is the residue class that remains, and it is
+invisible for exactly the reason this proposal exists.
+
 **Fix direction.** Two changes, both small:
 
 - Sweep emits one `sweep_held` event per pass carrying the count and the dominant reason, and a
@@ -409,6 +430,9 @@ Neither adds a decision for a wave to make, so neither costs a `SKILL.md` line.
   not the log line.
 - The completion-report path names the leftover inventory when there is one, and says nothing when
   the sweep is clean.
+- A worktree whose removal `git` refuses — the filesystem case, fixtured with a directory that
+  cannot be removed — is reported like any other hold, rather than being the one kept worktree the
+  ticker stays silent about.
 
 **Consumer.** The human, who currently discovers this by looking at their own filesystem months
 later.
