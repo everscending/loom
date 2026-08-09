@@ -1031,7 +1031,17 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     mr=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null \
          | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
     [ -n "$mr" ] || die "no open MR closes issue $iid — its description must contain 'Closes #$iid'"
-    "$GLAB" api --method PUT "projects/:fullpath/merge_requests/$mr/merge" >/dev/null 2>&1 \
+    # P84: delete the source branch as part of the merge. Nothing else in the
+    # loop ever deletes a branch — sweep's `git branch -d` only fires as a side
+    # effect of removing a worktree, and covers the local side alone — so five
+    # builds left 51 local `ticket-*` branches behind. The remote survived only
+    # because that project happened to set `remove_source_branch_after_merge`,
+    # a per-project setting this skill neither reads nor writes; a repo without
+    # it accumulates every branch it ever merges. This is the one moment the
+    # branch is provably disposable, and it is one field on a request the verb
+    # already makes.
+    "$GLAB" api --method PUT "projects/:fullpath/merge_requests/$mr/merge" \
+        -f should_remove_source_branch=true >/dev/null 2>&1 \
         || die "merge of MR !$mr refused (conflicts, red pipeline, or approvals) — record it: lane.sh merge-failed $iid"
     # GitLab merges asynchronously; never report a merge we have not observed.
     for n in 1 2 3 4 5 6 7 8 9 10; do

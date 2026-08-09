@@ -85,6 +85,15 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
+# P82: a lane's brief lives HERE, never in the working tree it is about.
+# `spawn-lane` used to copy it to $cwd/.lane-brief-<id>.md, which made every
+# lane worktree hold an untracked file by construction, so sweep's
+# unsaved-work guard (D-TICK-17) kept all 30 of them across five builds.
+BRIEFS_DIR="$LOOM_HOME/briefs"
+# P85: what the last sweep pass could not remove, and why. Sweep said all of
+# this to stdout inside a wave session for five builds — the right message,
+# addressed to a human, into a file no human reads.
+SWEEP_HELD_FILE="$LOOM_HOME/sweep-held.txt"
 # Every session gets its own scratch directory here (P17). Fixed paths were the
 # bug: a wave wrote /tmp/wave-note-16.md, a stale file of that name from an
 # earlier wave won, and its content was posted as a comment on the wrong ticket.
@@ -107,7 +116,7 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 # pane.
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 
-mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
+mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -177,7 +186,58 @@ _sweep_env_backup() {
     cp "$d/.env" "$dst/$(basename "$d").env" 2>/dev/null || true
 }
 
+# P83: does an MR whose SOURCE BRANCH is this one exist in state `merged`?
+# rc 0 yes, 1 a real "no", 2 the tracker could not be read. The distinction
+# between 1 and 2 is the whole point: a definite "no merged MR" is a decision,
+# an unreadable board is not, and only the first may keep a worktree on its own.
+# Read-only, like everything else in this script.
+_branch_merged() { # <branch>
+    local br="$1" out=""
+    [ -n "$br" ] || return 2
+    out=$(_glab_list --capped "projects/:id/merge_requests?source_branch=$br&state=merged&per_page=1" 2>/dev/null) || return 2
+    printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+    printf '%s' "$out" | jq -e 'length > 0' >/dev/null 2>&1 && return 0
+    return 1
+}
+
+# P85: sweep's decisions have to leave the wave log. It printed "kept, needs a
+# human" for thirty worktrees on every tick for five builds, into a file nobody
+# reads, and the build-5 completion report tore the agent down without
+# mentioning any of it. One event per PASS, not per worktree — a count that
+# never falls is the signal, and thirty lines a tick is not.
+_SWEEP_HELD=0
+_SWEEP_REMOVED=0
+_sweep_hold() { # <dir> <reason>
+    _SWEEP_HELD=$((_SWEEP_HELD + 1))
+    printf '%s\t%s\n' "$2" "$1" >> "$SWEEP_HELD_FILE.new"
+}
+_sweep_report() {
+    # The inventory is rewritten whole each pass, so a worktree a human cleared
+    # by hand stops being reported without anyone telling the loom about it.
+    if [ -s "$SWEEP_HELD_FILE.new" ]; then mv -f "$SWEEP_HELD_FILE.new" "$SWEEP_HELD_FILE"
+    else rm -f "$SWEEP_HELD_FILE.new" "$SWEEP_HELD_FILE"; fi
+    [ "$_SWEEP_REMOVED" -gt 0 ] && _ev sweep_removed count "$_SWEEP_REMOVED"
+    if [ "$_SWEEP_HELD" -gt 0 ]; then
+        local reason
+        reason=$(cut -f1 "$SWEEP_HELD_FILE" 2>/dev/null | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+        _ev sweep_held count "$_SWEEP_HELD" reason "${reason:-unknown}"
+    fi
+    return 0
+}
+
+# P85: the leftover inventory as one human-readable block, or nothing at all.
+# Read by cmd_notify so a completion announcement cannot omit it.
+_sweep_held_summary() {
+    [ -s "$SWEEP_HELD_FILE" ] || return 0
+    local n; n=$(wc -l < "$SWEEP_HELD_FILE" | tr -d ' ')
+    printf '\n%s worktree(s) kept by sweep, needing a human:\n' "$n"
+    while IFS="$(printf '\t')" read -r reason dir; do
+        printf '  %s — %s\n' "${dir##*/}" "$reason"
+    done < "$SWEEP_HELD_FILE"
+}
+
 cmd_sweep() {
+    _SWEEP_HELD=0; _SWEEP_REMOVED=0; rm -f "$SWEEP_HELD_FILE.new"
     local base dir name branch st gd dir_p root_p
     # git always reports worktrees by their PHYSICAL path, so a REPO_ROOT
     # carrying a symlink (macOS /tmp -> private/tmp, /var -> private/var, or
@@ -186,7 +246,13 @@ cmd_sweep() {
     # different cause, so it has its own regression test.
     root_p=$(cd "$REPO_ROOT" 2>/dev/null && pwd -P) || root_p="$REPO_ROOT"
     base=$(_detect_base "$REPO_ROOT" "$CONFIG")
-    git -C "$REPO_ROOT" fetch origin --quiet 2>/dev/null || true
+    # P84: --prune, so a remote-tracking ref expires with the branch it tracks.
+    # Without it nothing ever expires them: five builds left 122 stale
+    # `origin/ticket-*` refs pointing at branches the server had deleted, which
+    # is also what made the remote LOOK like it held 122 branches when
+    # `git ls-remote --heads` said 3. Any measurement of this must use
+    # ls-remote, not `git branch -r`.
+    git -C "$REPO_ROOT" fetch origin --prune --quiet 2>/dev/null || true
     # cwd of every ALIVE lane (running or stale) — never sweep ground a live
     # process stands on. A `stale` lane is quiet, not gone (P46).
     local live_cwds="" pid live_n=0
@@ -201,6 +267,7 @@ cmd_sweep() {
     # lsof is missing or blocked we cannot tell live from dead — so do nothing.
     if [ "$live_n" -gt 0 ] && [ -z "${live_cwds//[[:space:]]/}" ]; then
         echo "sweep: $live_n lane(s) running but no cwd resolved (lsof unavailable?) — skipping sweep rather than risk a live worktree"
+        rm -f "$SWEEP_HELD_FILE.new"   # a skipped pass observed nothing; keep the last real inventory
         return 0
     fi
     for dir in "$REPO_ROOT"-wt-*; do
@@ -216,6 +283,30 @@ cmd_sweep() {
         if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $dir_p"; then
             branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
             [ -n "$branch" ] || continue
+            # P83: ask the tracker whether THIS BRANCH landed, because the
+            # commit range answers a different question. `lane.sh reconcile`
+            # merges origin/<base> into the branch; run once more after the
+            # push the MR merged, the local tip carries a merge commit that was
+            # never pushed and is unreachable from the base forever. Fifteen of
+            # build-5's thirty held worktrees were exactly that: ticket closed,
+            # MR merged, main holding the work, only the local topology
+            # disagreeing.
+            if _branch_merged "$branch"; then
+                :                            # this branch's own MR is merged
+            else
+            # NEVER key this on ticket state. #67 shipped as bbac984 from
+            # ticket-67-pending-turn-bound while ticket-67-realtime-turn-mark-pairing
+            # sat beside it holding three commits and a 238-line variant that
+            # merged in no form at all. Nothing at sweep time separates a
+            # discarded draft from live work — both are commits on a branch
+            # with no merged MR of its own — so "the ticket is closed" would
+            # have armed rm -rf over it. That is D-TICK-17 through another door.
+            #
+            # With no merged MR, the range test decides, and it decides only
+            # the safe direction: empty means nothing to lose (a probe
+            # worktree, or a lane that never committed), so sweeping costs
+            # nothing. Anything ahead of base stays.
+            #
             # P47: `git log A..B` cannot tell "no commits ahead" from "range
             # does not resolve" once its own exit status is thrown away — an
             # unfetched or missing base ref used to read as "merged" and arm
@@ -230,6 +321,7 @@ cmd_sweep() {
             fi
             if [ -n "$_ahead" ]; then
                 continue                     # unmerged work — not ours to touch
+            fi
             fi
             # `|| true` is load-bearing: under `set -euo pipefail`, a `grep -v`
             # that filters out every line exits 1, pipefail propagates it to the
@@ -253,8 +345,8 @@ cmd_sweep() {
             st=$(git -C "$dir" status --porcelain 2>/dev/null | grep -vxF '?? .loom-sweep-hold' | head -1 || true)
             if [ -n "$st" ]; then
                 case "$st" in
-                    '??'*) echo "sweep: $dir merged but holds untracked work git does not ignore (${st#\?\? }) — kept, needs a human" ;;
-                    *)     echo "sweep: $dir merged but has modified tracked files — kept, needs a human" ;;
+                    '??'*) echo "sweep: $dir merged but holds untracked work git does not ignore (${st#\?\? }) — kept, needs a human"; _sweep_hold "$dir" untracked-work ;;
+                    *)     echo "sweep: $dir merged but has modified tracked files — kept, needs a human"; _sweep_hold "$dir" modified-tracked ;;
                 esac
                 continue
             fi
@@ -272,12 +364,12 @@ cmd_sweep() {
                 # later pass can still retry the removal it is holding.
                 printf 'kept by sweep: git worktree remove failed here; do not delete without a human\n' \
                     > "$dir/.loom-sweep-hold" 2>/dev/null || true
-                echo "sweep: git refused to remove $dir — kept"
+                echo "sweep: git refused to remove $dir — kept"; _sweep_hold "$dir" git-refused
                 continue
             fi
             [ -d "$dir" ] && rm -rf "$dir"
             git -C "$REPO_ROOT" branch -d "$branch" >/dev/null 2>&1 || true
-            echo "sweep: removed merged worktree $dir (branch $branch)"
+            echo "sweep: removed merged worktree $dir (branch $branch)"; _SWEEP_REMOVED=$((_SWEEP_REMOVED+1))
         else
             gd=""
             [ -f "$dir/.git" ] && gd=$(sed -n 's/^gitdir: //p' "$dir/.git" 2>/dev/null)
@@ -291,7 +383,7 @@ cmd_sweep() {
                     # So an earlier pass's "kept" is the only thing standing
                     # here, and it stands.
                     if [ -e "$dir/.loom-sweep-hold" ]; then
-                        echo "sweep: $dir held from an earlier failed removal — kept, needs a human"
+                        echo "sweep: $dir held from an earlier failed removal — kept, needs a human"; _sweep_hold "$dir" earlier-failure
                         continue
                     fi
                     _sweep_env_backup "$dir"
@@ -300,15 +392,16 @@ cmd_sweep() {
                     # was announced as a completed one, in the one place in the
                     # program that destroys work.
                     if rm -rf "$dir" 2>/dev/null && [ ! -e "$dir" ]; then
-                        echo "sweep: removed orphaned worktree corpse $dir"
+                        echo "sweep: removed orphaned worktree corpse $dir"; _SWEEP_REMOVED=$((_SWEEP_REMOVED+1))
                     else
-                        echo "sweep: could not fully remove orphaned worktree corpse $dir — what is left needs a human"
+                        echo "sweep: could not fully remove orphaned worktree corpse $dir — what is left needs a human"; _sweep_hold "$dir" partial-corpse
                     fi ;;
                 *) : ;;                      # not provably ours — never touch
             esac
         fi
     done
     git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+    _sweep_report
     return 0
 }
 
@@ -1228,14 +1321,34 @@ _spawn_stage_brief() {
     [ -z "$_slash" ] || die "spawn-lane: brief '$brief' tells the session to invoke $_slash —
   a headless session has no slash commands (P68). Inline the work that skill
   would do into the brief instead of naming it."
-    cp "$brief" "$abs/.lane-brief-$id.md" || die "spawn-lane: cannot copy brief into $abs"
+    # P82, the other half: the SOURCE brief must not live in a working tree
+    # either. `spawn-lane`'s own copy is what made every worktree unsweepable,
+    # but a wave writing its source brief into the worktree does the same
+    # damage by hand — build-5 held worktrees on `.gate-brief-114.md` and
+    # `.impl-brief-128.md`, neither of which this function can produce. The
+    # convention already existed (`lane.sh scratch`); nothing enforced it.
+    local _bdir="" _bpath=""
+    _bdir=$(cd "$(dirname "$brief")" 2>/dev/null && pwd -P) \
+        || die "spawn-lane: cannot resolve the directory of --brief '$brief'"
+    _bpath="$_bdir/$(basename "$brief")"
+    local _tree=""
+    for _tree in "$REPO_ROOT" "$abs"; do
+        [ -n "$_tree" ] || continue
+        local _t=""; _t=$(cd "$_tree" 2>/dev/null && pwd -P) || continue
+        case "$_bpath" in
+            "$_t"/*) die "spawn-lane: --brief '$brief' is inside the working tree $_t —
+  a brief there is untracked work to every git-facing guard, and sweep will keep
+  that worktree forever (P82). Write it where \`lane.sh scratch\` points instead." ;;
+        esac
+    done
+    cp "$brief" "$BRIEFS_DIR/$id.md" || die "spawn-lane: cannot copy brief into $BRIEFS_DIR"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless
     # survival rules the probe brief alone used to carry. They are facts
     # about the execution environment, not about probing, and a wave asked
     # to remember them forgets them: three dead or wedged spawns in
     # ai-workout build-1, one of them ending "the harness will notify me
     # automatically" over a background build that could never wake it.
-    cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+    cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 
 ## Headless execution rules (appended by spawn-lane — they bind every lane)
 - No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns, and ScheduleWakeup is denied on your command line — there is no main loop to resume you, so scheduling a wakeup ends the session with the job unfinished.
@@ -1254,7 +1367,7 @@ BRIEFEOF
     # being told its bullet was unsatisfiable, which is the one case more
     # rounds cannot help.
     if [ "$(_lane_type "$id")" = impl ]; then
-        cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
 - A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
 BRIEFEOF
@@ -1262,7 +1375,7 @@ BRIEFEOF
     local _hit=0 _prev=""
     for _b in "$@"; do
         if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
-            _brf+=("Read the file .lane-brief-$id.md in your working directory and execute it as your complete brief.")
+            _brf+=("Read the file $BRIEFS_DIR/$id.md and execute it as your complete brief.")
             _hit=1
         else
             _brf+=("$_b")
@@ -1989,6 +2102,13 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
 
 cmd_notify() {
     local event="$1" title="$2" body="$3" click="${4:-}"
+    # P85: a build that reports complete while leaving worktrees behind is
+    # reporting on part of its own work. build-5 posted its completion report
+    # and unloaded the agent with thirty standing, and said nothing. Appended
+    # here rather than asked of the wave, so it cannot be forgotten.
+    case "$event" in
+        build_complete|build_halted) body="$body$(_sweep_held_summary)" ;;
+    esac
     local topic events
     topic=$(cfg_ntfy_topic)
     events=" $(cfg_ntfy_events) "

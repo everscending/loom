@@ -142,8 +142,10 @@ implement → gate → merge without bouncing off the scheduler twice. Every
 handoff is allowed to fail — merge lock held, session died, a cap reached —
 and nothing depends on one: the numbered steps below do the same work next
 wave regardless. Briefs travel as files, never inline prompts:
-`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it in, appends
-the headless execution rules, and swaps the placeholder for a pointer prompt.
+`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it to the run
+directory, appends the headless rules, and swaps the placeholder for a pointer
+prompt. **Write the source where `lane.sh scratch` points** — a brief inside the
+repo or the lane's worktree is refused *(paid: 30 worktrees never swept)*.
 Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
 invoke — headless has no slash commands, so inline that work instead. The flag
 and the placeholder are a pair: either one without the other is refused, since
@@ -513,8 +515,9 @@ refuses outside herdr anyway.
    `build_complete` (ready set empty, no lanes, **and
    `summary.epics_awaiting_probe` empty** — an unaccepted epic means the build
    is not finished, however many tickets merged). On complete: post the
-   completion report — each PRD requirement → evidence links — then the
-   digest, then **close the `Build N` issue itself** via `lane.sh close`.
+   completion report — each PRD requirement → evidence links, plus any
+   worktrees `sweep` kept (`tick.sh notify` appends them) — then the digest,
+   then **close the `Build N` issue itself** via `lane.sh close`.
    Snapshot defines the *current* build as the highest open `Build N` issue,
    so a finished one left open is ambiguity every later snapshot re-warns
    about. Append wave learnings to ticket threads / the Build issue.
