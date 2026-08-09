@@ -263,15 +263,40 @@ Fifteen of build-5's 30 leftovers were held this way, every one showing the same
 The ticket was closed, the MR was merged, and main contained the work. Only the local topology
 disagreed.
 
-**Fix direction.** Ask for the fact rather than a proxy for it. Sweep already knows the branch name,
-and the tracker knows whether that branch's MR is `merged` and its ticket closed — the same query
+A second branch shows the same divergence with a different history: ticket #71 merged as `b31aa05`
+(MR !70), and its local branch then took one more reconcile merge and sits permanently ahead. Both
+shapes are one failure — the range is asked about the **local** tip, while the merge happened to the
+**pushed** tip.
+
+**The constraint any fix must satisfy.** A closed ticket does not make a branch disposable, and one
+branch in this repo proves it. Ticket #67 shipped as `bbac984` from `ticket-67-pending-turn-bound`
+(MR !66). A separate branch, `ticket-67-realtime-turn-mark-pairing`, carried three commits and a
+238-line variant of that fix which never merged in any form — `2 files changed, 238 insertions(+),
+1 deletion(-)` against its merge-base, measured 2026-08-09. The range test sees those three commits,
+declines, and is **right** to — that is the guard doing its job, and the work is real.
+
+That branch was queued for deletion in the hand-cleanup the same day, so the numbers above are the
+record. This section stands on them, not on anyone being able to reproduce the branch later.
+
+So the tracker's answer here is not "this branch is disposable". The tracker knows #67 is closed; it
+does not know that this particular branch was the abandoned attempt. Any fix keyed on *ticket*
+state deletes this worktree and those 238 lines — D-TICK-17 (boostlingo build-4 #98, ~100 turns
+lost) arriving through a different door, with a real branch rather than a hypothetical to prove it.
+
+**Fix direction.** Ask for the fact rather than a proxy for it, and make the fact **branch-keyed**:
+does an MR whose `source_branch` is *this branch* exist in state `merged`? That is the same query
 `lane.sh merge` makes to verify a landing. Read that, and treat the commit range as a secondary
 check rather than the decision.
 
+**Never key it on ticket state.** A branch with no merged MR of its own is never swept, however
+closed its ticket is. That single rule is what keeps the #67 branch — and every future abandoned
+attempt at a shipped ticket — out of the delete path.
+
 The cheap variant, if a tracker read per worktree is judged too expensive at sweep time: compare
-against `origin/<branch>` — the pushed tip — instead of the local one, which is what the MR
-actually merged. That fixes this failure without a network call, but it still infers rather than
-reads, and it will not notice a branch whose MR was closed unmerged.
+against `origin/<branch>` — the pushed tip — instead of the local one, which is what the MR actually
+merged. It fixes the 15-worktree case and #71 without a network call, and it declines the #67 branch
+correctly for the wrong reason (no remote counterpart survives). It still infers rather than reads,
+and it cannot see a branch whose MR was closed unmerged.
 
 Either variant must keep `tick.sh:226`'s exit-status handling intact (P47: an unresolvable range
 must abort, never read as "merged").
@@ -282,6 +307,10 @@ signal:
 - A worktree whose branch merged, and whose local tip carries an extra unpushed merge commit, is
   swept. Shown failing with the current local-range test restored — this is the 15-worktree case.
 - A worktree whose branch was never merged is never swept, no matter what the range says.
+- **A branch whose ticket is closed by a *different* branch's MR is not swept.** This is the #67
+  shape, and it is the test that fails the moment anyone keys the query on ticket state instead of
+  on the branch's own merged MR. The fixture builds the shape; it does not depend on that branch
+  still existing.
 - A branch whose MR was closed **unmerged** is not swept. The cheap variant fails this one by
   construction, so if it ships, this test is what records the gap rather than leaving it implied.
 - An unresolvable base ref still aborts that worktree's sweep with its reason (P47), shown failing
