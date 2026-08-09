@@ -14,7 +14,7 @@
 BR="$T/briefs"; mkdir -p "$BR/wt"
 printf 'Implement ticket 12 in this worktree. Run the tier gate before pushing.\n' > "$BR/clean.md"
 "$TICK" spawn-lane impl-71 --no-tick --cwd "$BR/wt" --brief "$BR/clean.md" -- true -p @brief >/dev/null 2>&1
-COMPOSED="$BR/wt/.lane-brief-impl-71.md"
+COMPOSED="$LOOM_HOME/briefs/impl-71.md"
 if [ -f "$COMPOSED" ] && grep -q 'Implement ticket 12' "$COMPOSED" \
    && grep -q 'every step blocks' "$COMPOSED" \
    && grep -q 'wait-ready --timeout' "$COMPOSED" \
@@ -46,7 +46,7 @@ fi
 printf 'Run /implement 12 and report back.\n' > "$BR/slash.md"
 out=$("$TICK" spawn-lane impl-72 --no-tick --cwd "$BR/wt" --brief "$BR/slash.md" -- true -p @brief 2>&1); rc_code=$?
 if [ "$rc_code" -ne 0 ] && case "$out" in *"/implement"*) true;; *) false;; esac \
-   && [ ! -f "$BR/wt/.lane-brief-impl-72.md" ] && [ ! -f "$LOOM_HOME/lanes/impl-72.pid" ]; then
+   && [ ! -f "$LOOM_HOME/briefs/impl-72.md" ] && [ ! -f "$LOOM_HOME/lanes/impl-72.pid" ]; then
     ok "P68: a brief instructing a skill invocation is refused, and nothing spawns"
 else
     bad "P68: slash-command brief accepted (rc=$rc_code) — $out"
@@ -55,7 +55,7 @@ fi
 # not an invocation; refusing it would push waves back to inline prompts.
 printf 'Edit src/implement/queue.ts; the loom/gate script stays as is.\n' > "$BR/pathy.md"
 "$TICK" spawn-lane impl-73 --no-tick --cwd "$BR/wt" --brief "$BR/pathy.md" -- true -p @brief >/dev/null 2>&1
-[ -f "$BR/wt/.lane-brief-impl-73.md" ] \
+[ -f "$LOOM_HOME/briefs/impl-73.md" ] \
     && ok "P68: a path that merely contains a skill name is not a slash command" \
     || bad "P68: false positive — a plain path was read as a skill invocation"
 
@@ -75,8 +75,8 @@ fi
 # Implementer instructions, and only the implementer's: a reviewer told to
 # publish the mapping would be reading someone else's job off its own brief.
 "$TICK" spawn-lane gate-74 --no-tick --cwd "$BR/wt" --brief "$BR/clean.md" -- true -p @brief >/dev/null 2>&1
-if grep -q 'every step blocks' "$BR/wt/.lane-brief-gate-74.md" 2>/dev/null \
-   && ! grep -q 'the test function that asserts it' "$BR/wt/.lane-brief-gate-74.md" 2>/dev/null; then
+if grep -q 'every step blocks' "$LOOM_HOME/briefs/gate-74.md" 2>/dev/null \
+   && ! grep -q 'the test function that asserts it' "$LOOM_HOME/briefs/gate-74.md" 2>/dev/null; then
     ok "P31: a gate brief gets the headless rules and not the implementer's mapping duty"
 else
     bad "P31: the mapping requirement leaked into a non-impl brief"
@@ -110,5 +110,81 @@ fi
 [ -f "$LOOM_HOME/lanes/gate-77.pid" ] \
     && ok "D-TICK-18: a command with no placeholder and no brief still spawns" \
     || bad "D-TICK-18: false positive — a plain prompt was refused"
+
+# --- P82: a brief never lands in a working tree ---------------------------
+# Five builds, thirty worktrees, none ever swept. Half were held by nothing but
+# the brief sitting in them: `git status --porcelain` lists it, sweep's
+# unsaved-work guard (D-TICK-17) reads untracked as a lane's unsaved work, and
+# keeps the worktree forever. The guard is right; the brief's location was not.
+P82WT="$BR/p82wt"; mkdir -p "$P82WT"
+git -C "$P82WT" init -q 2>/dev/null
+printf 'Do the thing.\n' > "$BR/p82.md"
+"$TICK" spawn-lane impl-82 --no-tick --cwd "$P82WT" --brief "$BR/p82.md" -- true -p @brief >/dev/null 2>&1
+if [ -z "$(git -C "$P82WT" status --porcelain 2>/dev/null)" ]; then
+    ok "P82: a spawned lane leaves its worktree clean — nothing for sweep to hold"
+else
+    bad "P82: the worktree still holds untracked work after a spawn ($(git -C "$P82WT" status --porcelain | head -1))"
+fi
+# ...and it landed in the run directory instead, where the pid files and locks
+# already live.
+[ -s "$LOOM_HOME/briefs/impl-82.md" ] \
+    && ok "P82: the composed brief lives in the run directory" \
+    || bad "P82: no brief at \$LOOM_HOME/briefs/impl-82.md"
+# The pointer prompt must name it ABSOLUTELY. The old prompt said "in your
+# working directory"; the file is no longer beside the session's cwd, so a
+# relative pointer would send every lane looking for a file that is not there.
+capture_spawn_argv() { # <id> <brief> — prints the argv the lane was launched with
+    local av="$T/p82-argv-$1"; rm -f "$av"
+    cat > "$T/p82-cmd.sh" <<EOS
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$av"
+EOS
+    chmod +x "$T/p82-cmd.sh"
+    "$TICK" spawn-lane "$1" --no-tick --cwd "$P82WT" --brief "$2" -- "$T/p82-cmd.sh" -p @brief >/dev/null 2>&1
+    sleep 0.4; cat "$av" 2>/dev/null
+}
+argv=$(capture_spawn_argv impl-83 "$BR/p82.md")
+case "$argv" in
+    *"$LOOM_HOME/briefs/impl-83.md"*) ok "P82: the pointer prompt names the brief by absolute path" ;;
+    *) bad "P82: pointer prompt does not carry the absolute brief path ($(printf '%s' "$argv" | tr '\n' ' ' | cut -c1-140))" ;;
+esac
+
+# The other half: the SOURCE brief. spawn-lane's copy was only one of the three
+# filename shapes found in build-5 — `.gate-brief-114.md` and `.impl-brief-128.md`
+# were written into the worktree by waves, and this function could not produce
+# either. The convention (`lane.sh scratch`) existed; nothing enforced it.
+printf 'Do the thing.\n' > "$P82WT/in-tree-brief.md"
+out=$("$TICK" spawn-lane impl-84 --no-tick --cwd "$P82WT" --brief "$P82WT/in-tree-brief.md" -- true -p @brief 2>&1); rc_code=$?
+if [ "$rc_code" -ne 0 ] && case "$out" in *"lane.sh scratch"*) true;; *) false;; esac; then
+    ok "P82: a brief written inside the lane worktree is refused, naming lane.sh scratch"
+else
+    bad "P82: in-worktree brief accepted (rc=$rc_code) — $out"
+fi
+printf 'Do the thing.\n' > "$LOOM_REPO/in-repo-brief.md"
+out=$("$TICK" spawn-lane impl-85 --no-tick --cwd "$P82WT" --brief "$LOOM_REPO/in-repo-brief.md" -- true -p @brief 2>&1); rc_code=$?
+[ "$rc_code" -ne 0 ] \
+    && ok "P82: a brief inside the repo root is refused too" \
+    || bad "P82: a brief in the repo root was accepted"
+rm -f "$LOOM_REPO/in-repo-brief.md"
+# The accepting direction, or the refusal would just be a ban on briefs.
+out=$("$TICK" spawn-lane impl-86 --no-tick --cwd "$P82WT" --brief "$(cd "$BR" && pwd -P)/p82.md" -- true -p @brief 2>&1); rc_code=$?
+[ "$rc_code" -eq 0 ] \
+    && ok "P82: a brief outside every working tree is accepted" \
+    || bad "P82: a scratch-side brief was refused (rc=$rc_code) — $out"
+
+# P75 pin: the refusal is above the destructive line, so a brief rejected for
+# its location leaves the previous run's log and rc byte-identical.
+prev_rc=$(cat "$LOOM_HOME/lanes/impl-86.rc" 2>/dev/null || echo missing)
+prev_log=$(cksum "$LOOM_HOME/logs/lane-impl-86.log" 2>/dev/null || echo missing)
+printf 'Do the thing.\n' > "$P82WT/again.md"
+"$TICK" spawn-lane impl-86 --no-tick --cwd "$P82WT" --brief "$P82WT/again.md" -- true -p @brief >/dev/null 2>&1
+now_rc=$(cat "$LOOM_HOME/lanes/impl-86.rc" 2>/dev/null || echo missing)
+now_log=$(cksum "$LOOM_HOME/logs/lane-impl-86.log" 2>/dev/null || echo missing)
+if [ "$prev_rc" = "$now_rc" ] && [ "$prev_log" = "$now_log" ]; then
+    ok "P82: a location refusal destroys nothing — prior rc and log untouched"
+else
+    bad "P82: the refused spawn clobbered the previous run (rc $prev_rc->$now_rc)"
+fi
+
 
 test_finish

@@ -85,6 +85,11 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
+# P82: a lane's brief lives HERE, never in the working tree it is about.
+# `spawn-lane` used to copy it to $cwd/.lane-brief-<id>.md, which made every
+# lane worktree hold an untracked file by construction, so sweep's
+# unsaved-work guard (D-TICK-17) kept all 30 of them across five builds.
+BRIEFS_DIR="$LOOM_HOME/briefs"
 # Every session gets its own scratch directory here (P17). Fixed paths were the
 # bug: a wave wrote /tmp/wave-note-16.md, a stale file of that name from an
 # earlier wave won, and its content was posted as a comment on the wrong ticket.
@@ -107,7 +112,7 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 # pane.
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 
-mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT"
+mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -1228,14 +1233,34 @@ _spawn_stage_brief() {
     [ -z "$_slash" ] || die "spawn-lane: brief '$brief' tells the session to invoke $_slash —
   a headless session has no slash commands (P68). Inline the work that skill
   would do into the brief instead of naming it."
-    cp "$brief" "$abs/.lane-brief-$id.md" || die "spawn-lane: cannot copy brief into $abs"
+    # P82, the other half: the SOURCE brief must not live in a working tree
+    # either. `spawn-lane`'s own copy is what made every worktree unsweepable,
+    # but a wave writing its source brief into the worktree does the same
+    # damage by hand — build-5 held worktrees on `.gate-brief-114.md` and
+    # `.impl-brief-128.md`, neither of which this function can produce. The
+    # convention already existed (`lane.sh scratch`); nothing enforced it.
+    local _bdir="" _bpath=""
+    _bdir=$(cd "$(dirname "$brief")" 2>/dev/null && pwd -P) \
+        || die "spawn-lane: cannot resolve the directory of --brief '$brief'"
+    _bpath="$_bdir/$(basename "$brief")"
+    local _tree=""
+    for _tree in "$REPO_ROOT" "$abs"; do
+        [ -n "$_tree" ] || continue
+        local _t=""; _t=$(cd "$_tree" 2>/dev/null && pwd -P) || continue
+        case "$_bpath" in
+            "$_t"/*) die "spawn-lane: --brief '$brief' is inside the working tree $_t —
+  a brief there is untracked work to every git-facing guard, and sweep will keep
+  that worktree forever (P82). Write it where \`lane.sh scratch\` points instead." ;;
+        esac
+    done
+    cp "$brief" "$BRIEFS_DIR/$id.md" || die "spawn-lane: cannot copy brief into $BRIEFS_DIR"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless
     # survival rules the probe brief alone used to carry. They are facts
     # about the execution environment, not about probing, and a wave asked
     # to remember them forgets them: three dead or wedged spawns in
     # ai-workout build-1, one of them ending "the harness will notify me
     # automatically" over a background build that could never wake it.
-    cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+    cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 
 ## Headless execution rules (appended by spawn-lane — they bind every lane)
 - No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns, and ScheduleWakeup is denied on your command line — there is no main loop to resume you, so scheduling a wakeup ends the session with the job unfinished.
@@ -1254,7 +1279,7 @@ BRIEFEOF
     # being told its bullet was unsatisfiable, which is the one case more
     # rounds cannot help.
     if [ "$(_lane_type "$id")" = impl ]; then
-        cat >> "$abs/.lane-brief-$id.md" <<BRIEFEOF
+        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
 - A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
 BRIEFEOF
@@ -1262,7 +1287,7 @@ BRIEFEOF
     local _hit=0 _prev=""
     for _b in "$@"; do
         if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
-            _brf+=("Read the file .lane-brief-$id.md in your working directory and execute it as your complete brief.")
+            _brf+=("Read the file $BRIEFS_DIR/$id.md and execute it as your complete brief.")
             _hit=1
         else
             _brf+=("$_b")

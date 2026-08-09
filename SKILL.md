@@ -142,8 +142,10 @@ implement → gate → merge without bouncing off the scheduler twice. Every
 handoff is allowed to fail — merge lock held, session died, a cap reached —
 and nothing depends on one: the numbered steps below do the same work next
 wave regardless. Briefs travel as files, never inline prompts:
-`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it in, appends
-the headless execution rules, and swaps the placeholder for a pointer prompt.
+`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it to the run
+directory, appends the headless rules, and swaps the placeholder for a pointer
+prompt. **Write the source where `lane.sh scratch` points** — a brief inside the
+repo or the lane's worktree is refused *(paid: 30 worktrees never swept)*.
 Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
 invoke — headless has no slash commands, so inline that work instead. The flag
 and the placeholder are a pair: either one without the other is refused, since

@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P82 | The lane brief does not live in the working tree | open — proposed 2026-08-09; `spawn-lane` writes the brief into the worktree, so every lane worktree contains an untracked file by construction and sweep's unsaved-work guard keeps it forever. 15 of 30 held worktrees in ai-interpreter-workbench build-5 |
 | P83 | "Merged" is a tracker fact, not a commit-range guess | open — proposed 2026-08-09; a lane that reconciles after pushing leaves an unpushed merge commit, so `origin/<base>..<branch>` is never empty and sweep reads merged work as unmerged. The other 15 of the same 30 |
 | P84 | Branch hygiene is owned, not inherited | open — proposed 2026-08-09; the remote stayed clean only because this GitLab project happens to set `remove_source_branch_after_merge`, which loom neither sets nor checks. Locally nothing prunes: 51 `ticket-*` branches and 122 stale `origin/ticket-*` tracking refs after five builds |
 | P85 | Sweep reports what it kept | open — proposed 2026-08-09; sweep prints "kept, needs a human" to the wave log, emits no event, and reaches no human surface. It announced this problem on every tick for five builds and nobody saw it |
@@ -180,67 +179,6 @@ both are paid for by real incidents. What is wrong is that the loop *manufacture
 that trip them, so the guards fire on every worktree rather than on the rare unsafe one. P82 and
 P83 remove those two conditions. P84 covers branches, which no step owns at all. P85 is why it
 stayed invisible for five builds.
-
-## P82 · The lane brief does not live in the working tree
-
-**Problem.** `tick.sh:1231` copies each lane's brief into its worktree as
-`.lane-brief-<id>.md`. Sweep's unsaved-work guard (`tick.sh:253`) treats any untracked,
-non-ignored file as a lane's uncommitted work and keeps the worktree, printing "merged but holds
-untracked work git does not ignore — kept, needs a human" (`tick.sh:256`).
-
-So every lane worktree is guaranteed, by construction, to contain at least one file that makes it
-unsweepable. In build-5's 30 leftovers, 15 were held by a brief and nothing else.
-
-**Two different writers put briefs there, and only one of them is `spawn-lane`.** The held files
-came in three shapes — `.lane-brief-impl-113.md`, `.gate-brief-114.md`, `.impl-brief-128.md` — and
-only the first can come from `tick.sh:1231`, whose filename is always `.lane-brief-<id>.md`. The
-other two are **source** briefs, written into the worktree by the wave before being passed to
-`--brief`. `lane.sh scratch` exists to give that file a path outside the repo
-(`$LOOM_HOME/scratch/…`), and SKILL.md says briefs travel as files, but nothing refuses one written
-somewhere else. The codebase already records the consequence: the D-TICK-18 comment at
-`tick.sh:1206` describes a gate lane that asked three times "which of six brief-shaped files it was
-meant to read".
-
-Fixing only `spawn-lane`'s copy therefore fixes only one of the three shapes, and those worktrees
-stay unsweepable.
-
-The guard itself must not be weakened. It was added as D-TICK-17 after the `grep -v '^??'` version
-filtered untracked files and armed `rm -rf` over ~100 turns of uncommitted work (boostlingo
-build-4 #98). The problem is the brief's location, not the rule.
-
-**Fix direction.** Keep the brief out of the repository working tree entirely. `spawn-lane` writes
-it to the run directory — `$LOOM_HOME/briefs/<lane-id>.md`, alongside the pid files and locks it
-already owns there — and passes an absolute path to the session. The worktree stays pristine, the
-guard keeps protecting what it was built to protect, and no target repo needs a `.gitignore` line
-for a file this skill invented.
-
-**And close the other half in the same place.** `spawn-lane` already validates the source brief —
-it refuses one that is unreadable or empty, and one that names a slash command (P68) — so it is the
-natural place to refuse one whose path resolves inside the target repo's working tree, naming
-`lane.sh scratch` as where it belongs. That converts an unwritten convention into a refusal, which
-is how every other brief rule in this function is enforced.
-
-A `.gitignore` entry in each bootstrapped repo is the cheaper variant and also works, since
-`git status --porcelain` never lists ignored paths. It is worse in three ways: it is a per-repo
-artifact that every future repo must acquire, it makes the skill's scratch files invisible to
-`git status` for the human as well, and it would have to enumerate all three filename shapes above
-rather than removing the cause.
-
-**Tests.**
-
-- A lane spawned with `--brief` leaves `git status --porcelain` empty in its worktree; shown
-  failing with the copy restored to the worktree path.
-- The brief lands at `$LOOM_HOME/briefs/<lane-id>.md` and the pointer prompt names that absolute
-  path — the placeholder swap keeps working when the file is no longer beside the session's cwd.
-- `spawn-lane` refuses a `--brief` whose path resolves inside the target repo working tree, and the
-  message names `lane.sh scratch`; a brief under the scratch root is accepted. Both directions, and
-  the refusal shown passing once the guard is removed.
-- The refusal sits **above** the destructive line (P75): a brief refused for its location leaves the
-  previous run's log and `.rc` byte-identical.
-- End to end: `sweep` removes a merged worktree in which a lane has run — the case that has never
-  once succeeded in five builds.
-
-**Consumer.** `tick.sh sweep`, which currently cannot remove a single merged worktree.
 
 ## P83 · "Merged" is a tracker fact, not a commit-range guess
 
