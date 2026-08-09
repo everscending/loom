@@ -12,6 +12,22 @@
 # only leftovers are untracked files is the COMMON case, so sweep never worked:
 # merged worktrees accumulated and a wave removed one by hand (2026-08-03).
 SW="$T/sweep"; mkdir -p "$SW"
+# P83: sweep now asks the tracker whether THIS BRANCH's own MR merged, so the
+# section needs a glab that answers without a network. Default: no branch has a
+# merged MR, which drops every existing case back onto the commit-range test and
+# is exactly the old behaviour. $SWEEP_MERGED names the branches that did merge.
+cat > "$SW/glab-stub.sh" <<'GLABEOF'
+#!/usr/bin/env bash
+q=""; for a in "$@"; do case "$a" in *source_branch=*) q="$a" ;; esac; done
+br="${q##*source_branch=}"; br="${br%%&*}"
+if [ -n "${SWEEP_MERGED:-}" ] && printf '%s' " $SWEEP_MERGED " | grep -q " $br "; then
+    printf '[{"iid":1,"state":"merged","source_branch":"%s"}]\n' "$br"
+else
+    printf '[]\n'
+fi
+GLABEOF
+chmod +x "$SW/glab-stub.sh"
+export GLAB_CMD="$SW/glab-stub.sh"
 git -c init.defaultBranch=main init -q --bare "$SW/origin.git"
 git clone -q "$SW/origin.git" "$SW/repo" 2>/dev/null
 git -C "$SW/repo" config user.email t@t; git -C "$SW/repo" config user.name t
@@ -145,5 +161,91 @@ if [ "$(id -u)" != 0 ]; then
 else
     echo "note: running as root — the two unremovable-directory cases cannot be staged, so they did not run"
 fi
+
+# --- P83: "merged" is a tracker fact, not a commit-range guess -------------
+# `lane.sh reconcile` merges origin/<base> into the branch. Run once more after
+# the push whose MR merged, the local tip carries a merge commit that was never
+# pushed, so origin/<base>..<branch> is non-empty FOREVER and the worktree is
+# permanently unsweepable. Fifteen of build-5's thirty held worktrees were this,
+# every one showing a single unpushed reconcile merge.
+# The shape that produces it: GitLab merged the MR by squash, so main carries an
+# EQUIVALENT commit with a different sha, and the branch's own commit is never an
+# ancestor of main. The reconcile merge is then a real merge, not a fast-forward,
+# and the range is non-empty forever. (Build-5's example named both shas:
+# cd520f8 the pushed tip, e583729 what landed on main.)
+git -C "$SW/repo" checkout -q main
+git -C "$SW/repo" checkout -qb ticket-96-reconciled
+echo p83 > "$SW/repo/p83"; git -C "$SW/repo" add p83; git -C "$SW/repo" commit -qm p83
+git -C "$SW/repo" checkout -q main
+echo p83 > "$SW/repo/p83"; git -C "$SW/repo" add p83
+git -C "$SW/repo" commit -qm 'p83 (squashed onto main, different sha)'
+git -C "$SW/repo" push -q origin main
+git -C "$SW/repo" worktree add -q "$SW/repo-wt-96" ticket-96-reconciled 2>/dev/null
+git -C "$SW/repo-wt-96" -c user.email=t@t -c user.name=t merge -q --no-edit origin/main 2>/dev/null
+[ -n "$(git -C "$SW/repo" log "origin/main..ticket-96-reconciled" --oneline 2>/dev/null)" ] \
+    && ok "P83-setup: the reconciled branch really is ahead of base — the old test would keep it" \
+    || bad "P83-setup: fixture does not reproduce the unpushed reconcile merge"
+SWEEP_MERGED="ticket-96-reconciled" LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >"$SW/out96" 2>&1
+[ ! -e "$SW/repo-wt-96" ] \
+    && ok "P83: a branch whose own MR merged is swept even with an unpushed reconcile merge on top" \
+    || bad "P83: the reconciled worktree survived ($(head -1 "$SW/out96"))"
+
+# Planted violation: the identical worktree, with the tracker answering "no
+# merged MR" so the commit range decides as it used to. It must be kept — that
+# is the failure this proposal is about, reproduced on demand.
+git -C "$SW/repo" checkout -q main
+git -C "$SW/repo" checkout -qb ticket-97-reconciled
+echo p83b > "$SW/repo/p83b"; git -C "$SW/repo" add p83b; git -C "$SW/repo" commit -qm p83b
+git -C "$SW/repo" checkout -q main
+echo p83b > "$SW/repo/p83b"; git -C "$SW/repo" add p83b
+git -C "$SW/repo" commit -qm 'p83b (squashed onto main, different sha)'
+git -C "$SW/repo" push -q origin main
+git -C "$SW/repo" worktree add -q "$SW/repo-wt-97" ticket-97-reconciled 2>/dev/null
+git -C "$SW/repo-wt-97" -c user.email=t@t -c user.name=t merge -q --no-edit origin/main 2>/dev/null
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
+[ -e "$SW/repo-wt-97" ] \
+    && ok "P83-violation: with the range deciding, the reconciled worktree is kept — the old failure" \
+    || bad "P83-violation: worktree removed with no merged MR to justify it"
+
+# THE constraint. #67 shipped as bbac984 from ticket-67-pending-turn-bound;
+# ticket-67-realtime-turn-mark-pairing sat beside it with three commits and a
+# 238-line variant that merged in no form. The ticket was closed and the feature
+# live, so any fix keyed on TICKET state deletes this worktree and those lines —
+# D-TICK-17 through another door. Nothing at sweep time separates a discarded
+# draft from live work; only the branch's own merged MR may decide.
+git -C "$SW/repo" worktree add -q "$SW/repo-wt-67" -b ticket-67-abandoned origin/main 2>/dev/null
+echo draft > "$SW/repo-wt-67/draft.txt"; git -C "$SW/repo-wt-67" add draft.txt
+git -C "$SW/repo-wt-67" -c user.email=t@t -c user.name=t commit -qm 'rejected first draft'
+# the ticket's OTHER branch is the one that merged — ticket state says "closed"
+SWEEP_MERGED="ticket-67-shipped" LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
+if [ -e "$SW/repo-wt-67" ] && [ -f "$SW/repo-wt-67/draft.txt" ]; then
+    ok "P83: a branch whose ticket closed via a DIFFERENT branch's MR is not swept"
+else
+    bad "P83: the abandoned #67-shape branch was deleted — ticket state reached the delete path"
+fi
+
+# An MR that was closed UNMERGED is not a merge. The query asks state=merged, so
+# this is the same "no" as never having opened one — assert it, or the cheap
+# variant's gap would be implied rather than recorded.
+git -C "$SW/repo" worktree add -q "$SW/repo-wt-68" -b ticket-68-rejected origin/main 2>/dev/null
+echo rej > "$SW/repo-wt-68/rej.txt"; git -C "$SW/repo-wt-68" add rej.txt
+git -C "$SW/repo-wt-68" -c user.email=t@t -c user.name=t commit -qm 'closed unmerged'
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
+[ -e "$SW/repo-wt-68" ] \
+    && ok "P83: a branch whose MR was closed unmerged is not swept" \
+    || bad "P83: a closed-unmerged branch was swept"
+
+# The tracker being unreadable is not an answer. A glab that fails must drop
+# sweep back to the conservative range test, never to "merged".
+cat > "$SW/glab-dead.sh" <<'DEADEOF'
+#!/usr/bin/env bash
+echo "fatal: could not read the board" >&2; exit 1
+DEADEOF
+chmod +x "$SW/glab-dead.sh"
+GLAB_CMD="$SW/glab-dead.sh" LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >/dev/null 2>&1
+[ -e "$SW/repo-wt-67" ] \
+    && ok "P83: an unreadable tracker falls back to the range test, and keeps the work" \
+    || bad "P83: a failed board read reached the delete path"
+
 
 test_finish

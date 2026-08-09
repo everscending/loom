@@ -182,6 +182,20 @@ _sweep_env_backup() {
     cp "$d/.env" "$dst/$(basename "$d").env" 2>/dev/null || true
 }
 
+# P83: does an MR whose SOURCE BRANCH is this one exist in state `merged`?
+# rc 0 yes, 1 a real "no", 2 the tracker could not be read. The distinction
+# between 1 and 2 is the whole point: a definite "no merged MR" is a decision,
+# an unreadable board is not, and only the first may keep a worktree on its own.
+# Read-only, like everything else in this script.
+_branch_merged() { # <branch>
+    local br="$1" out=""
+    [ -n "$br" ] || return 2
+    out=$(_glab_list --capped "projects/:id/merge_requests?source_branch=$br&state=merged&per_page=1" 2>/dev/null) || return 2
+    printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
+    printf '%s' "$out" | jq -e 'length > 0' >/dev/null 2>&1 && return 0
+    return 1
+}
+
 cmd_sweep() {
     local base dir name branch st gd dir_p root_p
     # git always reports worktrees by their PHYSICAL path, so a REPO_ROOT
@@ -221,6 +235,30 @@ cmd_sweep() {
         if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $dir_p"; then
             branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
             [ -n "$branch" ] || continue
+            # P83: ask the tracker whether THIS BRANCH landed, because the
+            # commit range answers a different question. `lane.sh reconcile`
+            # merges origin/<base> into the branch; run once more after the
+            # push the MR merged, the local tip carries a merge commit that was
+            # never pushed and is unreachable from the base forever. Fifteen of
+            # build-5's thirty held worktrees were exactly that: ticket closed,
+            # MR merged, main holding the work, only the local topology
+            # disagreeing.
+            if _branch_merged "$branch"; then
+                :                            # this branch's own MR is merged
+            else
+            # NEVER key this on ticket state. #67 shipped as bbac984 from
+            # ticket-67-pending-turn-bound while ticket-67-realtime-turn-mark-pairing
+            # sat beside it holding three commits and a 238-line variant that
+            # merged in no form at all. Nothing at sweep time separates a
+            # discarded draft from live work — both are commits on a branch
+            # with no merged MR of its own — so "the ticket is closed" would
+            # have armed rm -rf over it. That is D-TICK-17 through another door.
+            #
+            # With no merged MR, the range test decides, and it decides only
+            # the safe direction: empty means nothing to lose (a probe
+            # worktree, or a lane that never committed), so sweeping costs
+            # nothing. Anything ahead of base stays.
+            #
             # P47: `git log A..B` cannot tell "no commits ahead" from "range
             # does not resolve" once its own exit status is thrown away — an
             # unfetched or missing base ref used to read as "merged" and arm
@@ -235,6 +273,7 @@ cmd_sweep() {
             fi
             if [ -n "$_ahead" ]; then
                 continue                     # unmerged work — not ours to touch
+            fi
             fi
             # `|| true` is load-bearing: under `set -euo pipefail`, a `grep -v`
             # that filters out every line exits 1, pipefail propagates it to the

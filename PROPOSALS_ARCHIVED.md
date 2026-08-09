@@ -81,6 +81,7 @@ writing a new proposal that touches the same machinery.
 | P79 | A fix ticket cannot close over untracked residue | implemented 2026-08-08 (`references/ticket-template.md` gains a **Terminal condition** block required of every `fix` ticket — zero, or an accepted-residue threshold carrying its number, its measurement and its reason; the phase-4 check list gains an *Ends* bucket that catches a fix ticket without one; SKILL.md step 3 makes the gate read it — residue above the threshold is a FAIL, at or under it a PASS requires the follow-up already filed with `lane.sh fix-ticket` and its IID named in that same verdict comment, and a fix ticket stating no terminal condition FAILs as a phase-4 escape. Docs only; nothing in `tick.sh`) |
 | P80 | First live contact happens inside the epic, not after it | implemented 2026-08-08 (`references/ticket-template.md` gains a **Live check** block: a ticket claiming something about the running app carries one acceptance criterion exercised against it, scoped to that ticket's own claim, run in the implementation lane and recording the artifact the gate reads — gates still never call live providers. Deferral for billable provider spend stays legal as a written decision; silence is not deferral. `references/phases-1-5.md` adds the block to the phase-4 list and the *Ends* check, and the wiring-ticket rule now says it is the epic's last proof, not its first live contact. Docs only; nothing in `tick.sh`) |
 | P82 | The lane brief does not live in the working tree | implemented 2026-08-09 (`spawn-lane` writes the composed brief to `$LOOM_HOME/briefs/<lane-id>.md` instead of `<cwd>/.lane-brief-<id>.md`, and the pointer prompt names it by absolute path — so a lane worktree is no longer untracked-dirty by construction and D-TICK-17's guard stops firing on every one of them. The other half of the cause is closed in the same function: a `--brief` whose path resolves inside `$REPO_ROOT` or inside the lane's own `--cwd` is refused, naming `lane.sh scratch` — that is where `.gate-brief-114.md` and `.impl-brief-128.md` came from, neither of which `spawn-lane` could produce. Both refusals sit above the destructive line (P75). Suite 717 → 724 in section 23; one SKILL.md line edited, none added) |
+| P83 | "Merged" is a tracker fact, not a commit-range guess | implemented 2026-08-09 (sweep asks the tracker whether **this branch's own MR** is `merged` — new read-only `_branch_merged`, rc 0/1/2 so an unreadable board is never mistaken for a decision. Merged → sweepable regardless of local topology, which is the 15-worktree unpushed-reconcile case. No merged MR → the commit range decides, and only in the safe direction: empty means nothing to lose, anything ahead of base is kept. Never keyed on ticket state — the #67 shape is a test, with the squash-merge fixture that makes a branch permanently ahead. P47's exit-status handling intact; a dead `glab` falls back to the range test. Section 17: 7 → 14; no SKILL.md change) |
 
 ## Independent review round (2026-08-01)
 
@@ -3318,4 +3319,87 @@ rather than removing the cause.
   once succeeded in five builds.
 
 **Consumer.** `tick.sh sweep`, which currently cannot remove a single merged worktree.
+## P83 · "Merged" is a tracker fact, not a commit-range guess
+
+**Problem.** Sweep decides a worktree is merged by testing whether its branch has commits absent
+from the base: `git log "origin/$base..$branch"` at `tick.sh:226`, non-empty meaning "unmerged work
+— not ours to touch".
+
+That test is wrong whenever a lane reconciles after pushing. `lane.sh reconcile` merges
+`origin/<base>` into the branch; if it runs once more after the push that the MR merged, the local
+branch carries a merge commit that was never pushed and is therefore not reachable from the base.
+The range is permanently non-empty and the worktree is permanently unsweepable.
+
+Fifteen of build-5's 30 leftovers were held this way, every one showing the same single commit:
+
+```
+299782b Merge remote-tracking branch 'origin/main' into ticket-96-realtime-stability
+        parents = cd520f8 (pushed tip, merged into main as e583729) + 71a0990 (origin/main)
+```
+
+The ticket was closed, the MR was merged, and main contained the work. Only the local topology
+disagreed.
+
+A second branch shows the same divergence with a different history: ticket #71 merged as `b31aa05`
+(MR !70), and its local branch then took one more reconcile merge and sits permanently ahead. Both
+shapes are one failure — the range is asked about the **local** tip, while the merge happened to the
+**pushed** tip.
+
+**The constraint any fix must satisfy.** A closed ticket does not make a branch disposable, and one
+branch in this repo proves it. Ticket #67 shipped as `bbac984` from `ticket-67-pending-turn-bound`
+(MR !66). A separate branch, `ticket-67-realtime-turn-mark-pairing`, carried three commits and a
+238-line variant of that fix which never merged in any form — `2 files changed, 238 insertions(+),
+1 deletion(-)` against its merge-base, measured 2026-08-09. The range test sees those three commits,
+declines, and is **right** to — that is the guard doing its job.
+
+Diffed before deletion, those three commits turned out to be a rejected first draft of the *same*
+fix: `MAX_PENDING_TURN_AGE_MS = 30000` with a per-record timeout, against main's
+`PENDING_TURN_BOUND_MS = 30_000` — same day, same ticket, same bound, rewritten. So the claim here
+is **not** that valuable work was at stake. It is that the lines were unmerged in any form, and
+that **nothing available at sweep time can tell a discarded draft from live work**: both are
+commits on a branch with no merged MR of its own. That is the whole argument for keying on the
+branch, and for the guard staying conservative when it cannot tell.
+
+The branch was deleted in the hand-cleanup the same day (it was `b146fe1`), so the numbers above are
+the record. This section stands on them, not on anyone reproducing the branch later.
+
+So the tracker's answer here is not "this branch is disposable". The tracker knows #67 is closed; it
+does not know that this particular branch was the abandoned attempt. Any fix keyed on *ticket*
+state deletes this worktree and those 238 lines — D-TICK-17 (boostlingo build-4 #98, ~100 turns
+lost) arriving through a different door, with a real branch rather than a hypothetical to prove it.
+
+**Fix direction.** Ask for the fact rather than a proxy for it, and make the fact **branch-keyed**:
+does an MR whose `source_branch` is *this branch* exist in state `merged`? That is the same query
+`lane.sh merge` makes to verify a landing. Read that, and treat the commit range as a secondary
+check rather than the decision.
+
+**Never key it on ticket state.** A branch with no merged MR of its own is never swept, however
+closed its ticket is. That single rule is what keeps the #67 branch — and every future abandoned
+attempt at a shipped ticket — out of the delete path.
+
+The cheap variant, if a tracker read per worktree is judged too expensive at sweep time: compare
+against `origin/<branch>` — the pushed tip — instead of the local one, which is what the MR actually
+merged. It fixes the 15-worktree case and #71 without a network call, and it declines the #67 branch
+correctly for the wrong reason (no remote counterpart survives). It still infers rather than reads,
+and it cannot see a branch whose MR was closed unmerged.
+
+Either variant must keep `tick.sh:226`'s exit-status handling intact (P47: an unresolvable range
+must abort, never read as "merged").
+
+**Tests.** These hold whichever variant ships, because they assert the outcome rather than the
+signal:
+
+- A worktree whose branch merged, and whose local tip carries an extra unpushed merge commit, is
+  swept. Shown failing with the current local-range test restored — this is the 15-worktree case.
+- A worktree whose branch was never merged is never swept, no matter what the range says.
+- **A branch whose ticket is closed by a *different* branch's MR is not swept.** This is the #67
+  shape, and it is the test that fails the moment anyone keys the query on ticket state instead of
+  on the branch's own merged MR. The fixture builds the shape; it does not depend on that branch
+  still existing.
+- A branch whose MR was closed **unmerged** is not swept. The cheap variant fails this one by
+  construction, so if it ships, this test is what records the gap rather than leaving it implied.
+- An unresolvable base ref still aborts that worktree's sweep with its reason (P47), shown failing
+  when the separate exit-status capture is collapsed back into the pipeline.
+
+**Consumer.** `tick.sh sweep`.
 
