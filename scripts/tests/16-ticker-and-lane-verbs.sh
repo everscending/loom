@@ -484,12 +484,30 @@ for sib in tick.sh lane.sh snapshot.jq render.jq render-events.jq usage.jq repor
     ln -sf "$(dirname "$TICK")/$sib" "$V72/$sib"
 done
 sed 's/scan("orch-verdict/scan("orch-verdict-v2/' "$(dirname "$TICK")/lib.jq" > "$V72/lib.jq"
-LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" "$V72/tick.sh" snapshot 2>/dev/null > "$T/p72-snap-v2.json"
+# D-TEST-14: prove the planted mutation is the prelude jq ACTUALLY loads, before
+# asserting anything about behaviour. `jq -L <dir> 'include "lib"'` resolves a
+# relative include against the CURRENT WORKING DIRECTORY first, so running the
+# suite from scripts/ — where the real lib.jq lives — silently shadowed every
+# mutated copy: the duplicate refusal kept working and the violation could not
+# fail. The verdict of the whole section depended on nothing but the caller's
+# cwd (139/1 from scripts/, 140/0 from the repo root).
+#
+# Two halves, and both are needed. Every command below runs with cwd = $V72, so
+# the mutated copy wins by cwd AND by -L; and this check fails loudly if it ever
+# stops winning, rather than passing quietly as a violation that cannot fail.
+if ( cd "$V72" && printf '%s' '[{"body":"x <!-- orch-verdict PASS cafe0000 -->"}]' \
+     | jq -L "$V72" -e 'include "lib"; [.[] | .body | orch_verdict_scan] | length > 0' >/dev/null 2>&1 ); then
+    bad "D-TEST-14: the mutated prelude never loaded (jq resolved include \"lib\" elsewhere) — every assertion below is vacuous"
+else
+    ok "D-TEST-14: the planted mutation is the prelude jq actually loads"
+fi
+( cd "$V72" && LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" \
+    "$V72/tick.sh" snapshot 2>/dev/null ) > "$T/p72-snap-v2.json"
 v2read=$(jq -r '.tickets[]|select(.iid==12)|.gate.last_verdict' "$T/p72-snap-v2.json")
-echo "same SHA, same outcome, again" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
+if ( cd "$V72" && echo "same SHA, same outcome, again" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
     VCAP="$T/p72-dup-bodies" NOTES_FIXTURE="$NOTES_FIXTURE" \
-    "$V72/lane.sh" verdict 9 pass cafe0000 >/dev/null 2>&1 \
-    && v2dup=accepted || v2dup=refused
+    "$V72/lane.sh" verdict 9 pass cafe0000 >/dev/null 2>&1 ); then
+    v2dup=accepted; else v2dup=refused; fi
 if [ "$v2read" = null ] && [ "$v2dup" = accepted ]; then
     ok "P72-violation: one edit to the shared scan blinds the snapshot read AND lane.sh's duplicate refusal together"
 else

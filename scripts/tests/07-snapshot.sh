@@ -509,14 +509,37 @@ grep -c "/notes" "$CALLS" | grep -q '^4$' \
     && ok "snapshot: comment threads fetched per member, not per active ticket" \
     || bad "snapshot: thread fan-out is $(grep -c '/notes' "$CALLS"), expected 4 (3 members + lessons)"
 
-# 7c. Concurrency is real: with each call sleeping, wall clock must track the
-#     slowest call, not the sum. Planted violation is the serial bound itself.
+# 7c. Concurrency is real: calls must OVERLAP. Asserted by counting how many
+#     stub calls are in flight at once, not by timing the run (D-TEST-12): the
+#     old `elapsed < 3` was measured with integer `date +%s`, so its window sat
+#     inside its own +/-1s truncation, and a loaded machine crossed it — a
+#     false alarm on a correct fan-out, which is indistinguishable from a real
+#     regression and so gets dismissed as noise. Overlap is load-independent:
+#     a serial fan-out peaks at 1 no matter how fast or slow the machine is.
 : > "$CALLS"
-start=$(date +%s)
-GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$CALLS" STUB_SLEEP=0.6 "$TICK" snapshot >/dev/null 2>&1
-elapsed=$(( $(date +%s) - start ))
-[ "$elapsed" -lt 3 ] && ok "snapshot: fan-out is concurrent (${elapsed}s for 6 x 0.6s calls)" \
-                     || bad "snapshot: fan-out ran serially (${elapsed}s — a serial run costs ~4s)"
+INFLIGHT="$T/snap-inflight"; PEAKLOG="$T/snap-peak"; rm -rf "$INFLIGHT"; : > "$PEAKLOG"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$CALLS" STUB_SLEEP=0.6 \
+    STUB_INFLIGHT_DIR="$INFLIGHT" STUB_PEAK_LOG="$PEAKLOG" "$TICK" snapshot >/dev/null 2>&1
+peak=$(sort -n "$PEAKLOG" 2>/dev/null | tail -1); peak="${peak:-0}"
+[ "$peak" -gt 1 ] && ok "snapshot: fan-out is concurrent (peak $peak calls in flight at once)" \
+                  || bad "snapshot: fan-out ran serially (peak $peak in flight — concurrent work overlaps)"
+# Planted violation: SNAP_BATCH=1 forces one call at a time, and the same
+# assertion must report a peak of exactly 1. This is what the wall-clock form
+# could not do — a slow serial run and a slow concurrent run looked alike.
+rm -rf "$INFLIGHT"; : > "$PEAKLOG"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$CALLS" STUB_SLEEP=0.4 SNAP_BATCH=1 \
+    STUB_INFLIGHT_DIR="$INFLIGHT" STUB_PEAK_LOG="$PEAKLOG" "$TICK" snapshot >/dev/null 2>&1
+speak=$(sort -n "$PEAKLOG" 2>/dev/null | tail -1); speak="${speak:-0}"
+# Not "exactly 1": one pair genuinely overlaps even at SNAP_BATCH=1 (the gate
+# waits AFTER launching, so the last job of a batch can still be in flight as
+# the next starts) — 10 calls of the 11 see a single caller. The claim is that
+# forcing the batch COLLAPSES the overlap, which is what fails loudly if the
+# gate ever stops bounding: an unbounded fan-out measures ~9 here, not 2.
+if [ "$speak" -le 2 ] && [ "$speak" -lt "$peak" ]; then
+    ok "snapshot-violation: forcing the batch to 1 collapses the overlap ($peak → $speak) — the measure can fail"
+else
+    bad "snapshot-violation: a serialised fan-out still measured peak $speak (concurrent was $peak)"
+fi
 
 # 7d. Blocking edges come from BOTH sources (SKILL.md: native links where the
 #     tier allows, else the body's `## Blocked by` list), deduped and tagged.

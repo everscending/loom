@@ -139,7 +139,19 @@ cat > "$FX/glab-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 FX="$(cd "$(dirname "$0")" && pwd)"
 echo "$*" >> "${STUB_LOG:-/dev/null}"
-[ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
+# D-TEST-12: peak concurrency, counted rather than timed. A marker file exists
+# for exactly as long as this call is in flight, so the highest count any call
+# sees IS the peak overlap. Serial runs can never see more than 1, however slow
+# or fast the machine is — where `elapsed < 3` was a wall-clock guess whose
+# window sat inside its own +/-1s measurement error and failed under load.
+if [ -n "${STUB_INFLIGHT_DIR:-}" ]; then
+    mkdir -p "$STUB_INFLIGHT_DIR"
+    : > "$STUB_INFLIGHT_DIR/$$"
+    [ -n "${STUB_SLEEP:-}" ] && sleep "$STUB_SLEEP"
+    n=$(find "$STUB_INFLIGHT_DIR" -type f 2>/dev/null | wc -l | tr -d " ")
+    echo "$n" >> "${STUB_PEAK_LOG:-/dev/null}"
+    rm -f "$STUB_INFLIGHT_DIR/$$"
+elif [ -n "${STUB_SLEEP:-}" ]; then sleep "$STUB_SLEEP"; fi
 case "$*" in
   *"state=opened"*) [ -n "${STUB_FAIL_STAGE1:-}" ] && { echo "500 boom" >&2; exit 1; }
                     cat "${STUB_OPEN:-$FX/open.json}" ;;
