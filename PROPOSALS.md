@@ -56,7 +56,6 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
-| P85 | Sweep reports what it kept | open — proposed 2026-08-09; sweep prints "kept, needs a human" to the wave log, emits no event, and reaches no human surface. It announced this problem on every tick for five builds and nobody saw it |
 | P81 | The wave's scheduling is a pure function of the snapshot | open — proposed 2026-08-08; steps 2–6 read fields `snapshot.jq` already derives and add no information. A ticket becoming ready waits one whole wave (2m28s average, 36 of them, 57.5% of the seat-reservations span) for a model to re-derive a decision the document already contains. Supersedes the scheduling half of P18 |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
@@ -157,79 +156,6 @@ transcripts; waves 1h21m / 35%, one 57m blackout, peak concurrency 2 of 4, a sch
 suites differ too much for the spans to be compared directly.
 
 ---
-
-## The worktree pile-up — evidence shared by P82–P85
-
-All four were found on 2026-08-09, on `ai-interpreter-workbench` immediately after build-5
-completed and tore its agent down. Five builds had run in that repo. Cleanup had never once
-happened:
-
-| Leftover | Count |
-|---|---|
-| Worktrees under `<repo>-wt-*` | 30 (plus 2 orphan directories git no longer tracks) |
-| Remote `origin/ticket-*` branches | 122 |
-| Local `ticket-*` branches | 51 |
-| Worktrees sweep has ever removed | 0 |
-
-Sweep was neither broken nor disabled — it ran on every tick and correctly declined to touch all
-30, because each one trips one of its two safety guards. Both guards exist for good reasons and
-both are paid for by real incidents. What is wrong is that the loop *manufactures* the conditions
-that trip them, so the guards fire on every worktree rather than on the rare unsafe one. P82 and
-P83 remove those two conditions. P84 covers branches, which no step owns at all. P85 is why it
-stayed invisible for five builds.
-
-## P85 · Sweep reports what it kept
-
-**Problem.** Sweep announces every decision to `stdout` inside a wave session — "kept, needs a
-human", "git refused to remove", "removed merged worktree". A wave's stdout goes to its log file.
-Sweep emits no event, so nothing it says reaches `render-events`, `watch`, the ntfy pushes, or the
-completion report.
-
-For five builds in `ai-interpreter-workbench` it printed a "kept, needs a human" line for every
-worktree on every tick — the correct message, addressed to a human, into a file no human reads. The
-build-5 completion report was posted and the agent unloaded itself with 30 worktrees, 51 local
-branches and 122 stale tracking refs standing, and said nothing about any of them. (An earlier
-draft of this section said "173 branches", combining two counts that are not the same thing — see
-P84, where the 122 turn out to be tracking refs rather than branches.)
-
-This is the reason P82, P83 and P84 went unnoticed rather than being fixed after build-1.
-
-**And a third failure mode outlives both fixes.** `ai-interpreter-workbench-wt-26` survives the
-cleanup as a 12 KB husk: the worktree is merged, clean, and correctly identified, and removal still
-fails because `web/node_modules` and `server/.venv` are empty directories that refuse `rmdir` with
-EPERM despite being user-owned and unflagged — almost certainly stale Docker Desktop mounts. Sweep
-already handles this correctly, printing "git refused to remove — kept". P82 and P83 do not touch
-it, and nothing else will: after they land, this is the residue class that remains, and it is
-invisible for exactly the reason this proposal exists.
-
-**Fix direction.** Two changes, both small:
-
-- Sweep emits one `sweep_held` event per pass carrying the count and the dominant reason, and a
-  `sweep_removed` event when it removes. The ticker then shows cleanup the same way it shows
-  everything else, and a count that never falls is visible within one build.
-- The completion report states the leftover inventory — worktrees held and why, branches merged but
-  not deleted — before the build tears itself down. A build that reports complete while leaving 30
-  worktrees behind is reporting on part of its own work.
-
-Neither adds a decision for a wave to make, so neither costs a `SKILL.md` line.
-
-**Tests.**
-
-- A sweep pass that holds worktrees emits exactly one `sweep_held` event carrying the count and the
-  dominant reason — one per pass, not one per worktree; shown failing when the emit is removed.
-- A pass that removes emits `sweep_removed`; a pass that does neither emits nothing.
-- `render-events` renders both. This is the load-bearing one: **D-TICK-11 is open** — the renderer
-  indexes on `.state` and silently drops any event without it, so a new event that omits `state`
-  would be invisible in exactly the pane this proposal exists to reach. Assert the rendered line,
-  not the log line.
-- The completion-report path names the leftover inventory when there is one, and says nothing when
-  the sweep is clean.
-- A worktree whose removal `git` refuses — the filesystem case, fixtured with a directory that
-  cannot be removed — is reported like any other hold, rather than being the one kept worktree the
-  ticker stays silent about.
-
-**Consumer.** The human, who currently discovers this by looking at their own filesystem months
-later.
 
 ## P81 · The wave's scheduling is a pure function of the snapshot
 

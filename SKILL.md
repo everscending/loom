@@ -515,8 +515,9 @@ refuses outside herdr anyway.
    `build_complete` (ready set empty, no lanes, **and
    `summary.epics_awaiting_probe` empty** — an unaccepted epic means the build
    is not finished, however many tickets merged). On complete: post the
-   completion report — each PRD requirement → evidence links — then the
-   digest, then **close the `Build N` issue itself** via `lane.sh close`.
+   completion report — each PRD requirement → evidence links, plus any
+   worktrees `sweep` kept (`tick.sh notify` appends them) — then the digest,
+   then **close the `Build N` issue itself** via `lane.sh close`.
    Snapshot defines the *current* build as the highest open `Build N` issue,
    so a finished one left open is ambiguity every later snapshot re-warns
    about. Append wave learnings to ticket threads / the Build issue.

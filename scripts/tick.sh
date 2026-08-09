@@ -90,6 +90,10 @@ LOGS_DIR="$LOOM_HOME/logs"
 # lane worktree hold an untracked file by construction, so sweep's
 # unsaved-work guard (D-TICK-17) kept all 30 of them across five builds.
 BRIEFS_DIR="$LOOM_HOME/briefs"
+# P85: what the last sweep pass could not remove, and why. Sweep said all of
+# this to stdout inside a wave session for five builds — the right message,
+# addressed to a human, into a file no human reads.
+SWEEP_HELD_FILE="$LOOM_HOME/sweep-held.txt"
 # Every session gets its own scratch directory here (P17). Fixed paths were the
 # bug: a wave wrote /tmp/wave-note-16.md, a stale file of that name from an
 # earlier wave won, and its content was posted as a comment on the wrong ticket.
@@ -196,7 +200,44 @@ _branch_merged() { # <branch>
     return 1
 }
 
+# P85: sweep's decisions have to leave the wave log. It printed "kept, needs a
+# human" for thirty worktrees on every tick for five builds, into a file nobody
+# reads, and the build-5 completion report tore the agent down without
+# mentioning any of it. One event per PASS, not per worktree — a count that
+# never falls is the signal, and thirty lines a tick is not.
+_SWEEP_HELD=0
+_SWEEP_REMOVED=0
+_sweep_hold() { # <dir> <reason>
+    _SWEEP_HELD=$((_SWEEP_HELD + 1))
+    printf '%s\t%s\n' "$2" "$1" >> "$SWEEP_HELD_FILE.new"
+}
+_sweep_report() {
+    # The inventory is rewritten whole each pass, so a worktree a human cleared
+    # by hand stops being reported without anyone telling the loom about it.
+    if [ -s "$SWEEP_HELD_FILE.new" ]; then mv -f "$SWEEP_HELD_FILE.new" "$SWEEP_HELD_FILE"
+    else rm -f "$SWEEP_HELD_FILE.new" "$SWEEP_HELD_FILE"; fi
+    [ "$_SWEEP_REMOVED" -gt 0 ] && _ev sweep_removed count "$_SWEEP_REMOVED"
+    if [ "$_SWEEP_HELD" -gt 0 ]; then
+        local reason
+        reason=$(cut -f1 "$SWEEP_HELD_FILE" 2>/dev/null | sort | uniq -c | sort -rn | head -1 | awk '{print $2}')
+        _ev sweep_held count "$_SWEEP_HELD" reason "${reason:-unknown}"
+    fi
+    return 0
+}
+
+# P85: the leftover inventory as one human-readable block, or nothing at all.
+# Read by cmd_notify so a completion announcement cannot omit it.
+_sweep_held_summary() {
+    [ -s "$SWEEP_HELD_FILE" ] || return 0
+    local n; n=$(wc -l < "$SWEEP_HELD_FILE" | tr -d ' ')
+    printf '\n%s worktree(s) kept by sweep, needing a human:\n' "$n"
+    while IFS="$(printf '\t')" read -r reason dir; do
+        printf '  %s — %s\n' "${dir##*/}" "$reason"
+    done < "$SWEEP_HELD_FILE"
+}
+
 cmd_sweep() {
+    _SWEEP_HELD=0; _SWEEP_REMOVED=0; rm -f "$SWEEP_HELD_FILE.new"
     local base dir name branch st gd dir_p root_p
     # git always reports worktrees by their PHYSICAL path, so a REPO_ROOT
     # carrying a symlink (macOS /tmp -> private/tmp, /var -> private/var, or
@@ -226,6 +267,7 @@ cmd_sweep() {
     # lsof is missing or blocked we cannot tell live from dead — so do nothing.
     if [ "$live_n" -gt 0 ] && [ -z "${live_cwds//[[:space:]]/}" ]; then
         echo "sweep: $live_n lane(s) running but no cwd resolved (lsof unavailable?) — skipping sweep rather than risk a live worktree"
+        rm -f "$SWEEP_HELD_FILE.new"   # a skipped pass observed nothing; keep the last real inventory
         return 0
     fi
     for dir in "$REPO_ROOT"-wt-*; do
@@ -303,8 +345,8 @@ cmd_sweep() {
             st=$(git -C "$dir" status --porcelain 2>/dev/null | grep -vxF '?? .loom-sweep-hold' | head -1 || true)
             if [ -n "$st" ]; then
                 case "$st" in
-                    '??'*) echo "sweep: $dir merged but holds untracked work git does not ignore (${st#\?\? }) — kept, needs a human" ;;
-                    *)     echo "sweep: $dir merged but has modified tracked files — kept, needs a human" ;;
+                    '??'*) echo "sweep: $dir merged but holds untracked work git does not ignore (${st#\?\? }) — kept, needs a human"; _sweep_hold "$dir" untracked-work ;;
+                    *)     echo "sweep: $dir merged but has modified tracked files — kept, needs a human"; _sweep_hold "$dir" modified-tracked ;;
                 esac
                 continue
             fi
@@ -322,12 +364,12 @@ cmd_sweep() {
                 # later pass can still retry the removal it is holding.
                 printf 'kept by sweep: git worktree remove failed here; do not delete without a human\n' \
                     > "$dir/.loom-sweep-hold" 2>/dev/null || true
-                echo "sweep: git refused to remove $dir — kept"
+                echo "sweep: git refused to remove $dir — kept"; _sweep_hold "$dir" git-refused
                 continue
             fi
             [ -d "$dir" ] && rm -rf "$dir"
             git -C "$REPO_ROOT" branch -d "$branch" >/dev/null 2>&1 || true
-            echo "sweep: removed merged worktree $dir (branch $branch)"
+            echo "sweep: removed merged worktree $dir (branch $branch)"; _SWEEP_REMOVED=$((_SWEEP_REMOVED+1))
         else
             gd=""
             [ -f "$dir/.git" ] && gd=$(sed -n 's/^gitdir: //p' "$dir/.git" 2>/dev/null)
@@ -341,7 +383,7 @@ cmd_sweep() {
                     # So an earlier pass's "kept" is the only thing standing
                     # here, and it stands.
                     if [ -e "$dir/.loom-sweep-hold" ]; then
-                        echo "sweep: $dir held from an earlier failed removal — kept, needs a human"
+                        echo "sweep: $dir held from an earlier failed removal — kept, needs a human"; _sweep_hold "$dir" earlier-failure
                         continue
                     fi
                     _sweep_env_backup "$dir"
@@ -350,15 +392,16 @@ cmd_sweep() {
                     # was announced as a completed one, in the one place in the
                     # program that destroys work.
                     if rm -rf "$dir" 2>/dev/null && [ ! -e "$dir" ]; then
-                        echo "sweep: removed orphaned worktree corpse $dir"
+                        echo "sweep: removed orphaned worktree corpse $dir"; _SWEEP_REMOVED=$((_SWEEP_REMOVED+1))
                     else
-                        echo "sweep: could not fully remove orphaned worktree corpse $dir — what is left needs a human"
+                        echo "sweep: could not fully remove orphaned worktree corpse $dir — what is left needs a human"; _sweep_hold "$dir" partial-corpse
                     fi ;;
                 *) : ;;                      # not provably ours — never touch
             esac
         fi
     done
     git -C "$REPO_ROOT" worktree prune 2>/dev/null || true
+    _sweep_report
     return 0
 }
 
@@ -2059,6 +2102,13 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
 
 cmd_notify() {
     local event="$1" title="$2" body="$3" click="${4:-}"
+    # P85: a build that reports complete while leaving worktrees behind is
+    # reporting on part of its own work. build-5 posted its completion report
+    # and unloaded the agent with thirty standing, and said nothing. Appended
+    # here rather than asked of the wave, so it cannot be forgotten.
+    case "$event" in
+        build_complete|build_halted) body="$body$(_sweep_held_summary)" ;;
+    esac
     local topic events
     topic=$(cfg_ntfy_topic)
     events=" $(cfg_ntfy_events) "

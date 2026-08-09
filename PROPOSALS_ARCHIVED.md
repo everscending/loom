@@ -83,6 +83,7 @@ writing a new proposal that touches the same machinery.
 | P82 | The lane brief does not live in the working tree | implemented 2026-08-09 (`spawn-lane` writes the composed brief to `$LOOM_HOME/briefs/<lane-id>.md` instead of `<cwd>/.lane-brief-<id>.md`, and the pointer prompt names it by absolute path — so a lane worktree is no longer untracked-dirty by construction and D-TICK-17's guard stops firing on every one of them. The other half of the cause is closed in the same function: a `--brief` whose path resolves inside `$REPO_ROOT` or inside the lane's own `--cwd` is refused, naming `lane.sh scratch` — that is where `.gate-brief-114.md` and `.impl-brief-128.md` came from, neither of which `spawn-lane` could produce. Both refusals sit above the destructive line (P75). Suite 717 → 724 in section 23; one SKILL.md line edited, none added) |
 | P83 | "Merged" is a tracker fact, not a commit-range guess | implemented 2026-08-09 (sweep asks the tracker whether **this branch's own MR** is `merged` — new read-only `_branch_merged`, rc 0/1/2 so an unreadable board is never mistaken for a decision. Merged → sweepable regardless of local topology, which is the 15-worktree unpushed-reconcile case. No merged MR → the commit range decides, and only in the safe direction: empty means nothing to lose, anything ahead of base is kept. Never keyed on ticket state — the #67 shape is a test, with the squash-merge fixture that makes a branch permanently ahead. P47's exit-status handling intact; a dead `glab` falls back to the range test. Section 17: 7 → 14; no SKILL.md change) |
 | P84 | Branch hygiene is owned, not inherited | implemented 2026-08-09 (`lane.sh merge` passes `should_remove_source_branch=true` on the merge request it already makes, so the remote branch dies at the one moment it is provably disposable — rather than surviving unless the project happens to set `remove_source_branch_after_merge`, which this skill neither reads nor writes. Sweep's fetch gains `--prune`, so a tracking ref expires with the branch it tracks; without it five builds left 122 stale `origin/ticket-*` refs, which is also what made `git branch -r` report 122 remote branches when `ls-remote` said 3. Section 18: 3 → 8, including a fixture that deletes server-side because `push --delete` updates the local ref and would never leave one stale. No SKILL.md change) |
+| P85 | Sweep reports what it kept | implemented 2026-08-09 (`cmd_sweep` counts what it kept and emits **one `sweep_held` per pass** — count plus dominant reason, not one line per worktree — and `sweep_removed` when it removes; a clean pass emits nothing, so a count that never falls is the signal. `render-events.jq` renders both, and the test asserts the RENDERED line because D-TICK-11 is still open and drops any event without `.state`. The inventory is rewritten whole each pass into `$LOOM_HOME/sweep-held.txt`, so a worktree cleared by hand stops being reported; `cmd_notify` appends it to `build_complete` and `build_halted` bodies, which is mechanical rather than asked of the wave. Section 17: 14 → 25; one SKILL.md line edited, none added) |
 
 ## Independent review round (2026-08-01)
 
@@ -3460,4 +3461,76 @@ re-run.
 **Consumer.** Anyone reading `git branch -r` in a repo this skill has built, every future
 `spawn-lane` picking a non-colliding branch name, and any repo whose GitLab project does not
 already clean up after itself.
+## The worktree pile-up — evidence shared by P82–P85
+
+All four were found on 2026-08-09, on `ai-interpreter-workbench` immediately after build-5
+completed and tore its agent down. Five builds had run in that repo. Cleanup had never once
+happened:
+
+| Leftover | Count |
+|---|---|
+| Worktrees under `<repo>-wt-*` | 30 (plus 2 orphan directories git no longer tracks) |
+| Remote `origin/ticket-*` branches | 122 |
+| Local `ticket-*` branches | 51 |
+| Worktrees sweep has ever removed | 0 |
+
+Sweep was neither broken nor disabled — it ran on every tick and correctly declined to touch all
+30, because each one trips one of its two safety guards. Both guards exist for good reasons and
+both are paid for by real incidents. What is wrong is that the loop *manufactures* the conditions
+that trip them, so the guards fire on every worktree rather than on the rare unsafe one. P82 and
+P83 remove those two conditions. P84 covers branches, which no step owns at all. P85 is why it
+stayed invisible for five builds.
+
+## P85 · Sweep reports what it kept
+
+**Problem.** Sweep announces every decision to `stdout` inside a wave session — "kept, needs a
+human", "git refused to remove", "removed merged worktree". A wave's stdout goes to its log file.
+Sweep emits no event, so nothing it says reaches `render-events`, `watch`, the ntfy pushes, or the
+completion report.
+
+For five builds in `ai-interpreter-workbench` it printed a "kept, needs a human" line for every
+worktree on every tick — the correct message, addressed to a human, into a file no human reads. The
+build-5 completion report was posted and the agent unloaded itself with 30 worktrees, 51 local
+branches and 122 stale tracking refs standing, and said nothing about any of them. (An earlier
+draft of this section said "173 branches", combining two counts that are not the same thing — see
+P84, where the 122 turn out to be tracking refs rather than branches.)
+
+This is the reason P82, P83 and P84 went unnoticed rather than being fixed after build-1.
+
+**And a third failure mode outlives both fixes.** `ai-interpreter-workbench-wt-26` survives the
+cleanup as a 12 KB husk: the worktree is merged, clean, and correctly identified, and removal still
+fails because `web/node_modules` and `server/.venv` are empty directories that refuse `rmdir` with
+EPERM despite being user-owned and unflagged — almost certainly stale Docker Desktop mounts. Sweep
+already handles this correctly, printing "git refused to remove — kept". P82 and P83 do not touch
+it, and nothing else will: after they land, this is the residue class that remains, and it is
+invisible for exactly the reason this proposal exists.
+
+**Fix direction.** Two changes, both small:
+
+- Sweep emits one `sweep_held` event per pass carrying the count and the dominant reason, and a
+  `sweep_removed` event when it removes. The ticker then shows cleanup the same way it shows
+  everything else, and a count that never falls is visible within one build.
+- The completion report states the leftover inventory — worktrees held and why, branches merged but
+  not deleted — before the build tears itself down. A build that reports complete while leaving 30
+  worktrees behind is reporting on part of its own work.
+
+Neither adds a decision for a wave to make, so neither costs a `SKILL.md` line.
+
+**Tests.**
+
+- A sweep pass that holds worktrees emits exactly one `sweep_held` event carrying the count and the
+  dominant reason — one per pass, not one per worktree; shown failing when the emit is removed.
+- A pass that removes emits `sweep_removed`; a pass that does neither emits nothing.
+- `render-events` renders both. This is the load-bearing one: **D-TICK-11 is open** — the renderer
+  indexes on `.state` and silently drops any event without it, so a new event that omits `state`
+  would be invisible in exactly the pane this proposal exists to reach. Assert the rendered line,
+  not the log line.
+- The completion-report path names the leftover inventory when there is one, and says nothing when
+  the sweep is clean.
+- A worktree whose removal `git` refuses — the filesystem case, fixtured with a directory that
+  cannot be removed — is reported like any other hold, rather than being the one kept worktree the
+  ticker stays silent about.
+
+**Consumer.** The human, who currently discovers this by looking at their own filesystem months
+later.
 

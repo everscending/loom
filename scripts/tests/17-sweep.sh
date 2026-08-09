@@ -248,4 +248,106 @@ GLAB_CMD="$SW/glab-dead.sh" LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sw
     || bad "P83: a failed board read reached the delete path"
 
 
+# --- P85: sweep's decisions reach a human ----------------------------------
+# For five builds sweep printed "kept, needs a human" for every worktree on
+# every tick — into a wave's log file, which no human reads. It emitted no
+# event, so nothing reached the ticker, the pushes or the completion report,
+# and build-5 tore its agent down with thirty worktrees standing, silently.
+P85="$T/p85"; mkdir -p "$P85"
+git -c init.defaultBranch=main init -q --bare "$P85/origin.git"
+git clone -q "$P85/origin.git" "$P85/repo" 2>/dev/null
+git -C "$P85/repo" config user.email t@t; git -C "$P85/repo" config user.name t
+echo base > "$P85/repo/f"; git -C "$P85/repo" add f; git -C "$P85/repo" commit -qm base
+git -C "$P85/repo" push -q origin main
+git -C "$P85/repo" worktree add -q "$P85/repo-wt-3" -b held-work origin/main 2>/dev/null
+echo unsaved > "$P85/repo-wt-3/unsaved.txt"     # untracked, not ignored — the D-TICK-17 hold
+EV="$P85/home/events.jsonl"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+if grep -q '"ev":"sweep_held"' "$EV" 2>/dev/null; then
+    ok "P85: a pass that keeps a worktree emits sweep_held"
+else
+    bad "P85: sweep kept a worktree and emitted nothing ($(tail -1 "$EV" 2>/dev/null))"
+fi
+grep -q '"ev":"sweep_held".*"count":1' "$EV" \
+    && ok "P85: the event carries the count" \
+    || bad "P85: sweep_held has no usable count ($(grep sweep_held "$EV" | head -1))"
+grep -q '"reason":"untracked-work"' "$EV" \
+    && ok "P85: the event names the dominant reason" \
+    || bad "P85: sweep_held does not name why"
+# One event per PASS, not per worktree — thirty lines a tick is not a signal.
+git -C "$P85/repo" worktree add -q "$P85/repo-wt-4" -b held-work-2 origin/main 2>/dev/null
+echo unsaved > "$P85/repo-wt-4/unsaved.txt"
+: > "$EV"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+n=$(grep -c '"ev":"sweep_held"' "$EV" 2>/dev/null || echo 0)
+[ "$n" = 1 ] && grep -q '"count":2' "$EV" \
+    && ok "P85: two held worktrees produce one event carrying 2, not two events" \
+    || bad "P85: $n sweep_held events for two worktrees"
+# Planted violation: with the emit removed, the pane learns nothing — which is
+# exactly the five-build silence this proposal is about.
+sed 's/_ev sweep_held /: sweep_held /' "$TICK" > "$P85/tick-mute.sh"; chmod +x "$P85/tick-mute.sh"
+: > "$EV"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$P85/tick-mute.sh" sweep >/dev/null 2>&1
+grep -q '"ev":"sweep_held"' "$EV" 2>/dev/null \
+    && bad "P85-violation: the muted sweep still emitted" \
+    || ok "P85-violation: with the emit removed the ticker hears nothing — the old behaviour"
+
+# D-TICK-11 is OPEN: render-events indexes on .state and silently drops any
+# event without one. A sweep event that omitted it would be invisible in the
+# exact pane this proposal exists to reach — so assert the RENDERED line, not
+# the log line.
+: > "$EV"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+out=$(LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" render-events 2>&1)
+case "$out" in
+    *"sweep kept"*) ok "P85: the ticker renders the hold — it survives the D-TICK-11 .state drop" ;;
+    *) bad "P85: sweep_held is logged but never rendered ($(printf '%s' "$out" | tail -1))" ;;
+esac
+# Removals are visible too, and a clean pass says nothing at all.
+: > "$EV"
+rm -rf "$P85/repo-wt-3/unsaved.txt" "$P85/repo-wt-4/unsaved.txt"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+grep -q '"ev":"sweep_removed"' "$EV" \
+    && ok "P85: a pass that removes says so" \
+    || bad "P85: removals are still silent"
+: > "$EV"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+if grep -q '"ev":"sweep_held"' "$EV" || grep -q '"ev":"sweep_removed"' "$EV"; then
+    bad "P85: a sweep with nothing to do still emitted"
+else
+    ok "P85: a clean pass emits nothing — the count is a signal, not a heartbeat"
+fi
+
+# The completion announcement carries the inventory, because a build that
+# reports complete while leaving worktrees behind is reporting on part of its
+# own work. Appended by cmd_notify rather than asked of the wave.
+git -C "$P85/repo" worktree add -q "$P85/repo-wt-5" -b held-work-3 origin/main 2>/dev/null
+echo unsaved > "$P85/repo-wt-5/unsaved.txt"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" "$TICK" sweep >/dev/null 2>&1
+# The body is only observable on the push path — the no-topic fallback hands it
+# to osascript and prints nothing. Give the repo a topic and record the args.
+printf 'ntfy:\n  topic: p85-topic\n  push: [build_complete]\n' > "$P85/repo/.loom.yml"
+cat > "$P85/ntfy-stub.sh" <<'NTFYEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "${NTFY_ARGS:-/dev/null}"
+NTFYEOF
+chmod +x "$P85/ntfy-stub.sh"
+NTFY_ARGS="$P85/ntfy-args" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" \
+    NTFY_CMD="$P85/ntfy-stub.sh" "$TICK" notify build_complete "Build complete" "every ticket merged" >/dev/null 2>&1
+if grep -q 'kept by sweep' "$P85/ntfy-args" 2>/dev/null; then
+    ok "P85: a completion announcement names the leftover inventory"
+else
+    bad "P85: build_complete said nothing about the worktrees it left standing"
+fi
+grep -q 'repo-wt-5' "$P85/ntfy-args" 2>/dev/null \
+    && ok "P85: the inventory names the worktrees, not just a number" \
+    || bad "P85: the inventory carries no worktree names ($(tr '\n' ' ' < "$P85/ntfy-args" | cut -c1-120))"
+rm -f "$P85/home/sweep-held.txt"
+NTFY_ARGS="$P85/ntfy-args2" LOOM_REPO="$P85/repo" LOOM_HOME="$P85/home" \
+    NTFY_CMD="$P85/ntfy-stub.sh" "$TICK" notify build_complete "Build complete" "every ticket merged" >/dev/null 2>&1
+grep -q 'kept by sweep' "$P85/ntfy-args2" 2>/dev/null \
+    && bad "P85: a clean build still reported an inventory" \
+    || ok "P85: with nothing held, the announcement stays quiet about it"
+
+
 test_finish

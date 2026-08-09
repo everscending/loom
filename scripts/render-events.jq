@@ -64,6 +64,9 @@ fromjson? // empty | . as $e
     (if $e.result == "PASS"
      then $good + "✓ epic \($e.epic) — acceptance probe PASSED" + $rst
      else $bad + "✗ epic \($e.epic) — acceptance probe FAILED (fix tickets filed)" + $rst end)
+  elif $e.ev == "sweep_held" then
+    $warn + "⚠ sweep kept \($e.count) worktree(s) — mostly \($e.reason) — each needs a human" + $rst
+  elif $e.ev == "sweep_removed" then "sweep removed \($e.count) merged worktree(s)"
   elif $e.ev == "usage_pause" then "usage limit — paused (until \($e.until))"
   elif $e.ev == "usage_resume" then "usage limit cleared — resuming"
   # Three unrelated outcomes shared one sentence (P42). Harmless while the
