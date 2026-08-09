@@ -56,6 +56,7 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
+| P81 | The wave's scheduling is a pure function of the snapshot | open — proposed 2026-08-08; steps 2–6 read fields `snapshot.jq` already derives and add no information. A ticket becoming ready waits one whole wave (2m28s average, 36 of them, 57.5% of the seat-reservations span) for a model to re-derive a decision the document already contains. Supersedes the scheduling half of P18 |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
@@ -155,6 +156,91 @@ transcripts; waves 1h21m / 35%, one 57m blackout, peak concurrency 2 of 4, a sch
 suites differ too much for the spans to be compared directly.
 
 ---
+
+## P81 · The wave's scheduling is a pure function of the snapshot
+
+**Problem.** A wave is a model session, and steps 2–6 of SKILL.md's `tick` are a decision table
+written in prose for it to follow. Every input to that table is already computed, deterministically,
+by `snapshot.jq`: `gate.eligible` with its `reason`, `summary.stranded`, `summary.impl_slots_free`,
+`summary.merge_in_flight`, `.merge_hold`, `.merge_attempts`, `rejections.same_class_tail`,
+`.model.effective`, `summary.epics_awaiting_probe`. The wave reads those fields and applies rules
+that are total — rework before new work, `fix:` before the rest of the ready set, oldest
+`merge-queue` ticket, cap exhausted means block. It adds no information the document does not
+already carry. What it costs is a full model session between "a ticket became ready" and "a lane
+exists for it".
+
+**Evidence.** Two independent measurements already in this file.
+
+*Latency*, seat-reservations build-1: 36 waves, **1h29m, 57.5% of a 2h35m span**, averaging **2m28s
+each**. The slack analysis in "What the evidence says" isolates the residue after the two
+front-of-build windows are removed and names it exactly — "a merge lane fires the next tick in
+seconds, then the wave it wakes takes minutes to decide anything". Every later ready→spawn in that
+build was 1–3 minutes, and the loop was otherwise healthy: 0 crashes, 0 mechanical rejections, 0
+failed waves, impl→gate→merge handing off in 2–3 seconds across 46 lanes. The wave *is* the
+latency.
+
+*Spend*, boostlingo build-1: wave sessions cost **$683 of $3,404 (20%)** across **407 sessions
+averaging 28 turns at 118k context per turn**. The same section establishes that cost is
+`context × turns × sessions`. A planner attacks two of those three terms at once — a wave that
+executes a prepared plan is a handful of turns instead of 28, and a wave with an empty residue does
+not need to launch at all.
+
+Neither number is a prediction: both are `retro` output over real builds. What is *not* measured is
+how much of the 2m28s survives the change — some waves will still have residue to write. Measuring
+that split is the first job of any implementation, not an assumption to build on.
+
+**Fix direction.** Split the wave in two along the line the design already draws — *models judge,
+scripts plumb*.
+
+- **`tick.sh plan`** — read-only, takes a snapshot document, emits one JSON document: `.actions[]`,
+  each a fully-formed instruction (`spawn` with its id, cwd, model, brief inputs and pregate tier;
+  `clear-lane`; `kill-lane`; `transition … blocked`; `merge-failed`), and `.residue[]`, the items
+  that need prose a script cannot write. Every rule it encodes is one already written in SKILL.md
+  steps 2–6.
+- **The executor runs the actions.** Spawning is already `tick.sh spawn-lane`; every *tracker* write
+  in an action goes through the `lane.sh` verb that owns it. This is load-bearing: `tick.sh` is
+  read-only against the tracker and `scripts/tests/07-snapshot.sh` enforces it by checking every
+  captured argv against a mutating denylist.
+  `plan` must not become the exception that dissolves that guarantee — it derives, it does not
+  write.
+- **A model session launches only for the residue**, and receives the residue alone rather than the
+  whole board.
+- **SKILL.md shrinks.** Steps 2–6 stop being prose a wave interprets and become "run the plan, then
+  handle the residue". That is a line *reduction* in the file every session loads — the preamble's
+  "keep SKILL.md small" pulls the same direction as the fix rather than against it.
+
+**The plan is derived and disposable, like the snapshot.** It is never written anywhere a later run
+reads it back as state; constitution rule 1 is the reason, and a plan file that outlived its wave
+would be exactly the shadow state that rule forbids.
+
+**What stays a model, and should.** The gate verdict, the implementation, the probe, merge-conflict
+surgery, the blocked report, the completion report. Those are the four lane kinds plus two report
+writers — the work worth paying for. This proposal removes none of it; it stops paying a model to
+read a table.
+
+**Relationship to the neighbours.** P18 has two halves: a cheaper model for scheduling, and fewer
+scheduling turns. This proposal supersedes the second half and makes the first half cheap to keep —
+`wave_model` still applies to whatever residue remains. P54 and P77 both shrink the snapshot a wave
+must carry; a planner that reads the document in `jq` rather than into context makes P54 moot for
+the scheduling path specifically, and leaves P77's call count exactly where it is. Do P18's config
+change first: it is one line and costs nothing to try.
+
+**Tests.**
+
+- `plan` over a fixture snapshot emits the same actions the SKILL.md steps prescribe, one case per
+  step: a `dead` lane at rc 7, a `stale` lane, a stranded ticket with `same_class_tail` at 1 and at
+  2, a ready set with `fix:` and non-`fix:` members and fewer slots than candidates, two
+  `merge-queue` tickets one of which holds a `merge_hold`, an epic in `epics_awaiting_probe`.
+- Ordering is asserted, not incidental: rework outranks backlog, `fix:` outranks the rest, oldest
+  merge-queue wins.
+- `plan` makes no mutating call — the existing argv scan extended to the new code path, shown
+  failing once the guard is removed.
+- An action naming a lane id `spawn-lane` would refuse is a planner bug, and the suite catches it
+  at plan time rather than at spawn time.
+- A snapshot the planner cannot read produces an empty plan and a named reason, never a partial one.
+
+**Consumer.** The `tick` verb, which currently pays a model session per scheduling decision; and
+`retro`, whose wave line is the number this is judged on.
 
 ## P18 · Use a cheaper model for scheduling
 
