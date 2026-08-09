@@ -1,0 +1,1168 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>loom — how the machine is wired</title>
+
+<style>
+  :root {
+    --ground:   #D6D2C6;
+    --panel:    #E6E3D9;
+    --panel-2:  #EFEDE7;
+    --ink:      #1E2027;
+    --ink-soft: #5A5D64;
+    --ink-faint:#84867F;
+    --rule:     #B1AC9C;
+    --rule-soft:#C4BFB1;
+    --warp:     #26408F;
+    --weft:     #A5451A;
+    --tracker:  #16645A;
+    --halt:     #8C1F26;
+    --shadow:   rgba(30,32,39,.10);
+
+    --font-display: "Avenir Next Condensed", "Roboto Condensed", "Helvetica Neue", "Arial Narrow", sans-serif;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --measure: 66ch;
+    --wide: 1180px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #13151B;
+      --panel:    #1A1D25;
+      --panel-2:  #222630;
+      --ink:      #E5E2D9;
+      --ink-soft: #979AA2;
+      --ink-faint:#6E7178;
+      --rule:     #333846;
+      --rule-soft:#282D38;
+      --warp:     #8CA5F2;
+      --weft:     #E8A05C;
+      --tracker:  #52C6AC;
+      --halt:     #EB6B72;
+      --shadow:   rgba(0,0,0,.45);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #13151B;
+    --panel:    #1A1D25;
+    --panel-2:  #222630;
+    --ink:      #E5E2D9;
+    --ink-soft: #979AA2;
+    --ink-faint:#6E7178;
+    --rule:     #333846;
+    --rule-soft:#282D38;
+    --warp:     #8CA5F2;
+    --weft:     #E8A05C;
+    --tracker:  #52C6AC;
+    --halt:     #EB6B72;
+    --shadow:   rgba(0,0,0,.45);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 20px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* One left rail for everything: section rules, headings, figures, tables and
+     prose all start at the same edge. The container is centred at --wide; the
+     measure is constrained inside it rather than centred on its own, which is
+     what .section-head p already does. */
+  .col {
+    max-width: var(--wide);
+    margin-inline: auto;
+  }
+
+  .col > * { max-width: var(--measure); }
+
+  .wide {
+    max-width: var(--wide);
+    margin-inline: auto;
+  }
+
+  /* ---- header ---- */
+
+  header.masthead {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 56px 0 0;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(56px, 12vw, 104px);
+    line-height: .88;
+    letter-spacing: -.01em;
+    font-weight: 700;
+    margin: 0 0 14px;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    max-width: 58ch;
+    font-size: 20px;
+    line-height: 1.45;
+    color: var(--ink-soft);
+    margin: 0 0 34px;
+  }
+
+  .hero-fig { margin: 0 0 8px; }
+
+  /* ---- sections ---- */
+
+  section { margin-top: 72px; }
+
+  h2 {
+    font-family: var(--font-display);
+    font-size: 34px;
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: .005em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+
+  h3 {
+    max-width: var(--wide);
+    font-family: var(--font-display);
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    margin: 40px auto 6px;
+  }
+
+  .section-head {
+    max-width: var(--wide);
+    margin: 0 auto 26px;
+    border-top: 2px solid var(--ink);
+    padding-top: 12px;
+  }
+
+  .section-head .eyebrow { margin-bottom: 6px; }
+
+  .section-head p {
+    max-width: var(--measure);
+    color: var(--ink-soft);
+    margin: 8px 0 0;
+  }
+
+  p { margin: 0 0 16px; }
+
+  a { color: var(--warp); }
+
+  code, .m {
+    font-family: var(--font-mono);
+    font-size: .86em;
+    background: var(--panel-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 2px;
+    padding: .08em .32em;
+    white-space: nowrap;
+  }
+
+  /* ---- figures ---- */
+
+  figure {
+    max-width: var(--wide);
+    margin: 26px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 18px 18px 0;
+    box-shadow: 0 1px 0 var(--shadow);
+  }
+
+  .fig-scroll { overflow-x: auto; }
+
+  figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    min-width: 620px;
+    color: var(--ink);
+  }
+
+  /* SVG text defaults to fill:black regardless of the `color` property, and
+     `var()` never resolves inside a presentation attribute — so every label
+     is coloured here, through the cascade, where the tokens actually apply. */
+  figure svg text { fill: currentColor; }
+
+  figcaption {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--rule-soft);
+    margin-top: 14px;
+    padding: 12px 0 16px;
+  }
+
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* ---- callout ---- */
+
+  .callout {
+    max-width: var(--wide);
+    margin: 30px auto;
+    display: grid;
+    grid-template-columns: 8px 1fr;
+    gap: 0;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .callout .stripe { background: var(--weft); }
+  .callout .body { padding: 18px 22px; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .eyebrow { color: var(--weft); }
+
+  /* ---- tables ---- */
+
+  .table-wrap { max-width: var(--wide); margin: 24px auto; overflow-x: auto; }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 560px;
+    font-size: 15px;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 9px 14px 9px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    vertical-align: top;
+  }
+
+  thead th {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border-bottom: 1px solid var(--rule);
+    font-weight: 500;
+  }
+
+  td.mono, th.mono { font-family: var(--font-mono); font-size: 13px; white-space: nowrap; }
+  td.num { font-variant-numeric: tabular-nums; }
+
+  /* ---- key list ---- */
+
+  .keys {
+    max-width: var(--wide);
+    margin: 22px auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 1px;
+    background: var(--rule-soft);
+    border: 1px solid var(--rule-soft);
+  }
+
+  .keys > div { background: var(--panel); padding: 14px 16px; }
+
+  .keys h4 {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: .06em;
+    margin: 0 0 6px;
+    color: var(--ink);
+  }
+
+  .keys p { font-size: 14px; line-height: 1.5; color: var(--ink-soft); margin: 0; }
+
+  .swatch {
+    display: inline-block;
+    width: 10px; height: 10px;
+    margin-right: 7px;
+    vertical-align: 1px;
+    border-radius: 1px;
+  }
+
+  ul.tight { margin: 0 0 16px; padding-left: 1.1em; }
+  ul.tight li { margin-bottom: 6px; }
+
+  .footnote {
+    max-width: var(--wide);
+    margin: 60px auto 0;
+    border-top: 1px solid var(--rule);
+    padding-top: 14px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-faint);
+    line-height: 1.7;
+  }
+
+  @media (max-width: 720px) {
+    body { font-size: 16px; padding: 0 14px 80px; }
+    header.masthead { padding-top: 34px; }
+    figure { padding: 12px 12px 0; }
+  }
+</style>
+</head>
+<body>
+<header class="masthead">
+  <p class="eyebrow">Architecture · unattended build loop</p>
+  <h1>loom</h1>
+  <p class="standfirst">A skill that turns a product spec into a build that runs while nobody is
+  watching. This page is the wiring diagram: what fires, what spends, what writes,
+  and where every loop closes.</p>
+
+  <figure class="hero-fig">
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1160 250" role="img"
+           aria-label="Weaving metaphor: a launchd timer on the left drives waves that pass horizontally across four vertical lanes, and the resulting fabric is the GitLab tracker on the right.">
+        <defs>
+          <marker id="h-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <!-- warp threads = lanes -->
+        <g stroke-width="2.5" style="stroke:var(--warp)">
+          <line x1="330" y1="40" x2="330" y2="200"/>
+          <line x1="470" y1="40" x2="470" y2="200"/>
+          <line x1="610" y1="40" x2="610" y2="200"/>
+          <line x1="750" y1="40" x2="750" y2="200"/>
+        </g>
+        <g font-family="ui-monospace, monospace" font-size="11" text-anchor="middle" style="fill:var(--warp)">
+          <text x="330" y="30">impl</text>
+          <text x="470" y="30">gate</text>
+          <text x="610" y="30">merge</text>
+          <text x="750" y="30">probe</text>
+        </g>
+
+        <!-- weft passes = waves -->
+        <g stroke-width="2.5" marker-end="url(#h-arrow)" style="stroke:var(--weft);color:var(--weft)">
+          <line x1="190" y1="80" x2="880" y2="80"/>
+          <line x1="190" y1="125" x2="880" y2="125"/>
+          <line x1="190" y1="170" x2="880" y2="170"/>
+        </g>
+        <text x="190" y="200" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--weft)">one wave = one pass across every lane</text>
+
+        <!-- timer -->
+        <g stroke="currentColor" stroke-width="1.4" opacity=".55">
+          <line x1="120" y1="40" x2="120" y2="200"/>
+        </g>
+        <g fill="currentColor" opacity=".55">
+          <circle cx="120" cy="55" r="3"/><circle cx="120" cy="80" r="3"/>
+          <circle cx="120" cy="105" r="3"/><circle cx="120" cy="125" r="3"/>
+          <circle cx="120" cy="150" r="3"/><circle cx="120" cy="170" r="3"/>
+          <circle cx="120" cy="190" r="3"/>
+        </g>
+        <text x="120" y="30" font-family="ui-monospace, monospace" font-size="11" fill="currentColor" opacity=".7" text-anchor="middle">launchd</text>
+        <text x="60" y="225" font-family="ui-monospace, monospace" font-size="11" fill="currentColor" opacity=".7">ticks 60s</text>
+
+        <!-- selvedge = tracker -->
+        <rect x="900" y="40" width="26" height="160" style="fill:var(--tracker)"/>
+        <text x="940" y="112" font-family="ui-monospace, monospace" font-size="12" style="fill:var(--tracker)">GitLab</text>
+        <text x="940" y="130" font-family="ui-monospace, monospace" font-size="11" opacity=".8" style="fill:var(--tracker)">the only build state</text>
+      </svg>
+    </div>
+    <figcaption>The shape of the thing, in one picture. <b>Lanes</b> are the warp — long-running
+    workers, each on its own ticket in its own worktree. <b>Waves</b> are the weft — short scheduling
+    passes that cross every lane, decide what happens next, and end. The timer on the left only keeps
+    the shuttle moving when the work itself stops asking. The fabric that survives all of it is the tracker.</figcaption>
+  </figure>
+</header>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Vocabulary</p>
+    <h2>Five words, before any wiring</h2>
+    <p>Everything below is built out of these. Two of them are processes, two are records, one is a file on disk.</p>
+  </div>
+
+  <div class="keys">
+    <div>
+      <h4><span class="swatch" style="background:var(--weft)"></span>the build agent</h4>
+      <p>The launchd job. One per repo, label <code>com.loom.&lt;repo&gt;</code>, firing
+      <code>tick.sh tick --auto</code> every 60&nbsp;seconds. Also called the <i>heartbeat</i>, because
+      that is its whole job: prove something is still alive, and restart the loop if it isn't.</p>
+    </div>
+    <div>
+      <h4><span class="swatch" style="background:var(--weft)"></span>a wave</h4>
+      <p>One headless Claude session running <code>/loom tick</code>. It reads the board, spawns work,
+      writes back, exits. Stateless by construction — nothing carries from one wave to the next except
+      what got written down.</p>
+    </div>
+    <div>
+      <h4><span class="swatch" style="background:var(--warp)"></span>a lane</h4>
+      <p>One headless Claude session doing one piece of work in its own git worktree. Four kinds, told
+      apart by the lane's name alone: <code>impl-</code>, <code>gate-</code>, <code>merge-</code>,
+      <code>probe-</code>.</p>
+    </div>
+    <div>
+      <h4><span class="swatch" style="background:var(--tracker)"></span>the tracker</h4>
+      <p>GitLab, reached through <code>glab</code> — its command-line tool. Epics or milestones, a <code>Build N</code> issue,
+      tickets whose labels <i>are</i> their state, merge requests, and review comments. The only
+      mutable build state that exists.</p>
+    </div>
+    <div>
+      <h4>the run directory</h4>
+      <p><code>~/.loom/&lt;repo&gt;/</code> — locks, process ids, the event log, lane logs, the stop
+      switch. Plumbing for the machine, deliberately <i>not</i> build state: losing it costs you the
+      loop, never a decision.</p>
+    </div>
+    <div>
+      <h4>the worktree</h4>
+      <p>A sibling directory, <code>../&lt;repo&gt;-wt-&lt;n&gt;</code>, cut fresh from
+      <code>origin/&lt;base&gt;</code> per ticket. A lane starts inside one and never has to
+      <code>cd</code> anywhere.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">The whole machine</p>
+    <h2>What fires, what spends, what writes</h2>
+    <p>Read it left to right: three things can trigger a tick, one script decides whether that tick
+    costs money, and everything expensive happens to the right of that decision.</p>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1460 780" role="img"
+           aria-label="Full architecture: launchd, a human, or a finishing lane triggers tick.sh; tick.sh applies five gates and then launches one wave session; the wave reads a snapshot from GitLab and spawns implementation, gate, merge and probe lanes; every lane writes to GitLab through lane.sh; a finishing lane loops back to tick.sh; tick.sh writes locks and events to the run directory.">
+        <defs>
+          <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+
+        <g font-family="ui-monospace, monospace">
+
+          <!-- ============ TRIGGERS ============ -->
+          <g>
+            <rect x="24" y="64" width="150" height="56" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--weft)"/>
+            <text x="38" y="86" font-size="12" font-weight="600" style="fill:var(--weft)">a lane finished</text>
+            <text x="38" y="103" font-size="10" fill="currentColor" opacity=".75">tick --from-lane</text>
+
+            <rect x="24" y="140" width="150" height="84" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--weft)"/>
+            <text x="38" y="162" font-size="12" font-weight="600" style="fill:var(--weft)">the build agent</text>
+            <text x="38" y="179" font-size="10" fill="currentColor" opacity=".75">a launchd job</text>
+            <text x="38" y="193" font-size="10" fill="currentColor" opacity=".75">wakes every 60s</text>
+            <text x="38" y="212" font-size="10" fill="currentColor" opacity=".75">tick --auto</text>
+
+            <rect x="24" y="252" width="150" height="56" rx="3" stroke="currentColor" stroke-width="1.2" style="fill:var(--panel-2)"/>
+            <text x="38" y="274" font-size="12" font-weight="600">a human</text>
+            <text x="38" y="291" font-size="10" fill="currentColor" opacity=".75">/loom start · tick</text>
+          </g>
+
+          <!-- ============ TICK.SH ============ -->
+          <rect x="244" y="64" width="262" height="300" rx="3" stroke="currentColor" stroke-width="1.6" style="fill:var(--panel-2)"/>
+          <text x="260" y="88" font-size="13" font-weight="700">tick.sh — the scheduler</text>
+          <text x="260" y="105" font-size="10" fill="currentColor" opacity=".7">read-only against the tracker</text>
+          <line x1="244" y1="116" x2="506" y2="116" stroke="currentColor" opacity=".28"/>
+
+          <text x="260" y="136" font-size="10" font-weight="600" style="fill:var(--weft)">1 · watch — always, before the lock</text>
+          <text x="270" y="150" font-size="10" opacity=".75">count lane turns, read the board</text>
+          <text x="260" y="172" font-size="10" font-weight="600">2 · loop switch — loop.stopped</text>
+          <text x="260" y="192" font-size="10" font-weight="600">3 · wave gap — 10 min (--auto only)</text>
+          <text x="260" y="212" font-size="10" font-weight="600">4 · the tick lock — one wave at a time</text>
+          <text x="260" y="232" font-size="10" font-weight="600">5 · is anything worth doing?</text>
+          <text x="270" y="246" font-size="10" style="fill:var(--tracker)">active · complete · unknown → wave</text>
+          <text x="270" y="260" font-size="10" style="fill:var(--halt)">halted · stalled · unreadable → skip</text>
+
+          <line x1="244" y1="274" x2="506" y2="274" stroke="currentColor" opacity=".28"/>
+          <text x="260" y="292" font-size="10" opacity=".75">then: sweep worktrees · bootstrap once</text>
+          <text x="260" y="306" font-size="10" opacity=".75">arm the agent if none is armed</text>
+          <text x="260" y="328" font-size="10" opacity=".75">also serves: snapshot · spawn-lane</text>
+          <text x="260" y="342" font-size="10" opacity=".75">kill-lane · lane-status · sweep</text>
+          <text x="260" y="356" font-size="10" opacity=".75">render-events · notify · report · retro</text>
+
+          <!-- ============ WAVE ============ -->
+          <rect x="580" y="88" width="214" height="140" rx="3" stroke-width="2" style="fill:var(--panel-2);stroke:var(--weft)"/>
+          <text x="596" y="112" font-size="13" font-weight="700" style="fill:var(--weft)">a wave</text>
+          <text x="596" y="132" font-size="10" opacity=".8">one headless session:</text>
+          <text x="596" y="146" font-size="10" opacity=".8">claude -p "/loom tick"</text>
+          <text x="596" y="166" font-size="10" opacity=".8">model: wave_model</text>
+          <text x="596" y="186" font-size="10" opacity=".8">stateless — reads the board,</text>
+          <text x="596" y="200" font-size="10" opacity=".8">acts, writes back, exits</text>
+          <text x="596" y="218" font-size="10" opacity=".8">holds the lock while it runs</text>
+
+          <!-- ============ LANES ============ -->
+          <g>
+            <rect x="580" y="268" width="400" height="56" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="596" y="290" font-size="12" font-weight="700" style="fill:var(--warp)">impl-&lt;ticket&gt;</text>
+            <text x="596" y="308" font-size="10" opacity=".8">writes the code, runs the repo's checks, pushes, opens the MR</text>
+
+            <rect x="580" y="336" width="400" height="56" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="596" y="358" font-size="12" font-weight="700" style="fill:var(--warp)">gate-&lt;ticket&gt;[-r&lt;round&gt;]</text>
+            <text x="596" y="376" font-size="10" opacity=".8">runs the repo's own checks first, then one review of the diff</text>
+
+            <rect x="580" y="404" width="400" height="56" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="596" y="426" font-size="12" font-weight="700" style="fill:var(--warp)">merge-&lt;ticket&gt;</text>
+            <text x="596" y="444" font-size="10" opacity=".8">one at a time: merge the base in, re-check, merge the MR</text>
+
+            <rect x="580" y="472" width="400" height="56" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="596" y="494" font-size="12" font-weight="700" style="fill:var(--warp)">probe-&lt;epic-slug&gt;</text>
+            <text x="596" y="512" font-size="10" opacity=".8">drives the epic like a user would, against a running app</text>
+          </g>
+
+          <!-- ============ LANE.SH ============ -->
+          <rect x="1020" y="376" width="140" height="56" rx="3" stroke-width="2" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="1090" y="400" font-size="13" font-weight="700" text-anchor="middle" style="fill:var(--tracker)">lane.sh</text>
+          <text x="1090" y="418" font-size="10" text-anchor="middle" opacity=".8">16 verbs</text>
+          <text x="1090" y="452" font-size="10" text-anchor="middle" style="fill:var(--tracker)">the only tracker writer</text>
+          <text x="1090" y="466" font-size="10" text-anchor="middle" opacity=".7">in a lane</text>
+
+          <!-- ============ GITLAB ============ -->
+          <rect x="1200" y="64" width="226" height="496" rx="3" stroke-width="2" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="1216" y="88" font-size="13" font-weight="700" style="fill:var(--tracker)">GitLab</text>
+          <text x="1216" y="105" font-size="10" opacity=".75">via glab · the only mutable</text>
+          <text x="1216" y="119" font-size="10" opacity=".75">build state there is</text>
+          <line x1="1200" y1="132" x2="1426" y2="132" opacity=".35" style="stroke:var(--tracker)"/>
+
+          <text x="1216" y="154" font-size="11" font-weight="600">epics / milestones</text>
+          <text x="1216" y="169" font-size="10" opacity=".75">+ acceptance criteria</text>
+          <text x="1216" y="196" font-size="11" font-weight="600">Build N issue</text>
+          <text x="1216" y="211" font-size="10" opacity=".75">the selected epics</text>
+          <text x="1216" y="238" font-size="11" font-weight="600">tickets · build-N label</text>
+          <text x="1216" y="253" font-size="10" opacity=".75">ready-for-agent</text>
+          <text x="1216" y="267" font-size="10" opacity=".75">in-progress</text>
+          <text x="1216" y="281" font-size="10" opacity=".75">review</text>
+          <text x="1216" y="295" font-size="10" opacity=".75">merge-queue</text>
+          <text x="1216" y="309" font-size="10" opacity=".75">blocked · fix · tier · model</text>
+          <text x="1216" y="336" font-size="11" font-weight="600">blocking edges</text>
+          <text x="1216" y="351" font-size="10" opacity=".75">sequence, derived each wave</text>
+          <text x="1216" y="378" font-size="11" font-weight="600">merge requests</text>
+          <text x="1216" y="393" font-size="10" opacity=".75">“Closes #12” links MR to ticket</text>
+          <text x="1216" y="420" font-size="11" font-weight="600">comments</text>
+          <text x="1216" y="435" font-size="10" opacity=".75">verdicts, rejections,</text>
+          <text x="1216" y="449" font-size="10" opacity=".75">blocked reports, lessons</text>
+          <text x="1216" y="476" font-size="10" opacity=".6">a fresh session must be able to</text>
+          <text x="1216" y="490" font-size="10" opacity=".6">rebuild the entire build from</text>
+          <text x="1216" y="504" font-size="10" opacity=".6">this column alone — if it can't,</text>
+          <text x="1216" y="518" font-size="10" opacity=".6">that is a bug, not a trade-off</text>
+
+          <!-- ============ RUN DIRECTORY ============ -->
+          <rect x="244" y="630" width="1182" height="122" rx="3" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" opacity=".9" style="fill:var(--panel-2)"/>
+          <text x="264" y="654" font-size="13" font-weight="700">~/.loom/&lt;repo&gt;/ — the run directory (plumbing, never decisions)</text>
+          <text x="264" y="680" font-size="10" opacity=".8">tick.lock.d · merge.lock.d · gate.lock.d</text>
+          <text x="264" y="696" font-size="10" opacity=".6">atomic mkdir holding the owner pid</text>
+          <text x="264" y="718" font-size="10" opacity=".8">loop.stopped</text>
+          <text x="264" y="734" font-size="10" opacity=".6">the stop switch</text>
+
+          <text x="580" y="680" font-size="10" opacity=".8">lanes/&lt;id&gt;.pid · .rc · .start · .progress</text>
+          <text x="580" y="696" font-size="10" opacity=".6">.progress counts model turns, not log bytes</text>
+          <text x="580" y="718" font-size="10" opacity=".8">scratch/ — staged briefs and report bodies</text>
+          <text x="580" y="734" font-size="10" opacity=".6">pruned after 7 days</text>
+
+          <text x="960" y="680" font-size="10" opacity=".8">events.jsonl</text>
+          <text x="960" y="696" font-size="10" opacity=".6">every spawn, exit, transition, skip</text>
+          <text x="960" y="718" font-size="10" opacity=".8">logs/lane-&lt;id&gt;.jsonl · launchd.tick.*.log</text>
+          <text x="960" y="734" font-size="10" opacity=".6">raw session streams + cost</text>
+
+          <!-- ============ ARROWS ============ -->
+          <g stroke="currentColor" fill="none" marker-end="url(#a1)">
+            <line x1="174" y1="92"  x2="240" y2="92"  stroke-width="1.6" style="stroke:var(--weft);color:var(--weft)"/>
+            <line x1="174" y1="182" x2="240" y2="182" stroke-width="1.6" style="stroke:var(--weft);color:var(--weft)"/>
+            <line x1="174" y1="280" x2="240" y2="280" stroke-width="1.4"/>
+          </g>
+
+          <!-- tick -> wave -->
+          <line x1="506" y1="158" x2="576" y2="158" stroke-width="2.4" marker-end="url(#a1)" style="stroke:var(--weft);color:var(--weft)"/>
+          <text x="541" y="148" font-size="10" text-anchor="middle" style="fill:var(--weft)">spend</text>
+
+          <!-- gitlab -> wave (read) -->
+          <line x1="1200" y1="120" x2="798" y2="120" stroke-width="1.8" marker-end="url(#a1)" style="stroke:var(--tracker);color:var(--tracker)"/>
+          <text x="999" y="110" font-size="10" text-anchor="middle" style="fill:var(--tracker)">tick.sh snapshot --brief · one JSON read, no writes</text>
+
+          <!-- spawn bus -->
+          <path d="M 620 228 L 620 246 L 556 246 L 556 528" stroke-width="1.8" fill="none" style="stroke:var(--warp)"/>
+          <g stroke-width="1.8" marker-end="url(#a1)" style="stroke:var(--warp);color:var(--warp)">
+            <line x1="556" y1="296" x2="576" y2="296"/>
+            <line x1="556" y1="364" x2="576" y2="364"/>
+            <line x1="556" y1="432" x2="576" y2="432"/>
+            <line x1="556" y1="500" x2="576" y2="500"/>
+          </g>
+          <text x="634" y="242" font-size="10" style="fill:var(--warp)">spawn-lane &lt;id&gt; --cwd &lt;worktree&gt; --brief &lt;file&gt;</text>
+
+          <!-- lanes -> lane.sh -->
+          <g stroke-width="1.4" style="stroke:var(--tracker)">
+            <line x1="980" y1="296" x2="1000" y2="296"/>
+            <line x1="980" y1="364" x2="1000" y2="364"/>
+            <line x1="980" y1="432" x2="1000" y2="432"/>
+            <line x1="980" y1="500" x2="1000" y2="500"/>
+            <line x1="1000" y1="296" x2="1000" y2="500"/>
+          </g>
+          <line x1="1000" y1="404" x2="1016" y2="404" stroke-width="1.8" marker-end="url(#a1)" style="stroke:var(--tracker);color:var(--tracker)"/>
+          <line x1="1160" y1="404" x2="1196" y2="404" stroke-width="2.4" marker-end="url(#a1)" style="stroke:var(--tracker);color:var(--tracker)"/>
+          <text x="1181" y="394" font-size="10" text-anchor="middle" style="fill:var(--tracker)">writes</text>
+
+          <!-- run dir -->
+          <line x1="300" y1="364" x2="300" y2="626" stroke="currentColor" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#a1)" opacity=".8"/>
+          <text x="310" y="470" font-size="10" opacity=".7">locks, pids, events, logs</text>
+
+          <!-- THE RETURN LOOP -->
+          <path d="M 720 528 L 720 580 L 1442 580 L 1442 30 L 99 30 L 99 60"
+                stroke-width="2.6" fill="none" marker-end="url(#a1)" style="stroke:var(--weft);color:var(--weft)"/>
+          <text x="1070" y="572" font-size="11" text-anchor="middle" style="fill:var(--weft)">a lane exits → tick.sh tick --from-lane</text>
+          <text x="770" y="22" font-size="11" text-anchor="middle" style="fill:var(--weft)">the fast path: finished work fires the next wave immediately — the timer is only the backstop</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>The load-bearing detail is the order inside tick.sh.</b> Step 1 runs on
+    every single firing, before the lock — so during a wave, when a lane is most likely to wedge,
+    something is still watching. Steps 2–5 are refusals; only past all five does anything cost a
+    model session. The thick orange path is the loop that actually paces the build: work finishing
+    fires the next wave, and the 60-second timer exists only for the two things completion can't
+    signal — the first kick, and waking up after a total stall.</figcaption>
+  </figure>
+
+  <div class="callout">
+    <div class="stripe"></div>
+    <div class="body">
+      <p class="eyebrow">The name you asked for</p>
+      <p>The launchd job is <b>the build agent</b> — one per repo, label
+      <code>com.loom.&lt;repo-basename&gt;-&lt;path-hash&gt;</code>, plist in
+      <code>~/Library/LaunchAgents</code>. In the code it's also called the <i>heartbeat</i>, and
+      the state it can be in is <i>armed</i> or not. <code>/loom start</code> arms it and verifies
+      launchd actually accepted it; <code>/loom stop</code> boots it out; a finished build tears it
+      down on its own, detached, three seconds after the completion report lands.</p>
+      <p>There used to be two jobs — a scheduler and a separate 60-second watcher. Merging them is
+      why step&nbsp;1 above sits outside the lock.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Loop 1 · the heartbeat</p>
+    <h2>Why a 60-second timer doesn't cost 60 seconds of model</h2>
+    <p>Watching is free and happens always. Spending is paced by a separate clock, and a finishing
+    lane is allowed to skip that clock.</p>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1060 280" role="img"
+           aria-label="Timeline over sixteen minutes: the agent fires every sixty seconds and every firing watches, but only firings past the ten-minute wave gap launch a wave. A lane finishing at minute thirteen launches a wave immediately, ignoring the gap.">
+        <defs>
+          <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace, monospace">
+          <line x1="60" y1="150" x2="1000" y2="150" stroke="currentColor" stroke-width="1.4" opacity=".5"/>
+
+          <!-- watch-only firings -->
+          <g fill="none" stroke="currentColor" stroke-width="1.5" opacity=".75">
+            <circle cx="115" cy="150" r="5"/><circle cx="170" cy="150" r="5"/>
+            <circle cx="225" cy="150" r="5"/><circle cx="280" cy="150" r="5"/>
+            <circle cx="335" cy="150" r="5"/><circle cx="390" cy="150" r="5"/>
+            <circle cx="445" cy="150" r="5"/><circle cx="500" cy="150" r="5"/>
+            <circle cx="555" cy="150" r="5"/>
+            <circle cx="665" cy="150" r="5"/><circle cx="720" cy="150" r="5"/>
+            <circle cx="775" cy="150" r="5"/>
+            <circle cx="885" cy="150" r="5"/><circle cx="940" cy="150" r="5"/>
+          </g>
+
+          <!-- wave firings -->
+          <g style="fill:var(--weft)">
+            <circle cx="60" cy="150" r="8"/>
+            <circle cx="610" cy="150" r="8"/>
+            <circle cx="830" cy="150" r="8"/>
+          </g>
+
+          <text x="60" y="128" font-size="11" text-anchor="middle" style="fill:var(--weft)">wave</text>
+          <text x="610" y="128" font-size="11" text-anchor="middle" style="fill:var(--weft)">wave</text>
+          <text x="830" y="128" font-size="11" text-anchor="middle" style="fill:var(--weft)">wave</text>
+
+          <!-- gap bracket -->
+          <path d="M 60 96 L 60 84 L 610 84 L 610 96" fill="none" stroke-width="1.3" opacity=".7" style="stroke:var(--weft)"/>
+          <text x="335" y="76" font-size="11" text-anchor="middle" style="fill:var(--weft)">min_wave_gap_minutes · 10 — the only thing pacing spend on the timer</text>
+
+          <!-- lane trigger -->
+          <path d="M 830 230 L 830 166" stroke-width="2.2" fill="none" marker-end="url(#a2)" style="stroke:var(--warp);color:var(--warp)"/>
+          <text x="812" y="222" font-size="11" text-anchor="end" style="fill:var(--warp)">a lane finished here — this tick ignores the gap</text>
+          <text x="812" y="238" font-size="10" text-anchor="end" opacity=".75" style="fill:var(--warp)">work already in progress should not have to wait</text>
+
+          <!-- watch label -->
+          <text x="60" y="186" font-size="11" opacity=".8">every firing, wave or not:</text>
+          <text x="60" y="202" font-size="10" opacity=".65">stamp each lane's model-turn count · classify the board · notify once per state change</text>
+
+          <!-- axis -->
+          <g font-size="10" opacity=".6" text-anchor="middle">
+            <text x="60" y="264">0 min</text>
+            <text x="335" y="264">5</text>
+            <text x="610" y="264">10</text>
+            <text x="885" y="264">15</text>
+          </g>
+          <g stroke="currentColor" opacity=".35">
+            <line x1="60" y1="244" x2="60" y2="250"/>
+            <line x1="335" y1="244" x2="335" y2="250"/>
+            <line x1="610" y1="244" x2="610" y2="250"/>
+            <line x1="885" y1="244" x2="885" y2="250"/>
+          </g>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Sixteen firings, three waves. <b>Three callers, three contracts:</b>
+    <code>tick</code> typed by a human always runs a wave and ignores both the switch and the gap;
+    <code>tick --auto</code> from the timer respects both; <code>tick --from-lane</code> respects the
+    stop switch but ignores the gap. Every skip writes a <code>tick_skipped</code> event naming its
+    reason, so the ticker can always say why nothing ran.</figcaption>
+  </figure>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th class="mono">board reads as</th><th class="mono">meaning</th><th class="mono">timer buys a wave?</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">active</td><td>lanes are making turns</td><td>yes</td></tr>
+        <tr><td class="mono">complete</td><td>nothing ready, nothing running</td><td>yes — the wave posts the report and tears the agent down</td></tr>
+        <tr><td class="mono">unknown</td><td>no build label yet</td><td>yes — this is how a fresh repo gets its first wave</td></tr>
+        <tr><td class="mono">stalled</td><td>work is ready, nothing is running</td><td>yes by default; <code>stall_action: notify_only</code> makes it wait for a human</td></tr>
+        <tr><td class="mono">halted</td><td>every open ticket is blocked</td><td>no — a wave would only be told so again</td></tr>
+        <tr><td class="mono">unreadable</td><td><code>glab</code>, auth or network failed</td><td>no, on the timer — a sleeping laptop runs its missed firing before WiFi is back</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Loop 2 · one ticket</p>
+    <h2>Every state change is a label, and one verb writes it</h2>
+    <p>The inner loop. A ticket's labels <i>are</i> its state — there is no other record — and the
+    lane never touches <code>glab</code> directly to change one.</p>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1320 470" role="img"
+           aria-label="Ticket lifecycle: ready-for-agent to in-progress to review to merge-queue to closed, with a rework loop from a failed gate back to in-progress, a merge retry loop, a blocked escape hatch that only a human can release, and a hold for tickets waiting on a fix to the base branch.">
+        <defs>
+          <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace, monospace">
+
+          <!-- states -->
+          <g>
+            <rect x="30" y="150" width="168" height="46" rx="23" stroke="currentColor" stroke-width="1.5" style="fill:var(--panel-2)"/>
+            <text x="114" y="178" font-size="12" text-anchor="middle">ready-for-agent</text>
+
+            <rect x="296" y="150" width="168" height="46" rx="23" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="380" y="178" font-size="12" text-anchor="middle" style="fill:var(--warp)">in-progress</text>
+
+            <rect x="562" y="150" width="168" height="46" rx="23" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="646" y="178" font-size="12" text-anchor="middle" style="fill:var(--warp)">review</text>
+
+            <rect x="828" y="150" width="168" height="46" rx="23" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--warp)"/>
+            <text x="912" y="178" font-size="12" text-anchor="middle" style="fill:var(--warp)">merge-queue</text>
+
+            <rect x="1094" y="150" width="168" height="46" rx="23" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+            <text x="1178" y="178" font-size="12" text-anchor="middle" style="fill:var(--tracker)">closed</text>
+          </g>
+
+          <!-- forward arrows -->
+          <g stroke="currentColor" stroke-width="1.8" marker-end="url(#a3)">
+            <line x1="198" y1="173" x2="292" y2="173"/>
+            <line x1="464" y1="173" x2="558" y2="173"/>
+            <line x1="730" y1="173" x2="824" y2="173"/>
+            <line x1="996" y1="173" x2="1090" y2="173"/>
+          </g>
+          <g font-size="10" text-anchor="middle" style="fill:var(--tracker)">
+            <text x="245" y="163">claim</text>
+            <text x="511" y="163">submit</text>
+            <text x="646" y="205" style="fill:var(--tracker)">opens the MR, which says “Closes #12”</text>
+            <text x="777" y="163">verdict pass</text>
+            <text x="1043" y="163">merge</text>
+          </g>
+          <text x="1043" y="205" font-size="10" text-anchor="middle" opacity=".65">waits until GitLab says merged, then closes</text>
+
+          <!-- rework loop -->
+          <path d="M 616 146 L 616 74 L 410 74 L 410 146" fill="none" stroke-width="2" marker-end="url(#a3)" style="stroke:var(--halt);color:var(--halt)"/>
+          <text x="513" y="64" font-size="11" text-anchor="middle" style="fill:var(--halt)">the review fails — back for rework, and the cap counts</text>
+          <text x="513" y="49" font-size="10" opacity=".8" text-anchor="middle" style="fill:var(--halt)">rejected twice for the same reason → stop, rather than guess a third time</text>
+
+          <!-- merge retry -->
+          <path d="M 964 146 L 964 108 L 874 108 L 874 146" fill="none" stroke-width="1.8" marker-end="url(#a3)" style="stroke:var(--halt);color:var(--halt)"/>
+          <text x="919" y="99" font-size="10" text-anchor="middle" style="fill:var(--halt)">the merge failed — try again, twice</text>
+
+          <!-- blocked -->
+          <rect x="268" y="330" width="264" height="52" rx="4" stroke-width="2" style="fill:var(--panel-2);stroke:var(--halt)"/>
+          <text x="400" y="352" font-size="12" text-anchor="middle" style="fill:var(--halt)">blocked</text>
+          <text x="400" y="370" font-size="10" text-anchor="middle" opacity=".75">+ a report naming the decision needed</text>
+
+          <g stroke-width="1.5" marker-end="url(#a3)" fill="none" opacity=".85" style="stroke:var(--halt);color:var(--halt)">
+            <path d="M 380 196 L 380 326"/>
+            <path d="M 646 196 L 646 300 L 552 300 L 552 340 L 536 340"/>
+            <path d="M 912 196 L 912 312 L 560 312 L 560 356 L 536 356"/>
+          </g>
+          <text x="390" y="238" font-size="10" style="fill:var(--halt)">2 crashes, or 150 turns spent</text>
+          <text x="656" y="290" font-size="10" style="fill:var(--halt)">2 rejections</text>
+          <text x="922" y="302" font-size="10" style="fill:var(--halt)">2 failed merges</text>
+
+          <!-- human release -->
+          <path d="M 268 356 L 114 356 L 114 200" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#a3)"/>
+          <text x="30" y="392" font-size="11" font-weight="600">a human, and only a human:</text>
+          <text x="30" y="408" font-size="10" opacity=".8">/loom unblock &lt;n&gt; → transition --release-hold</text>
+          <text x="30" y="424" font-size="10" opacity=".8">posts the decision, drops the label, clears the assignee —</text>
+          <text x="30" y="440" font-size="10" opacity=".8">a lane or a wave may not pass that flag at all</text>
+
+          <!-- merge hold -->
+          <rect x="1000" y="330" width="280" height="52" rx="4" stroke="currentColor" stroke-width="1.4" stroke-dasharray="4 3" style="fill:var(--panel-2)"/>
+          <text x="1140" y="352" font-size="12" text-anchor="middle">held</text>
+          <text x="1140" y="370" font-size="10" text-anchor="middle" opacity=".75">waiting on a fix to the base branch</text>
+          <path d="M 1000 356 L 950 356 L 950 200" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#a3)" opacity=".8"/>
+          <text x="1140" y="404" font-size="10" text-anchor="middle" opacity=".7">the fix merges → it rejoins the queue on its own</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>Read the green labels as the verb that performs each transition:
+    <code>lane.sh claim</code>, <code>submit</code>, <code>verdict</code>, <code>merge</code>. Hand-rolling
+    any of them is the failure this design keeps paying for — a lane that closes the issue without
+    merging the MR reports success over unmerged work, and the tickets it unblocks branch from a base
+    that doesn't have the code in it. <b>The red loops all terminate in a cap</b>, and every cap ends
+    at the same place: a human decision, not another attempt.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Loop 3 · one epic</p>
+    <h2>The outer loop nobody has to be awake for</h2>
+    <p>An epic isn't done when its tickets close. It's done when something has driven it the way a
+    user would — and a failed probe feeds straight back into the ticket loop.</p>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1160 330" role="img"
+           aria-label="Epic acceptance loop: when an epic's last ticket closes it appears in the awaiting-probe list, a probe lane runs its acceptance criteria, a pass closes the milestone and a fail files fix tickets that re-enter the ticket loop and bring the epic back for a re-probe.">
+        <defs>
+          <marker id="a4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace, monospace">
+
+          <rect x="30" y="100" width="200" height="72" rx="3" stroke-width="1.6" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="130" y="128" font-size="12" text-anchor="middle" style="fill:var(--tracker)">last ticket closes</text>
+          <text x="130" y="146" font-size="10" text-anchor="middle" opacity=".75">its milestone has no</text>
+          <text x="130" y="160" font-size="10" text-anchor="middle" opacity=".75">open tickets left</text>
+
+          <rect x="290" y="100" width="200" height="72" rx="3" stroke="currentColor" stroke-width="1.4" style="fill:var(--panel-2)"/>
+          <text x="390" y="128" font-size="12" text-anchor="middle">waiting for a probe</text>
+          <text x="390" y="146" font-size="10" text-anchor="middle" opacity=".75">re-worked out every wave,</text>
+          <text x="390" y="160" font-size="10" text-anchor="middle" opacity=".75">never a moment to catch</text>
+
+          <rect x="550" y="100" width="200" height="72" rx="3" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--warp)"/>
+          <text x="650" y="128" font-size="12" text-anchor="middle" style="fill:var(--warp)">probe-&lt;epic-slug&gt;</text>
+          <text x="650" y="146" font-size="10" text-anchor="middle" opacity=".75">its own acceptance tests</text>
+          <text x="650" y="160" font-size="10" text-anchor="middle" opacity=".75">plus past known failures</text>
+
+          <rect x="900" y="30" width="230" height="66" rx="3" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="1015" y="56" font-size="12" text-anchor="middle" style="fill:var(--tracker)">PASS → accepted</text>
+          <text x="1015" y="74" font-size="10" text-anchor="middle" opacity=".75">probe-result closes the milestone</text>
+
+          <rect x="900" y="180" width="230" height="66" rx="3" stroke-width="1.8" style="fill:var(--panel-2);stroke:var(--halt)"/>
+          <text x="1015" y="206" font-size="12" text-anchor="middle" style="fill:var(--halt)">FAIL → fix tickets</text>
+          <text x="1015" y="224" font-size="10" text-anchor="middle" opacity=".75">lane.sh fix-ticket files them</text>
+
+          <g stroke="currentColor" stroke-width="1.8" marker-end="url(#a4)">
+            <line x1="230" y1="136" x2="286" y2="136"/>
+            <line x1="490" y1="136" x2="546" y2="136"/>
+          </g>
+          <path d="M 750 128 L 830 128 L 830 63 L 896 63" fill="none" stroke-width="1.8" marker-end="url(#a4)" style="stroke:var(--tracker);color:var(--tracker)"/>
+          <path d="M 750 148 L 830 148 L 830 213 L 896 213" fill="none" stroke-width="1.8" marker-end="url(#a4)" style="stroke:var(--halt);color:var(--halt)"/>
+
+          <!-- the return -->
+          <path d="M 1015 246 L 1015 296 L 130 296 L 130 176" fill="none" stroke-width="2.4" marker-end="url(#a4)" style="stroke:var(--halt);color:var(--halt)"/>
+          <text x="572" y="288" font-size="11" text-anchor="middle" style="fill:var(--halt)">fix tickets re-enter the ticket loop · fix-first ordering · the milestone stays open</text>
+          <text x="572" y="318" font-size="10" text-anchor="middle" opacity=".7">so the epic reappears here the moment its fixes merge — the re-probe is the same step, never a judgement call about whether the fixes “looked small enough”</text>
+
+          <text x="30" y="60" font-size="11" opacity=".75">the build is complete only when this list is empty —</text>
+          <text x="30" y="76" font-size="11" opacity=".75">an unaccepted epic means unfinished, however many tickets merged</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption>The probe is deliberately <b>not</b> the test suite again — it drives a really-running
+    stack the way a person would. Its brief is assembled from the epic's own acceptance criteria
+    (written in phase&nbsp;3, stored on the milestone) plus regression checks for defects this epic has
+    already produced. Written from the defect history alone, a brief can only ever catch what somebody
+    already broke.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Scripts</p>
+    <h2>Two shell entry points, one shared prelude, seven jq views</h2>
+    <p>The split that matters isn't by feature — it's by whether a thing is allowed to write to the
+    tracker. A test suite enforces one side of it.</p>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+      <svg viewBox="0 0 1280 520" role="img"
+           aria-label="Script map: tick.sh is read-only against the tracker and enforced by tick-test.sh; lane.sh and bootstrap.sh are the only writers; both source lib.sh; jq programs read either the snapshot document or the event log; watch-panes.sh renders the event log into terminal panes.">
+        <defs>
+          <marker id="a5" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+          </marker>
+        </defs>
+        <g font-family="ui-monospace, monospace">
+
+          <!-- entry points -->
+          <rect x="30" y="40" width="280" height="106" rx="3" stroke="currentColor" stroke-width="1.8" style="fill:var(--panel-2)"/>
+          <text x="46" y="64" font-size="13" font-weight="700">tick.sh</text>
+          <text x="46" y="80" font-size="10" opacity=".75">3053 lines · 25 subcommands</text>
+          <text x="46" y="100" font-size="11" style="fill:var(--tracker)">reads the tracker, never writes it</text>
+          <text x="46" y="118" font-size="10" opacity=".75">scheduling · locks · spawning · liveness</text>
+          <text x="46" y="134" font-size="10" opacity=".75">snapshots · notifications · reports</text>
+
+          <rect x="350" y="40" width="280" height="106" rx="3" stroke-width="2" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="366" y="64" font-size="13" font-weight="700" style="fill:var(--tracker)">lane.sh</text>
+          <text x="366" y="80" font-size="10" opacity=".75">971 lines · 16 verbs</text>
+          <text x="366" y="100" font-size="11" style="fill:var(--tracker)">every tracker write inside a lane</text>
+          <text x="366" y="118" font-size="10" opacity=".75">claim · submit · verdict · merge · note</text>
+          <text x="366" y="134" font-size="10" opacity=".75">fix-ticket · reconcile · probe-result · …</text>
+
+          <rect x="670" y="40" width="250" height="106" rx="3" stroke-width="1.5" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="686" y="64" font-size="13" font-weight="700" style="fill:var(--tracker)">bootstrap.sh</text>
+          <text x="686" y="80" font-size="10" opacity=".75">the other writer — setup only</text>
+          <text x="686" y="100" font-size="10" opacity=".75">seeds the global config</text>
+          <text x="686" y="116" font-size="10" opacity=".75">writes .claude/settings.json</text>
+          <text x="686" y="132" font-size="10" opacity=".75">creates missing state labels</text>
+
+          <rect x="960" y="40" width="300" height="106" rx="3" stroke-width="1.5" style="fill:var(--panel-2);stroke:var(--warp)"/>
+          <text x="976" y="64" font-size="13" font-weight="700" style="fill:var(--warp)">watch-panes.sh</text>
+          <text x="976" y="80" font-size="10" opacity=".75">the viewer — one per repo, in herdr</text>
+          <text x="976" y="100" font-size="10" opacity=".75">one pane per live lane, following its log</text>
+          <text x="976" y="116" font-size="10" opacity=".75">plus a build-ticker strip</text>
+          <text x="976" y="132" font-size="10" opacity=".75">zero model time — pure rendering</text>
+
+          <!-- test -->
+          <rect x="30" y="176" width="280" height="46" rx="3" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" style="fill:var(--panel-2)"/>
+          <text x="46" y="196" font-size="11" font-weight="600">tick-test.sh · 6986 lines</text>
+          <text x="46" y="212" font-size="10" opacity=".75">checks every command it would run</text>
+          <line x1="170" y1="172" x2="170" y2="150" stroke="currentColor" stroke-width="1.3" marker-end="url(#a5)" opacity=".8"/>
+          <text x="181" y="166" font-size="10" opacity=".7">proves the read-only half stays read-only</text>
+
+          <!-- stores -->
+          <rect x="200" y="270" width="290" height="66" rx="3" stroke-width="1.6" style="fill:var(--panel);stroke:var(--tracker)"/>
+          <text x="345" y="294" font-size="12" font-weight="700" text-anchor="middle" style="fill:var(--tracker)">the snapshot document</text>
+          <text x="345" y="312" font-size="10" text-anchor="middle" opacity=".75">one JSON read of the whole board,</text>
+          <text x="345" y="326" font-size="10" text-anchor="middle" opacity=".75">derived and disposable</text>
+
+          <rect x="690" y="270" width="300" height="66" rx="3" stroke="currentColor" stroke-width="1.6" style="fill:var(--panel)"/>
+          <text x="840" y="294" font-size="12" font-weight="700" text-anchor="middle">events.jsonl</text>
+          <text x="840" y="312" font-size="10" text-anchor="middle" opacity=".75">append-only local log — every spawn,</text>
+          <text x="840" y="326" font-size="10" text-anchor="middle" opacity=".75">exit, transition, skip and notify</text>
+
+          <path d="M 100 146 L 100 250 L 280 250 L 280 266" fill="none" stroke-width="1.6" marker-end="url(#a5)" style="stroke:var(--tracker);color:var(--tracker)"/>
+          <text x="108" y="242" font-size="10" style="fill:var(--tracker)">snapshot</text>
+
+          <path d="M 240 146 L 240 200 L 760 200 L 760 266" fill="none" stroke="currentColor" stroke-width="1.6" marker-end="url(#a5)"/>
+          <text x="470" y="192" font-size="10" opacity=".7">tick.sh event — waves and lanes both append</text>
+
+          <path d="M 1110 146 L 1110 303 L 994 303" fill="none" stroke-width="1.6" marker-end="url(#a5)" style="stroke:var(--warp);color:var(--warp)"/>
+          <text x="1119" y="240" font-size="10" style="fill:var(--warp)">follows</text>
+
+          <!-- jq -->
+          <rect x="200" y="392" width="300" height="94" rx="3" stroke-width="1.2" stroke-dasharray="4 3" style="fill:var(--panel-2);stroke:var(--tracker)"/>
+          <text x="216" y="414" font-size="11" font-weight="600">over the snapshot</text>
+          <text x="216" y="434" font-size="10" opacity=".8">snapshot.jq — builds it in one pass</text>
+          <text x="216" y="450" font-size="10" opacity=".8">graph.jq — is there parallel work to do?</text>
+          <text x="216" y="470" font-size="10" opacity=".65">flags an epic wired to nothing</text>
+
+          <rect x="690" y="392" width="320" height="94" rx="3" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" style="fill:var(--panel-2)"/>
+          <text x="706" y="414" font-size="11" font-weight="600">over the event log</text>
+          <text x="706" y="434" font-size="10" opacity=".8">render-events.jq · render.jq — the ticker</text>
+          <text x="706" y="450" font-size="10" opacity=".8">report.jq · report-ticket.jq · retro.jq</text>
+          <text x="706" y="466" font-size="10" opacity=".8">usage.jq — dollars, priced per message</text>
+          <text x="706" y="482" font-size="10" opacity=".65">costs no tracker calls; works after the build</text>
+
+          <g stroke="currentColor" stroke-width="1.4" marker-end="url(#a5)" opacity=".8">
+            <line x1="345" y1="336" x2="345" y2="388"/>
+            <line x1="840" y1="336" x2="840" y2="388"/>
+          </g>
+
+          <!-- lib -->
+          <rect x="1050" y="392" width="220" height="94" rx="3" stroke="currentColor" stroke-width="1.4" style="fill:var(--panel-2)"/>
+          <text x="1066" y="414" font-size="11" font-weight="600">lib.sh · lib.jq</text>
+          <text x="1066" y="434" font-size="10" opacity=".8">the shared preludes</text>
+          <text x="1066" y="450" font-size="10" opacity=".8">config layers, the base</text>
+          <text x="1066" y="466" font-size="10" opacity=".8">branch, epic name → id,</text>
+          <text x="1066" y="482" font-size="10" opacity=".8">the verdict marker format</text>
+          <path d="M 1160 388 L 1160 360 L 500 360 L 500 150" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#a5)" opacity=".65"/>
+          <text x="510" y="356" font-size="10" opacity=".6">sourced by every script above — one copy of each fact, so none can drift</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Why the read/write split is a hard line:</b> a wave re-runs <code>tick.sh</code>
+    constantly, so a mutating call in there would be unsafe to repeat. Setup genuinely must write, so
+    it lives in <code>bootstrap.sh</code> instead of eroding the guarantee. And inside a lane, the
+    rule is stricter still — hand-rolling a <code>glab</code> mutation fails on argument length or on
+    a <code>$VAR</code> defeating the permission allowlist, so a lane that needs a mutation
+    <code>lane.sh</code> lacks has found a missing verb, never a missing permission rule.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Ownership</p>
+    <h2>Where each kind of fact lives</h2>
+    <p>The constitution's first rule: no shadow state. Everything below is a consequence of it.</p>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th class="mono">place</th><th class="mono">holds</th><th class="mono">who writes it</th><th class="mono">safe to delete?</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono" style="color:var(--tracker)">GitLab</td>
+          <td>every decision about a ticket — state, assignee, verdicts, edges, reports, MRs</td>
+          <td class="mono">lane.sh, bootstrap.sh</td>
+          <td>no. This is the build.</td>
+        </tr>
+        <tr>
+          <td class="mono">~/.loom/&lt;repo&gt;/</td>
+          <td>locks, pids, turn counts, the event log, lane logs, the stop switch, scratch</td>
+          <td class="mono">tick.sh</td>
+          <td>yes — you lose history and the running loop, never a decision</td>
+        </tr>
+        <tr>
+          <td class="mono">.loom.yml + ~/.loom/config.yml</td>
+          <td>caps, models, gate commands, the push-notification topic, permission mode</td>
+          <td>a human, once</td>
+          <td>yes — every key has a default, and most are derived from the repo anyway</td>
+        </tr>
+        <tr>
+          <td class="mono">../&lt;repo&gt;-wt-&lt;n&gt;</td>
+          <td>one lane's working copy and its branch</td>
+          <td>the lane</td>
+          <td>the sweeper does it for you, once the branch is merged</td>
+        </tr>
+        <tr>
+          <td class="mono">the repo's gate runner</td>
+          <td>this repo's definition of done</td>
+          <td>a human, in the repo</td>
+          <td>no — CI and bare-clone contributors run it without the skill installed</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Config resolves in four layers</h3>
+  <div class="col">
+    <p>Repo → derived → global → built-in. <code>tick.sh resolve-config</code> prints the merged
+    document with each value's source, so the effective setting is one command away rather than
+    something to reason about. The derived layer is the interesting one: the base branch, the gate
+    commands, and the whole permission surface are all read off the repo, and the permission allowlist
+    is <i>generated from the same commands the gates will run</i> — so it cannot drift from them.</p>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th class="mono">limit</th><th class="mono">default</th><th class="mono">what it stops</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">max_lanes</td><td class="mono num">4</td><td>implementation lanes running at once — each is a full worktree</td></tr>
+        <tr><td class="mono">max_aux_lanes</td><td class="mono num">4</td><td>gate, merge and probe lanes, sharing one pool</td></tr>
+        <tr><td class="mono">rejection_cap</td><td class="mono num">2</td><td>gate rejections before the ticket goes to a human</td></tr>
+        <tr><td class="mono">crash_cap</td><td class="mono num">2</td><td>implementer crashes — counted separately, since a crash isn't a rejection</td></tr>
+        <tr><td class="mono">merge_attempt_cap</td><td class="mono num">2</td><td>merge attempts on one ticket, so the queue advances instead of feeding every lane into the same wall</td></tr>
+        <tr><td class="mono">lane_turn_cap</td><td class="mono num">150</td><td>model turns in one lane — past this it's effort, not progress</td></tr>
+        <tr><td class="mono">heartbeat_stale_minutes</td><td class="mono num">30</td><td>silence before a live lane counts as wedged — measured in model turns, not log bytes</td></tr>
+        <tr><td class="mono">min_wave_gap_minutes</td><td class="mono num">10</td><td>how often the timer may buy a wave</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">Phases</p>
+    <h2>Everything above is phase six</h2>
+    <p>The first five phases are a human sitting with the machine. The sixth is the one that runs
+    overnight — and it is the only phase with a loop in it.</p>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th class="mono">verb</th><th class="mono">phase</th><th class="mono">what it produces</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">plan &lt;spec&gt;</td><td class="mono">1–2</td><td>architecture and UX grilled to closure: decision records, an architecture doc, a UX spec</td></tr>
+        <tr><td class="mono">epics</td><td class="mono">3</td><td>the epic breakdown, created in the tracker, each carrying its own acceptance criteria</td></tr>
+        <tr><td class="mono">tickets</td><td class="mono">4</td><td>tickets with contracts, gate tiers, spec IDs and blocking edges</td></tr>
+        <tr><td class="mono">build</td><td class="mono">5</td><td>a <code>Build N</code> issue selecting epics — and it deliberately never starts anything</td></tr>
+        <tr><td class="mono">start</td><td class="mono">5→6</td><td>the trigger: arms the build agent, clears the stop switch</td></tr>
+        <tr><td class="mono">tick · watch · unblock · stop</td><td class="mono">6</td><td>one wave · a narrated view · a human decision · the switch off</td></tr>
+        <tr><td class="mono">retro</td><td class="mono">after 6</td><td>where the time and money went, written up as proposals</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>Verb boundaries are hard stops: a verb ends at its own output and hands back to the human. It
+    never auto-advances to the next verb, and never implements by hand — a rule paid for by a run that
+    chained plan → epics → hand-coding under a deadline.</p>
+  </div>
+
+  <h3>Two more things wired into phase six</h3>
+  <div class="keys">
+    <div>
+      <h4>notifications</h4>
+      <p>Build complete, halted, stalled, ticket blocked, lane stale, workspace untrusted, no
+      heartbeat. Pushed to an <b>access-protected</b> topic on ntfy — a phone-push service — via <code>curl</code>, or — with no
+      topic set — a local macOS banner. The event is recorded in the ticker <i>first</i>, before any
+      decision about pushing, so a misconfigured push can't also silence the record.</p>
+    </div>
+    <div>
+      <h4>the viewer</h4>
+      <p>Inside herdr — the terminal multiplexer this runs in — <code>watch-panes.sh</code> raises a pane per live lane plus a ticker strip.
+      Two switches, both honored mid-run — <code>q</code> in the ticker pane, and the whole viewer
+      off — and only <code>start</code> and <code>watch</code> may clear them, so an automatic tick can
+      never undo a human's close.</p>
+    </div>
+  </div>
+</section>
+
+<div class="footnote">
+  Sources: SKILL.md and references/ · scripts/tick.sh, lane.sh, bootstrap.sh, watch-panes.sh, lib.sh
+  · the seven jq programs · defaults read from the code, not the docs.<br>
+  Colour carries meaning throughout: <span style="color:var(--weft)">orange = scheduling and waves</span> ·
+  <span style="color:var(--warp)">indigo = lanes and the work itself</span> ·
+  <span style="color:var(--tracker)">green = the tracker and the verbs that write it</span> ·
+  <span style="color:var(--halt)">red = a loop that ends at a cap</span>.
+</div>
+</body>
+</html>
