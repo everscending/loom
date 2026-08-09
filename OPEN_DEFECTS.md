@@ -492,12 +492,51 @@ removed, and would pass identically if `watcher-arm` wrote a plist elsewhere.
 end) against a claimed serial cost of "~4s" for what is actually 11 stub calls. A partially
 serialised fan-out (two sequential concurrent stages) lands inside the window.
 
+**Now observed, 2026-08-09.** `snapshot: fan-out ran serially (3s — a serial run costs ~4s)` failed
+on the second of two back-to-back full-suite runs and passed 4/4 when section 07 was run alone. The
+window is not merely narrow in theory — a loaded machine crosses it, so the suite is not reliably
+green even with nothing wrong. It fails in the *safe* direction (a false alarm, never a false
+pass), which is why it has survived: it reads as a real regression and is dismissed as noise, and
+those are the same signal. Any fix has to assert the shape of the concurrency rather than its
+wall-clock cost — count overlapping stub invocations, not elapsed seconds.
+
 ### D-TEST-13 · a false rule recorded in the suite
 `tick-test.sh:594-595` — the comment states "a prefix on a function call is not passed through to
 the command the function runs". Verified false in bash: `ZZZ=hello f` reaches a grandchild process.
 Sections at `:1057`, `:1111`, `:1128`, `:1167` depend on the prefix form working, so the comment
 invites a future "fix" that would rewrite working tests. Not a test defect; a trap for the next
 maintainer.
+
+### D-TEST-14 · the P72 trailer violation is defeated by the directory the suite runs from
+`scripts/tests/16-ticker-and-lane-verbs.sh`, the test asserting *"one edit to the shared scan blinds
+the snapshot read AND lane.sh's duplicate refusal together"*. The planted violation builds a
+directory of symlinks to every script plus a **real, mutated `lib.jq`**, then runs `lane.sh verdict`
+out of it and expects the duplicate refusal to go blind.
+
+`cmd_verdict` reaches the prelude with `jq -L "$jqd" … 'include "lib"; …'`, and jq resolves a
+relative `include` against the **current working directory** before that `-L` directory is reached.
+So when the suite is run from `scripts/` — where the real `lib.jq` sits — every mutated copy is
+shadowed by the unmutated original, the refusal keeps working, and the violation cannot fail.
+
+**Failure:** the outcome depends on nothing but cwd, in both directions.
+
+```
+cd scripts && bash tick-test.sh ticker   → 139 passed, 1 failed
+cd ..       && bash scripts/tick-test.sh ticker → 140 passed, 0 failed
+```
+
+The production claim is fine — verified by hand: with the mutation genuinely loaded, both readers do
+go blind together. What is broken is the fixture, and it is broken twice over: it reports a
+regression that does not exist from one directory, and from the other it proves the right thing only
+by accident of where it was launched. A test whose verdict is set by the caller's cwd is asserting
+about the caller.
+
+Whichever way it is fixed, the mutated prelude has to be the one jq actually loads — an absolute
+`include` path, a cwd the harness controls, or a `-L` directory that cannot be shadowed — and the
+fix is not done until the test fails from **both** directories with the mutation in place.
+
+Should the suite have caught it? It is the suite. Section 27 checks that every section sources the
+harness and ends at `test_finish`; nothing checks that a section's verdict is independent of cwd.
 
 ---
 
