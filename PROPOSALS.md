@@ -56,6 +56,10 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
+| P82 | The lane brief does not live in the working tree | open — proposed 2026-08-09; `spawn-lane` writes the brief into the worktree, so every lane worktree contains an untracked file by construction and sweep's unsaved-work guard keeps it forever. 15 of 30 held worktrees in ai-interpreter-workbench build-5 |
+| P83 | "Merged" is a tracker fact, not a commit-range guess | open — proposed 2026-08-09; a lane that reconciles after pushing leaves an unpushed merge commit, so `origin/<base>..<branch>` is never empty and sweep reads merged work as unmerged. The other 15 of the same 30 |
+| P84 | `lane.sh merge` deletes the source branch | open — proposed 2026-08-09; nothing in the loop ever deletes a branch. 122 remote `ticket-*` branches and 51 local ones after five builds |
+| P85 | Sweep reports what it kept | open — proposed 2026-08-09; sweep prints "kept, needs a human" to the wave log, emits no event, and reaches no human surface. It announced this problem on every tick for five builds and nobody saw it |
 | P81 | The wave's scheduling is a pure function of the snapshot | open — proposed 2026-08-08; steps 2–6 read fields `snapshot.jq` already derives and add no information. A ticket becoming ready waits one whole wave (2m28s average, 36 of them, 57.5% of the seat-reservations span) for a model to re-derive a decision the document already contains. Supersedes the scheduling half of P18 |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
@@ -156,6 +160,139 @@ transcripts; waves 1h21m / 35%, one 57m blackout, peak concurrency 2 of 4, a sch
 suites differ too much for the spans to be compared directly.
 
 ---
+
+## The worktree pile-up — evidence shared by P82–P85
+
+All four were found on 2026-08-09, on `ai-interpreter-workbench` immediately after build-5
+completed and tore its agent down. Five builds had run in that repo. Cleanup had never once
+happened:
+
+| Leftover | Count |
+|---|---|
+| Worktrees under `<repo>-wt-*` | 30 (plus 2 orphan directories git no longer tracks) |
+| Remote `origin/ticket-*` branches | 122 |
+| Local `ticket-*` branches | 51 |
+| Worktrees sweep has ever removed | 0 |
+
+Sweep was neither broken nor disabled — it ran on every tick and correctly declined to touch all
+30, because each one trips one of its two safety guards. Both guards exist for good reasons and
+both are paid for by real incidents. What is wrong is that the loop *manufactures* the conditions
+that trip them, so the guards fire on every worktree rather than on the rare unsafe one. P82 and
+P83 remove those two conditions. P84 covers branches, which no step owns at all. P85 is why it
+stayed invisible for five builds.
+
+## P82 · The lane brief does not live in the working tree
+
+**Problem.** `tick.sh:1231` copies each lane's brief into its worktree as
+`.lane-brief-<id>.md`. Sweep's unsaved-work guard (`tick.sh:253`) treats any untracked,
+non-ignored file as a lane's uncommitted work and keeps the worktree, printing "merged but holds
+untracked work git does not ignore — kept, needs a human" (`tick.sh:256`).
+
+So every lane worktree is guaranteed, by construction, to contain at least one file that makes it
+unsweepable. In build-5's 30 leftovers, 15 were held by exactly this and nothing else — the held
+file was the worktree's own brief in every case (`.gate-brief-114.md`, `.impl-brief-128.md`,
+`.lane-brief-impl-113.md`, …).
+
+The guard itself must not be weakened. It was added as D-TICK-17 after the `grep -v '^??'` version
+filtered untracked files and armed `rm -rf` over ~100 turns of uncommitted work (boostlingo
+build-4 #98). The problem is the brief's location, not the rule.
+
+**Fix direction.** Keep the brief out of the repository working tree entirely. `spawn-lane` writes
+it to the run directory — `$LOOM_HOME/briefs/<lane-id>.md`, alongside the pid files and locks it
+already owns there — and passes an absolute path to the session. The worktree stays pristine, the
+guard keeps protecting what it was built to protect, and no target repo needs a `.gitignore` line
+for a file this skill invented.
+
+A `.gitignore` entry in each bootstrapped repo is the cheaper variant and also works, since
+`git status --porcelain` never lists ignored paths. It is worse in two ways: it is a per-repo
+artifact that every future repo must acquire, and it makes the skill's scratch files invisible to
+`git status` for the human as well.
+
+**Consumer.** `tick.sh sweep`, which currently cannot remove a single merged worktree.
+
+## P83 · "Merged" is a tracker fact, not a commit-range guess
+
+**Problem.** Sweep decides a worktree is merged by testing whether its branch has commits absent
+from the base: `git log "origin/$base..$branch"` at `tick.sh:226`, non-empty meaning "unmerged work
+— not ours to touch".
+
+That test is wrong whenever a lane reconciles after pushing. `lane.sh reconcile` merges
+`origin/<base>` into the branch; if it runs once more after the push that the MR merged, the local
+branch carries a merge commit that was never pushed and is therefore not reachable from the base.
+The range is permanently non-empty and the worktree is permanently unsweepable.
+
+Fifteen of build-5's 30 leftovers were held this way, every one showing the same single commit:
+
+```
+299782b Merge remote-tracking branch 'origin/main' into ticket-96-realtime-stability
+        parents = cd520f8 (pushed tip, merged into main as e583729) + 71a0990 (origin/main)
+```
+
+The ticket was closed, the MR was merged, and main contained the work. Only the local topology
+disagreed.
+
+**Fix direction.** Ask for the fact rather than a proxy for it. Sweep already knows the branch name,
+and the tracker knows whether that branch's MR is `merged` and its ticket closed — the same query
+`lane.sh merge` makes to verify a landing. Read that, and treat the commit range as a secondary
+check rather than the decision.
+
+The cheap variant, if a tracker read per worktree is judged too expensive at sweep time: compare
+against `origin/<branch>` — the pushed tip — instead of the local one, which is what the MR
+actually merged. That fixes this failure without a network call, but it still infers rather than
+reads, and it will not notice a branch whose MR was closed unmerged.
+
+Either variant must keep `tick.sh:226`'s exit-status handling intact (P47: an unresolvable range
+must abort, never read as "merged").
+
+**Consumer.** `tick.sh sweep`.
+
+## P84 · `lane.sh merge` deletes the source branch
+
+**Problem.** No step in the loop deletes a branch. `lane.sh cmd_merge` (`lane.sh:1016`) merges the
+MR, waits for GitLab to report `merged`, closes the ticket and strips its labels — it never sets
+`remove_source_branch`, so the remote branch survives its own merge. Local branches are deleted
+only as a side effect of a successful `worktree remove` in sweep, so with sweep held by P82 and
+P83, none of them were either.
+
+Five builds in `ai-interpreter-workbench` left **122 remote `origin/ticket-*` branches and 51 local
+ones**. Unlike the worktrees, this is not a guard misfiring — it is a step that does not exist.
+
+**Fix direction.** Set `remove_source_branch` on the merge call in `cmd_merge`. It is one field on a
+request the verb already makes, at the one moment the branch is provably disposable, and it needs
+no new verb, no new state, and no scheduling. Sweep's existing `git branch -d` covers the local side
+once P82 and P83 unblock it; a merged-branch prune in sweep would clear the backlog that has already
+accumulated.
+
+**Consumer.** Anyone reading `git branch -r` in a repo this skill has built, and every future
+`spawn-lane` that has to pick a non-colliding branch name.
+
+## P85 · Sweep reports what it kept
+
+**Problem.** Sweep announces every decision to `stdout` inside a wave session — "kept, needs a
+human", "git refused to remove", "removed merged worktree". A wave's stdout goes to its log file.
+Sweep emits no event, so nothing it says reaches `render-events`, `watch`, the ntfy pushes, or the
+completion report.
+
+For five builds in `ai-interpreter-workbench` it printed a "kept, needs a human" line for every
+worktree on every tick — the correct message, addressed to a human, into a file no human reads. The
+build-5 completion report was posted and the agent unloaded itself with 30 worktrees and 173
+branches standing, and said nothing about either.
+
+This is the reason P82, P83 and P84 went unnoticed rather than being fixed after build-1.
+
+**Fix direction.** Two changes, both small:
+
+- Sweep emits one `sweep_held` event per pass carrying the count and the dominant reason, and a
+  `sweep_removed` event when it removes. The ticker then shows cleanup the same way it shows
+  everything else, and a count that never falls is visible within one build.
+- The completion report states the leftover inventory — worktrees held and why, branches merged but
+  not deleted — before the build tears itself down. A build that reports complete while leaving 30
+  worktrees behind is reporting on part of its own work.
+
+Neither adds a decision for a wave to make, so neither costs a `SKILL.md` line.
+
+**Consumer.** The human, who currently discovers this by looking at their own filesystem months
+later.
 
 ## P81 · The wave's scheduling is a pure function of the snapshot
 
