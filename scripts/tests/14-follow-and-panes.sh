@@ -451,6 +451,7 @@ rm -f "$T/wp13p-home/lanes"/*.pid
 # prove anything. And tick.sh needs lib.sh beside IT (P73), for the same
 # reason it needs snapshot.jq — the shared derivations ship as a sibling file.
 mkdir -p "$T/wpmod"; ln -sf "$TICK" "$T/wpmod/tick.sh"
+link_trackers "$T/wpmod"
 ln -sf "$(dirname "$TICK")/lib.sh" "$T/wpmod/lib.sh"   # P73: tick.sh sources it
 sed 's/\*)  # P41/merge-*)  # P41/' "$WP" > "$T/wpmod/wp-mergeonly.sh"; chmod +x "$T/wpmod/wp-mergeonly.sh"
 mkdir -p "$T/wp13p2-home/lanes"

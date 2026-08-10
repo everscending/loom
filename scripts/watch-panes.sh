@@ -41,7 +41,17 @@ fi
 # Same seam pattern as GLAB_CMD/LAUNCHCTL_CMD: the test suite exercises pane
 # lifecycle against a capture stub, never a real herdr.
 HERDR="${HERDR_CMD:-herdr}"
-GLAB="${GLAB_CMD:-glab}"   # one read per merge conclusion (see pane release)
+# P86: the one tracker read this file makes goes through the driver, like every
+# other tracker call in the skill. Resolved with the same rule tick.sh uses —
+# lib.sh's `_tracker_cmd`, sourced here for that one function — so the viewer
+# cannot end up asking a different tracker than the build it is watching.
+LOOM_LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+if [ -f "$LOOM_LIB_SH" ]; then
+    . "$LOOM_LIB_SH"
+    TRACKER_SH="$(_tracker_cmd "${LOOM_LIB_SH%/*}" "${LOOM_REPO:-.}")"
+else
+    TRACKER_SH=""
+fi
 
 # The deliberate off-switch for the ticker strip, honored mid-run. The viewer
 # reopens a dead ticker every poll (see ensure_ticker), which makes the
@@ -441,7 +451,7 @@ while :; do
                     probe-*) story_done=1 ;;
                     *)  # P41: every kind, not merge-* alone
                         [ "$tkt" != "-" ] \
-                            && [ "$("$GLAB" api "projects/:fullpath/issues/$tkt" 2>/dev/null \
+                            && [ "$("$TRACKER_SH" issue "$tkt" 2>/dev/null \
                                  | jq -r '.state' 2>/dev/null)" = "closed" ] && story_done=1 ;;
                 esac
                 if [ -n "$story_done" ]; then

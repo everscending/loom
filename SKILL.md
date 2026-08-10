@@ -191,7 +191,7 @@ so every worktree and CI inherit them. Never spawn a loop session with
 
 **Every tracker write in a lane goes through `scripts/lane.sh`** — `claim`,
 `transition`, `note`, `mr-note`, `verdict`, `merge-failed`, `merge`, `fix-ticket`, `scratch`; long
-bodies via stdin or `--file`. Never hand-roll a `glab` mutation in a lane: an inline `-m` body
+bodies via stdin or `--file`. Never hand-roll a tracker mutation in a lane: an inline `-m` body
 is denied on length alone, and any `$VAR` or `$(...)` anywhere in a command
 defeats allowlist prefix-matching outright. *(paid: a gate finished a correct
 review, then burned 40+ turns unable to post it.)* A lane that needs a

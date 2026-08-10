@@ -53,6 +53,7 @@ fi
 #       GETs for one label move.
 mkdir -p "$P74/twice"
 ln -sf "$LIBSH" "$P74/twice/lib.sh"; ln -sf "$TICK" "$P74/twice/tick.sh"
+link_trackers "$P74/twice"
 sed 's|^    \[ "\$iid" = "\$_ISSUE_IID" \] && return 0$|    :|' "$LANE" > "$P74/twice/lane.sh"
 chmod +x "$P74/twice/lane.sh"
 : > "$P74/gets"
@@ -135,6 +136,7 @@ fi
 # straight through the hold.
 mkdir -p "$P74/stale"
 ln -sf "$LIBSH" "$P74/stale/lib.sh"; ln -sf "$TICK" "$P74/stale/tick.sh"
+link_trackers "$P74/stale"
 sed '/^cmd_merge() {/,/^}/s/^    _forget_issue$/    :/' "$LANE" > "$P74/stale/lane.sh"
 chmod +x "$P74/stale/lane.sh"
 : > "$P74/gets"; : > "$P74/calls"; rm -f "$P74/merged"
@@ -175,6 +177,7 @@ mkdir -p "$PU/nopause"
 for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
     ln -sf "$(dirname "$TICK")/$jf" "$PU/nopause/$jf"
 done
+link_trackers "$PU/nopause"
 ln -sf "$LIBSH" "$PU/nopause/lib.sh"; ln -sf "$LANE" "$PU/nopause/lane.sh"
 sed 's|^    _pause_on_limit "\$stem-retry" retry && return 0$|    :|' "$TICK" > "$PU/nopause/tick.sh"
 chmod +x "$PU/nopause/tick.sh"

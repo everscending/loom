@@ -209,6 +209,7 @@ awk '
   { print }
 ' "$(dirname "$TICK")/lib.sh" > "$TD/nolib/lib.sh"
 chmod +x "$TD/nolib"/*.sh
+link_trackers "$TD/nolib"
 grep -q "printf 'gitlab" "$TD/nolib/lib.sh" \
     && ok "guard-violation: the planted lib.sh really did lose its check" \
     || bad "guard-violation: the plant failed — the rest of this block proves nothing"
@@ -220,9 +221,87 @@ out=$(P86ENV "$TD/none" "$TD/nolib/lane.sh" transition 7 review 2>&1); rc=$?
 printf '%s' "$out" | grep -q "issue-tracker.md" \
     && bad "guard-violation: lane.sh still refused on the declaration with the guard gone" \
     || ok "guard-violation: with the guard gone lane.sh proceeds to its own verb — the halt was the cause"
+# The undriven-tracker case is the one that degrades most usefully. With the
+# guard gone the resolver still points at `trackers/linear.sh`, so the run
+# still fails — but on a missing FILE, saying nothing about what the repo
+# declared or what loom drives. That difference is the guard's whole value:
+# it turns "some file is not there" into an answer a human can act on.
 out=$(P86ENV "$TD/linear" "$TD/nolib/tick.sh" snapshot 2>&1); rc=$?
-[ "$rc" = 0 ] \
-    && ok "guard-violation: the undriven-tracker refusal is the guard's too, not a coincidence" \
-    || bad "guard-violation: 'Linear' still refused without the driver check (rc=$rc)"
+if [ "$rc" != 0 ] && ! printf '%s' "$out" | grep -q "loom has drivers for"; then
+    ok "guard-violation: without the check, 'Linear' fails on a missing driver file and explains nothing"
+else
+    bad "guard-violation: the named refusal survived the guard's removal, so the guard is not what produced it"
+fi
+
+# --- P86 stage 2: one driver contract, and GitLab implements it -----------
+# `glab api "projects/:fullpath/issues/$iid"` was written out at ~28 call sites
+# across three scripts. It is now written in one file, and these are the two
+# properties that keep it that way.
+
+# p86-8. The literal lives in exactly one place.
+# Code lines only: lane.sh's header quotes the hand-rolled `glab api` calls
+# that paid for its existence, and history is not a call site.
+stray=$(grep -l '^[^#]*\("\$GLAB"\|\$GLAB_CMD" api\|glab api \)' "$(dirname "$TICK")"/*.sh 2>/dev/null \
+        | grep -v '/trackers/' || true)
+[ -z "$stray" ] \
+    && ok "driver: no script outside trackers/ issues a glab call of its own" \
+    || bad "driver: glab is still called directly in $(printf '%s' "$stray" | tr '\n' ' ')"
+
+# p86-9. The read-only guarantee, re-pointed. `07-snapshot.sh` proves tick.sh
+# makes no MUTATING call by scanning captured argv — but it scans GLAB verbs,
+# and with the calls now going through the driver that scan would keep passing
+# while checking a condition that can no longer arise. So the same guarantee is
+# asserted one layer up, against the CONTRACT's own write verbs, where a future
+# driver that never runs `glab` is still covered.
+DRV="$TD/drv-stub.sh"
+cat > "$DRV" <<'EOF'
+#!/usr/bin/env bash
+echo "$1" >> "${DRV_LOG:?}"
+echo "[]"
+EOF
+chmod +x "$DRV"
+# The contract's write half, named here so the assertion is a list and not a
+# regex anyone can read two ways.
+DRV_WRITES="issue-create issue-relabel issue-close note-add label-create milestone-close mr-create mr-merge"
+scan_writes() { # <log> → the write verbs it contains, if any
+    local log="$1" v hits=""
+    for v in $DRV_WRITES; do grep -qx "$v" "$log" 2>/dev/null && hits="$hits $v"; done
+    printf '%s' "${hits# }"
+}
+: > "$TD/drv-snapshot.log"
+DRV_LOG="$TD/drv-snapshot.log" TRACKER_CMD="$DRV" P86ENV "$TD/gitlab" "$TICK" snapshot >/dev/null 2>&1 || true
+[ -s "$TD/drv-snapshot.log" ] \
+    && ok "driver: snapshot really did call the contract — the scan below reads a non-empty log" \
+    || bad "driver: snapshot made no driver call at all, so the scan proves nothing"
+w=$(scan_writes "$TD/drv-snapshot.log")
+[ -z "$w" ] \
+    && ok "read-only: snapshot called no write verb of the contract" \
+    || bad "read-only: snapshot issued write verb(s):$w"
+# P81: `plan` is the newest path under this guarantee and makes no tracker call
+# AT ALL — it derives from a document handed to it.
+: > "$TD/drv-plan.log"
+printf '{"tickets":[]}' | DRV_LOG="$TD/drv-plan.log" TRACKER_CMD="$DRV" \
+    P86ENV "$TD/gitlab" "$TICK" plan >/dev/null 2>&1 || true
+[ ! -s "$TD/drv-plan.log" ] \
+    && ok "read-only: plan called the driver not at all — P81's guarantee holds through the seam" \
+    || bad "read-only: plan reached the tracker ($(head -1 "$TD/drv-plan.log"))"
+# Planted violation: a write verb on a tick.sh read path. The scan must catch
+# it, or it is checking nothing.
+mkdir -p "$TD/writey"
+cp "$(dirname "$TICK")"/*.sh "$(dirname "$TICK")"/*.jq "$TD/writey/" 2>/dev/null
+link_trackers "$TD/writey"
+awk '{ print }
+     /^    SNAP_TMP=\$\(mktemp -d\)$/ { print "    \"$TRACKER_SH\" issue-relabel 1 --add planted >/dev/null 2>&1 || true" }
+' "$TICK" > "$TD/writey/tick.sh"
+chmod +x "$TD/writey"/*.sh
+grep -q 'issue-relabel 1 --add planted' "$TD/writey/tick.sh" \
+    && ok "read-only-violation: the planted write really is in the mutant" \
+    || bad "read-only-violation: the plant failed — the assertion below proves nothing"
+: > "$TD/drv-planted.log"
+DRV_LOG="$TD/drv-planted.log" TRACKER_CMD="$DRV" P86ENV "$TD/gitlab" "$TD/writey/tick.sh" snapshot >/dev/null 2>&1 || true
+w=$(scan_writes "$TD/drv-planted.log")
+[ -n "$w" ] \
+    && ok "read-only-violation: the scan catches a write planted on a read path ($w)" \
+    || bad "read-only-violation: a planted write went unnoticed — the guarantee is unchecked"
 
 test_finish

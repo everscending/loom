@@ -33,6 +33,16 @@ seed_tracker_decl() { # <repo-root> [tracker name]
     git -C "$root" add docs/agents/issue-tracker.md >/dev/null 2>&1 || true
 }
 seed_tracker_decl "$LOOM_REPO"
+
+# P86 stage 2: several sections mirror the scripts into a temp directory and
+# mutate one of them, to prove a guard is what produces a refusal. Every tracker
+# call now goes through `trackers/<name>.sh`, resolved beside the script that
+# asks — so a mirror without that directory makes lane.sh and tick.sh die on a
+# missing driver instead of exercising the mutation. One line per mirror,
+# rather than each section growing its own copy of the path.
+link_trackers() { # <mirror dir>
+    ln -sfn "$(dirname "$TICK")/trackers" "$1/trackers" 2>/dev/null || true
+}
 # Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
 # lane below it spawns without an entry of its own, exactly as a real worktree
 # relies on its parent directory.

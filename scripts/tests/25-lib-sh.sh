@@ -179,6 +179,7 @@ mkdir -p "$LB/nocfg"
 for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
     ln -sf "$(dirname "$TICK")/$jf" "$LB/nocfg/$jf"
 done
+link_trackers "$LB/nocfg"
 cp "$TICK" "$LB/nocfg/tick.sh"; chmod +x "$LB/nocfg/tick.sh"
 cp "$LANE" "$LB/nocfg/lane.sh"; chmod +x "$LB/nocfg/lane.sh"
 sed 's/^    base=\$(_yaml_scalar "\$cfgf" base)$/    base=""/' "$LIBSH" > "$LB/nocfg/lib.sh"
@@ -233,6 +234,7 @@ fi
 # ls-remote question, config key unread. This is what today's code did, and it
 # targets main while every merge in the repo reconciles against trunk.
 mkdir -p "$LB/olddrift"; ln -sf "$LIBSH" "$LB/olddrift/lib.sh"; ln -sf "$TICK" "$LB/olddrift/tick.sh"
+link_trackers "$LB/olddrift"
 sed '/^cmd_submit()/,/^}/s|base=\$(_detect_base \.)|if git ls-remote --exit-code --heads origin develop >/dev/null 2>\&1; then base=develop; else base=main; fi|' \
     "$LANE" > "$LB/olddrift/lane.sh"; chmod +x "$LB/olddrift/lane.sh"
 git -C "$LBU/repo" checkout -qb ticket-52 main

@@ -101,7 +101,6 @@ SCRATCH_ROOT="$LOOM_HOME/scratch"
 SCRATCH_KEEP_DAYS="${LOOM_SCRATCH_KEEP_DAYS:-7}"
 NTFY_BASE="${NTFY_BASE:-https://ntfy.sh}"
 NTFY_CMD="${NTFY_CMD:-curl}"
-GLAB_CMD="${GLAB_CMD:-glab}"
 # Seam like GLAB_CMD/NTFY_CMD, and for the same reason: the test suite must
 # never touch real launchd. (Paid for: 2026-08-02 — every tick-test run armed
 # a real watcher agent for its mktemp sandbox; 26 zombie agents accumulated,
@@ -141,6 +140,13 @@ LIB_SH="$LIB_DIR/lib.sh"
     || { echo "tick.sh: $LIB_SH is missing — it holds the shared derivations and ships beside tick.sh" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
+
+# P86: every tracker read this file makes goes through the driver for the
+# repo's declared tracker, so `glab` is named in scripts/trackers/gitlab.sh and
+# nowhere else. Resolved ONCE, here — after lib.sh and after SELF_PATH, and
+# before any verb, because tick.sh cds to the repo root mid-verb and a relative
+# resolution would then answer differently depending on which verb asked.
+TRACKER_SH="$(_tracker_cmd "${SELF_PATH%/*}" "$REPO_ROOT")"
 
 # A fresh, empty, uniquely-named directory for one session to write in, handed
 # over as $LOOM_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
@@ -194,7 +200,7 @@ _sweep_env_backup() {
 _branch_merged() { # <branch>
     local br="$1" out=""
     [ -n "$br" ] || return 2
-    out=$(_glab_list --capped "projects/:id/merge_requests?source_branch=$br&state=merged&per_page=1" 2>/dev/null) || return 2
+    out=$("$TRACKER_SH" mr-for-branch "$br" --state merged 2>/dev/null) || return 2
     printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
     printf '%s' "$out" | jq -e 'length > 0' >/dev/null 2>&1 && return 0
     return 1
@@ -422,8 +428,8 @@ cmd_sweep() {
 _epics_unaccepted() { # <build-label>
     local label="$1" closed ms
     [ -n "$label" ] || return 1
-    closed=$(_glab_list "projects/:fullpath/issues?labels=$label&state=closed&per_page=100" 2>/dev/null) || return 1
-    ms=$(_glab_list "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null) || return 1
+    closed=$("$TRACKER_SH" issues-by-label "$label" closed 2>/dev/null) || return 1
+    ms=$("$TRACKER_SH" milestones --state active 2>/dev/null) || return 1
     printf '%s' "$closed" | jq -e --argjson ms "${ms:-[]}" '
         ([.[] | .milestone.title? // empty] | unique) as $mine
         | ($ms | map(.title) | map(select(. as $t | $mine | index($t))) | length) > 0
@@ -482,7 +488,7 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown | unre
     fi
     age=$(( $(date +%s) - $(_last_activity_ts) ))
     [ "$age" -lt "${LOOM_QUIET_SETTLE:-120}" ] && { echo active; return 0; }
-    open=$(_glab_list "projects/:fullpath/issues?labels=$label&state=opened&per_page=100" 2>/dev/null) \
+    open=$("$TRACKER_SH" issues-by-label "$label" opened 2>/dev/null) \
         || { echo unreadable; return 0; }
     count=$(printf '%s' "$open" | jq 'length' 2>/dev/null) || { echo unreadable; return 0; }
     # Zero open tickets is "all the work merged", NOT "the product was
@@ -1182,7 +1188,7 @@ Wave context from tick.sh — trust it over rediscovery:
 - FIRST action: run \"$SELF_PATH\" snapshot --brief | \"$SELF_PATH\" plan — the read step and the schedule. The plan's .actions[] are already decided: run them in order (each carries via + argv, or everything a spawn needs but its brief). .residue[] is what needs prose from you; .deferred[] is what a cap or a hold cut. Absence of .loom.yml is normal (config resolves from derived/global layers).
 - Spawn every lane with: --permission-mode $perm_mode. The model is per ticket, not global: pass --model from that ticket's .model.effective in the snapshot, and omit the flag when it is null.
 - Lanes make EVERY tracker write through the verb script $lane_path (${verb_txt}long bodies via stdin or --file; run it bare for usage).
-- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree, appends the headless execution rules every lane needs, and swaps @brief for a pointer prompt. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
+- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree, appends the headless execution rules every lane needs, and swaps @brief for a pointer prompt. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Inline arguments over 1000 chars are refused. Never hand-roll tracker mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
     export LOOM_WAVE_PROMPT
     local wave_cmd="${LOOM_WAVE_CMD:-claude -p \"\$LOOM_WAVE_PROMPT\" --permission-mode $perm_mode$wm_flag}"
@@ -2173,11 +2179,10 @@ _snap_warn() { printf '%s\n' "$*" >> "$SNAP_TMP/warn.txt"; }
 # A degrading GET: one flaky call costs that field, not the document. A 403
 # on the links endpoint is the EXPECTED path on a tier without native issue
 # links — body-parsed edges carry the wave (SKILL.md's blocking-edge rule).
-_snap_api() {  # _snap_api [--capped] <out> <path> <what>
-    local capped=""
-    case "${1:-}" in --capped) capped=--capped; shift ;; esac
-    local out="$1" path="$2" what="$3" why
-    if ! _glab_list $capped "$path" > "$out" 2>"$out.err"; then
+_snap_api() {  # _snap_api <out> <what> -- <driver verb and args...>
+    local out="$1" what="$2" why; shift 2
+    [ "${1:-}" = "--" ] && shift
+    if ! "$TRACKER_SH" "$@" > "$out" 2>"$out.err"; then
         why=$(head -1 "$out.err" 2>/dev/null | tr -d '\n')
         printf '[]\n' > "$out"
         _snap_warn "degraded: $what — ${why:-non-array response}"
@@ -2209,12 +2214,15 @@ cmd_snapshot() {
     SNAP_JQD="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
     SNAP_JQ="$SNAP_JQD/snapshot.jq"
     [ -f "$SNAP_JQ" ] || die "snapshot: $SNAP_JQ is missing — it holds the document builder and ships beside tick.sh"
-    command -v "$GLAB_CMD" >/dev/null 2>&1 || die "snapshot: '$GLAB_CMD' not found"
-    # P86: the halt, on the read half. This is the one board read every other
-    # read verb funnels through — `watch`, `graph` and `plan` all consume a
-    # snapshot DOCUMENT rather than the tracker — so one check here covers them
-    # all, and `plan` keeps P81's guarantee of making no tracker call of its own.
+    # P86: the halt, on the read half, and BEFORE the driver is looked for. This
+    # is the one board read every other read verb funnels through — `watch`,
+    # `graph` and `plan` all consume a snapshot DOCUMENT rather than the
+    # tracker — so one check here covers them all, and `plan` keeps P81's
+    # guarantee of making no tracker call of its own. Order matters: a repo
+    # declaring a tracker loom has no driver for must be told exactly that, not
+    # that some file is missing.
     _require_tracker "$REPO_ROOT" "snapshot" >/dev/null
+    [ -x "$TRACKER_SH" ] || die "snapshot: tracker driver '$TRACKER_SH' is missing or not executable"
     # glab api's projects/:id shorthand resolves from the cwd's git remote,
     # and a wave may invoke this from a lane worktree — never assume cwd.
     cd "$REPO_ROOT" || die "snapshot: cannot cd to $REPO_ROOT"
@@ -2231,7 +2239,7 @@ cmd_snapshot() {
     # Foundational, so a failure DIES: an empty ticket list from a failed
     # call reads exactly like a genuinely empty build, and launching a wave
     # on a garbage universe is how you get ghost gates.
-    _glab_list "projects/:id/issues?state=opened&per_page=100" \
+    "$TRACKER_SH" issues-open \
         > "$SNAP_TMP/open.json" 2>"$SNAP_TMP/raw.err" \
         || die "snapshot: open-issue list failed or was not JSON — $(head -2 "$SNAP_TMP/raw.err" | tr '\n' ' ')"
 
@@ -2250,7 +2258,7 @@ cmd_snapshot() {
     # nothing in the issue payload, so a serial read here would put a whole
     # round-trip on the critical path of every snapshot the build ever takes.
     printf '[]\n' > "$SNAP_TMP/milestones.json"
-    ( _glab_list "projects/:id/milestones?per_page=100" 2>/dev/null \
+    ( "$TRACKER_SH" milestones 2>/dev/null \
         | jq 'map({title, state, description})' > "$SNAP_TMP/ms.json" 2>/dev/null \
       && mv "$SNAP_TMP/ms.json" "$SNAP_TMP/milestones.json" ) &
 
@@ -2303,25 +2311,23 @@ cmd_snapshot() {
 
     # -- Stage 2: concurrent fan-out. Wall clock is the slowest single call.
     for iid in $member_iids; do
-        ( _snap_api "$SNAP_TMP/links-$iid.json" \
-            "projects/:id/issues/$iid/links?per_page=100" "issue #$iid links" ) &
+        ( _snap_api "$SNAP_TMP/links-$iid.json" "issue #$iid links" \
+            -- issue-links "$iid" ) &
         _snap_batch_gate
     done
     for iid in $active_iids; do
-        ( _snap_api "$SNAP_TMP/mrs-$iid.json" \
-            "projects/:id/issues/$iid/related_merge_requests?per_page=100" "issue #$iid merge requests" ) &
+        ( _snap_api "$SNAP_TMP/mrs-$iid.json" "issue #$iid merge requests" \
+            -- issue-mrs "$iid" ) &
         _snap_batch_gate
     done
     for iid in $review_iids; do
-        ( _snap_api --capped "$SNAP_TMP/tnotes-$iid.json" \
-            "projects/:id/issues/$iid/notes?sort=desc&order_by=created_at&per_page=30" \
-            "issue #$iid comments" ) &
+        ( _snap_api "$SNAP_TMP/tnotes-$iid.json" "issue #$iid comments" \
+            -- issue-notes "$iid" --limit 30 ) &
         _snap_batch_gate
     done
     if [ -n "$build_iid" ]; then
-        ( _snap_api --capped "$SNAP_TMP/notes.json" \
-            "projects/:id/issues/$build_iid/notes?sort=desc&order_by=created_at&per_page=20" \
-            "build lessons thread" ) &
+        ( _snap_api "$SNAP_TMP/notes.json" "build lessons thread" \
+            -- issue-notes "$build_iid" --limit 20 ) &
         _snap_batch_gate
     fi
     # P35: the CLOSED members of this build. An epic whose last ticket closed
@@ -2338,9 +2344,8 @@ cmd_snapshot() {
     # in build-2 the same blind spot let E6 and E7 close unprobed.)
     printf '[]\n' > "$SNAP_TMP/closed.json"
     if [ -n "$label" ]; then
-        ( _snap_api "$SNAP_TMP/closed.json" \
-            "projects/:id/issues?labels=$label&state=closed&per_page=100" \
-            "closed build members" ) &
+        ( _snap_api "$SNAP_TMP/closed.json" "closed build members" \
+            -- issues-by-label "$label" closed ) &
         _snap_batch_gate
     fi
     ( cmd_lane_status > "$SNAP_TMP/lanes.txt" 2>/dev/null || : ) &
@@ -2855,7 +2860,7 @@ _adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reje
     done <<EOF
 $changed
 EOF
-    body=$("$GLAB_CMD" api "projects/:fullpath/issues/$iid" 2>/dev/null \
+    body=$("$TRACKER_SH" issue "$iid" 2>/dev/null \
            | jq -r '.description // empty' 2>/dev/null) || return 1
     sect=$(printf '%s\n' "$body" | awk '
         tolower($0) ~ /^#+[[:space:]]*mandatory adversarial test/ { f=1; next }
@@ -2971,6 +2976,13 @@ _derive_allow() {
     # compound (`ls …; find …; which glab; glab …`) — build-1 2026-08-02 had
     # one denied wholesale, and the wave misread the denial as "repo never
     # bootstrapped" and quit. mkdir: worktree parent dirs.
+    # P86 settled `Bash(glab *)` deliberately rather than dropping it with the
+    # call sites: no wave or lane needs it to WRITE any more — every tracker
+    # call is a subprocess of tick.sh or lane.sh, which the model already
+    # invokes — but it is not here for writes. It is here so the exploration
+    # compound above is not denied whole, which is the failure that cost a
+    # build. The rule stays; the prose forbidding hand-rolled mutations is what
+    # governs writes, and every verb a lane needs now exists.
     # BashOutput/KillShell are how a probe runs a live stack without waiting on
     # anything: start the server as a background shell, POLL it, kill it before
     # exiting. A headless session gets no notifications, so polling is the only

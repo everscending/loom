@@ -10,7 +10,11 @@
 #     line must not kill a --follow pane that runs for a whole build.
 LANE="$(dirname "$TICK")/lane.sh"
 EVH="$T/ev-home"; mkdir -p "$EVH"
-GSTUB="$T/glab-ok.sh"; printf '#!/bin/sh\nexit 0\n' > "$GSTUB"; chmod +x "$GSTUB"
+# P86: answers every read with an empty ARRAY rather than with nothing at all.
+# A list read that returns no bytes is an unreadable tracker, and the driver
+# says so instead of parsing silence as emptiness (P49's rule, now applied to
+# lane.sh's reads too).
+GSTUB="$T/glab-ok.sh"; printf '#!/bin/sh\necho "[]"\nexit 0\n' > "$GSTUB"; chmod +x "$GSTUB"
 LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 4 review >/dev/null 2>&1
 echo "gate looks good" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 4 pass abcd1234 >/dev/null 2>&1
 grep -q '"ev":"ticket_transition"' "$EVH/events.jsonl" 2>/dev/null \
@@ -204,6 +208,7 @@ mkdir -p "$T/tickmod"
 for jf in snapshot.jq render.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.sh lib.jq; do
     ln -sf "$(dirname "$TICK")/$jf" "$T/tickmod/$jf"
 done
+link_trackers "$T/tickmod"
 cp "$TICK" "$T/tickmod/tick.sh"; chmod +x "$T/tickmod/tick.sh"
 sed '/elif $e.ev == "tick_skipped"/,/elif $e.ev == "tick_replayed"/s/else empty end)/else "tick landed mid-wave — remembered for replay" end)/g' \
     "$(dirname "$TICK")/render-events.jq" > "$T/tickmod/render-events.jq"
@@ -327,7 +332,10 @@ GB transition 51 review >/dev/null 2>&1 \
 cat > "$T/glab-body-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${VCAP:?}" ;; esac; done
-echo '{}'
+# P86: a LIST endpoint answers with a list. The driver validates that a list
+# read really returned an array — `verdict`'s duplicate check reads the notes
+# thread, and an object there is a malformed response, not "no duplicate".
+echo '[]'
 EOF
 chmod +x "$T/glab-body-stub.sh"
 VCAP2="$T/verdict-bodies"; : > "$VCAP2"
@@ -446,6 +454,7 @@ D72="$T/slugdrift"; mkdir -p "$D72"
 for sib in lib.sh lib.jq tick.sh snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
     ln -sf "$(dirname "$TICK")/$sib" "$D72/$sib"
 done
+link_trackers "$D72"
 cat > "$T/drift-line.txt" <<'EOF'
         norm=$(printf '%s' "$title" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+$//')
 EOF
@@ -483,6 +492,7 @@ V72="$T/trailer-onesite"; mkdir -p "$V72"
 for sib in tick.sh lane.sh snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.sh; do
     ln -sf "$(dirname "$TICK")/$sib" "$V72/$sib"
 done
+link_trackers "$V72"
 sed 's/scan("orch-verdict/scan("orch-verdict-v2/' "$(dirname "$TICK")/lib.jq" > "$V72/lib.jq"
 # D-TEST-14: prove the planted mutation is the prelude jq ACTUALLY loads, before
 # asserting anything about behaviour. `jq -L <dir> 'include "lib"'` resolves a

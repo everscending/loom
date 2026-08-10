@@ -16,12 +16,12 @@
 #   settings            write .claude/settings.json (delegates to tick.sh)
 #   all                 all three, in dependency order
 #
-# Test seams (env): LOOM_REPO, LOOM_GLOBAL_CONFIG, GLAB_CMD.
+# Test seams (env): LOOM_REPO, LOOM_GLOBAL_CONFIG, TRACKER_CMD (the driver),
+# GLAB_CMD (inside the gitlab driver).
 set -euo pipefail
 
 REPO_ROOT="${LOOM_REPO:-$PWD}"
 GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
-GLAB_CMD="${GLAB_CMD:-glab}"
 TICK="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/tick.sh"
 
 # P73: `die` was written a third time here. It lives in lib.sh beside this
@@ -108,13 +108,15 @@ EOF
 
 cmd_labels() { # labels [--dry-run]
     local dry=0; [ "${1:-}" = "--dry-run" ] && dry=1
-    command -v "$GLAB_CMD" >/dev/null 2>&1 || die "labels: '$GLAB_CMD' not found"
     command -v jq >/dev/null 2>&1 || die "labels: jq required"
     _require_repo labels
     # P86: the write half's halt, asked at the verb that actually writes to the
     # tracker, so `bootstrap.sh labels` run on its own is refused too — not only
     # the `all` path above it.
     _require_tracker "$REPO_ROOT" labels >/dev/null
+    # P86: through the driver, like every other tracker call in this skill.
+    local TRACKER; TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "$REPO_ROOT")"
+    [ -x "$TRACKER" ] || die "labels: tracker driver '$TRACKER' is missing or not executable"
     cd "$REPO_ROOT" || die "labels: cannot cd to $REPO_ROOT"
     local raw existing name color desc created=0 skipped=0
     # One read for the whole set; creating a label that exists is an error on
@@ -130,7 +132,7 @@ cmd_labels() { # labels [--dry-run]
     # meant an auth failure or outage produced "no labels exist", so every
     # create was attempted, the first one failed against a tracker that already
     # had it, and bootstrap died on every tick thereafter.
-    raw=$("$GLAB_CMD" api --paginate "projects/:id/labels?per_page=100" 2>/dev/null) \
+    raw=$("$TRACKER" labels 2>/dev/null) \
         || die "labels: could not read the existing labels (auth, network, or
   project resolution). Not guessing — the next tick retries."
     existing=$(printf '%s' "$raw" | jq -r 'if type == "array" then .[].name else empty end' 2>/dev/null) \
@@ -143,7 +145,7 @@ cmd_labels() { # labels [--dry-run]
         if [ "$dry" -eq 1 ]; then
             echo "labels: would create $name"; created=$((created+1)); continue
         fi
-        "$GLAB_CMD" label create --name "$name" --color "$color" --description "$desc" >/dev/null \
+        "$TRACKER" label-create "$name" "$color" "$desc" >/dev/null \
             || die "labels: failed creating '$name'"
         created=$((created+1))
     done <<EOF

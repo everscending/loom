@@ -17,7 +17,8 @@
 # Callers set the ambient variables these functions read, and every one is
 # read defensively so a script that never sets it can still source this file:
 #   CONFIG, GLOBAL_CONFIG  the two config layers cfg/cfg_source read
-#   GLAB_CMD               the tracker binary seam (default `glab`)
+#   TRACKER_CMD            the tracker DRIVER seam (default: the driver for
+#                          the repo's declared tracker, under trackers/)
 #   DIE_RC                 exit code for die (tick.sh/bootstrap.sh 1, lane.sh 2)
 
 # One die for three scripts. The prefix is the script's own name, so a message
@@ -42,26 +43,11 @@ _jq_lib_dir() { # <dir the scripts ship in> → the same dir, prelude proven pre
     printf '%s\n' "$d"
 }
 
-# P49: the one tracker LIST read. Every `per_page=` GET in this skill goes
-# through here and PAGINATES — `per_page=100` alone silently returns page 1 and
-# nothing says so. Past 100 closed members an epic whose tickets all closed
-# early contributes no milestone title, `_epics_unaccepted` answers false,
-# `_quiet_check` prints `complete`, and the completion wave tears the agent
-# down with that epic never probed: the build-2 failure the acceptance gate
-# exists to prevent, reachable again by size alone. The open read truncates the
-# same way, so `blocked == count` gets compared over a partial board.
-# `--paginate` emits one array PER PAGE, so the fold is part of the read, not a
-# nicety. Prints one JSON array; returns non-zero when the call failed or the
-# result was not an array, so every caller's existing failure path still fires.
-# `--capped` is the deliberate opposite and stays explicit: a `sort=desc` notes
-# read wants the newest N, and paginating it would pull the whole thread.
-_glab_list() { # [--capped] <api-path> → one JSON array on stdout
-    local capped=false glab="${GLAB_CMD:-glab}"
-    case "${1:-}" in --capped) capped=true; shift ;; esac
-    if $capped; then "$glab" api "$1"; else "$glab" api --paginate "$1"; fi \
-        | jq -s 'if (length > 0) and all(type == "array") then add
-                 else error("not a JSON array") end' 2>/dev/null
-}
+# P86: `_glab_list` used to live here — the one paginating tracker LIST read,
+# with its handling of `glab issue list -F json` printing a human sentence on an
+# empty board. Both facts are GitLab's, not loom's, so it moved into
+# scripts/trackers/gitlab.sh as `_list`. What stays here is the resolver that
+# says WHICH driver to call.
 
 # --- the tracker declaration (P86) ----------------------------------------
 # ONE place says which tracker a repo uses, and it is not this skill's file.
@@ -98,6 +84,21 @@ _tracker_declared() { # <dir inside the repo> → tracker name, or empty
 # running the gitlab driver at it is precisely the failure the declaration
 # exists to prevent.
 _tracker_drivers() { printf 'gitlab\n'; }
+
+# The driver for this repo's declared tracker (P86 stage 2). Every tracker call
+# in this skill goes through the returned script, so `glab` appears in exactly
+# one file. `TRACKER_CMD` is the seam a test stubs to watch the CONTRACT being
+# called; `GLAB_CMD` inside the driver is the seam for watching GitLab itself.
+# Falls back to gitlab when nothing is declared, which only ever happens on a
+# path `_require_tracker` has already refused — a resolver must not be the
+# thing that reports a missing declaration.
+_tracker_cmd() { # <dir the scripts ship in> [<dir inside the repo>]
+    [ -z "${TRACKER_CMD:-}" ] || { printf '%s\n' "$TRACKER_CMD"; return 0; }
+    local d="$1" name
+    name=$(_tracker_declared "${2:-.}")
+    [ -n "$name" ] || name=gitlab
+    printf '%s/trackers/%s.sh\n' "$d" "$name"
+}
 
 # The halt. Four distinct refusals, because they need four different actions
 # from the human, and a lane is headless — it cannot be asked which one applies.

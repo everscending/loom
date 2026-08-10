@@ -107,6 +107,7 @@ for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticke
 done
 ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM2/lib.sh"
 ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM2/lane.sh"
+link_trackers "$ADVM2"
 adv_guard_line=$(grep -Fn '[[:space:]]*[-*][[:space:]]' "$TICK" | cut -d: -f1)
 if [ -n "$adv_guard_line" ]; then
     sed "${adv_guard_line}s#.*#    [ -n \"\$sect\" ] || return 1#" "$TICK" > "$ADVM2/tick.sh"
@@ -216,6 +217,7 @@ for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticke
 done
 ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM/lib.sh"
 ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM/lane.sh"
+link_trackers "$ADVM"
 sed 's|^    \[ -n "\$dir" \] && \[ -f "\$dir/.loom.yml" \] && cfg="\$dir/.loom.yml"$|    :|' \
     "$TICK" > "$ADVM/tick.sh"
 chmod +x "$ADVM/tick.sh"

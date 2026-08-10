@@ -127,8 +127,11 @@ LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 DIE_RC=2   # every refusal in this file exits 2, and briefs read that code
 # Same seam as tick.sh, for the same reason: the test suite exercises these
 # verbs against a capture stub, never the real tracker.
-GLAB="${GLAB_CMD:-glab}"
-command -v "$GLAB" >/dev/null 2>&1 || die "glab not on PATH"
+# P86: every tracker call this file makes goes through the driver for the
+# repo's declared tracker. `glab` used to be named here and at seventeen call
+# sites below; it is now named in scripts/trackers/gitlab.sh and nowhere else.
+TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "${LOOM_REPO:-.}")"
+[ -x "$TRACKER" ] || die "tracker driver '$TRACKER' is missing or not executable"
 
 STATES="ready-for-agent in-progress review merge-queue blocked"
 
@@ -140,8 +143,8 @@ STATES="ready-for-agent in-progress review merge-queue blocked"
 TICK_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 _lane_ev() { "$TICK_SH" event "$@" >/dev/null 2>&1 || true; }
 
-# Stage stdin/--file into a private temp file so the glab command the harness
-# sees contains only a literal path this script produced.
+# Stage stdin/--file into a private temp file so the tracker command the
+# harness sees contains only a literal path this script produced.
 _stage_body() { # [--file F] ; prints staged file path
     local src="" tmp
     if [ "${1:-}" = "--file" ]; then
@@ -154,9 +157,8 @@ _stage_body() { # [--file F] ; prints staged file path
     printf '%s\n' "$tmp"
 }
 
-_post_note() { # <issues|merge_requests> <iid> <bodyfile>
-    "$GLAB" api --method POST "projects/:fullpath/$1/$2/notes" \
-        --field "body=@$3" >/dev/null
+_post_note() { # <issue|mr> <iid> <bodyfile> — the driver's own vocabulary
+    "$TRACKER" note-add "$1" "$2" "$3"
     echo "lane.sh: note posted on $1/$2"
 }
 
@@ -195,9 +197,9 @@ _forget_issue() { _ISSUE_IID=""; _ISSUE_JSON=""; }
 _read_issue() { # <iid> <what-a-failed-read-would-mean> — sets _ISSUE_JSON, or dies
     local iid="$1" refusal="$2" body rc
     [ "$iid" = "$_ISSUE_IID" ] && return 0
-    body=$("$GLAB" api "projects/:fullpath/issues/$iid" 2>/dev/null) && rc=0 || rc=$?
+    body=$("$TRACKER" issue "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read issue state (glab api failed, rc=$rc) — $refusal Retry once the tracker is reachable."
+        || die "issue $iid: could not read issue state (tracker read failed, rc=$rc) — $refusal Retry once the tracker is reachable."
     _ISSUE_IID="$iid"; _ISSUE_JSON="$body"
     return 0
 }
@@ -208,9 +210,9 @@ _read_issue() { # <iid> <what-a-failed-read-would-mean> — sets _ISSUE_JSON, or
 # the writes around these calls change.
 _open_mr_closing() { # <iid> <what-a-failed-read-would-mean> — sets _OPEN_MR, or dies
     local iid="$1" refusal="$2" body rc
-    body=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    body=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — $refusal"
+        || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — $refusal"
     _OPEN_MR=$(printf '%s' "$body" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
     return 0
 }
@@ -255,8 +257,7 @@ _set_state() { # <iid> <state> [extra -f args...]
     _blocked_guard "$iid" "$state"
     local remove="" s
     for s in $STATES; do [ "$s" = "$state" ] || remove="$remove,$s"; done
-    "$GLAB" api --method PUT "projects/:fullpath/issues/$iid" \
-        -f "add_labels=$state" -f "remove_labels=${remove#,}" "$@" >/dev/null
+    "$TRACKER" issue-relabel "$iid" --add "$state" --remove "${remove#,}" "$@"
     _forget_issue   # the labels just changed; no later guard may read the old set
     echo "lane.sh: issue $iid → $state"
 }
@@ -270,8 +271,8 @@ cmd_scratch() {
     printf '%s\n' "$d"
 }
 
-cmd_note()    { _check_iid "${1:-}"; local f; f=$(_stage_body "${@:2}"); _post_note issues "$1" "$f"; }
-cmd_mr_note() { _check_iid "${1:-}"; local f; f=$(_stage_body "${@:2}"); _post_note merge_requests "$1" "$f"; }
+cmd_note()    { _check_iid "${1:-}"; local f; f=$(_stage_body "${@:2}"); _post_note issue "$1" "$f"; }
+cmd_mr_note() { _check_iid "${1:-}"; local f; f=$(_stage_body "${@:2}"); _post_note mr "$1" "$f"; }
 
 cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     local iid="${1:-}" res="${2:-}" sha="${3:-}"
@@ -306,9 +307,9 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     # posted. Fail closed on the read, same as the blocked-hold guard above:
     # a transient API failure must never read as "definitely not a duplicate".
     local _notes rc
-    _notes=$("$GLAB" api "projects/:fullpath/issues/$iid/notes?sort=desc&order_by=created_at&per_page=100" 2>/dev/null) && rc=0 || rc=$?
+    _notes=$("$TRACKER" issue-notes "$iid" --limit 100 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read existing verdict trailers (glab api failed, rc=$rc) — refusing to guess whether this is a duplicate. Retry once the tracker is reachable."
+        || die "issue $iid: could not read existing verdict trailers (tracker read failed, rc=$rc) — refusing to guess whether this is a duplicate. Retry once the tracker is reachable."
     # P72: the trailer regex is `orch_verdict_scan` in lib.jq, the one the
     # snapshot reads verdicts back with. It used to be written out here as a
     # third copy, so a trailer format change could land in the reader and not
@@ -325,7 +326,7 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     # Note first, label second: a verdict note with no label flip is repaired
     # by the next wave (it reads the trailer); a label flip with no note is a
     # verdict that never happened.
-    _post_note issues "$iid" "$f"
+    _post_note issue "$iid" "$f"
     if [ "$res" = pass ]; then _set_state "$iid" merge-queue
     else _set_state "$iid" in-progress; fi
     _lane_ev gate_verdict ticket "$iid" verdict "$up" sha "$sha"
@@ -360,9 +361,9 @@ cmd_merge_failed() { # <iid> [--file F]
     # read as "definitely not merged" and let a failed-merge note land on a
     # ticket that in fact just succeeded.
     local _closed_by rc
-    _closed_by=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null) && rc=0 || rc=$?
+    _closed_by=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (glab api failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
+        || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
     merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].iid // empty' || true)
     [ -z "$merged_mr" ] \
         || die "issue $iid already has MERGED MR !$merged_mr — the merge succeeded; refusing to record a failed attempt. Re-read the ticket: your snapshot is stale."
@@ -393,7 +394,7 @@ cmd_merge_failed() { # <iid> [--file F]
     local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
     printf '\n\n<!-- orch-merge-attempt %s%s -->\n' "$iid" \
         "${klass:+ base-red=$klass fix=$fixiid}" >> "$f"
-    _post_note issues "$iid" "$f"
+    _post_note issue "$iid" "$f"
     _lane_ev merge_failed ticket "$iid" ${klass:+base_red "$klass"}
     echo "lane.sh: issue $iid — merge attempt recorded${klass:+ (base-red: $klass, fix #$fixiid — does not count toward the cap)}"
 }
@@ -498,7 +499,7 @@ cmd_rescope() { # <iid> [--file F]
     # nothing to the next reader.
     local f; f=$(_stage_body "${@:2}")
     printf '\n\n<!-- orch-scope-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
-    _post_note issues "$iid" "$f"
+    _post_note issue "$iid" "$f"
     _lane_ev ticket_rescope ticket "$iid"
     echo "lane.sh: issue $iid re-scoped — rejections recorded before this note no longer count"
 }
@@ -535,7 +536,7 @@ cmd_blocked_report() { # <iid> [--category <slug>] [--file F]
     local f; f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
     printf '\n\n<!-- orch-blocked%s %s -->\n' \
         "${category:+ category=$category}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
-    _post_note issues "$iid" "$f"
+    _post_note issue "$iid" "$f"
     _lane_ev ticket_blocked_report ticket "$iid" ${category:+category "$category"}
     echo "lane.sh: blocked report posted on issue $iid${category:+ (category: $category)}"
 }
@@ -571,8 +572,7 @@ cmd_model_tier() { # <iid> <tier>
     local drop
     drop=$(printf '%s' "$_ISSUE_JSON" \
         | jq -r '[.labels[]? | select(startswith("model::"))] | join(",")' || true)
-    "$GLAB" api --method PUT "projects/:fullpath/issues/$iid" \
-        -f "add_labels=model::$tier" ${drop:+-f "remove_labels=$drop"} >/dev/null
+    "$TRACKER" issue-relabel "$iid" --add "model::$tier" ${drop:+--remove "$drop"}
     _forget_issue
     _lane_ev ticket_model_tier ticket "$iid" tier "$tier"
     echo "lane.sh: issue $iid → model::$tier"
@@ -629,17 +629,18 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     # The build label is DERIVED, never asked for: the scheduler's universe is
     # "open issues labeled build-N" for the highest open `Build N` issue, and a
     # lane that had to name it could name last week's.
-    # P70: through `_glab_list`, like every other list read in this skill. A
+    # P70: through the driver's paginating list read, like every other list
+    # read in this skill. A
     # bare `per_page=100` is page 1 and says nothing about the rest, so on a
     # board with more than 100 open issues the `Build N` issue itself can fall
     # off the read and every filing die "no open Build N issue".
     local blabel
-    blabel=$(_glab_list "projects/:fullpath/issues?state=opened&per_page=100" 2>/dev/null \
+    blabel=$("$TRACKER" issues-open 2>/dev/null \
         | jq -r '[.[] | select((.title // "") | test("^Build [0-9]+$"))]
                  | sort_by(.iid) | last | (.title // "") | sub("^Build "; "build-")')
     case "$blabel" in build-[0-9]*) ;; *) die "fix-ticket: no open \`Build N\` issue — cannot derive the build label" ;; esac
     local mid
-    mid=$(_glab_list "projects/:fullpath/milestones?per_page=100" 2>/dev/null \
+    mid=$("$TRACKER" milestones 2>/dev/null \
         | jq -r --arg t "$ms" '.[] | select(.title == $t) | .id' | head -1)
     [ -n "$mid" ] || die "fix-ticket: no milestone titled '$ms'"
     if ! $force; then
@@ -651,7 +652,7 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
         # page reads as "no twin" and files the duplicate this check exists to
         # stop.
         local dups
-        dups=$(_glab_list "projects/:fullpath/issues?state=opened&labels=fix&per_page=100" 2>/dev/null \
+        dups=$("$TRACKER" issues-by-label fix opened 2>/dev/null \
             | jq -c --arg ms "$ms" --arg newt "$title" '
                 def words: ascii_downcase | gsub("[^a-z0-9]+"; " ") | split(" ") | map(select(length > 0));
                 ($newt | words) as $nw
@@ -668,10 +669,9 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
         fi
     fi
     local iid
-    iid=$("$GLAB" api --method POST "projects/:fullpath/issues" \
-        -f "title=$title" --field "description=@$f" \
-        -f "labels=$blabel,fix,tier::$tier,ready-for-agent" \
-        -f "milestone_id=$mid" 2>/dev/null | jq -r '.iid // empty')
+    iid=$("$TRACKER" issue-create --title "$title" --body-file "$f" \
+        --labels "$blabel,fix,tier::$tier,ready-for-agent" \
+        --milestone-id "$mid" 2>/dev/null)
     [ -n "$iid" ] || die "fix-ticket: create failed"
     echo "lane.sh: filed #$iid — $blabel, fix, tier::$tier, ready-for-agent, milestone '$ms'${blockedby:+, blocked by $blockedby}"
     _lane_ev fix_filed ticket "$iid" tier "$tier"
@@ -692,7 +692,7 @@ cmd_probe_result() { # <build-iid> <epic-slug> pass|fail [--file F]
     local hdr; hdr=$(mktemp "${TMPDIR:-/tmp}/lane-body.XXXXXX")
     printf '**Epic acceptance probe `%s`: %s**\n\n' "$slug" "$up" > "$hdr"
     cat "$f" >> "$hdr"
-    _post_note issues "$iid" "$hdr"
+    _post_note issue "$iid" "$hdr"
     _lane_ev probe_result epic "$slug" result "$up"
     # A PASS also closes the epic's milestone — completeness stays DERIVED
     # (nothing reads milestone state), but a finished epic left open misleads
@@ -714,15 +714,14 @@ _close_epic_milestone() { # <slug> — close active milestones matching the slug
     # P70: paginated, like the snapshot's own active-milestone read. On the
     # unpaginated read an epic past page 1 is simply not seen, and the probe
     # reports PASS while its milestone stays open forever.
-    _glab_list "projects/:fullpath/milestones?state=active&per_page=100" 2>/dev/null \
+    "$TRACKER" milestones --state active 2>/dev/null \
     | jq -r '.[] | [.id, .title] | @tsv' 2>/dev/null \
     | while IFS=$'\t' read -r mid title; do
         # "E5 · Cascade mode" normalizes to e5-cascade-mode, so both the full
         # slug and a bare "e5" match it.
         norm=$(printf '%s' "$title" | jq -L "$jqd" -rR 'include "lib"; epic_norm')
         case "$norm" in "$slug"|"$slug"-*)
-            "$GLAB" api --method PUT "projects/:fullpath/milestones/$mid" \
-                --field state_event=close >/dev/null 2>&1 \
+            "$TRACKER" milestone-close "$mid" >/dev/null 2>&1 \
                 && echo "lane.sh: closed milestone '$title' (epic complete, probe passed)"
         ;; esac
     done
@@ -894,10 +893,10 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
             echo "lane.sh: issue $iid already carries a release note for this block — not posting a second one"
         else
             printf '\n\n<!-- orch-unblock %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
-            _post_note issues "$iid" "$f"
+            _post_note issue "$iid" "$f"
         fi
     fi
-    if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" -f assignee_ids=0
+    if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" --assignee 0
     else _set_state "$iid" "$state"; fi
     _lane_ev ticket_transition ticket "$iid" state "$state"
 }
@@ -909,7 +908,7 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
 # the cost of the wrong answer here is one duplicate comment, not a lost write.
 _release_noted() { # <iid>
     local iid="$1" body rc
-    body=$("$GLAB" api "projects/:fullpath/issues/$iid/notes?sort=desc&order_by=created_at&per_page=30" 2>/dev/null) && rc=0 || rc=$?
+    body=$("$TRACKER" issue-notes "$iid" --limit 30 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] || return 1
     printf '%s' "$body" | jq -e '
         def newest($pat): [.[] | select((.body // "") | test($pat)) | .created_at // ""]
@@ -921,9 +920,9 @@ _release_noted() { # <iid>
 
 cmd_claim() { # <iid>
     _check_iid "${1:-}"
-    local me; me=$("$GLAB" api user | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+    local me; me=$("$TRACKER" whoami | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
     [ -n "$me" ] || die "cannot resolve current user id"
-    _set_state "$1" in-progress -f "assignee_ids=$me"
+    _set_state "$1" in-progress --assignee "$me"
     _lane_ev ticket_claim ticket "$1"
 }
 
@@ -993,9 +992,8 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         # by; an MR without it is invisible to the build. Appended here rather
         # than asked for, exactly as verdict appends its own trailer.
         grep -Eq "[Cc]loses #$iid([^0-9]|$)" "$f" || printf '\n\nCloses #%s\n' "$iid" >> "$f"
-        mr=$("$GLAB" api --method POST "projects/:fullpath/merge_requests" \
-            -f "source_branch=$branch" -f "target_branch=$base" -f "title=$title" \
-            --field "description=@$f" 2>/dev/null | jq -r '.iid // empty') || mr=""
+        mr=$("$TRACKER" mr-create --source "$branch" --target "$base" \
+            --title "$title" --body-file "$f" 2>/dev/null) || mr=""
         # MR first, label second, and the label is skipped when the MR failed:
         # an open MR with no label flip is a state the snapshot now names and a
         # wave repairs in one call, where a `review` label with no MR is a
@@ -1028,7 +1026,7 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     local iid="${1:-}" mr state n
     _check_iid "$iid"
     _blocked_guard "$iid" merge
-    mr=$("$GLAB" api "projects/:fullpath/issues/$iid/closed_by" 2>/dev/null \
+    mr=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null \
          | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
     [ -n "$mr" ] || die "no open MR closes issue $iid — its description must contain 'Closes #$iid'"
     # P84: delete the source branch as part of the merge. Nothing else in the
@@ -1040,12 +1038,11 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     # it accumulates every branch it ever merges. This is the one moment the
     # branch is provably disposable, and it is one field on a request the verb
     # already makes.
-    "$GLAB" api --method PUT "projects/:fullpath/merge_requests/$mr/merge" \
-        -f should_remove_source_branch=true >/dev/null 2>&1 \
+    "$TRACKER" mr-merge "$mr" >/dev/null 2>&1 \
         || die "merge of MR !$mr refused (conflicts, red pipeline, or approvals) — record it: lane.sh merge-failed $iid"
     # GitLab merges asynchronously; never report a merge we have not observed.
     for n in 1 2 3 4 5 6 7 8 9 10; do
-        state=$("$GLAB" api "projects/:fullpath/merge_requests/$mr" 2>/dev/null \
+        state=$("$TRACKER" mr "$mr" 2>/dev/null \
                 | jq -r '.state // empty' || true)
         [ "$state" = merged ] && break
         sleep 2
@@ -1082,8 +1079,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
     [ -z "$open_mr" ] \
         || die "issue $iid still has unmerged MR !$open_mr — 'close' closes the issue only, it does not merge. Use: lane.sh merge $iid"
     for s in $STATES; do remove="$remove,$s"; done
-    "$GLAB" api --method PUT "projects/:fullpath/issues/$iid" \
-        -f "remove_labels=${remove#,}" -f state_event=close >/dev/null
+    "$TRACKER" issue-close "$iid" --remove "${remove#,}"
     echo "lane.sh: issue $iid closed, state labels stripped"
     _lane_ev ticket_close ticket "$iid"
 }
