@@ -85,6 +85,7 @@ writing a new proposal that touches the same machinery.
 | P83 | "Merged" is a tracker fact, not a commit-range guess | implemented 2026-08-09 (sweep asks the tracker whether **this branch's own MR** is `merged` — new read-only `_branch_merged`, rc 0/1/2 so an unreadable board is never mistaken for a decision. Merged → sweepable regardless of local topology, which is the 15-worktree unpushed-reconcile case. No merged MR → the commit range decides, and only in the safe direction: empty means nothing to lose, anything ahead of base is kept. Never keyed on ticket state — the #67 shape is a test, with the squash-merge fixture that makes a branch permanently ahead. P47's exit-status handling intact; a dead `glab` falls back to the range test. Section 17: 7 → 14; no SKILL.md change) |
 | P84 | Branch hygiene is owned, not inherited | implemented 2026-08-09 (`lane.sh merge` passes `should_remove_source_branch=true` on the merge request it already makes, so the remote branch dies at the one moment it is provably disposable — rather than surviving unless the project happens to set `remove_source_branch_after_merge`, which this skill neither reads nor writes. Sweep's fetch gains `--prune`, so a tracking ref expires with the branch it tracks; without it five builds left 122 stale `origin/ticket-*` refs, which is also what made `git branch -r` report 122 remote branches when `ls-remote` said 3. Section 18: 3 → 8, including a fixture that deletes server-side because `push --delete` updates the local ref and would never leave one stale. No SKILL.md change) |
 | P85 | Sweep reports what it kept | implemented 2026-08-09 (`cmd_sweep` counts what it kept and emits **one `sweep_held` per pass** — count plus dominant reason, not one line per worktree — and `sweep_removed` when it removes; a clean pass emits nothing, so a count that never falls is the signal. `render-events.jq` renders both, and the test asserts the RENDERED line because D-TICK-11 is still open and drops any event without `.state`. The inventory is rewritten whole each pass into `$LOOM_HOME/sweep-held.txt`, so a worktree cleared by hand stops being reported; `cmd_notify` appends it to `build_complete` and `build_halted` bodies, which is mechanical rather than asked of the wave. Section 17: 14 → 25; one SKILL.md line edited, none added) |
+| P86 | The tracker is declared once, and every tracker call goes through one driver | implemented 2026-08-10 (three stages. **Declare and halt**: `docs/agents/issue-tracker.md` — the sibling skills' own output, which every lane already reads through the repo's `CLAUDE.md` — is the single source of truth, read via its `# Issue tracker: <Name>` heading by `_tracker_declared` in `lib.sh`. Four distinct refusals hang off it: missing, present-but-untracked (a worktree is a checkout, so an untracked declaration is visible to the human and to no lane), present with no heading, and naming a tracker loom has no driver for. The halt sits in `bootstrap.sh` before any write, `cmd_tick` before a wave is paid for, `cmd_snapshot` — the read every other read verb funnels through, so `plan` keeps P81's no-tracker-call guarantee — and `lane.sh` at verb dispatch; the usage path is deliberately exempt, because `tick.sh` derives the wave prompt's verb roster from it (P48 caught that). `resolve-config` gains a derived `tracker` scalar and never halts. `.loom.yml` gets NO tracker key: a second place to say it is a way for `tick.sh` to read one board while its lanes write to another. **The driver**: `scripts/trackers/gitlab.sh` implements a 20-verb contract named for what loom needs — board reads, board writes, and a forge group kept separate because a tracker that is not also a code host (Linear has no merge requests) needs exactly that group pointed elsewhere. All 29 call sites across `tick.sh`, `lane.sh`, `bootstrap.sh` and `watch-panes.sh` go through it; `lib.sh`'s `_glab_list` moved in with it. The read-only guarantee was re-pointed rather than inherited — `07-snapshot.sh`'s glab-argv scan would have kept passing while checking a condition that can no longer arise, so section 29 asserts it against the contract's own write verbs, `snapshot` and `plan` alike, with a planted write to prove the scan bites. `Bash(glab *)` stays in the generated allowlist, settled rather than assumed: nothing needs it to write any more, but it is not there for writes — it keeps a wave's compound exploration command from being denied whole (build-1 2026-08-02). **The document**: the driver maps every response into loom's shape (`id`, `state` open/closed plus `merged` for an MR, `labels`, `assignees`, `epic`, `url`, `body`, `project`, `updated_at`), so no GitLab payload field survives in `scripts/*.jq` — asserted by grep, and proved by a fixture driver containing no GitLab field at all that drives a full `snapshot` → `plan`. One mapping bug caught by the suite and worth recording: a blocking link carrying no state is UNKNOWN and must stay unknown, or a cross-project blocker gets guessed at. SKILL.md 624 → 623 and names GitLab nowhere. Suite 786 → 818, new section 29. NOT shipped: any second driver. A tracker with no driver — including Linear — is refused by name, and Linear additionally needs the forge group pointed at a code host, which is where stage 2's grouping plugs in) |
 
 ## Independent review round (2026-08-01)
 
@@ -3619,3 +3620,212 @@ Neither adds a decision for a wave to make, so neither costs a `SKILL.md` line.
 **Consumer.** The human, who currently discovers this by looking at their own filesystem months
 later.
 
+## P86 · The tracker is declared once, and every tracker call goes through one driver
+
+**Problem.** Two halves of the same gap.
+
+*Loom does not know which tracker it is pointed at.* Every lane is a `claude -p` session spawned with
+`--cwd <worktree>`, so it loads the repo's `CLAUDE.md`, whose `## Agent skills` block points at
+`docs/agents/issue-tracker.md`. That file is the sibling skills' declaration of the tracker and its
+whole workflow: how to create an issue, apply a label, open and merge an MR, what "publish to the
+issue tracker" means. Loom neither reads it nor requires it. A repo without it spawns lanes that
+infer a tracker from the git remote — `code-review/SKILL.md:13` handles the missing file by telling
+the human to run `/setup-matt-pocock-skills`, and a headless lane has no human to tell.
+
+*And loom could not honour the answer if it had one.* GitLab is not a configured backend, it is a
+literal spread through the machinery: `GLAB_CMD` at `lane.sh:130`, `tick.sh:104` and
+`bootstrap.sh:24`; roughly 28 `glab api` call sites under them across seven endpoint families; and
+GitLab's own JSON shape spoken directly by the jq layer, where `.iid` appears 57 times and `.state`
+34 across `scripts/*.jq`. There is no seam. A second tracker is not a configuration change, it is a
+rewrite of every file that touches the board.
+
+The two halves have to land together. A declaration with no driver behind it can only refuse. A
+driver with no declaration has to be told which one to be, in a second place, and a mismatch between
+that place and the file every lane reads is a split brain rather than an error: `tick.sh` reads one
+board while its own lanes write to another. Nothing in the current design would notice.
+
+**Evidence.** Structural, read off the file layout and the call structure, not off a failed run — no
+build has been run in an unconfigured repo yet, so say that rather than quoting a cost.
+
+On this machine `docs/agents/issue-tracker.md` exists in exactly two directories, and they are the
+same repo: `openemr-base-clean` and one of its worktrees. No other repo running the sibling skills
+has the file, and none carries the `## Agent skills` block that points at it — `ai-interpreter-workbench`
+has a `CLAUDE.md` with no such block; `agents`, `6.1-langgraph` and `ai-workout-generator-copilot`
+have no `CLAUDE.md` at all. The global `~/AGENTS.md` and `~/.claude/CLAUDE.md` declare no tracker.
+So the declaration is per-repo, it is absent nearly everywhere, and its absence is currently silent.
+
+**Fix.** Three stages, in order. Nothing archives until all three land; per the preamble's
+partial-implementation rule, a stage that ships alone updates this row in place and leaves the
+section here.
+
+### Stage 1 — the declaration, and the halt
+
+- **One declaration, owned by the human, in the repo.** `docs/agents/issue-tracker.md` is the source
+  of truth for *which* tracker. Its `# Issue tracker: <Name>` H1 is already machine-readable in all
+  three seed templates (`GitHub`, `GitLab`, `Local Markdown`). `lib.sh` — the home the two halves
+  already share — gains `_tracker_declared()`, returning the lowercased name or empty.
+
+- **`resolve-config` grows one derived scalar, `tracker`**, source `derived`, beside `base` and
+  `runner`. Layer 2 of `references/loom-config.md` is "anything readable off the repo", and this is
+  exactly that. **`.loom.yml` gets no `tracker:` key.** A second place to say it is the split brain
+  this proposal exists to close, and `references/setup.md` already states that the loom never writes
+  `.loom.yml`.
+
+- **The halt, in three places, because there are three entry points and no fourth.**
+  `bootstrap.sh cmd_all` refuses before any write, in the same position and shape as `_require_repo`.
+  `tick.sh cmd_snapshot` refuses, because it is the one board read every other read verb funnels
+  through — `watch`, `graph` and `plan` all consume a snapshot document rather than the tracker.
+  `lane.sh` refuses at verb dispatch, which is the sharpest of the three: a lane is headless and
+  cannot be asked.
+
+- **Present is not enough; it must be tracked by git.** Worktrees sit *beside* the repo, not inside
+  it (the fact P30 was written about), and each is a checkout. An untracked or gitignored
+  `docs/agents/issue-tracker.md` is therefore visible to the human in the primary clone and absent
+  from every lane's worktree — the worst version of this bug, because the human can see the file
+  they are being told is missing. `git ls-files --error-unmatch` is the check, and present-but-untracked
+  gets its own refusal message, distinct from absent.
+
+- **A tracker with no driver is a halt, named.** After stage 3 the driver set is `{gitlab}`, so
+  `github`, `local` and anything else refuse by name — "this repo declares Linear; loom drives
+  gitlab" — rather than resolving a tracker and then running `glab` at it.
+
+### Stage 2 — one driver contract, and GitLab implements it
+
+Every tracker call moves behind `scripts/trackers/gitlab.sh`, whose verbs are the ones the call sites
+already need. Grouped deliberately into two sets, because they are two different systems that GitLab
+happens to merge — a board, and a place where code and merge requests live:
+
+*Board reads*: `issues-open`, `issues-by-label <label> <state>`, `issue <id>`, `issue-notes <id>`,
+`issue-links <id>`, `milestones [state]`, `labels`, `whoami`.
+*Board writes*: `issue-create`, `issue-relabel <id> --add --remove`, `issue-close <id>`,
+`note-add <id>`, `label-create`, `milestone-update`.
+*Forge*: `mr-create`, `mr-note-add`, `mr-merge`, `mr-state <mr>`, `mr-for-branch <branch>`,
+`issue-closed-by <id>`.
+
+The grouping costs nothing today and is the whole seam later: a tracker that is not also a forge —
+Linear has no merge requests — needs exactly the second group pointed somewhere else.
+
+`_glab_list` moves out of `lib.sh` into the driver: its pagination and its handling of `glab issue
+list -F json` printing a human sentence on an empty board are GitLab facts, not loom facts.
+
+**Behaviour change in this stage is a bug.** Its acceptance test is the existing suite, green, with
+no test edited except where a fixture must now stub the driver instead of `GLAB_CMD`.
+
+**The read-only guarantee must be re-pointed, not inherited.** `tick.sh` is read-only against the
+tracker and `scripts/tests/07-snapshot.sh` enforces it by scanning captured argv against a mutating
+denylist of `glab` verbs. Once the calls go through the driver, that scan matches nothing and the
+guarantee evaporates *silently* — the test stays green while checking a condition that can no longer
+occur. The denylist becomes a list of the driver's write verbs, and the suite must show it failing
+when a write verb is planted in a `tick.sh` path.
+
+**Settle before writing code**, with the evidence in hand rather than by assumption: the generated
+allowlist contains `Bash(glab *)` (`tick.sh:2905`). Find out whether any wave or lane still issues a
+`glab` command *itself*, or whether every remaining call is a subprocess of a script the model
+already invoked — the second needs no rule, and carrying a stale one keeps a hand-rolled mutation
+possible in exactly the place SKILL.md forbids it.
+
+### Stage 3 — the contract carries a loom document, not GitLab's
+
+The driver's output is defined by loom: `id`, `state` (`open` | `closed`), `labels[]`, `epic`,
+`blockers[]`, `url`, `notes[]`, `updated_at`. The jq layer stops speaking GitLab — `.iid` becomes
+`.id` across `scripts/*.jq`, and the same for `.state`'s `opened`, `.milestone`, `.assignees`.
+
+This is the expensive half and the one worth defending. A driver that emits raw GitLab JSON is not a
+contract, it is a passthrough: the next driver would have to *fabricate* `iid`, `opened` and
+`milestone.title` to satisfy readers that were never told what they actually need. That hides every
+mapping decision inside a fake, in the one layer where the decisions should be visible. Skipping this
+stage does not save the work, it defers it into a worse shape.
+
+The rename is mechanical and has a mechanical guard: after this stage no GitLab field name appears in
+`scripts/*.jq`, and that is a grep the suite can assert.
+
+**What this does not do.** It ships no second driver. After all three stages loom still drives GitLab
+and only GitLab — but it knows what it is pointed at, it refuses honestly when it is pointed at
+something else, and a second driver becomes a new file implementing a written contract rather than a
+rewrite. Linear specifically needs one further thing this proposal does not build: a forge separate
+from the board, since `issue-closed-by` and the whole `mr-*` group have no Linear answer. That is a
+follow-on, and stage 2's grouping is where it plugs in.
+
+**Relationship to P81.** P81 shipped `tick.sh plan` and the `plan.jq` program, and left the executor
+as a wave session. Four of its properties constrain this work.
+
+- `plan` is read-only against the tracker and `07-snapshot.sh` enforces that by scanning captured
+  argv. It must not grow a tracker check of its own — it derives from a snapshot handed to it, so the
+  halt belongs upstream at `cmd_snapshot`, and `plan` keeps the guarantee intact.
+- That same argv scan is the guarantee stage 2 has to re-point. `plan` is the newest code path under
+  it, so the planted-write test must cover `plan` as well as `snapshot`.
+- `plan` already has the right failure shape for the halt: a snapshot it cannot read yields an
+  *empty* plan with a named reason, never a partial one. Land the halt as that shape rather than as
+  a new exception path.
+- The executor is still a model. So the halt cannot be a rule the wave is told to follow — a wave
+  that must never launch has to have been refused by a script first. `cmd_snapshot` and
+  `bootstrap.sh` both run ahead of any wave; that is why they are two of the three.
+
+Stage 3 also touches `plan.jq`, which reads the snapshot document. It is a consumer of the rename
+like every other jq program, not a special case.
+
+**SKILL.md.** P81 cut it from 686 to 624 lines. **Budget zero net new lines, and expect a small
+reduction.** The refusals are script refusals carrying their own messages. The GitLab literals in the
+prose are *edits*, not additions: "Epic = GitLab epic if the instance tier has them" (`SKILL.md:30`)
+becomes a driver concern, and "never hand-roll a `glab` mutation in a lane" (`SKILL.md:194`) becomes
+the same rule stated about the driver. Roughly eight lines name GitLab today; each is a rewrite in
+place.
+
+**Constitution note.** Reading `docs/agents/issue-tracker.md` is *consuming* a sibling skill's output,
+not editing the skill — the same relationship phase 4 already has with `/to-tickets`. Nothing under
+`~/.agents/skills/` is touched, and the implementation must not reach there.
+
+The gap that follows from that boundary, stated so nobody re-scopes it: `/setup-matt-pocock-skills`
+offers GitHub, GitLab and Local Markdown as templates and files everything else — Jira, Linear — under
+"Other", recorded as freeform prose with no guaranteed heading. Loom cannot add a template there and
+must not try. Its refusal instead names the exact H1 it needs, and the human edits their own file.
+That keeps the declaration in one place at the cost of one line of human work, once per repo.
+
+**New machine contracts.** Later compaction passes must preserve: the path
+`docs/agents/issue-tracker.md`; the heading form `# Issue tracker: <Name>`; the `resolve-config` key
+`tracker`; the helper name `_tracker_declared` in `lib.sh`; the driver path
+`scripts/trackers/<name>.sh`; every verb name in the stage-2 contract; and every field name in the
+stage-3 document.
+
+**Tests.** New section, `scripts/tests/29-tracker-driver.sh`, each guard shown both holding and
+failing once its mechanism is removed.
+
+*Stage 1 — the halt.*
+
+- File absent → `bootstrap.sh all` refuses **before any write**: no label call in the captured argv,
+  no `.claude/settings.json` produced, and the message names the missing path.
+- File absent → `tick.sh snapshot` refuses, and `tick.sh tick` launches no wave.
+- File present but untracked → a distinct refusal, asserted separately from the absent case, because
+  the two need different instructions to the human.
+- File present, H1 declares `GitLab` → everything behaves exactly as it does today. This is the
+  regression guard for every existing green test.
+- File present, H1 declares `Linear` → halt naming both the declared tracker and the drivers loom
+  has; no driver call is captured.
+- File present with no `# Issue tracker:` H1 → halt naming the heading form required.
+- `resolve-config` prints `tracker` with source `derived`.
+- A `lane.sh` verb run in a worktree missing the file refuses — the headless case, the one with no
+  human in the loop to correct it.
+
+*Stage 2 — the seam.*
+
+- The whole existing suite, green, with no behaviour change. Fixtures stub the driver where they
+  stubbed `GLAB_CMD`.
+- No `glab` literal remains outside `scripts/trackers/gitlab.sh` — a grep the suite asserts.
+- The re-pointed argv denylist catches a write verb planted in a `tick.sh` path, `plan` included, and
+  the test is shown failing when the denylist is emptied.
+
+*Stage 3 — the document.*
+
+- No GitLab field name appears in `scripts/*.jq` — a grep the suite asserts.
+- A fixture driver emitting the loom document, with no GitLab field present anywhere in it, drives a
+  full `snapshot` → `plan` run. This is the real proof the contract is a contract: it passes without
+  GitLab existing.
+
+**Fixture cost, so it is not a surprise.** The halt binds every fixture: there are 75 `LOOM_REPO=`
+assignments across 19 of the 28 suite sections, and the git-tracked check means fixtures using a bare
+temp dir need a real `git init` and `git add`. Only five test files call `git init` today. Add one
+seeding helper to `scripts/test-lib.sh` and call it from shared setup — not 75 hand edits.
+
+**Consumer.** Every verb, in every repo. Immediately: any repo other than `openemr-base-clean`, where
+loom today spawns lanes that guess. Next: whichever second driver gets written, which is a new file
+against a written contract rather than a rewrite of the machinery.
