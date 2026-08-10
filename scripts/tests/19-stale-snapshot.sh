@@ -71,6 +71,7 @@ fi
 #     derived + global defaults, which would silently ignore every setting the
 #     human wrote. Shown failing too: add `.loom.yml` and the same repo runs.
 HC="$T/hardcut"; mkdir -p "$HC/repo" "$HC/home"
+seed_tracker_decl "$HC/repo"
 printf 'max_lanes: 2\n' > "$HC/repo/.orchestrator.yml"
 LOOM_REPO="$HC/repo" LOOM_HOME="$HC/home" "$TICK" tick >"$HC/out" 2>&1; rc_hc=$?
 if [ "$rc_hc" != 0 ] && grep -q 'old config name' "$HC/out" \

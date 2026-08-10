@@ -14,6 +14,7 @@
 # per-ticket escalation `snapshot` resolves into `.model.effective`, so a
 # rework round ran on the tier that had just failed it.
 WP="$T/waveprompt"; mkdir -p "$WP/repo" "$WP/bin"
+seed_tracker_decl "$WP/repo"
 printf 'lane_model: sonnet\n' > "$WP/repo/.loom.yml"
 wave_prompt() { # wave_prompt <tick.sh> → the context that tick injected
     : > "$WP/prompt.txt"

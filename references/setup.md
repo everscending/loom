@@ -14,6 +14,15 @@ There is deliberately **no tick-interval key**: the heartbeat is a fixed
 backstop and lane self-triggers set the pace. The loom never writes
 `.loom.yml`.
 
+## Before anything: declare the tracker
+
+A repo must say which issue tracker it uses, in
+`docs/agents/issue-tracker.md`, and that file must be committed. It is
+`/setup-matt-pocock-skills`' output — run that verb once per repo — and loom
+reads its `# Issue tracker: <Name>` heading rather than keeping an answer of
+its own. Without it every loom verb refuses: no bootstrap, no wave, no
+snapshot, no lane. Details and the reasoning: [loom-config.md](loom-config.md).
+
 ## New repo bootstrap
 
 Mostly derived, not authored, and it runs itself. The **first `tick` in a

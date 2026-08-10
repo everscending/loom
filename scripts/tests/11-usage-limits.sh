@@ -13,6 +13,7 @@
 # Isolated state dir: these tests pause and halt builds, which no earlier test
 # should inherit.
 UT="$T/usage"; mkdir -p "$UT/repo" "$UT/home" "$UT/fx"
+seed_tracker_decl "$UT/repo"
 : > "$UT/g.yml"
 cat > "$UT/repo/.loom.yml" <<'EOF'
 crash_cap: 2

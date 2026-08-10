@@ -151,6 +151,7 @@ grep -q 'state_event=close' "$P74/calls" \
 #       to carry this went missing once, and every tick after it burned a fresh
 #       session against the same wall.
 PU="$T/p74usage"; mkdir -p "$PU/repo" "$PU/home" "$PU/fx"
+seed_tracker_decl "$PU/repo"
 : > "$PU/g.yml"
 printf 'ntfy:\n  topic: "p74-topic"\n  push: [usage_pause]\n' > "$PU/repo/.loom.yml"
 make_wave_stub "$PU/fx/claude"   # the shared wave stub, `crash_then_limit` mode
@@ -202,6 +203,7 @@ sed 's|^    rm -rf "\$dir"                         # owner dead: break the stale
     "$TICK" > "$P74/wedged/tick.sh"
 chmod +x "$P74/wedged/tick.sh"
 PW="$T/p74lock"; mkdir -p "$PW/repo" "$PW/home/tick.lock.d"
+seed_tracker_decl "$PW/repo"
 echo 999999 > "$PW/home/tick.lock.d/pid"       # an owner that cannot be alive
 pw_out=$(LOOM_REPO="$PW/repo" LOOM_HOME="$PW/home" LOOM_WAVE_CMD="echo revived" \
          LOOM_SKIP_BOOTSTRAP=1 "$P74/wedged/tick.sh" tick 2>&1)
@@ -222,6 +224,7 @@ ln -sf "$LIBSH" "$P74/loud/lib.sh"; ln -sf "$LANE" "$P74/loud/lane.sh"
 sed 's|^    \[ "\$state" = "\$prev" \] && return 1$|    :|' "$TICK" > "$P74/loud/tick.sh"
 chmod +x "$P74/loud/tick.sh"
 PN="$T/p74notify"; mkdir -p "$PN/repo" "$PN/home"
+seed_tracker_decl "$PN/repo"
 PNCAP="$PN/ntfy"; PNSTUB="$PN/ntfy.sh"
 printf '#!/bin/sh\necho "$@" >> "%s"\n' "$PNCAP" > "$PNSTUB"; chmod +x "$PNSTUB"
 printf 'ntfy:\n  topic: "p74-quiet"\n  push: [workspace_untrusted]\n' > "$PN/repo/.loom.yml"

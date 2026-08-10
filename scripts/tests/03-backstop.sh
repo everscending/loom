@@ -19,6 +19,7 @@
 #      everything else 0, so nothing can ever be observed un-armed. This one
 #      keeps a register of what it actually loaded, like launchd does.
 P3T="$T/p3"; mkdir -p "$P3T/repo" "$P3T/home" "$P3T/agents"
+seed_tracker_decl "$P3T/repo"
 P3LOADED="$P3T/loaded"; P3REFUSE="$P3T/refuse"; P3STUB="$P3T/launchctl.sh"
 P3NTFY="$P3T/pushes"
 cat > "$P3STUB" <<'STUBEOF'

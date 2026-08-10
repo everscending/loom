@@ -18,12 +18,34 @@ about.
    `usage_limit`, the ntfy block. Written once, ever.
 2. **Derived — no file.** Anything readable off the repo: `base`
    (`origin/develop` if it exists, else `main`), the `gates` pack (from the
-   detected stack), `runner` (`scripts/gate.sh`), and the whole
+   detected stack), `runner` (`scripts/gate.sh`), `tracker` (read off
+   `docs/agents/issue-tracker.md` — see below), and the whole
    `.claude/settings.json` permission surface. `tick.sh install-settings`
    writes that surface; it is idempotent and refuses to overwrite a differing
    hand-edited file without `--force`.
 3. **Repo — `.loom.yml`, optional.** Only facts no detector can infer.
    Its absence is a valid, complete configuration.
+
+## The tracker is declared, not configured (P86)
+
+`tracker` has **no `.loom.yml` key, deliberately**. Which tracker a repo uses
+is already declared in `docs/agents/issue-tracker.md` — the file
+`/setup-matt-pocock-skills` writes, and the one every lane reads through the
+repo's `CLAUDE.md`. A second copy of the answer here would not be a config key;
+it would be a way for `tick.sh` to read one board while the lanes it spawns
+write to another, with nothing in the design able to notice.
+
+So loom reads that file's `# Issue tracker: <Name>` heading and **halts**
+without it — in `bootstrap.sh` before any write, in `cmd_tick` before any wave
+is paid for, in `cmd_snapshot` (the read every other read verb funnels
+through), and at `lane.sh`'s verb dispatch. The declaration must also be
+**tracked by git**: worktrees sit beside the repo and each is a checkout, so an
+untracked file is visible to the human and absent from every lane.
+
+A tracker loom has no driver for halts too, by name. Resolving the declaration
+and then ignoring it is the failure the declaration exists to prevent.
+`tick.sh resolve-config` reports the resolved name and never halts — it is how
+the halt gets diagnosed.
 
 A repo `gates:` block overrides the derived pack wholesale. The one extra repo
 key is `worktree_cmd:` — a non-git worktree helper such as `openemr-cmd`. It is

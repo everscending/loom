@@ -11,6 +11,7 @@
 # The repo `retro` is pointed at. Section 12 built the same one for the event
 # record and this section used to inherit it.
 ET="$T/ev"; mkdir -p "$ET/repo"
+seed_tracker_decl "$ET/repo"
 git -C "$ET/repo" init -q 2>/dev/null || git init -q "$ET/repo" 2>/dev/null || :
 RT="$T/retro"; mkdir -p "$RT/home"
 RTF="$RT/home/events.jsonl"

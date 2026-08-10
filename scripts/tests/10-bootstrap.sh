@@ -13,6 +13,10 @@ BT="$T/boot"; mkdir -p "$BT/repo" "$BT/fx"
 # own ~/.claude/settings.json. The fixture has to be a real repo to exercise the
 # write paths at all.
 git -C "$BT/repo" init -q 2>/dev/null || git init -q "$BT/repo" 2>/dev/null || :
+# P86: and it has to DECLARE its issue tracker, tracked by git, or every write
+# path below is refused before it starts. Same reason the line above exists:
+# the fixture must satisfy the guards it is not the subject of.
+seed_tracker_decl "$BT/repo"
 cat > "$BT/fx/glab" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "${STUB_LOG:-/dev/null}"
@@ -213,6 +217,7 @@ out=$(LOOM_TRUST_FILE="$BT/untrusted-root.json" BOOTENV "$TICK" tick 2>&1) || tr
 # 9f. ntfy topic is layered like every other key, and derives from one global
 #     prefix so no per-repo topic is ever hand-written.
 NT="$T/ntfy"; mkdir -p "$NT/repo"; : > "$NT/calls"
+seed_tracker_decl "$NT/repo"
 cat > "$NT/curl" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in http*) echo "$a" >> "$STUB_URL";; esac; done

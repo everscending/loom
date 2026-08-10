@@ -63,6 +63,79 @@ _glab_list() { # [--capped] <api-path> → one JSON array on stdout
                  else error("not a JSON array") end' 2>/dev/null
 }
 
+# --- the tracker declaration (P86) ----------------------------------------
+# ONE place says which tracker a repo uses, and it is not this skill's file.
+# Every lane is a `claude -p` session in a worktree, so it loads that repo's
+# CLAUDE.md, whose `## Agent skills` block points at
+# `docs/agents/issue-tracker.md` — the sibling skills' declaration of the
+# tracker and its whole workflow. A second answer kept in `.loom.yml` would not
+# be a config key, it would be a way for tick.sh to read one board while the
+# lanes it spawns write to another, with nothing in the design able to notice.
+# So loom READS that file and never writes one of its own.
+_tracker_decl_path() { printf 'docs/agents/issue-tracker.md\n'; }
+
+_repo_toplevel() { # <dir> → the git worktree root, else <dir> unchanged
+    local d="${1:-.}" top
+    top=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null) && printf '%s\n' "$top" \
+        || printf '%s\n' "$d"
+}
+
+# The heading form, which every seed template already carries
+# (`# Issue tracker: GitHub` / `GitLab` / `Local Markdown`). Scanned over the
+# opening lines rather than line 1 alone, so a file that grew a title above it
+# still answers. Prints the name lowercased, or nothing.
+_tracker_declared() { # <dir inside the repo> → tracker name, or empty
+    local root f
+    root=$(_repo_toplevel "${1:-.}")
+    f="$root/$(_tracker_decl_path)"
+    [ -f "$f" ] || return 0
+    sed -nE '1,20s/^#[[:space:]]+Issue tracker:[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p' "$f" \
+        | head -1 | tr 'A-Z' 'a-z'
+}
+
+# The drivers this build of loom actually has, one per line. A declared tracker
+# outside this set is a HALT, never a fallback: resolving `linear` and then
+# running the gitlab driver at it is precisely the failure the declaration
+# exists to prevent.
+_tracker_drivers() { printf 'gitlab\n'; }
+
+# The halt. Four distinct refusals, because they need four different actions
+# from the human, and a lane is headless — it cannot be asked which one applies.
+# Prints the resolved tracker name on success.
+_require_tracker() { # <dir inside the repo> <who is refusing> → tracker name
+    local root what="${2:-loom}" rel name drivers
+    root=$(_repo_toplevel "${1:-.}")
+    rel=$(_tracker_decl_path)
+    [ -f "$root/$rel" ] \
+        || die "$what: '$root/$rel' is missing — nothing declares which issue tracker this
+  repo uses. Every lane loom spawns reads that file through the repo's CLAUDE.md,
+  so without it a headless session infers a tracker from the git remote and
+  guesses. Run /setup-matt-pocock-skills in this repo to write it, then commit it."
+    # Present is not enough. Worktrees sit BESIDE the repo and each is a
+    # checkout, so an untracked or ignored declaration is visible to the human
+    # in the primary clone and absent from every lane — the worst version of
+    # this, because the file you are told is missing is one you can see.
+    git -C "$root" ls-files --error-unmatch "$rel" >/dev/null 2>&1 \
+        || die "$what: '$rel' exists but git does not track it, so it is in none of the
+  worktrees the lanes run in — you can see the declaration and no lane ever will.
+  Commit it:  git add $rel"
+    name=$(_tracker_declared "$root")
+    [ -n "$name" ] \
+        || die "$what: '$rel' carries no '# Issue tracker: <Name>' heading in its opening
+  lines, so nothing in it names a tracker. Add one as the file's first line, e.g.
+  '# Issue tracker: GitLab'."
+    drivers=$(_tracker_drivers | tr '\n' ' '); drivers="${drivers% }"
+    local d have=0
+    while IFS= read -r d; do [ "$d" = "$name" ] && have=1; done <<EOF
+$(_tracker_drivers)
+EOF
+    [ "$have" = 1 ] \
+        || die "$what: this repo declares '$name' in $rel, and loom has drivers for:
+  $drivers. Refusing to drive a $name board with a $drivers driver — resolving the
+  declaration and then ignoring it is the split brain the declaration exists to close."
+    printf '%s\n' "$name"
+}
+
 # --- config readers (flat keys) -------------------------------------------
 _yaml_scalar() { # _yaml_scalar <file> <key> -> value or empty
     local f="$1" k="$2" v=""

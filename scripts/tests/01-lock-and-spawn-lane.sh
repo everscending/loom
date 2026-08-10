@@ -294,6 +294,7 @@ rm -rf "$LOOM_HOME/merge.lock.d" "$LOOM_HOME/tick.lock.d"
 #      ticket+commit so unrelated gates never queue behind each other.
 rm -rf "$LOOM_HOME/tick.lock.d" "$LOOM_HOME/gate.lock.d"
 GL="$T/gatelock"; mkdir -p "$GL/repo"
+seed_tracker_decl "$GL/repo"
 git init -q "$GL/repo" 2>/dev/null
 git -C "$GL/repo" config user.email t@t; git -C "$GL/repo" config user.name t
 : > "$GL/repo/f"; git -C "$GL/repo" add f >/dev/null 2>&1

@@ -12,6 +12,27 @@ TICK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 T=$(mktemp -d)
 export LOOM_HOME="$T/home" LOOM_REPO="$T/repo"
 mkdir -p "$LOOM_REPO"
+
+# P86: loom refuses to run in a repo that has not declared its issue tracker,
+# and the declaration must be TRACKED BY GIT — a lane works in a worktree, and
+# an untracked file is in none of them. Every fixture repo a halted verb runs
+# against therefore needs one. It is a helper called from shared setup rather
+# than seventy-five hand edits: the sections that build their own repos call it
+# with their own root, and a section that WANTS the refusal simply does not.
+# `git add` is enough; `ls-files --error-unmatch` asks the index, not HEAD, so
+# no fixture has to pay for a commit.
+seed_tracker_decl() { # <repo-root> [tracker name]
+    local root="$1" name="${2:-GitLab}"
+    mkdir -p "$root/docs/agents"
+    printf '# Issue tracker: %s\n' "$name" > "$root/docs/agents/issue-tracker.md"
+    if ! git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
+        git -C "$root" init -q >/dev/null 2>&1 || return 0
+        git -C "$root" config user.email loom@test >/dev/null 2>&1 || true
+        git -C "$root" config user.name loom >/dev/null 2>&1 || true
+    fi
+    git -C "$root" add docs/agents/issue-tracker.md >/dev/null 2>&1 || true
+}
+seed_tracker_decl "$LOOM_REPO"
 # Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
 # lane below it spawns without an entry of its own, exactly as a real worktree
 # relies on its parent directory.

@@ -1088,6 +1088,28 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
     _lane_ev ticket_close ticket "$iid"
 }
 
+_usage() {
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+}
+
+# The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
+# no verb prints the roster, and that is how tick.sh derives the verb list it
+# injects into every wave prompt (`_lane_verbs`). A halt above this line makes
+# the roster empty in every repo — the wave then loses the list of verbs it is
+# supposed to use, which is the opposite of what a missing declaration should
+# cost. (Caught by P48's roster test, which is exactly why that test exists.)
+case "${1:-}" in ''|-h|--help|help) _usage ;; esac
+
+# P86: no declaration, no lane — checked once here so every verb inherits it
+# rather than each growing a copy. This is the sharpest of the three halts: a
+# lane is headless, so it cannot be asked which tracker the repo uses, and the
+# alternative to refusing is a session inferring one from the git remote. The
+# question is asked of `$LOOM_REPO` for the same reason `_lane_ev` above reads
+# it: spawn-lane exports it to every lane, so a worktree cwd still resolves the
+# repo whose index the tracked-by-git half is really about. A human running
+# this by hand has it unset and is answered about the repo they are standing in.
+_require_tracker "${LOOM_REPO:-.}" "lane.sh" >/dev/null
+
 case "${1:-}" in
     scratch)    shift; cmd_scratch "$@" ;;
     note)       shift; cmd_note "$@" ;;
@@ -1107,5 +1129,5 @@ case "${1:-}" in
     transition) shift; cmd_transition "$@" ;;
     claim)      shift; cmd_claim "$@" ;;
     close)      shift; cmd_close "$@" ;;
-    *) die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)" ;;
+    *) _usage ;;
 esac

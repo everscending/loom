@@ -1023,6 +1023,13 @@ cmd_tick() {
     # quiescence — and _launch_wave is every cost. The gates report through
     # tick_go rather than a return code so the call sits outside any condition
     # and `set -e` keeps its teeth inside them.
+    # P86: before any gate, because the cheapest wave is the one never launched.
+    # `cmd_snapshot` carries the halt for every read verb, but a wave calls that
+    # from INSIDE a model session — so without this line an undeclared repo pays
+    # a whole session to be told what one stat could have said. The heartbeat
+    # fires on this every 60s and says the same thing each time, which is the
+    # correct amount of noise for a build that cannot legally start.
+    _require_tracker "$REPO_ROOT" tick >/dev/null
     local mode="manual" quiet="" tick_go=0
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
@@ -2203,6 +2210,11 @@ cmd_snapshot() {
     SNAP_JQ="$SNAP_JQD/snapshot.jq"
     [ -f "$SNAP_JQ" ] || die "snapshot: $SNAP_JQ is missing — it holds the document builder and ships beside tick.sh"
     command -v "$GLAB_CMD" >/dev/null 2>&1 || die "snapshot: '$GLAB_CMD' not found"
+    # P86: the halt, on the read half. This is the one board read every other
+    # read verb funnels through — `watch`, `graph` and `plan` all consume a
+    # snapshot DOCUMENT rather than the tracker — so one check here covers them
+    # all, and `plan` keeps P81's guarantee of making no tracker call of its own.
+    _require_tracker "$REPO_ROOT" "snapshot" >/dev/null
     # glab api's projects/:id shorthand resolves from the cwd's git remote,
     # and a wave may invoke this from a lane worktree — never assume cwd.
     cd "$REPO_ROOT" || die "snapshot: cannot cd to $REPO_ROOT"
@@ -3049,6 +3061,7 @@ cmd_resolve_config() {
         --arg wmod "$(cfg wave_model '')"                --arg wmod_s  "$(cfg_source wave_model)" \
         --arg lmod "$(cfg lane_model '')"                --arg lmod_s  "$(cfg_source lane_model)" \
         --arg rmod "$(cfg rework_model '')"              --arg rmod_s  "$(cfg_source rework_model)" \
+        --arg trk  "$(_tracker_declared "$REPO_ROOT")" \
         '{repo: $repo, stack: $stack, base: $base, runner: $runner,
           gates: $gates, gates_source: $gsrc,
           settings: {permissions: {allow: $allow, deny: $deny}},
@@ -3067,7 +3080,8 @@ cmd_resolve_config() {
             permission_mode:         {value: $pmode,  source: $pmode_s},
             wave_model:              {value: $wmod,   source: $wmod_s},
             lane_model:              {value: $lmod,   source: $lmod_s},
-            rework_model:            {value: $rmod,   source: $rmod_s}
+            rework_model:            {value: $rmod,   source: $rmod_s},
+            tracker:                 {value: $trk,    source: "derived"}
           }}'
 }
 

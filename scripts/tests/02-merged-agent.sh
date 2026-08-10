@@ -12,6 +12,7 @@
 #     first makes the second program unnecessary. (Designed with the human,
 #     2026-08-04.)
 MT="$T/merged"; mkdir -p "$MT/repo" "$MT/home" "$MT/agents"
+seed_tracker_decl "$MT/repo"
 MENV() { LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" LOOM_PLIST_DIR="$MT/agents" \
          LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 

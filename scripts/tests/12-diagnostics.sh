@@ -10,6 +10,7 @@
 # filename arithmetic, and none of it survived to the next build. These events
 # are written by the MACHINERY, so they exist even when a wave dies.
 ET="$T/ev"; mkdir -p "$ET/repo"
+seed_tracker_decl "$ET/repo"
 git -C "$ET/repo" init -q 2>/dev/null || git init -q "$ET/repo" 2>/dev/null || :
 EVENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$ET/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
           LOOM_TRUST_FILE="$LOOM_TRUST_FILE" LOOM_RETRY_BACKOFF_SECONDS=0 \

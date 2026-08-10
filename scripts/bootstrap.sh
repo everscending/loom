@@ -111,6 +111,10 @@ cmd_labels() { # labels [--dry-run]
     command -v "$GLAB_CMD" >/dev/null 2>&1 || die "labels: '$GLAB_CMD' not found"
     command -v jq >/dev/null 2>&1 || die "labels: jq required"
     _require_repo labels
+    # P86: the write half's halt, asked at the verb that actually writes to the
+    # tracker, so `bootstrap.sh labels` run on its own is refused too — not only
+    # the `all` path above it.
+    _require_tracker "$REPO_ROOT" labels >/dev/null
     cd "$REPO_ROOT" || die "labels: cannot cd to $REPO_ROOT"
     local raw existing name color desc created=0 skipped=0
     # One read for the whole set; creating a label that exists is an error on
@@ -202,6 +206,12 @@ cmd_all() {
         --dry-run)  dry="--dry-run" ;;
         *)          die "all: unknown flag '$1' (only --dry-run applies to 'all')" ;;
     esac
+    # P86: BEFORE any write, including the machine-scoped one. A repo that has
+    # not declared its tracker is a repo no lane can work in, so there is
+    # nothing worth setting up in it yet — and `--dry-run` refuses too, because
+    # a preview of labels for a tracker nobody named is not a preview of
+    # anything.
+    _require_tracker "$REPO_ROOT" bootstrap >/dev/null
     if [ -n "$dry" ]; then
         echo "bootstrap: dry run — nothing will be written"
         cmd_labels --dry-run

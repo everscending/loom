@@ -12,6 +12,7 @@
 # The repo the followed lanes belong to. Section 12 built the same one for the
 # event record and this section used to inherit it.
 ET="$T/ev"; mkdir -p "$ET/repo"
+seed_tracker_decl "$ET/repo"
 git -C "$ET/repo" init -q 2>/dev/null || git init -q "$ET/repo" 2>/dev/null || :
 WT="$T/follow"; mkdir -p "$WT/home/lanes" "$WT/home/logs"
 FENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$WT/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
@@ -106,6 +107,7 @@ HERDR_ENV= bash "$(dirname "$TICK")/watch-panes.sh" >/dev/null 2>&1 \
     && bad "watch-panes: ran outside a herdr session" \
     || ok "watch-panes: refuses to run outside herdr instead of degrading"
 WPT="$T/wp-layer"; mkdir -p "$WPT/repo" "$WPT/home" "$WPT/agents"
+seed_tracker_decl "$WPT/repo"
 WPCALLS="$WPT/calls"
 printf '#!/bin/sh\necho called >> "%s"\n' "$WPCALLS" > "$WPT/stub"; chmod +x "$WPT/stub"
 : > "$WPCALLS"
