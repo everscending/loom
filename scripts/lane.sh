@@ -100,7 +100,7 @@
 #   lane.sh submit <iid> [--title <t>] [--file F]
 #                                            the LAST write of an impl lane:
 #                                            opens the MR (description from
-#                                            F/stdin, `Closes #<iid>` appended)
+#                                            F/stdin, the forge's ticket marker appended)
 #                                            and moves the label to `review`,
 #                                            in one call. Refuses an unpushed
 #                                            HEAD, a closed ticket, and a
@@ -132,6 +132,11 @@ DIE_RC=2   # every refusal in this file exits 2, and briefs read that code
 # sites below; it is now named in scripts/trackers/gitlab.sh and nowhere else.
 TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "${LOOM_REPO:-.}")"
 [ -x "$TRACKER" ] || die "tracker driver '$TRACKER' is missing or not executable"
+# P87: and the FORGE, which is a different thing that GitLab happens also to be.
+# Branches and merge requests are not board state, and a board that has none
+# (Linear) still needs somewhere for a lane's code to land.
+FORGE="$(_forge_cmd "${LIB_SH%/*}" "${LOOM_REPO:-.}")"
+[ -x "$FORGE" ] || die "forge driver '$FORGE' is missing or not executable"
 
 STATES="ready-for-agent in-progress review merge-queue blocked"
 
@@ -157,8 +162,16 @@ _stage_body() { # [--file F] ; prints staged file path
     printf '%s\n' "$tmp"
 }
 
-_post_note() { # <issue|mr> <iid> <bodyfile> — the driver's own vocabulary
-    "$TRACKER" note-add "$1" "$2" "$3"
+# P87: an issue note is board state and a merge-request note is forge state, so
+# they are two verbs on two drivers rather than one verb with a kind argument.
+# The kind stays in this signature because every call site already reads that
+# way, and because the message a lane prints has to name which thing it wrote on.
+_post_note() { # <issue|mr> <iid> <bodyfile>
+    case "$1" in
+        issue) "$TRACKER" note-add "$2" "$3" ;;
+        mr)    "$FORGE" mr-note-add "$2" "$3" ;;
+        *)     die "_post_note: first argument is issue|mr, got '${1:-}'" ;;
+    esac
     echo "lane.sh: note posted on $1/$2"
 }
 
@@ -210,9 +223,9 @@ _read_issue() { # <iid> <what-a-failed-read-would-mean> — sets _ISSUE_JSON, or
 # the writes around these calls change.
 _open_mr_closing() { # <iid> <what-a-failed-read-would-mean> — sets _OPEN_MR, or dies
     local iid="$1" refusal="$2" body rc
-    body=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
+    body=$("$FORGE" mr-for-ticket "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — $refusal"
+        || die "issue $iid: could not read which MR closes it (forge read failed, rc=$rc) — $refusal"
     _OPEN_MR=$(printf '%s' "$body" | jq -r '[.[] | select(.state == "open")] | .[0].id // empty' || true)
     return 0
 }
@@ -361,9 +374,9 @@ cmd_merge_failed() { # <iid> [--file F]
     # read as "definitely not merged" and let a failed-merge note land on a
     # ticket that in fact just succeeded.
     local _closed_by rc
-    _closed_by=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
+    _closed_by=$("$FORGE" mr-for-ticket "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
+        || die "issue $iid: could not read which MR closes it (forge read failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
     merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].id // empty' || true)
     [ -z "$merged_mr" ] \
         || die "issue $iid already has MERGED MR !$merged_mr — the merge succeeded; refusing to record a failed attempt. Re-read the ticket: your snapshot is stale."
@@ -988,11 +1001,19 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         [ -n "$title" ] || title=$(printf '%s' "$_ISSUE_JSON" | jq -r '.title // empty' || true)
         [ -n "$title" ] || die "submit: no title on issue $iid and none given — pass --title"
         local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
-        # `Closes #<iid>` is the literal string the scheduler links MR to ticket
-        # by; an MR without it is invisible to the build. Appended here rather
-        # than asked for, exactly as verdict appends its own trailer.
-        grep -Eq "[Cc]loses #$iid([^0-9]|$)" "$f" || printf '\n\nCloses #%s\n' "$iid" >> "$f"
-        mr=$("$TRACKER" mr-create --source "$branch" --target "$base" \
+        # The marker that links MR to ticket; an MR without it is invisible to
+        # the build. Appended here rather than asked for, exactly as verdict
+        # appends its own trailer.
+        # P87: the FORGE says what it is, because only the forge knows how it
+        # will look the MR up again. On GitLab it is `Closes #<iid>` and the
+        # lookup is the native closing edge, unchanged. On a forge whose issues
+        # are somebody else's — a GitHub repo with a Linear board — `Closes #41`
+        # would close GitHub issue 41, so that forge names a marker of its own.
+        # A marker must be regex-inert; the drivers' are.
+        local marker; marker=$("$FORGE" ticket-marker "$iid") \
+            || die "submit: the forge could not name its ticket marker — refusing to open an MR the build could never find"
+        grep -Eqi "$marker([^0-9]|\$)" "$f" || printf '\n\n%s\n' "$marker" >> "$f"
+        mr=$("$FORGE" mr-create --source "$branch" --target "$base" \
             --title "$title" --body-file "$f" 2>/dev/null) || mr=""
         # MR first, label second, and the label is skipped when the MR failed:
         # an open MR with no label flip is a state the snapshot now names and a
@@ -1026,9 +1047,9 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     local iid="${1:-}" mr state n
     _check_iid "$iid"
     _blocked_guard "$iid" merge
-    mr=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null \
+    mr=$("$FORGE" mr-for-ticket "$iid" 2>/dev/null \
          | jq -r '[.[] | select(.state == "open")] | .[0].id // empty' || true)
-    [ -n "$mr" ] || die "no open MR closes issue $iid — its description must contain 'Closes #$iid'"
+    [ -n "$mr" ] || die "no open MR closes issue $iid — its description must carry the forge's ticket marker, '$("$FORGE" ticket-marker "$iid" 2>/dev/null)'"
     # P84: delete the source branch as part of the merge. Nothing else in the
     # loop ever deletes a branch — sweep's `git branch -d` only fires as a side
     # effect of removing a worktree, and covers the local side alone — so five
@@ -1038,11 +1059,11 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     # it accumulates every branch it ever merges. This is the one moment the
     # branch is provably disposable, and it is one field on a request the verb
     # already makes.
-    "$TRACKER" mr-merge "$mr" >/dev/null 2>&1 \
+    "$FORGE" mr-merge "$mr" >/dev/null 2>&1 \
         || die "merge of MR !$mr refused (conflicts, red pipeline, or approvals) — record it: lane.sh merge-failed $iid"
     # GitLab merges asynchronously; never report a merge we have not observed.
     for n in 1 2 3 4 5 6 7 8 9 10; do
-        state=$("$TRACKER" mr "$mr" 2>/dev/null \
+        state=$("$FORGE" mr "$mr" 2>/dev/null \
                 | jq -r '.state // empty' || true)
         [ "$state" = merged ] && break
         sleep 2
@@ -1105,6 +1126,11 @@ case "${1:-}" in ''|-h|--help|help) _usage ;; esac
 # repo whose index the tracked-by-git half is really about. A human running
 # this by hand has it unset and is answered about the repo they are standing in.
 _require_tracker "${LOOM_REPO:-.}" "lane.sh" >/dev/null
+# P87: and a forge, for the same reason and in the same place. A board with no
+# merge requests is only half an answer — `submit` and `merge` have nowhere to
+# go — and a lane discovering that after it has already built something is a
+# lane that wasted its whole session.
+_require_forge "${LOOM_REPO:-.}" "lane.sh" >/dev/null
 
 case "${1:-}" in
     scratch)    shift; cmd_scratch "$@" ;;

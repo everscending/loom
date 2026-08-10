@@ -40,8 +40,11 @@ seed_tracker_decl "$LOOM_REPO"
 # asks — so a mirror without that directory makes lane.sh and tick.sh die on a
 # missing driver instead of exercising the mutation. One line per mirror,
 # rather than each section growing its own copy of the path.
+# P87 split the forge out, so a mirror needs both directories or it dies on a
+# missing forge driver instead — same failure, one directory further along.
 link_trackers() { # <mirror dir>
     ln -sfn "$(dirname "$TICK")/trackers" "$1/trackers" 2>/dev/null || true
+    ln -sfn "$(dirname "$TICK")/forges"   "$1/forges"   2>/dev/null || true
 }
 # Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
 # lane below it spawns without an entry of its own, exactly as a real worktree

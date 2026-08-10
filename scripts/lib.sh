@@ -19,6 +19,8 @@
 #   CONFIG, GLOBAL_CONFIG  the two config layers cfg/cfg_source read
 #   TRACKER_CMD            the tracker DRIVER seam (default: the driver for
 #                          the repo's declared tracker, under trackers/)
+#   FORGE_CMD              the forge DRIVER seam (default: the driver for the
+#                          repo's forge, under forges/)
 #   DIE_RC                 exit code for die (tick.sh/bootstrap.sh 1, lane.sh 2)
 
 # One die for three scripts. The prefix is the script's own name, so a message
@@ -134,6 +136,93 @@ EOF
         || die "$what: this repo declares '$name' in $rel, and loom has drivers for:
   $drivers. Refusing to drive a $name board with a $drivers driver — resolving the
   declaration and then ignoring it is the split brain the declaration exists to close."
+    printf '%s\n' "$name"
+}
+
+# --- the forge (P87 stage 1) ----------------------------------------------
+# A BOARD and a FORGE are two systems, and GitLab happens to be both. The board
+# holds tickets, labels and epics; the forge holds branches and merge requests.
+# P86 grouped the driver's verbs that way in comments, deliberately. This makes
+# the grouping load-bearing, because Linear is a board and nothing else: it has
+# no merge requests at all, so a Linear-tracked repo keeps its code on GitHub or
+# GitLab and loom has to resolve two backends rather than one.
+#
+# The forge is DERIVED, never declared. A second thing for a human to write down
+# is the split brain P86 exists to close, and the repo already answers the
+# question twice over — once by naming a tracker that is itself a code host, and
+# once through its own git remote.
+_forge_drivers() { printf 'gitlab\ngithub\n'; }
+
+# Trackers that are also code hosts. A repo declaring one of these needs no
+# remote inspection at all, which is the whole reason resolution asks this
+# FIRST: every GitLab repo keeps the forge it has always had, and a self-hosted
+# instance on a domain with no `gitlab` in its name is answered correctly
+# without anyone having to teach this file about hostnames.
+_forge_capable_trackers() { printf 'gitlab\ngithub\n'; }
+
+_is_forge_capable() { # <tracker name>
+    local t
+    while IFS= read -r t; do [ "$t" = "$1" ] && return 0; done <<EOF
+$(_forge_capable_trackers)
+EOF
+    return 1
+}
+
+# The host half, consulted only when the board cannot host code. Matches on the
+# remote URL rather than parsing it into pieces: `git@github.com:o/r.git` and
+# `https://github.com/o/r` are the same answer, and a self-hosted GitLab is
+# recognised by the name it almost always carries in its own domain.
+_forge_from_remote() { # <dir inside the repo> → forge name, or empty
+    local root url
+    root=$(_repo_toplevel "${1:-.}")
+    url=$(git -C "$root" remote get-url origin 2>/dev/null) || return 0
+    case "$url" in
+        *github.com*)  printf 'github\n' ;;
+        *gitlab*)      printf 'gitlab\n' ;;
+        *)             : ;;
+    esac
+}
+
+_forge_declared() { # <dir inside the repo> → forge name, or empty
+    local trk
+    trk=$(_tracker_declared "${1:-.}")
+    if [ -n "$trk" ] && _is_forge_capable "$trk"; then printf '%s\n' "$trk"; return 0; fi
+    _forge_from_remote "${1:-.}"
+}
+
+# Same shape as `_tracker_cmd`, same reason for the fallback: a resolver must
+# not be the thing that reports a missing answer. `_require_forge` does that.
+_forge_cmd() { # <dir the scripts ship in> [<dir inside the repo>]
+    [ -z "${FORGE_CMD:-}" ] || { printf '%s\n' "$FORGE_CMD"; return 0; }
+    local d="$1" name
+    name=$(_forge_declared "${2:-.}")
+    [ -n "$name" ] || name=gitlab
+    printf '%s/forges/%s.sh\n' "$d" "$name"
+}
+
+# The fourth refusal. It only ever fires for a board that is not also a code
+# host — every GitLab repo answers at the first line — so its message is written
+# for exactly that case and says both halves: what the repo declared, and why
+# the remote could not supply the rest.
+_require_forge() { # <dir inside the repo> <who is refusing> → forge name
+    local root trk name drivers d have=0
+    root=$(_repo_toplevel "${1:-.}")
+    trk=$(_tracker_declared "$root")
+    if [ -n "$trk" ] && _is_forge_capable "$trk"; then printf '%s\n' "$trk"; return 0; fi
+    drivers=$(_forge_drivers | tr '\n' ' '); drivers="${drivers% }"
+    name=$(_forge_from_remote "$root")
+    [ -n "$name" ] \
+        || die "${2:-loom}: this repo declares '${trk:-nothing}' as its issue tracker, which is a
+  board and not a code host — it has no merge requests — and its 'origin' remote
+  does not name a forge loom drives ($drivers). Loom needs both: the board for
+  tickets and the forge for the branches and merge requests a lane opens. Point
+  'origin' at the repository the code actually lives in."
+    while IFS= read -r d; do [ "$d" = "$name" ] && have=1; done <<EOF
+$(_forge_drivers)
+EOF
+    [ "$have" = 1 ] \
+        || die "${2:-loom}: this repo's remote resolves to forge '$name', and loom has forge
+  drivers for: $drivers."
     printf '%s\n' "$name"
 }
 

@@ -151,7 +151,7 @@ esac
 EOF
 chmod +x "$GF/fail-closedby-72.sh"
 GLAB_CMD="$GF/fail-closedby-72.sh" STUB_LOG="$GF/cc" "$LANE" close 72 >"$GF/oc" 2>&1; rc_c=$?
-if [ "$rc_c" != 0 ] && grep -q 'could not read closed_by' "$GF/oc" \
+if [ "$rc_c" != 0 ] && grep -q 'could not read which MR closes it' "$GF/oc" \
    && ! grep -q 'state_event=close' "$GF/cc"; then
     ok "guards fail closed: close dies on a failed closed_by read, writes nothing"
 else
@@ -171,7 +171,7 @@ chmod +x "$GF/fail-closedby-73.sh"
 echo body > "$GF/report.md"
 GLAB_CMD="$GF/fail-closedby-73.sh" STUB_LOG="$GF/cd" "$LANE" merge-failed 73 --file "$GF/report.md" \
     >"$GF/od" 2>&1; rc_d=$?
-if [ "$rc_d" != 0 ] && grep -q 'could not read closed_by' "$GF/od" \
+if [ "$rc_d" != 0 ] && grep -q 'could not read which MR closes it' "$GF/od" \
    && ! grep -q '/notes' "$GF/cd"; then
     ok "guards fail closed: merge-failed dies on a failed closed_by read, writes nothing"
 else

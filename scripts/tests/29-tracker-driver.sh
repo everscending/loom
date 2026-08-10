@@ -202,8 +202,11 @@ mkdir -p "$TD/nolib"
 cp "$(dirname "$TICK")"/*.sh "$(dirname "$TICK")"/*.jq "$TD/nolib/" 2>/dev/null
 # Replace the function body with one that answers and returns, leaving every
 # other line of the three scripts untouched.
+# P87 added a second halt beside it — the forge — and the plant has to remove
+# both, or "it still refused" would only prove the OTHER guard fired.
 awk '
   /^_require_tracker\(\) \{/ { print "_require_tracker() { printf '\''gitlab\\n'\''; return 0; }"; skip=1; next }
+  /^_require_forge\(\) \{/   { print "_require_forge() { printf '\''gitlab\\n'\''; return 0; }"; skip=1; next }
   skip && /^\}$/ { skip=0; next }
   skip { next }
   { print }

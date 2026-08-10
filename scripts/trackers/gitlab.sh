@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The GitLab driver (P86 stage 2). Every tracker call loom makes goes through a
-# driver, and this is the one implementation of the contract.
+# The GitLab BOARD driver (P86 stage 2, split from the forge by P87 stage 1).
+# Every board call loom makes goes through a driver, and this is one of them.
 #
 # WHY A DRIVER AT ALL. GitLab was never a configured backend, it was a literal:
 # `glab api "projects/:fullpath/issues/$iid"` written out at ~28 call sites
@@ -9,23 +9,29 @@
 # verbs below are named for what LOOM needs, not for what GitLab offers, so a
 # second driver is a new file implementing a written contract.
 #
-# THE VERB GROUPS ARE THE SEAM. `board-*` and the issue/label/milestone verbs
-# are a tracker; the `mr-*` group and `issue-closed-by` are a FORGE — a place
-# where branches and merge requests live. GitLab happens to be both. A tracker
-# that is not also a forge (Linear has no merge requests) needs exactly the
-# second group pointed somewhere else, and grouping them costs nothing today.
+# WHY THE FORGE IS NOT HERE. P86 grouped these verbs and the `mr-*` ones apart
+# in a comment, because they are two systems GitLab happens to merge: a board,
+# and a place where branches and merge requests live. P87 made the grouping
+# real — the merge-request half is `forges/gitlab.sh`, resolved separately — so
+# that a board which is not also a code host (Linear has no merge requests) can
+# be driven here while its code lives somewhere else. If an `mr-` verb ever
+# appears in this file, that split has failed.
 #
 # CONTRACT — the SHAPE is loom's, not GitLab's (P86 stage 3)
-#   * every read verb emits the loom document: `id`, `state` (open | closed,
-#     plus `merged` for a merge request), `labels`, `assignees` (usernames),
-#     `epic`, `url`, `body`, `updated_at`. Nothing downstream of this file
-#     knows the words `iid`, `opened`, `milestone` or `web_url`.
+#   * every read verb emits the loom document: `id`, `state` (open | closed),
+#     `labels`, `assignees` (usernames), `epic`, `url`, `body`, `updated_at`.
+#     Nothing downstream of this file knows the words `iid`, `opened`,
+#     `milestone` or `web_url`.
 #     This is what makes the verbs a contract rather than a passthrough: a
 #     second driver implements what loom asked for, instead of fabricating
 #     GitLab fields to satisfy readers that were never told what they need.
+#   * `id` is an INTEGER, scoped to the project. Linear's `Issue.number` is the
+#     same shape for the same reason (P87 stage 3) — the jq layer does
+#     arithmetic on ticket ids, and an opaque string id would be a rewrite of
+#     all of it.
 #   * stdout is JSON for every read verb, and a JSON array wherever the tracker
 #     returns a list — never a bare page, never GitLab's human sentence for an
-#     empty list (see `_list` below).
+#     empty list (see `_list` in gitlab-common.sh).
 #   * a failed call exits non-zero and prints nothing on stdout, so every
 #     caller's existing fail-closed path still fires. This file NEVER
 #     substitutes an empty list for an error: `snapshot` degrades deliberately,
@@ -42,38 +48,15 @@ LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
     || { echo "gitlab.sh: $LIB_SH is missing — it holds the shared derivations" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1
-GLAB="${GLAB_CMD:-glab}"
-
-# The one LIST read, moved here from lib.sh where it was `_glab_list` (P49).
-# Its two jobs are both GitLab facts and belong to this driver: `--paginate`
-# emits one array PER PAGE and a bare `per_page=100` silently returns page one,
-# so the fold is part of the read; and a non-array response (including `glab
-# issue list`'s human sentence on an empty board) must fail rather than parse as
-# emptiness. `--capped` is the deliberate opposite and stays explicit: a
-# `sort=desc` notes read wants the newest N, and paginating it pulls the whole
-# thread.
-_list() { # [--capped] <api-path> → one JSON array
-    local capped=false
-    case "${1:-}" in --capped) capped=true; shift ;; esac
-    if $capped; then "$GLAB" api "$1"; else "$GLAB" api --paginate "$1"; fi \
-        | jq -s 'if (length > 0) and all(type == "array") then add
-                 else error("not a JSON array") end' 2>/dev/null
-}
-
-_one() { "$GLAB" api "$1"; }   # a single object read, passed through as-is
-
-# `:fullpath` and `:id` are both glab shorthands for "the project this cwd's
-# git remote points at". They were used interchangeably at the old call sites;
-# one form here means the driver resolves the project one way, always.
-_p() { printf 'projects/:fullpath/%s' "$1"; }
+COMMON_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gitlab-common.sh"
+[ -f "$COMMON_SH" ] \
+    || die "$COMMON_SH is missing — it holds the GitLab transport both drivers share"
+. "$COMMON_SH"
 
 # --- the loom shape -------------------------------------------------------
-# One jq program per kind of thing, applied on the way out. Every GitLab field
-# name in this skill is now inside these four filters.
-#
-# `state` collapses GitLab's vocabulary to loom's: an issue is open or closed,
-# and a merge request is additionally `merged` — a distinct fact the merge
-# queue turns on, not a synonym for closed.
+# One jq program per kind of thing, applied on the way out. Every GitLab board
+# field name in this skill is now inside these filters (the merge-request one
+# lives in gitlab-common.sh, shared with the forge).
 _MAP_ISSUE='
   def st: if . == "closed" then "closed" else "open" end;
   { id: .iid, title: (.title // ""), state: (.state | st),
@@ -91,22 +74,11 @@ _MAP_LINK='
 _MAP_NOTE='
   { body: (.body // ""), created_at: (.created_at // null),
     system: (.system // false), author: (.author.username // null) }'
-_MAP_MR='
-  def st: if . == "merged" then "merged" elif . == "closed" then "closed" else "open" end;
-  { id: .iid, title: (.title // ""), state: ((.state // "opened") | st),
-    draft: (.draft // false), url: (.web_url // null),
-    branch: (.source_branch // null), sha: (.sha // null),
-    body: (.description // "") }'
 _MAP_MILESTONE='
   def st: if . == "closed" then "closed" else "open" end;
   { id: .id, title: (.title // ""), state: ((.state // "active") | st),
     description: (.description // "") }'
 _MAP_LABEL='{ name: .name }'
-
-_shape()     { jq "map($1)"; }   # a list
-_shape_one() { jq "$1"; }        # a single object
-
-need_id() { case "${1:-}" in ''|*[!0-9]*) die "$2: needs a numeric id, got '${1:-}'" ;; esac; }
 
 # --- board reads ----------------------------------------------------------
 
@@ -149,16 +121,16 @@ v_whoami() { _one user; }
 
 # --- board writes ---------------------------------------------------------
 
-v_note_add() { # <issue|mr> <id> <body-file>
-    local kind="${1:-}" id="${2:-}" f="${3:-}" path
-    case "$kind" in issue) path=issues ;; mr) path=merge_requests ;;
-        *) die "note-add: first argument is issue|mr, got '${kind:-}'" ;; esac
+# Issues only. The merge-request note is `mr-note-add` on the forge (P87), for
+# the plain reason that a board with no merge requests cannot answer it.
+v_note_add() { # <id> <body-file>
+    local id="${1:-}" f="${2:-}"
     need_id "$id" note-add
     [ -f "$f" ] || die "note-add: no such body file: '$f'"
     # `--field body=@file` and never an inline `-m`: a lane's bodies are long
     # enough to be denied on length alone, and any $VAR in the command defeats
     # allowlist prefix-matching. The path this file passes is one loom produced.
-    "$GLAB" api --method POST "$(_p "$path/$id/notes")" --field "body=@$f" >/dev/null
+    "$GLAB" api --method POST "$(_p "issues/$id/notes")" --field "body=@$f" >/dev/null
 }
 
 v_issue_relabel() { # <id> [--add <csv>] [--remove <csv>] [--assignee <user-id>]
@@ -215,57 +187,6 @@ v_milestone_close() { # <milestone-id>
     "$GLAB" api --method PUT "$(_p "milestones/$1")" --field state_event=close >/dev/null
 }
 
-# --- forge ----------------------------------------------------------------
-# The group a tracker that is not also a code host cannot answer. Kept separate
-# for that reason and no other.
-
-# `closed_by`, never `related_merge_requests`: the looser endpoint lists any MR
-# that merely MENTIONS the issue, and on build-1 2026-08-03 issue #1 listed
-# #21's open MR alongside its own.
-# Not through `_list`: `closed_by` is a short, unpaginated list and the callers
-# that matter (submit, merge, close, merge-failed) each apply their own jq to
-# it. Paginating it would change the request these guards have always made.
-v_issue_closed_by() { need_id "${1:-}" issue-closed-by; _one "$(_p "issues/$1/closed_by")" | _shape "$_MAP_MR"; }
-
-# The looser one, wanted deliberately by the snapshot: it is showing a human
-# every MR touching a ticket, not choosing one to merge.
-v_issue_mrs() { need_id "${1:-}" issue-mrs; _list "$(_p "issues/$1/related_merge_requests?per_page=100")" | _shape "$_MAP_MR"; }
-
-v_mr() { need_id "${1:-}" mr; _one "$(_p "merge_requests/$1")" | _shape_one "$_MAP_MR"; }
-
-v_mr_for_branch() { # <branch> [--state merged]
-    local br="${1:-}" state="merged"
-    [ -n "$br" ] || die "mr-for-branch: needs a branch"
-    case "${2:-}" in --state) state="${3:-merged}" ;; esac
-    _list --capped "$(_p "merge_requests?source_branch=$br&state=$state&per_page=1")" | _shape "$_MAP_MR"
-}
-
-v_mr_create() { # --source B --target B --title T --body-file F → the new mr id
-    local src="" tgt="" title="" f=""
-    while [ $# -gt 0 ]; do case "$1" in
-        --source)    src="${2:-}";   shift 2 ;;
-        --target)    tgt="${2:-}";   shift 2 ;;
-        --title)     title="${2:-}"; shift 2 ;;
-        --body-file) f="${2:-}";     shift 2 ;;
-        *) die "mr-create: unknown option '$1'" ;;
-    esac; done
-    [ -n "$src" ] && [ -n "$tgt" ] && [ -n "$title" ] || die "mr-create: --source, --target and --title are all required"
-    [ -f "$f" ] || die "mr-create: no such body file: '$f'"
-    "$GLAB" api --method POST "$(_p merge_requests)" \
-        -f "source_branch=$src" -f "target_branch=$tgt" -f "title=$title" \
-        --field "description=@$f" | jq -r '.iid // empty'
-}
-
-# P84: the source branch is deleted as part of the merge. This is the one
-# moment it is provably disposable, and it is one field on a request the verb
-# already makes — without it a repo that does not set
-# `remove_source_branch_after_merge` accumulates every branch it ever merges.
-v_mr_merge() { # <mr-id>
-    need_id "${1:-}" mr-merge
-    "$GLAB" api --method PUT "$(_p "merge_requests/$1/merge")" \
-        -f should_remove_source_branch=true >/dev/null
-}
-
 case "${1:-}" in
     issues-open)      shift; v_issues_open "$@" ;;
     issues-by-label)  shift; v_issues_by_label "$@" ;;
@@ -281,12 +202,6 @@ case "${1:-}" in
     issue-create)     shift; v_issue_create "$@" ;;
     label-create)     shift; v_label_create "$@" ;;
     milestone-close)  shift; v_milestone_close "$@" ;;
-    issue-closed-by)  shift; v_issue_closed_by "$@" ;;
-    issue-mrs)        shift; v_issue_mrs "$@" ;;
-    mr)               shift; v_mr "$@" ;;
-    mr-for-branch)    shift; v_mr_for_branch "$@" ;;
-    mr-create)        shift; v_mr_create "$@" ;;
-    mr-merge)         shift; v_mr_merge "$@" ;;
     # The roster, printed for a human and read by the suite's drift check.
     *) die "usage: gitlab.sh <verb> [args]
   board reads : issues-open | issues-by-label <label> <opened|closed> | issue <id> |
@@ -294,9 +209,7 @@ case "${1:-}" in
                 milestones [--state <state>] | labels | whoami
   board writes: issue-create --title T --body-file F --labels CSV [--milestone-id N] |
                 issue-relabel <id> [--add CSV] [--remove CSV] [--assignee N] |
-                issue-close <id> [--remove CSV] | note-add <issue|mr> <id> <body-file> |
+                issue-close <id> [--remove CSV] | note-add <id> <body-file> |
                 label-create <name> <color> <desc> | milestone-close <id>
-  forge       : mr-create --source B --target B --title T --body-file F | mr-merge <id> |
-                mr <id> | mr-for-branch <branch> [--state S] | issue-closed-by <id> |
-                issue-mrs <id>" ;;
+  the merge-request verbs are the FORGE's, in forges/<name>.sh" ;;
 esac

@@ -147,6 +147,11 @@ DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
 # before any verb, because tick.sh cds to the repo root mid-verb and a relative
 # resolution would then answer differently depending on which verb asked.
 TRACKER_SH="$(_tracker_cmd "${SELF_PATH%/*}" "$REPO_ROOT")"
+# P87: the forge is the other half — where branches and merge requests live.
+# GitLab is both and resolves to itself; a board that is not a code host
+# (Linear) resolves this from the repo's own remote. Resolved here for the same
+# reason, at the same moment, under the same rule.
+FORGE_SH="$(_forge_cmd "${SELF_PATH%/*}" "$REPO_ROOT")"
 
 # A fresh, empty, uniquely-named directory for one session to write in, handed
 # over as $LOOM_SCRATCH. `mkdir` is the uniqueness test, not a name guess: it
@@ -200,7 +205,7 @@ _sweep_env_backup() {
 _branch_merged() { # <branch>
     local br="$1" out=""
     [ -n "$br" ] || return 2
-    out=$("$TRACKER_SH" mr-for-branch "$br" --state merged 2>/dev/null) || return 2
+    out=$("$FORGE_SH" mr-for-branch "$br" --state merged 2>/dev/null) || return 2
     printf '%s' "$out" | jq -e 'type == "array"' >/dev/null 2>&1 || return 2
     printf '%s' "$out" | jq -e 'length > 0' >/dev/null 2>&1 && return 0
     return 1
@@ -1036,6 +1041,7 @@ cmd_tick() {
     # fires on this every 60s and says the same thing each time, which is the
     # correct amount of noise for a build that cannot legally start.
     _require_tracker "$REPO_ROOT" tick >/dev/null
+    _require_forge "$REPO_ROOT" tick >/dev/null
     local mode="manual" quiet="" tick_go=0
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
@@ -2179,10 +2185,15 @@ _snap_warn() { printf '%s\n' "$*" >> "$SNAP_TMP/warn.txt"; }
 # A degrading GET: one flaky call costs that field, not the document. A 403
 # on the links endpoint is the EXPECTED path on a tier without native issue
 # links — body-parsed edges carry the wave (SKILL.md's blocking-edge rule).
-_snap_api() {  # _snap_api <out> <what> -- <driver verb and args...>
-    local out="$1" what="$2" why; shift 2
+# P87: `--forge` picks the other driver. One flag rather than a second copy of
+# this function, because the degrading behaviour is the point and it is the same
+# behaviour whichever backend the call went to.
+_snap_api() {  # _snap_api <out> <what> [--forge] -- <driver verb and args...>
+    local out="$1" what="$2" why drv; shift 2
+    drv="$TRACKER_SH"
+    [ "${1:-}" = "--forge" ] && { drv="$FORGE_SH"; shift; }
     [ "${1:-}" = "--" ] && shift
-    if ! "$TRACKER_SH" "$@" > "$out" 2>"$out.err"; then
+    if ! "$drv" "$@" > "$out" 2>"$out.err"; then
         why=$(head -1 "$out.err" 2>/dev/null | tr -d '\n')
         printf '[]\n' > "$out"
         _snap_warn "degraded: $what — ${why:-non-array response}"
@@ -2222,7 +2233,9 @@ cmd_snapshot() {
     # declaring a tracker loom has no driver for must be told exactly that, not
     # that some file is missing.
     _require_tracker "$REPO_ROOT" "snapshot" >/dev/null
+    _require_forge "$REPO_ROOT" "snapshot" >/dev/null
     [ -x "$TRACKER_SH" ] || die "snapshot: tracker driver '$TRACKER_SH' is missing or not executable"
+    [ -x "$FORGE_SH" ] || die "snapshot: forge driver '$FORGE_SH' is missing or not executable"
     # glab api's projects/:id shorthand resolves from the cwd's git remote,
     # and a wave may invoke this from a lane worktree — never assume cwd.
     cd "$REPO_ROOT" || die "snapshot: cannot cd to $REPO_ROOT"
@@ -2317,7 +2330,7 @@ cmd_snapshot() {
     done
     for iid in $active_iids; do
         ( _snap_api "$SNAP_TMP/mrs-$iid.json" "issue #$iid merge requests" \
-            -- issue-mrs "$iid" ) &
+            --forge -- issue-mrs "$iid" ) &
         _snap_batch_gate
     done
     for iid in $review_iids; do
@@ -2600,7 +2613,7 @@ _write_plist() {  # _write_plist <path> <interval>
     # launchd starts with a bare environment; bake a PATH covering the real
     # tool locations (the interactive `claude` may be a shell alias — resolve
     # the binary via PATH here, at install time).
-    for b in claude uv glab jq git node bash; do
+    for b in claude uv glab gh jq git node bash; do
         d="$(command -v "$b" 2>/dev/null)" && toolpath="$toolpath:$(dirname "$d")"
     done
     local pathval="${toolpath#:}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -2963,7 +2976,7 @@ _derive_allow() {
     local runner cmds line
     runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
     printf '%s\n' \
-        'Bash(git *)' 'Bash(glab *)' 'Bash(sleep *)' 'Bash(curl *)' \
+        'Bash(git *)' 'Bash(glab *)' 'Bash(gh *)' 'Bash(sleep *)' 'Bash(curl *)' \
         'Bash(*tick.sh *)' "Bash($runner *)" "Bash(bash $runner *)" \
         'Read' 'Write' 'Edit' 'Glob' 'Grep' \
         'BashOutput' 'KillShell' 'KillBash' \
@@ -2983,6 +2996,9 @@ _derive_allow() {
     # compound above is not denied whole, which is the failure that cost a
     # build. The rule stays; the prose forbidding hand-rolled mutations is what
     # governs writes, and every verb a lane needs now exists.
+    # P87 added `Bash(gh *)` on exactly that reading and no other: a GitHub
+    # forge means a wave's exploration compound can name `gh`, and one unlisted
+    # segment denies the whole command.
     # BashOutput/KillShell are how a probe runs a live stack without waiting on
     # anything: start the server as a background shell, POLL it, kill it before
     # exiting. A headless session gets no notifications, so polling is the only
@@ -3074,6 +3090,7 @@ cmd_resolve_config() {
         --arg lmod "$(cfg lane_model '')"                --arg lmod_s  "$(cfg_source lane_model)" \
         --arg rmod "$(cfg rework_model '')"              --arg rmod_s  "$(cfg_source rework_model)" \
         --arg trk  "$(_tracker_declared "$REPO_ROOT")" \
+        --arg frg  "$(_forge_declared "$REPO_ROOT")" \
         '{repo: $repo, stack: $stack, base: $base, runner: $runner,
           gates: $gates, gates_source: $gsrc,
           settings: {permissions: {allow: $allow, deny: $deny}},
@@ -3093,7 +3110,8 @@ cmd_resolve_config() {
             wave_model:              {value: $wmod,   source: $wmod_s},
             lane_model:              {value: $lmod,   source: $lmod_s},
             rework_model:            {value: $rmod,   source: $rmod_s},
-            tracker:                 {value: $trk,    source: "derived"}
+            tracker:                 {value: $trk,    source: "derived"},
+            forge:                   {value: $frg,    source: "derived"}
           }}'
 }
 
