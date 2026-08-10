@@ -16,6 +16,10 @@ echo "$*" >> "${STUB_LOG:-/dev/null}"
 case "$*" in
   *"issues/41/closed_by"*) echo '[{"iid":9,"state":"opened"}]' ;;
   *"issues/42/closed_by"*) echo '[]' ;;
+  # P86: the driver maps each response into loom's shape, so a single-issue
+  # read has to answer with an object. The payload stays GitLab-shaped — that
+  # is what the driver is translating FROM.
+  *"issues/4"*)            echo '{"iid":41,"state":"opened","labels":[]}' ;;
   *) echo '[]' ;;
 esac
 EOF

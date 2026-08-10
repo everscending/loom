@@ -304,4 +304,58 @@ w=$(scan_writes "$TD/drv-planted.log")
     && ok "read-only-violation: the scan catches a write planted on a read path ($w)" \
     || bad "read-only-violation: a planted write went unnoticed — the guarantee is unchecked"
 
+# --- P86 stage 3: the contract carries a loom document, not GitLab's ------
+# A driver that emitted raw GitLab JSON would not be a contract, it would be a
+# passthrough: the next driver would have to FABRICATE `iid`, `opened` and
+# `milestone.title` to satisfy readers that were never told what they actually
+# need. These two assertions are what stop that.
+
+# p86-10. The jq layer speaks loom, not GitLab.
+gl=$(grep -nE '\.(iid|web_url|project_id|link_type|source_branch)\b|"opened"|\.milestone\.title|\.author\.username' \
+     "$(dirname "$TICK")"/*.jq 2>/dev/null || true)
+[ -z "$gl" ] \
+    && ok "document: no GitLab payload field name survives in the jq layer" \
+    || bad "document: GitLab field names still read in jq — $(printf '%s' "$gl" | head -2 | tr '\n' ' ')"
+
+# p86-11. The real proof, and the one that could not be faked: a driver whose
+# output contains no GitLab field ANYWHERE drives a full snapshot, and the
+# planner reads it. This passes without GitLab existing.
+LOOMD="$TD/loom-driver.sh"
+cat > "$LOOMD" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  issues-open)
+    cat <<'JSON'
+[{"id":1,"title":"Build 7","state":"open","labels":[],"assignees":[],"epic":null,
+  "url":"https://tracker/1","project":1,"body":"**Selected epics**\n- Ledger (#2)\n","updated_at":"2026-08-10T00:00:00Z"},
+ {"id":2,"title":"Add the ledger","state":"open","labels":["build-7","ready-for-agent"],"assignees":[],
+  "epic":"Ledger","url":"https://tracker/2","project":1,
+  "body":"## Risk tier\n\nlogic\n\n## Blocked by\n\nNone - can start immediately\n","updated_at":"2026-08-10T00:00:00Z"}]
+JSON
+    ;;
+  milestones) echo '[{"id":5,"title":"Ledger","state":"open","description":"## Acceptance criteria\n\n- [ ] it balances\n"}]' ;;
+  *)          echo '[]' ;;
+esac
+EOF
+chmod +x "$LOOMD"
+grep -qE '"iid"|"web_url"|"project_id"|"link_type"|"milestone"|"opened"' "$LOOMD" \
+    && bad "document: the loom-shaped fixture driver still contains a GitLab field — it proves nothing" \
+    || ok "document: the fixture driver contains no GitLab field at all"
+TRACKER_CMD="$LOOMD" P86ENV "$TD/gitlab" "$TICK" snapshot > "$TD/loom-snap.json" 2>"$TD/loom-snap.err"; rc=$?
+if [ "$rc" = 0 ] \
+   && [ "$(jq -r '.build.label' "$TD/loom-snap.json" 2>/dev/null)" = "build-7" ] \
+   && [ "$(jq -r '.tickets[0].id' "$TD/loom-snap.json" 2>/dev/null)" = "2" ] \
+   && [ "$(jq -r '.tickets[0].tier' "$TD/loom-snap.json" 2>/dev/null)" = "logic" ] \
+   && [ "$(jq -r '.tickets[0].epic' "$TD/loom-snap.json" 2>/dev/null)" = "Ledger" ]; then
+    ok "document: a driver emitting only loom fields builds the whole snapshot — GitLab is not required"
+else
+    bad "document: the loom-only driver could not drive a snapshot (rc=$rc, $(head -1 "$TD/loom-snap.err"))"
+fi
+if jq -e '.actions | type == "array"' \
+     <(P86ENV "$TD/gitlab" "$TICK" plan "$TD/loom-snap.json" 2>/dev/null) >/dev/null 2>&1; then
+    ok "document: the planner reads that snapshot too — the contract carries end to end"
+else
+    bad "document: plan could not read a snapshot built from the loom-only driver"
+fi
+
 test_finish

@@ -46,17 +46,17 @@ EOF
 chmod +x "$RP/glab-stub.sh"
 GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap.json" 2>"$RP/err"
 qr() { jq -r "$1" "$RP/snap.json"; }
-if [ "$(qr '[.summary.repairs[] | select(.iid==31)] | length')" = "1" ] \
-   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .shape')" = "mr-open-not-in-review" ] \
-   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .mr')" = "8" ] \
-   && [ "$(qr '.summary.repairs[] | select(.iid==31) | .fix')" = "lane.sh transition 31 review" ] \
+if [ "$(qr '[.summary.repairs[] | select(.id==31)] | length')" = "1" ] \
+   && [ "$(qr '.summary.repairs[] | select(.id==31) | .shape')" = "mr-open-not-in-review" ] \
+   && [ "$(qr '.summary.repairs[] | select(.id==31) | .mr')" = "8" ] \
+   && [ "$(qr '.summary.repairs[] | select(.id==31) | .fix')" = "lane.sh transition 31 review" ] \
    && qr '.warnings[]' | grep -q 'MR !8 is open and closes it'; then
     ok "repairs: an open MR closing an in-progress ticket is named, with its repair command"
 else
     bad "repairs: MR-open shape missed ($(qr '.summary.repairs | tostring'), $(head -2 "$RP/err"))"
 fi
-if [ "$(qr '.summary.repairs[] | select(.iid==26) | .shape')" = "pass-not-in-merge-queue" ] \
-   && [ "$(qr '.summary.repairs[] | select(.iid==26) | .fix')" = "lane.sh transition 26 merge-queue" ] \
+if [ "$(qr '.summary.repairs[] | select(.id==26) | .shape')" = "pass-not-in-merge-queue" ] \
+   && [ "$(qr '.summary.repairs[] | select(.id==26) | .fix')" = "lane.sh transition 26 merge-queue" ] \
    && qr '.warnings[]' | grep -q 'the verdict note landed and the label flip did not'; then
     ok "repairs: a PASS standing at HEAD on a non-queued ticket is named, with its repair command"
 else
@@ -66,17 +66,17 @@ fi
 # MR and the SAME PASS and is correctly in `merge-queue`, and #10's open MR
 # mentions another ticket's `Closes` line rather than its own — repairing off
 # that MR would relabel a ticket over someone else's branch.
-if [ "$(qr '[.summary.repairs[] | select(.iid==36 or .iid==10)] | length')" = "0" ]; then
+if [ "$(qr '[.summary.repairs[] | select(.id==36 or .id==10)] | length')" = "0" ]; then
     ok "repairs: a queued ticket and a mentions-only MR produce no repair item"
 else
-    bad "repairs: false positive ($(qr '[.summary.repairs[] | select(.iid==36 or .iid==10)] | tostring'))"
+    bad "repairs: false positive ($(qr '[.summary.repairs[] | select(.id==36 or .id==10)] | tostring'))"
 fi
 # A ticket whose lane is still ALIVE is never flagged: the second write may
 # simply not have happened yet. Same live-lane set `summary.stranded` uses.
 "$TICK" spawn-lane impl-31 -- sleep 30 >/dev/null
 GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap2.json" 2>/dev/null
-if [ "$(jq -r '[.summary.repairs[] | select(.iid==31)] | length' "$RP/snap2.json")" = "0" ] \
-   && [ "$(jq -r '[.summary.repairs[] | select(.iid==26)] | length' "$RP/snap2.json")" = "1" ]; then
+if [ "$(jq -r '[.summary.repairs[] | select(.id==31)] | length' "$RP/snap2.json")" = "0" ] \
+   && [ "$(jq -r '[.summary.repairs[] | select(.id==26)] | length' "$RP/snap2.json")" = "1" ]; then
     ok "repairs: a ticket holding an alive lane is not flagged mid-write"
 else
     bad "repairs: live-lane race guard wrong ($(jq -c '.summary.repairs' "$RP/snap2.json"))"

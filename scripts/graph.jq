@@ -14,7 +14,7 @@
 # across every jq program here (P72), not a dependency this one has yet.
 include "lib";
   (.tickets // []) as $ts
-| ($ts | map(.iid)) as $ids
+| ($ts | map(.id)) as $ids
 | ($ts | length) as $n
 | ((.config.max_lanes // 4) | tonumber? // 4) as $max_lanes
 # A blocker whose closed state is unknown (cross-project link) counts as
@@ -25,27 +25,27 @@ include "lib";
 # of those seven were waiting on issues outside the build. They get no depth of
 # their own (this graph cannot see them), but they do push their dependent off
 # depth 0, which is the number that matters.
-| ($ts | map({key: (.iid | tostring),
+| ($ts | map({key: (.id | tostring),
               value: [(.blocked_by // [])[]
                       | select((.closed // false) != true)
-                      | .iid | select(. as $b | ($ids | index($b)) != null)]})
+                      | .id | select(. as $b | ($ids | index($b)) != null)]})
        | from_entries) as $preds
-| ($ts | map({key: (.iid | tostring),
+| ($ts | map({key: (.id | tostring),
               value: ((.blocked_by // [])
-                      | map(select((.closed // false) != true) | .iid)
+                      | map(select((.closed // false) != true) | .id)
                       | any(. as $b | ($ids | index($b)) == null))})
        | from_entries) as $ext
 | (if $n == 0 then {} else
      reduce range(0; $n + 1) as $_ (
-       ($ts | map({key: (.iid | tostring), value: 0}) | from_entries);
+       ($ts | map({key: (.id | tostring), value: 0}) | from_entries);
        reduce ($preds | keys_unsorted[]) as $k (
          .;
          .[$k] = ((([$preds[$k][] as $p | .[$p | tostring]]
                     + (if $ext[$k] then [0] else [] end)) | max // -1) + 1)))
    end) as $depth
-| ($depth | to_entries | map({iid: (.key | tonumber), depth: .value})) as $dl
+| ($depth | to_entries | map({id: (.key | tonumber), depth: .value})) as $dl
 | ([$dl[].depth] | max // -1) as $maxdepth
-| ($dl | group_by(.depth) | map({depth: .[0].depth, iids: (map(.iid) | sort)})
+| ($dl | group_by(.depth) | map({depth: .[0].depth, iids: (map(.id) | sort)})
        | sort_by(.depth)) as $levels
 | ($levels | map(.iids | length) | max // 0) as $widest
 # How wide the build OPENS, which is a different question from how wide it ever
@@ -61,7 +61,7 @@ include "lib";
 | ($n > 0 and $maxdepth >= $n) as $cycle
 | (if $n == 0 then []
    else reduce range(0; $maxdepth) as $_
-          ([$dl | map(select(.depth == $maxdepth)) | first | .iid];
+          ([$dl | map(select(.depth == $maxdepth)) | first | .id];
            . as $path
            | ($path[0] | tostring) as $cur
            | ([$preds[$cur][] | select($depth[(. | tostring)] == ($depth[$cur] - 1))]
@@ -79,7 +79,7 @@ include "lib";
 | (6) as $deep_files
 | ($ts | map(select(((.criteria_count // 0) > $deep_criteria)
                     or ((.file_surface // 0) > $deep_files))
-           | {iid, criteria_count: (.criteria_count // 0), file_surface: (.file_surface // 0)})) as $deep
+           | {id, criteria_count: (.criteria_count // 0), file_surface: (.file_surface // 0)})) as $deep
 # P64: unit-tier gates judge tickets; nothing before the epic probe judges the
 # EPIC. ai-workout build-1 — every E1 ticket passed its gate while the running
 # app never called build_kg1() once, and the probe, the last step of the epic,
@@ -91,10 +91,10 @@ include "lib";
 | ([$ts[] | .epic // empty] | unique) as $epic_names
 | ($epic_names | map(. as $e
     | ($ts | map(select(.epic == $e))) as $mem
-    | ($mem | map(.iid)) as $mids
+    | ($mem | map(.id)) as $mids
     | if ($mem | any(. as $c
-             | (($c.blocked_by // []) | map(.iid)) as $bb
-             | ($mids | map(select(. != $c.iid))
+             | (($c.blocked_by // []) | map(.id)) as $bb
+             | ($mids | map(select(. != $c.id))
                 | all(. as $o | ($bb | index($o)) != null))))
       then empty else $e end)) as $unwired
 | {tickets: $n,
@@ -121,7 +121,7 @@ include "lib";
            else "" end)
           + "opens \($opening) wide, widest level \($widest), against \($max_lanes) lanes; critical path \($cyc) through \($n) tickets"
           + (if ($deep | length) > 0
-             then "; LIKELY DEEP — #\($deep | map(.iid | tostring) | join(", #")) (outsized acceptance-criteria or file count — split before build)"
+             then "; LIKELY DEEP — #\($deep | map(.id | tostring) | join(", #")) (outsized acceptance-criteria or file count — split before build)"
              else "" end)
           + (if ($unwired | length) > 0
              then "; UNWIRED EPIC — \($unwired | join(", ")) (no ticket blocked by every other member; phase 4 must end each epic with a wiring ticket)"

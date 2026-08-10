@@ -60,12 +60,12 @@ include "lib";
   | ($waste | map(.secs) | add // 0) as $rework
   # Ticket spans, at wave resolution: first and last snapshot that named it.
   | ([$snaps[] | .ts as $ts | (.tickets // {}) | to_entries[]
-      | {iid: .key, ts: $ts}]
-     | group_by(.iid)
-     | map({iid: .[0].iid, first: (map(.ts) | min), last: (map(.ts) | max)})) as $tk
+      | {id: .key, ts: $ts}]
+     | group_by(.id)
+     | map({id: .[0].id, first: (map(.ts) | min), last: (map(.ts) | max)})) as $tk
   | ($tk | map(. as $t
       | . + {work: ($lanes
-                    | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
+                    | map(select(.id | test("^(impl|gate|merge)-\($t.id)(-|$)")))
                     | map(.secs) | add // 0)}
       | . + {open: (.last - .first)}
       | . + {wait: (.open - .work)})) as $tw
@@ -85,10 +85,10 @@ include "lib";
      | (if $wave_cost > 0 then . + [{type: "wave", cost: $wave_cost}] else . end)
      | sort_by(-.cost)) as $by_kind
   | ($tw | map(. as $t | . + {cost: ($lanes_c
-       | map(select(.id | test("^(impl|gate|merge)-\($t.iid)(-|$)")))
+       | map(select(.id | test("^(impl|gate|merge)-\($t.id)(-|$)")))
        | map(.cost) | add // 0)})) as $twc
   | ($lanes_c | sort_by(-.cost) | [limit(5; .[])]) as $top
-  | ($tk | map({key: .iid, value: .last}) | from_entries) as $closed_at
+  | ($tk | map({key: .id, value: .last}) | from_entries) as $closed_at
   | (($snaps | map(select((.deps // {}) | length > 0)) | first | .deps) // {}) as $deps
   # Longest dependency chain the graph allowed — what `graph` would have
   # predicted from the same edges, recomputed here so the two are comparable.
@@ -101,11 +101,11 @@ include "lib";
   # guard — a dependency cycle would otherwise recurse forever.
   | (($tw | sort_by(.last) | last) // null) as $tail
   | (if $tail == null then []
-     else [limit(20; {iid: $tail.iid, last: $tail.last}
+     else [limit(20; {id: $tail.id, last: $tail.last}
        | recurse(. as $c
-           | [($deps[$c.iid] // [])[] | tostring | select($closed_at[.] != null)]
+           | [($deps[$c.id] // [])[] | tostring | select($closed_at[.] != null)]
            | max_by($closed_at[.]) | select(. != null)
-           | {iid: ., last: $closed_at[.]}))] end) as $chain
+           | {id: ., last: $closed_at[.]}))] end) as $chain
   | ["Where the capacity went   (sampled at wave cadence, so ±one wave)",
      "",
      "  at capacity    \(hms($atcap))  \(pct($atcap; $covered))   every impl slot busy",
@@ -129,7 +129,7 @@ include "lib";
   + ["", "Wait vs work per ticket   (open span minus lane time)", ""]
   + (if ($tw | length) == 0 then ["  nothing recorded"]
      else [$tw | sort_by(-.wait) | limit(10; .[])
-           | "  #\(.iid)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
+           | "  #\(.id)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
   + ["", "Spend   (priced from every lane and wave session log)", ""]
   + (if ($lanes_c | length) == 0 and ($waves_c | length) == 0 then ["  nothing recorded"]
      else ["  total          \(usd($total_cost))"]
@@ -139,10 +139,10 @@ include "lib";
           + (if ($twc | map(select(.cost > 0)) | length) == 0 then []
              else ["", "  by ticket"]
                   + [$twc | sort_by(-.cost) | limit(5; .[])
-                     | select(.cost > 0) | "  #\(.iid)  \(usd(.cost))"] end) end)
+                     | select(.cost > 0) | "  #\(.id)  \(usd(.cost))"] end) end)
   + ["", "The chain that set the length", ""]
   + (if ($chain | length) == 0 then ["  no ticket history recorded"]
-     else [($chain | map("#\(.iid) at \(hms(.last - $t0))") | join("  ←  ") | "  " + .),
+     else [($chain | map("#\(.id) at \(hms(.last - $t0))") | join("  ←  ") | "  " + .),
            "",
            "  actual chain \($chain | length) deep; deepest chain in the graph was \($predicted)"]
           + (if ($predicted > ($chain | length)) then

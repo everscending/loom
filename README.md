@@ -71,8 +71,9 @@ time and money went and writes up proposals for improving the next one.
 |---|---|
 | **Claude Code** | Loom is a skill. Every wave, implementer, reviewer, merger, and probe is a headless `claude -p` session that Loom spawns. |
 | **A git repository** | Each in-flight ticket gets its own git worktree, cut as a sibling directory of the repo. Local-only repos will not work — lanes always branch from the remote. |
-| **GitLab** *(the tracker)* | This is not optional and there is no other backend. Epics or milestones, issues, labels, blocking links, and merge requests are where **all** build state lives. Loom needs a project it can create labels in and open and merge merge requests against. GitHub is not supported. |
-| **`glab`**, logged in | The GitLab command-line tool. Every read (`tick.sh snapshot`) and every write (`scripts/lane.sh`) goes through it. Run `glab auth status` in the repo before starting; if `glab` cannot resolve the project, Loom reads the board as unknown and skips the wave. |
+| **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. It is what `/setup-matt-pocock-skills` writes and what every lane reads through your `CLAUDE.md`, so Loom reads that same file rather than keeping an answer of its own. Without it, every Loom verb refuses. |
+| **GitLab** *(today's only driver)* | Milestones or epics, issues, labels, blocking links, and merge requests are where **all** build state lives. Loom needs a project it can create labels in and open and merge merge requests against. Every tracker call goes through `scripts/trackers/gitlab.sh`, which is the one file that knows GitLab; a repo declaring anything else is refused by name until a driver for it exists. |
+| **`glab`**, logged in | The GitLab command-line tool, used by that driver. Run `glab auth status` in the repo before starting; if `glab` cannot resolve the project, Loom reads the board as unknown and skips the wave. |
 | **`jq`** | Every snapshot, dependency graph, report, and log render is a `jq` query. Missing `jq` is a hard error, not a downgrade. macOS 15 and later ship it at `/usr/bin/jq`; on anything older, `brew install jq`. |
 | **A scheduler — launchd (macOS) or cron** | The once-a-minute heartbeat that watches lanes, makes the first wave fire, and resumes a build after a full stall. `/loom start` writes and loads the launchd agent for you. Without one, a build only advances when a lane hands off to the next lane, and a single wedge stops it for good. |
 | **A gate runner in your repo** | `scripts/gate.sh <tier>` — yours, not Loom's. Every branch is gated by it before review and again before merge. You do not have to write it up front — it is normally the first epic of your first build. |
@@ -119,7 +120,13 @@ they sit. Install `lavish`, `grilling`, `to-tickets`, `implement`,
 `code-review`, `domain-modeling`, and `prototype` beside it; the planning
 verbs hand off to them.
 
-### 2. Authenticate `glab`, and trust the repo
+### 2. Declare the tracker, authenticate `glab`, and trust the repo
+
+Run `/setup-matt-pocock-skills` in the repo once. It writes
+`docs/agents/issue-tracker.md` — the file every lane follows and the one Loom
+reads to learn which tracker this repo uses. **Commit it.** A worktree is a
+checkout, so an untracked declaration is visible to you and to no lane, and
+Loom refuses on exactly that.
 
 ```sh
 glab auth login          # then, in the repo:
@@ -144,7 +151,7 @@ why.
 then the wave proceeds. It writes `~/.loom/config.yml` (your machine-wide
 preferences), writes `.claude/settings.json` (the permission allowlist,
 generated from the very commands your gates and probes will run, so it cannot
-drift from them), and creates the ticket-state labels in GitLab. A failed
+drift from them), and creates the ticket-state labels on the board. A failed
 bootstrap writes no sentinel, so the next tick just retries. Running
 `bootstrap.sh all` by hand is safe and idempotent, but it buys you nothing.
 

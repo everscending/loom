@@ -20,10 +20,10 @@ SNAP > "$T/snap.json"; rc=$?
 if [ "$rc" = 0 ] && jq -e . "$T/snap.json" >/dev/null 2>&1; then
     q() { jq -r "$1" "$T/snap.json"; }
     if [ "$(q '.build.label')" = "build-2" ] \
-       && [ "$(q '[.tickets[].iid] | @csv')" = '10,11,12' ] \
-       && [ "$(q '.tickets[] | select(.iid==10) | .state')" = "ready-for-agent" ] \
-       && [ "$(q '.tickets[] | select(.iid==10) | .tier')" = "api" ] \
-       && [ "$(q '.tickets[] | select(.iid==12) | .related_merge_requests[0].iid')" = "77" ] \
+       && [ "$(q '[.tickets[].id] | @csv')" = '10,11,12' ] \
+       && [ "$(q '.tickets[] | select(.id==10) | .state')" = "ready-for-agent" ] \
+       && [ "$(q '.tickets[] | select(.id==10) | .tier')" = "api" ] \
+       && [ "$(q '.tickets[] | select(.id==12) | .related_merge_requests[0].id')" = "77" ] \
        && [ "$(q '.lanes[] | select(.id=="merge-51") | .state')" = "running" ] \
        && [ "$(q '[.lessons_tail[].body] | length')" = "1" ] \
        && [ "$(q '.lessons_tail[0].author')" = "wave" ] \
@@ -99,25 +99,25 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-stranded.json" STUB_LOG="$T/call
 #      `fix: true` before the rest of the ready set (a fix ticket holds an
 #      epic's re-probe hostage — asked for by the human, 2026-08-02), so the
 #      flag must be derivable without label-parsing in every wave.
-[ "$(q '.tickets[] | select(.iid==11) | .fix')" = "true" ] \
-    && [ "$(q '.tickets[] | select(.iid==10) | .fix')" = "false" ] \
+[ "$(q '.tickets[] | select(.id==11) | .fix')" = "true" ] \
+    && [ "$(q '.tickets[] | select(.id==10) | .fix')" = "false" ] \
     && ok "snapshot: fix label surfaces as a per-ticket flag" \
-    || bad "snapshot: fix flag wrong (11=$(q '.tickets[] | select(.iid==11) | .fix'), 10=$(q '.tickets[] | select(.iid==10) | .fix'))"
+    || bad "snapshot: fix flag wrong (11=$(q '.tickets[] | select(.id==11) | .fix'), 10=$(q '.tickets[] | select(.id==10) | .fix'))"
 # 7a5. P30: the rejection history is a decision input. Two consecutive FAILs
 #      naming one class → tail 2 (the wave blocks for a design decision);
 #      different classes → tail 1; no verdicts at all → 0. (#39 burned
 #      round 3 on a class the round-2 verdict had named, 2026-08-02.)
-[ "$(q '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"')" = "2/marks-attribution/2" ] \
+[ "$(q '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"')" = "2/marks-attribution/2" ] \
     && ok "snapshot: two same-class FAILs count as a tail of 2" \
-    || bad "snapshot: same-class tail wrong for #12 ($(q '.tickets[] | select(.iid==12) | .rejections | @json'))"
+    || bad "snapshot: same-class tail wrong for #12 ($(q '.tickets[] | select(.id==12) | .rejections | @json'))"
 cp "$FX/notes-12.json" "$FX/notes-12-orig.json"
 cp "$FX/notes-12-changed-class.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-cls" "$TICK" snapshot > "$T/snap-cls.json" 2>/dev/null
 cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections.same_class_tail' "$T/snap-cls.json")" = "1" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections.same_class_tail' "$T/snap-cls.json")" = "1" ] \
     && ok "snapshot: a class change resets the tail to 1" \
-    || bad "snapshot: differing classes did not reset the tail ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-cls.json"))"
-[ "$(q '.tickets[] | select(.iid==10) | .rejections | "\(.total)/\(.same_class_tail)"')" = "0/0" ] \
+    || bad "snapshot: differing classes did not reset the tail ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-cls.json"))"
+[ "$(q '.tickets[] | select(.id==10) | .rejections | "\(.total)/\(.same_class_tail)"')" = "0/0" ] \
     && ok "snapshot: no verdicts means zero rejections" \
     || bad "snapshot: phantom rejections on a clean ticket"
 # 7a5b. P37: the cap belongs to the SCOPE, not the issue number. A ticket
@@ -133,18 +133,18 @@ cat > "$FX/notes-12-rescoped.json" <<'EOF'
 EOF
 cp "$FX/notes-12-rescoped.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-rescope" "$TICK" snapshot > "$T/snap-rescope.json" 2>/dev/null
-[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.same_class_tail)"' "$T/snap-rescope.json")" = "0/0" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.same_class_tail)"' "$T/snap-rescope.json")" = "0/0" ] \
     && ok "snapshot: a scope reset retires every rejection older than it" \
-    || bad "snapshot: re-scoped ticket still carries its old cap ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-rescope.json"))"
+    || bad "snapshot: re-scoped ticket still carries its old cap ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-rescope.json"))"
 # Planted violation: the marker must not eat history NEWER than itself, or a
 # single rescope would make the cap permanently unreachable. Same fixture, the
 # marker moved back between r2 and r3 — r3 still counts.
 sed 's/2026-07-28T10:00:00Z/2026-07-28T09:25:00Z/g' "$FX/notes-12-rescoped.json" > "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-rescope-mid" "$TICK" snapshot > "$T/snap-rescope-mid.json" 2>/dev/null
 cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-rescope-mid.json")" = "1/marks-attribution/1" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-rescope-mid.json")" = "1/marks-attribution/1" ] \
     && ok "snapshot: rejections newer than the reset marker still count" \
-    || bad "snapshot: the reset swallowed a later rejection ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-rescope-mid.json"))"
+    || bad "snapshot: the reset swallowed a later rejection ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-rescope-mid.json"))"
 # 7a5c. P78: the blocked report is located by its `orch-blocked` trailer and
 #      carried WHOLE, so the human triaging a blocked ticket reads why without
 #      opening the tracker. Every other parser here extracts a field; this one
@@ -155,10 +155,10 @@ cat > "$FX/notes-12-blocked.json" <<'EOF'
 EOF
 cp "$FX/notes-12-blocked.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedrep" "$TICK" snapshot > "$T/snap-blockedrep.json" 2>/dev/null
-br() { jq -r ".tickets[] | select(.iid==12) | .blocked_report | $1" "$T/snap-blockedrep.json"; }
+br() { jq -r ".tickets[] | select(.id==12) | .blocked_report | $1" "$T/snap-blockedrep.json"; }
 [ "$(br .category)" = "rejection-cap" ] \
     && ok "snapshot: the blocked report's category is read off its trailer" \
-    || bad "snapshot: category missing ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedrep.json"))"
+    || bad "snapshot: category missing ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedrep.json"))"
 case "$(br .body)" in *"Attempt 3 tried the adapter seam"*) \
     ok "snapshot: the report body is carried whole, not summarised";; \
     *) bad "snapshot: report body lost ($(br .body))";; esac
@@ -176,9 +176,9 @@ cat > "$FX/notes-12.json" <<'EOF'
  {"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"}]
 EOF
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedrel" "$TICK" snapshot > "$T/snap-blockedrel.json" 2>/dev/null
-[ "$(jq -r '.tickets[] | select(.iid==12) | .blocked_report.released' "$T/snap-blockedrel.json")" = "true" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-blockedrel.json")" = "true" ] \
     && ok "snapshot: a release note newer than the block reads as already decided" \
-    || bad "snapshot: a posted decision was not seen ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedrel.json"))"
+    || bad "snapshot: a posted decision was not seen ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedrel.json"))"
 # Planted violation: `released` must be bounded by the NEWEST block. A ticket
 # blocked, released, then blocked again would otherwise read as already decided
 # forever, and its second decision would never be asked for.
@@ -188,25 +188,25 @@ cat > "$FX/notes-12.json" <<'EOF'
  {"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"}]
 EOF
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedre" "$TICK" snapshot > "$T/snap-blockedre.json" 2>/dev/null
-rb() { jq -r ".tickets[] | select(.iid==12) | .blocked_report | $1" "$T/snap-blockedre.json"; }
+rb() { jq -r ".tickets[] | select(.id==12) | .blocked_report | $1" "$T/snap-blockedre.json"; }
 [ "$(rb .released)" = "false" ] && [ "$(rb .category)" = "external-dep" ] \
     && ok "snapshot: a re-blocked ticket asks for its second decision" \
-    || bad "snapshot: stale release note swallowed the new block ($(jq -c '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockedre.json"))"
+    || bad "snapshot: stale release note swallowed the new block ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedre.json"))"
 # A thread with no trailer yields null rather than guessing which comment was
 # the report — the state every ticket blocked before this verb existed is in.
 cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockednone" "$TICK" snapshot > "$T/snap-blockednone.json" 2>/dev/null
-[ "$(jq -r '.tickets[] | select(.iid==12) | .blocked_report' "$T/snap-blockednone.json")" = "null" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockednone.json")" = "null" ] \
     && ok "snapshot: an unmarked thread yields no report rather than a guess" \
     || bad "snapshot: invented a blocked report from an unmarked thread"
 # The new parser shares one thread with three others. The blocked-report
 # fixture above carries an `orch-verdict` FAIL alongside its `orch-blocked`
 # trailer, so this reads back the count the SAME thread must still produce —
 # a blocked ticket whose rejection history stopped counting is #47 again.
-[ "$(jq -r '.tickets[] | select(.iid==12) | .rejections | "\(.total)/\(.last_class)"' "$T/snap-blockedrep.json")" \
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)"' "$T/snap-blockedrep.json")" \
   = "1/marks-attribution" ] \
     && ok "snapshot: a blocked report does not disturb the rejection parser beside it" \
-    || bad "snapshot: blocked_report shifted the rejection read ($(jq -c '.tickets[] | select(.iid==12) | .rejections' "$T/snap-blockedrep.json"))"
+    || bad "snapshot: blocked_report shifted the rejection read ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-blockedrep.json"))"
 
 # 7a6. P31: the model escalation chain is RESOLVED in the snapshot, not
 #      reasoned about per wave — ticket `model::` label > rework_model (a
@@ -214,9 +214,9 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockednone" "$TICK" snapshot > "
 #      With neither key set, the chain must resolve to "inherit", never to an
 #      invented tier (2026-08-02: a fable interactive default silently ran
 #      every worker top-tier — the failure that made lane_model exist).
-[ "$(q '.tickets[] | select(.iid==10) | .model | "\(.effective)/\(.source)"')" = "null/session-default" ] \
+[ "$(q '.tickets[] | select(.id==10) | .model | "\(.effective)/\(.source)"')" = "null/session-default" ] \
     && ok "snapshot: no model config resolves to inherit-the-default, not an invented tier" \
-    || bad "snapshot: unconfigured model chain invented $(q '.tickets[] | select(.iid==10) | .model | @json')"
+    || bad "snapshot: unconfigured model chain invented $(q '.tickets[] | select(.id==10) | .model | @json')"
 cat > "$FX/open-model.json" <<'EOF'
 [
  {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
@@ -241,7 +241,7 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-model.json" STUB_LOG="$T/calls-m
     "$TICK" snapshot > "$T/snap-model.json" 2>/dev/null
 sed -i.bak '/^lane_model: sonnet$/d;/^rework_model: opus$/d' "$LOOM_REPO/.loom.yml"
 rm -f "$FX/notes-13.json"
-m() { jq -r ".tickets[] | select(.iid==$1) | .model | \"\(.effective)/\(.source)\"" "$T/snap-model.json"; }
+m() { jq -r ".tickets[] | select(.id==$1) | .model | \"\(.effective)/\(.source)\"" "$T/snap-model.json"; }
 [ "$(m 10)" = "sonnet/lane_model" ] \
     && ok "snapshot: an unlabeled first round takes lane_model" \
     || bad "snapshot: first round resolved $(m 10), want sonnet/lane_model"
@@ -297,9 +297,9 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-unblocked.json" STUB_LOG="$T/cal
     "$TICK" snapshot > "$T/snap-unblocked.json" 2>/dev/null
 rm -f "$FX/notes-30.json" "$FX/notes-33.json"
 u() { jq -r "$1" "$T/snap-unblocked.json"; }
-[ "$(u '.tickets[] | select(.iid==30) | .rejections | "\(.total)/\(.last_class)"')" = "1/positional-correlation" ] \
+[ "$(u '.tickets[] | select(.id==30) | .rejections | "\(.total)/\(.last_class)"')" = "1/positional-correlation" ] \
     && ok "snapshot: a rejection history survives the trip through blocked and back to ready" \
-    || bad "snapshot: history lost on a non-active member ($(u '.tickets[] | select(.iid==30) | .rejections | @json'))"
+    || bad "snapshot: history lost on a non-active member ($(u '.tickets[] | select(.id==30) | .rejections | @json'))"
 jq -e '[.warnings[] | select(test("#31") and test("still assigned")
                              and test("lane.sh transition 31 ready-for-agent"))] | length == 1' \
     "$T/snap-unblocked.json" >/dev/null \
@@ -315,13 +315,13 @@ jq -e '[.warnings[] | select(test("#30") and test("still assigned"))] | length =
 # stop feeding lanes into one poisoned ticket. #30 carries a FAIL verdict and
 # no merge attempt; #33 carries two attempts — the cap default is 2, so that
 # is the ticket the queue must give up on and step past.
-[ "$(u '.tickets[] | select(.iid==33) | .merge_attempts')" = "2" ] \
+[ "$(u '.tickets[] | select(.id==33) | .merge_attempts')" = "2" ] \
     && ok "snapshot: merge attempts counted from the orch-merge-attempt trailers" \
-    || bad "snapshot: merge_attempts = $(u '.tickets[] | select(.iid==33) | .merge_attempts'), want 2"
+    || bad "snapshot: merge_attempts = $(u '.tickets[] | select(.id==33) | .merge_attempts'), want 2"
 # Planted violation: a gate verdict is not a merge attempt. If the count
 # matched any trailer, #30's FAIL would inflate it and the queue would give
 # up on a ticket that has never once been merged.
-[ "$(u '.tickets[] | select(.iid==30) | .merge_attempts')" = "0" ] \
+[ "$(u '.tickets[] | select(.id==30) | .merge_attempts')" = "0" ] \
     && ok "snapshot: a gate verdict does not count as a merge attempt" \
     || bad "snapshot: verdict trailer leaked into merge_attempts"
 # 7a7b. P62: a base-red attempt failed on a defect already on origin/<base>,
@@ -365,20 +365,20 @@ br() { jq -r "$1" "$T/snap-basered.json"; }
 # Planted violation: the shipped count took ANY orch-merge-attempt trailer, so
 # #50 would read 2 — at the default cap — and the wave would block a ticket
 # whose branch was never once the problem.
-[ "$(br '.tickets[] | select(.iid==50) | .merge_attempts')" = "0" ] \
+[ "$(br '.tickets[] | select(.id==50) | .merge_attempts')" = "0" ] \
     && ok "snapshot: base-red attempts never count toward merge_attempt_cap" \
-    || bad "snapshot: base-red attempts counted ($(br '.tickets[] | select(.iid==50) | .merge_attempts')) — the cap burns on a base defect"
-[ "$(br '.tickets[] | select(.iid==50) | .merge_hold | "\(.checks[0])/\(.fixes[0])"')" = "model-literal-guard/60" ] \
+    || bad "snapshot: base-red attempts counted ($(br '.tickets[] | select(.id==50) | .merge_attempts')) — the cap burns on a base defect"
+[ "$(br '.tickets[] | select(.id==50) | .merge_hold | "\(.checks[0])/\(.fixes[0])"')" = "model-literal-guard/60" ] \
     && ok "snapshot: an open linked fix parks the ticket — merge_hold names check and fix" \
-    || bad "snapshot: merge_hold wrong ($(br '.tickets[] | select(.iid==50) | .merge_hold | @json'))"
+    || bad "snapshot: merge_hold wrong ($(br '.tickets[] | select(.id==50) | .merge_hold | @json'))"
 # Release is derivation: fix #61 is absent from the open set (closed), so the
 # hold is gone with no requeue write — and the one REAL attempt still counts.
-[ "$(br '.tickets[] | select(.iid==51) | .merge_hold')" = "null" ] \
+[ "$(br '.tickets[] | select(.id==51) | .merge_hold')" = "null" ] \
     && ok "snapshot: a closed fix releases the hold with no write" \
-    || bad "snapshot: hold survived its fix closing ($(br '.tickets[] | select(.iid==51) | .merge_hold | @json'))"
-[ "$(br '.tickets[] | select(.iid==51) | .merge_attempts')" = "1" ] \
+    || bad "snapshot: hold survived its fix closing ($(br '.tickets[] | select(.id==51) | .merge_hold | @json'))"
+[ "$(br '.tickets[] | select(.id==51) | .merge_attempts')" = "1" ] \
     && ok "snapshot: a real attempt beside a base-red one still counts" \
-    || bad "snapshot: mixed history miscounted ($(br '.tickets[] | select(.iid==51) | .merge_attempts'), want 1)"
+    || bad "snapshot: mixed history miscounted ($(br '.tickets[] | select(.id==51) | .merge_attempts'), want 1)"
 [ "$(jq -r '.config.merge_attempt_cap' "$T/snap-unblocked.json")" != "null" ] \
     && ok "snapshot: merge_attempt_cap is published so the wave can bound retries" \
     || bad "snapshot: no merge_attempt_cap in config"
@@ -392,18 +392,18 @@ br() { jq -r "$1" "$T/snap-basered.json"; }
 # `tier::ui` — so it was dead in every repo this skill bootstraps, and a
 # probe-filed ticket that set the label and not the section read `tier: null`,
 # leaving no suite for `--pregate` to run (#52, 2026-08-03).
-[ "$(u '.tickets[] | select(.iid==32) | .tier')" = "api" ] \
+[ "$(u '.tickets[] | select(.id==32) | .tier')" = "api" ] \
     && ok "snapshot: tier falls back to the scoped tier:: label, prefix stripped" \
-    || bad "snapshot: scoped tier label ignored ($(u '.tickets[] | select(.iid==32) | .tier'))"
+    || bad "snapshot: scoped tier label ignored ($(u '.tickets[] | select(.id==32) | .tier'))"
 jq -e '[.warnings[] | select(test("#32") and test("Risk tier"))] | length == 0' \
     "$T/snap-unblocked.json" >/dev/null \
     && ok "snapshot: a label-only tier is not warned about as missing" \
     || bad "snapshot: label-only tier still warned as missing"
 # Planted violation: the body section must still WIN over the label, so a
 # ticket whose body says logic is not silently regraded by a stray label.
-[ "$(u '.tickets[] | select(.iid==31) | .tier')" = "logic" ] \
+[ "$(u '.tickets[] | select(.id==31) | .tier')" = "logic" ] \
     && ok "snapshot: the body's Risk tier section still outranks the label" \
-    || bad "snapshot: body tier lost to the label ($(u '.tickets[] | select(.iid==31) | .tier'))"
+    || bad "snapshot: body tier lost to the label ($(u '.tickets[] | select(.id==31) | .tier'))"
 # The hole itself, documented: #31 is in neither fill path. That is WHY the
 # warning exists — the scheduler cannot see it, so a human has to.
 [ "$(u '.summary.ready_set_empty')" = "false" ] \
@@ -458,26 +458,26 @@ EOF
 "$TICK" spawn-lane gate-206 -- sleep 20 >/dev/null
 GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-brief" \
     "$TICK" snapshot --brief > "$T/snap-brief.json" 2>/dev/null
-[ "$(jq -c '[.tickets[].iid] | sort' "$T/snap-brief.json")" = "[201,202,203,204,205,206]" ] \
+[ "$(jq -c '[.tickets[].id] | sort' "$T/snap-brief.json")" = "[201,202,203,204,205,206]" ] \
     && ok "brief: full rows for ready+unblocked, gateable, both merge-queue tickets, stranded, and a lane-held review ticket" \
-    || bad "brief: tickets = $(jq -c '[.tickets[].iid] | sort' "$T/snap-brief.json"), want [201,202,203,204,205,206]"
+    || bad "brief: tickets = $(jq -c '[.tickets[].id] | sort' "$T/snap-brief.json"), want [201,202,203,204,205,206]"
 [ "$(jq -c '.other_iids' "$T/snap-brief.json")" = "[207]" ] \
     && ok "brief: the blocked, unclaimed, laneless ticket is a bare iid, not a full row" \
     || bad "brief: other_iids = $(jq -c '.other_iids' "$T/snap-brief.json"), want [207]"
-[ "$(jq -r '.tickets[] | select(.iid==206) | .gate.eligible' "$T/snap-brief.json")" = "false" ] \
+[ "$(jq -r '.tickets[] | select(.id==206) | .gate.eligible' "$T/snap-brief.json")" = "false" ] \
     && ok "brief: #206 earns its row via the lane clause, not the gateable one (already gated)" \
     || bad "brief: #206 unexpectedly gate.eligible — the fixture no longer tests what it claims to"
 GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-brief-full" \
     "$TICK" snapshot > "$T/snap-full.json" 2>/dev/null
-[ "$(jq -c '[.tickets[].iid] | sort' "$T/snap-full.json")" = "[201,202,203,204,205,206,207]" ] \
+[ "$(jq -c '[.tickets[].id] | sort' "$T/snap-full.json")" = "[201,202,203,204,205,206,207]" ] \
     && [ "$(jq -c '.other_iids' "$T/snap-full.json")" = "[]" ] \
     && ok "brief: plain snapshot (no flag) still carries every ticket, other_iids empty" \
-    || bad "brief: plain snapshot filtered rows or populated other_iids ($(jq -c '{t: [.tickets[].iid], o: .other_iids}' "$T/snap-full.json"))"
+    || bad "brief: plain snapshot filtered rows or populated other_iids ($(jq -c '{t: [.tickets[].id], o: .other_iids}' "$T/snap-full.json"))"
 kill "$(cat "$LOOM_HOME/lanes/gate-206.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-206 >/dev/null
 
 # The scheduler's universe is "open issues labeled build-N" — #20 is neither.
-jq -e '[.tickets[].iid] | index(20)' "$T/snap.json" >/dev/null 2>&1 \
+jq -e '[.tickets[].id] | index(20)' "$T/snap.json" >/dev/null 2>&1 \
     && bad "snapshot: non-member issue leaked into tickets" \
     || ok "snapshot: membership is exactly the build-N label"
 # System notes are label-change spam, not lessons.
@@ -543,17 +543,17 @@ fi
 
 # 7d. Blocking edges come from BOTH sources (SKILL.md: native links where the
 #     tier allows, else the body's `## Blocked by` list), deduped and tagged.
-b() { jq -r ".tickets[] | select(.iid==11) | .blocked_by[] | select(.iid==$1) | .$2" "$T/snap.json"; }
+b() { jq -r ".tickets[] | select(.id==11) | .blocked_by[] | select(.id==$1) | .$2" "$T/snap.json"; }
 if [ "$(b 10 source)" = "both" ] && [ "$(b 14 source)" = "native" ] && [ "$(b 13 source)" = "body" ] \
-   && [ "$(jq '.tickets[] | select(.iid==11) | .blocked_by | length' "$T/snap.json")" = 3 ]; then
+   && [ "$(jq '.tickets[] | select(.id==11) | .blocked_by | length' "$T/snap.json")" = 3 ]; then
     ok "snapshot: native + body blockers unioned, deduped, source-tagged"
 else
-    bad "snapshot: blocker union wrong ($(jq -c '.tickets[]|select(.iid==11)|.blocked_by' "$T/snap.json"))"
+    bad "snapshot: blocker union wrong ($(jq -c '.tickets[]|select(.id==11)|.blocked_by' "$T/snap.json"))"
 fi
 # Planted violation: on a tier without issue links the API 403s. Body-sourced
 # edges must survive, with a warning — a degraded field, not a dead document.
 GLAB_CMD="$FX/glab-stub.sh" STUB_403_LINKS=1 "$TICK" snapshot > "$T/snap403.json" 2>/dev/null
-if jq -e '(.tickets[] | select(.iid==11) | .blocked_by | map(.source) | unique == ["body"])
+if jq -e '(.tickets[] | select(.id==11) | .blocked_by | map(.source) | unique == ["body"])
           and (.warnings | any(test("links")))' "$T/snap403.json" >/dev/null 2>&1; then
     ok "snapshot-violation: links 403 degrades to body edges + warning, not failure"
 else
@@ -562,18 +562,18 @@ fi
 
 # 7e. Blocker closed-state needs no extra call: the universe is the open set,
 #     so a blocker absent from it is closed. #10 is open, #7 and #13 are not.
-if [ "$(jq -r '.tickets[]|select(.iid==11)|.blocked_by[]|select(.iid==10)|.closed' "$T/snap.json")" = "false" ] \
-   && [ "$(jq -r '.tickets[]|select(.iid==11)|.unblocked' "$T/snap.json")" = "false" ] \
-   && [ "$(jq -r '.tickets[]|select(.iid==10)|.blocked_by[0].closed' "$T/snap.json")" = "true" ] \
-   && [ "$(jq -r '.tickets[]|select(.iid==10)|.unblocked' "$T/snap.json")" = "true" ]; then
+if [ "$(jq -r '.tickets[]|select(.id==11)|.blocked_by[]|select(.id==10)|.closed' "$T/snap.json")" = "false" ] \
+   && [ "$(jq -r '.tickets[]|select(.id==11)|.unblocked' "$T/snap.json")" = "false" ] \
+   && [ "$(jq -r '.tickets[]|select(.id==10)|.blocked_by[0].closed' "$T/snap.json")" = "true" ] \
+   && [ "$(jq -r '.tickets[]|select(.id==10)|.unblocked' "$T/snap.json")" = "true" ]; then
     ok "snapshot: blocker closed-state derived from the open set, no extra call"
 else
     bad "snapshot: closed-state/unblocked derivation wrong"
 fi
 # A cross-project link cannot use that inference — say so, never guess.
-if [ "$(jq -r '.tickets[]|select(.iid==12)|.blocked_by[0].closed' "$T/snap.json")" = "null" ] \
+if [ "$(jq -r '.tickets[]|select(.id==12)|.blocked_by[0].closed' "$T/snap.json")" = "null" ] \
    && jq -e '.warnings | any(test("cross-project"))' "$T/snap.json" >/dev/null 2>&1 \
-   && [ "$(jq -r '.tickets[]|select(.iid==12)|.unblocked' "$T/snap.json")" = "false" ]; then
+   && [ "$(jq -r '.tickets[]|select(.id==12)|.unblocked' "$T/snap.json")" = "false" ]; then
     ok "snapshot: cross-project blocker is unknown + warned, never assumed closed"
 else
     bad "snapshot: cross-project blocker was guessed at"
@@ -964,12 +964,12 @@ kill "$(cat "$LOOM_HOME/lanes/merge-51.pid" 2>/dev/null)" 2>/dev/null
 PSNAP() { GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-p11" "$TICK" snapshot 2>"$T/p11.err"; }
 rm -f "$FX/notes-12.json"
 PSNAP > "$T/p11.json"
-if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11.json")" = "true" ] \
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11.json")" = "true" ] \
    && [ "$(jq -r '.summary.gateable' "$T/p11.json")" = "1" ] \
-   && [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.head' "$T/p11.json")" = "e52b7c1000000000000000000000000000000000" ]; then
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .gate.head' "$T/p11.json")" = "e52b7c1000000000000000000000000000000000" ]; then
     ok "gate: a ticket in review with an open MR and no verdict is gateable"
 else
-    bad "gate: a genuinely gateable ticket was not marked so ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p11.json"))"
+    bad "gate: a genuinely gateable ticket was not marked so ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11.json"))"
 fi
 
 # 7f2. The merged-underneath case: no open MR left, so no verifier.
@@ -977,11 +977,11 @@ cat > "$FX/mrs-12.json" <<'EOF'
 [{"iid":77,"title":"Ledger report view","state":"merged","draft":false,"web_url":"https://x/mr/77","source_branch":"t12","sha":"e52b7c1000000000000000000000000000000000"}]
 EOF
 PSNAP > "$T/p11b.json"
-if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11b.json")" = "false" ] \
-   && jq -e '.tickets[] | select(.iid==12) | .gate.reason | test("no open merge request")' "$T/p11b.json" >/dev/null 2>&1; then
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11b.json")" = "false" ] \
+   && jq -e '.tickets[] | select(.id==12) | .gate.reason | test("no open merge request")' "$T/p11b.json" >/dev/null 2>&1; then
     ok "gate: a ticket whose MR already merged is not gated again"
 else
-    bad "gate: merged-underneath ticket still gateable ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p11b.json"))"
+    bad "gate: merged-underneath ticket still gateable ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11b.json"))"
 fi
 cat > "$FX/mrs-12.json" <<'EOF'
 [{"iid":77,"title":"Ledger report view","state":"opened","draft":false,"web_url":"https://x/mr/77","source_branch":"t12","sha":"e52b7c1000000000000000000000000000000000"}]
@@ -995,12 +995,12 @@ cat > "$FX/notes-12.json" <<'EOF'
   "body":"Review complete. Verdict: PASS.\n\n<!-- orch-verdict PASS e52b7c1 -->"}]
 EOF
 PSNAP > "$T/p11c.json"
-if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11c.json")" = "false" ] \
-   && [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.last_verdict.verdict' "$T/p11c.json")" = "PASS" ] \
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11c.json")" = "false" ] \
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .gate.last_verdict.verdict' "$T/p11c.json")" = "PASS" ] \
    && [ "$(jq -r '.summary.gateable' "$T/p11c.json")" = "0" ]; then
     ok "gate: a HEAD already judged is not judged twice (short sha matches long)"
 else
-    bad "gate: duplicate dispatch not caught ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p11c.json" 2>&1) | err: $(head -2 "$T/p11.err"))"
+    bad "gate: duplicate dispatch not caught ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11c.json" 2>&1) | err: $(head -2 "$T/p11.err"))"
 fi
 
 # 7f4. Planted violation: a verdict against a DIFFERENT commit must not suppress
@@ -1011,7 +1011,7 @@ cat > "$FX/notes-12.json" <<'EOF'
   "body":"Rejected.\n\n<!-- orch-verdict FAIL 9999999 -->"}]
 EOF
 PSNAP > "$T/p11d.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11d.json")" = "true" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11d.json")" = "true" ] \
     && ok "gate-violation: a verdict on an older commit still leaves the new HEAD gateable" \
     || bad "gate-violation: a stale verdict suppressed the gate — fixes would never be re-reviewed"
 
@@ -1027,9 +1027,9 @@ cat > "$FX/notes-12.json" <<'EOF'
   "body":"Rejected.\n\n<!-- orch-verdict FAIL e52b7c1 -->"}]
 EOF
 PSNAP > "$T/p11g.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .gate.last_verdict.verdict' "$T/p11g.json")" = "PASS" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .gate.last_verdict.verdict' "$T/p11g.json")" = "PASS" ] \
     && ok "gate: the newest verdict at a HEAD wins, not the first one fetched" \
-    || bad "gate: took the older verdict ($(jq -c '.tickets[]|select(.iid==12)|.gate.last_verdict' "$T/p11g.json"))"
+    || bad "gate: took the older verdict ($(jq -c '.tickets[]|select(.id==12)|.gate.last_verdict' "$T/p11g.json"))"
 # Reversed arrival order must give the same answer. This is a CONSISTENCY check,
 # not a guard: with notes already ascending, a plain `last` would also return
 # PASS, so it would still pass with the fix reverted. The assertion above is the
@@ -1041,7 +1041,7 @@ cat > "$FX/notes-12.json" <<'EOF'
   "body":"Passed on re-review.\n\n<!-- orch-verdict PASS e52b7c1 -->"}]
 EOF
 PSNAP > "$T/p11h.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .gate.last_verdict.verdict' "$T/p11h.json")" = "PASS" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .gate.last_verdict.verdict' "$T/p11h.json")" = "PASS" ] \
     && ok "gate-violation: arrival order does not change which verdict wins" \
     || bad "gate-violation: answer flipped with arrival order — the sort is not doing the work"
 rm -f "$FX/notes-12.json"
@@ -1055,7 +1055,7 @@ touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-12.log"   # alive, silent since
 st=$("$TICK" lane-status | awk '$1=="gate-12"{print $3}')
 PSNAP > "$T/p11i.json"
 if [ "$st" = "stale" ] \
-   && [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11i.json")" = "false" ]; then
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11i.json")" = "false" ]; then
     ok "gate: a stale (alive but silent) verifier still blocks a second dispatch"
 else
     bad "gate: stale lane state '$st' left the ticket gateable — a duplicate would spawn"
@@ -1070,18 +1070,18 @@ kill "$(cat "$LOOM_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
 #      the lane that is doing the work.
 "$TICK" spawn-lane gate-12 --no-tick -- sleep 20 >/dev/null
 PSNAP > "$T/p11e.json"
-if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11e.json")" = "false" ] \
-   && jq -e '.tickets[] | select(.iid==12) | .gate.reason | test("already running")' "$T/p11e.json" >/dev/null 2>&1; then
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11e.json")" = "false" ] \
+   && jq -e '.tickets[] | select(.id==12) | .gate.reason | test("already running")' "$T/p11e.json" >/dev/null 2>&1; then
     ok "gate: a ticket with a verifier already running is not gated again"
 else
-    bad "gate: running gate lane did not suppress a second one ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p11e.json"))"
+    bad "gate: running gate lane did not suppress a second one ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11e.json"))"
 fi
 kill "$(cat "$LOOM_HOME/lanes/gate-12.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-12 >/dev/null
 # And it must free up again once that lane is gone, or a ticket gated once could
 # never be re-gated after a rejection.
 PSNAP > "$T/p11f.json"
-[ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11f.json")" = "true" ] \
+[ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11f.json")" = "true" ] \
     && ok "gate-violation: with the lane cleared the ticket is gateable again" \
     || bad "gate-violation: ticket stayed suppressed after its gate lane ended"
 
@@ -1111,7 +1111,7 @@ cat > "$FX/notes-12.json" <<'EOF'
   "body":"Rejected.\n\n<!-- orch-verdict FAIL 9999999 class=wrong-scope -->"}]
 EOF
 PSNAP > "$T/p11k.json"
-if [ "$(jq -r '.tickets[] | select(.iid==12) | .gate.eligible' "$T/p11k.json")" = "true" ] \
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11k.json")" = "true" ] \
    && jq -e '[.warnings[] | select(test("#12") and test("FAIL verdict standing at"))] | length == 0' \
         "$T/p11k.json" >/dev/null; then
     ok "gate-violation: a FAIL on an older commit does not read as a stall"

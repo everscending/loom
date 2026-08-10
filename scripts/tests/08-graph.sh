@@ -10,8 +10,8 @@
 # ticket; peak concurrency for the whole run was 2. That is decided when the
 # tickets are written, and it was invisible until wave 1 said so out loud.
 # `graph` reads a snapshot, so it costs no extra tracker calls.
-GN() { printf '{"iid":%s,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[]}' "$1"; }
-GB() { printf '{"iid":%s,"blocked_by":[{"iid":%s,"closed":false}],"state":"blocked","unblocked":false,"assignees":[]}' "$1" "$2"; }
+GN() { printf '{"id":%s,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[]}' "$1"; }
+GB() { printf '{"id":%s,"blocked_by":[{"id":%s,"closed":false}],"state":"blocked","unblocked":false,"assignees":[]}' "$1" "$2"; }
 GRAPH() { printf '{"config":{"max_lanes":4},"tickets":[%s]}' "$1" | "$TICK" graph; }
 
 # 7g1. Shapes that can be checked by hand. A diamond (1 → 2,3 → 4) is three
@@ -61,7 +61,7 @@ after=$(GRAPH "$(GN 1),$(GN 2),$(GN 3),$(GN 4)" | jq -r .opening_width)
 
 # 7g5. A closed blocker constrains nothing, and a cycle is reported rather than
 #      silently producing nonsense depths.
-out=$(printf '{"config":{"max_lanes":4},"tickets":[{"iid":1,"blocked_by":[{"iid":99,"closed":true}],"state":"ready-for-agent","unblocked":true,"assignees":[]},%s]}' "$(GN 2)" | "$TICK" graph)
+out=$(printf '{"config":{"max_lanes":4},"tickets":[{"id":1,"blocked_by":[{"id":99,"closed":true}],"state":"ready-for-agent","unblocked":true,"assignees":[]},%s]}' "$(GN 2)" | "$TICK" graph)
 [ "$(printf '%s' "$out" | jq -r '.opening_width')" = "2" ] \
     && ok "graph: an already-closed blocker does not narrow the frontier" \
     || bad "graph: closed blocker still counted"
@@ -69,7 +69,7 @@ out=$(printf '{"config":{"max_lanes":4},"tickets":[{"iid":1,"blocked_by":[{"iid"
 # edges because the graph cannot see their depth made crucible report "opens 7
 # wide" when three of the seven were waiting on issues outside the build —
 # false reassurance, which is worse than no report at all.
-out=$(printf '{"config":{"max_lanes":4},"tickets":[%s,{"iid":2,"blocked_by":[{"iid":900,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]}]}' "$(GN 1)" | "$TICK" graph)
+out=$(printf '{"config":{"max_lanes":4},"tickets":[%s,{"id":2,"blocked_by":[{"id":900,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]}]}' "$(GN 1)" | "$TICK" graph)
 if [ "$(printf '%s' "$out" | jq -r '.opening_width')" = "1" ] \
    && [ "$(printf '%s' "$out" | jq -c '[.levels[].iids]')" = "[[1],[2]]" ]; then
     ok "graph: a blocker outside the build still keeps its dependent off the frontier"
@@ -83,9 +83,9 @@ fi
 # ticket, which is exactly why it missed this.
 # (Found by an independent review, 2026-08-01.)
 out=$(printf '{"config":{"max_lanes":4},"tickets":[
- {"iid":1,"blocked_by":[{"iid":900,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]},
- {"iid":2,"blocked_by":[{"iid":901,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]},
- {"iid":3,"blocked_by":[{"iid":902,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]}]}' | "$TICK" graph)
+ {"id":1,"blocked_by":[{"id":900,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]},
+ {"id":2,"blocked_by":[{"id":901,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]},
+ {"id":3,"blocked_by":[{"id":902,"closed":false}],"state":"ready-for-agent","unblocked":false,"assignees":[]}]}' | "$TICK" graph)
 if [ "$(printf '%s' "$out" | jq -r '.opening_width')" = "0" ] \
    && [ "$(printf '%s' "$out" | jq -r '.startable_now')" = "0" ]; then
     ok "graph: a build where nothing can start reports a frontier of 0, not its first level"
@@ -107,16 +107,16 @@ out=$(printf '{"config":{"max_lanes":4},"tickets":[]}' | "$TICK" graph)
 #      flagged as LIKELY DEEP, named in both the structured list and the
 #      verdict string — a build under threshold raises nothing.
 out=$(printf '{"config":{"max_lanes":4},"tickets":[%s]}' \
-    '{"iid":1,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":9,"file_surface":1}' \
+    '{"id":1,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":9,"file_surface":1}' \
     | "$TICK" graph)
-if [ "$(printf '%s' "$out" | jq -c '.likely_deep')" = '[{"iid":1,"criteria_count":9,"file_surface":1}]' ] \
+if [ "$(printf '%s' "$out" | jq -c '.likely_deep')" = '[{"id":1,"criteria_count":9,"file_surface":1}]' ] \
    && case "$(printf '%s' "$out" | jq -r .verdict)" in *"LIKELY DEEP"*"#1"*) true ;; *) false ;; esac; then
     ok "graph: an outsized acceptance-criteria count is flagged LIKELY DEEP"
 else
     bad "graph: no depth alarm on an outsized criteria count ($(printf '%s' "$out" | jq -c '{likely_deep, verdict}'))"
 fi
 out=$(printf '{"config":{"max_lanes":4},"tickets":[%s]}' \
-    '{"iid":2,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":1,"file_surface":9}' \
+    '{"id":2,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":1,"file_surface":9}' \
     | "$TICK" graph)
 case "$(printf '%s' "$out" | jq -r .verdict)" in
     *"LIKELY DEEP"*"#2"*) ok "graph: an outsized file count is flagged LIKELY DEEP too" ;;
@@ -124,7 +124,7 @@ case "$(printf '%s' "$out" | jq -r .verdict)" in
 esac
 # Planted violation: a ticket comfortably under both thresholds must not cry
 # wolf, same discipline as 7g3 for width.
-out=$(GRAPH "$(printf '{"iid":3,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":3,"file_surface":2}')")
+out=$(GRAPH "$(printf '{"id":3,"blocked_by":[],"state":"ready-for-agent","unblocked":true,"assignees":[],"criteria_count":3,"file_surface":2}')")
 case "$(printf '%s' "$out" | jq -r .verdict)" in
     *"LIKELY DEEP"*) bad "graph-violation: a normally-sized ticket was flagged LIKELY DEEP" ;;
     *) ok "graph-violation: a normally-sized ticket raises no depth alarm" ;;
@@ -146,8 +146,8 @@ out=$(GRAPH "$(GN 4)")
 # no label. A definition whose epic has none is REFUSED (rc 1), not annotated.
 GE() { # iid epic [blocker-iid...] — a build member carrying its epic
     local iid="$1" epic="$2" bb="" b; shift 2
-    for b in "$@"; do bb="$bb${bb:+,}{\"iid\":$b,\"closed\":false}"; done
-    printf '{"iid":%s,"epic":"%s","blocked_by":[%s],"state":"ready-for-agent","unblocked":true,"assignees":[]}' \
+    for b in "$@"; do bb="$bb${bb:+,}{\"id\":$b,\"closed\":false}"; done
+    printf '{"id":%s,"epic":"%s","blocked_by":[%s],"state":"ready-for-agent","unblocked":true,"assignees":[]}' \
         "$iid" "$epic" "$bb"
 }
 

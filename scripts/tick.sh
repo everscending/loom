@@ -431,7 +431,7 @@ _epics_unaccepted() { # <build-label>
     closed=$("$TRACKER_SH" issues-by-label "$label" closed 2>/dev/null) || return 1
     ms=$("$TRACKER_SH" milestones --state active 2>/dev/null) || return 1
     printf '%s' "$closed" | jq -e --argjson ms "${ms:-[]}" '
-        ([.[] | .milestone.title? // empty] | unique) as $mine
+        ([.[] | .epic // empty] | unique) as $mine
         | ($ms | map(.title) | map(select(. as $t | $mine | index($t))) | length) > 0
     ' >/dev/null 2>&1
 }
@@ -2266,9 +2266,9 @@ cmd_snapshot() {
     nbuild=$(jq '[.[] | select((.title // "") | test("^Build [0-9]+$"))] | length' "$SNAP_TMP/open.json")
     if [ "$nbuild" -ge 1 ]; then
         build_iid=$(jq -r '[.[] | select((.title // "") | test("^Build [0-9]+$"))]
-                           | sort_by(.iid) | last | .iid' "$SNAP_TMP/open.json")
+                           | sort_by(.id) | last | .id' "$SNAP_TMP/open.json")
         label="build-$(jq -r --argjson b "$build_iid" \
-            '.[] | select(.iid == $b) | .title | capture("(?<n>[0-9]+)$").n' "$SNAP_TMP/open.json")"
+            '.[] | select(.id == $b) | .title | capture("(?<n>[0-9]+)$").n' "$SNAP_TMP/open.json")"
         if [ "$nbuild" -gt 1 ]; then
             _snap_warn "$nbuild open \`Build N\` issues — took the highest (#$build_iid)"
         fi
@@ -2282,13 +2282,13 @@ cmd_snapshot() {
     local member_iids="" active_iids="" review_iids="" iid
     if [ -n "$label" ]; then
         member_iids=$(jq -r --arg l "$label" \
-            '.[] | select((.labels // []) | index($l)) | .iid' "$SNAP_TMP/open.json")
+            '.[] | select((.labels // []) | index($l)) | .id' "$SNAP_TMP/open.json")
         # MRs exist only once work has started: a ready-for-agent ticket has
         # none by definition, so fetching one is waste.
         active_iids=$(jq -r --arg l "$label" \
             '.[] | select((.labels // []) | index($l))
                  | select((.labels // []) | (index("in-progress") or index("review") or index("merge-queue")))
-                 | .iid' "$SNAP_TMP/open.json")
+                 | .id' "$SNAP_TMP/open.json")
         # Comment threads are read for EVERY member ticket, active or not.
         # This widened twice, each time for the same reason: a verdict lives
         # in the thread (P11, gating), but so does the rejection history P30
@@ -2411,10 +2411,10 @@ cmd_snapshot() {
     # how cycle times become derivable, at wave resolution (P23).
     if [ -n "$label" ]; then
         _ev snapshot \
-            tickets "$(jq -c '[.tickets[] | {(.iid | tostring): (.state // "none")}]
+            tickets "$(jq -c '[.tickets[] | {(.id | tostring): (.state // "none")}]
                               | add // {}' "$SNAP_TMP/snapshot.json")" \
-            deps "$(jq -c '[.tickets[] | {(.iid | tostring):
-                              [(.blocked_by // [])[] | .iid]}] | add // {}' \
+            deps "$(jq -c '[.tickets[] | {(.id | tostring):
+                              [(.blocked_by // [])[] | .id]}] | add // {}' \
                     "$SNAP_TMP/snapshot.json")" \
             ready "$(jq '[.tickets[] | select(.state == "ready-for-agent" and .unblocked
                           and ((.assignees | length) == 0))] | length' "$SNAP_TMP/snapshot.json")" \
@@ -2861,7 +2861,7 @@ _adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reje
 $changed
 EOF
     body=$("$TRACKER_SH" issue "$iid" 2>/dev/null \
-           | jq -r '.description // empty' 2>/dev/null) || return 1
+           | jq -r '.body // empty' 2>/dev/null) || return 1
     sect=$(printf '%s\n' "$body" | awk '
         tolower($0) ~ /^#+[[:space:]]*mandatory adversarial test/ { f=1; next }
         f && /^#/ { f=0 }

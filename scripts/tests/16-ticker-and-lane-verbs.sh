@@ -14,7 +14,21 @@ EVH="$T/ev-home"; mkdir -p "$EVH"
 # A list read that returns no bytes is an unreadable tracker, and the driver
 # says so instead of parsing silence as emptiness (P49's rule, now applied to
 # lane.sh's reads too).
-GSTUB="$T/glab-ok.sh"; printf '#!/bin/sh\necho "[]"\nexit 0\n' > "$GSTUB"; chmod +x "$GSTUB"
+GSTUB="$T/glab-ok.sh"
+cat > "$GSTUB" <<'GSEOF'
+#!/bin/sh
+# P86: the driver maps every response into loom's shape, so a stub has to
+# answer in the right KIND — an array for a list endpoint, an object for a
+# single read. Answering everything with nothing at all (the old `exit 0`) is
+# an unreadable tracker now, and the driver says so rather than parsing
+# silence as emptiness.
+case "$*" in
+  *notes*|*links*|*closed_by*|*related_merge_requests*|*labels*|*milestones*|*"issues?"*|*"merge_requests?"*) echo "[]" ;;
+  *) echo "{}" ;;
+esac
+exit 0
+GSEOF
+chmod +x "$GSTUB"
 LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" transition 4 review >/dev/null 2>&1
 echo "gate looks good" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" "$LANE" verdict 4 pass abcd1234 >/dev/null 2>&1
 grep -q '"ev":"ticket_transition"' "$EVH/events.jsonl" 2>/dev/null \
@@ -332,10 +346,14 @@ GB transition 51 review >/dev/null 2>&1 \
 cat > "$T/glab-body-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${VCAP:?}" ;; esac; done
-# P86: a LIST endpoint answers with a list. The driver validates that a list
-# read really returned an array — `verdict`'s duplicate check reads the notes
-# thread, and an object there is a malformed response, not "no duplicate".
-echo '[]'
+# P86: answer in the KIND the endpoint returns. The driver maps each response
+# into loom's shape, so a list read must get an array and a single read an
+# object; `verdict`'s duplicate check reads the notes thread, where an object
+# is a malformed response rather than "no duplicate".
+case "$*" in
+  *notes*|*links*|*closed_by*|*related_merge_requests*|*labels*|*milestones*|*"issues?"*) echo '[]' ;;
+  *) echo '{}' ;;
+esac
 EOF
 chmod +x "$T/glab-body-stub.sh"
 VCAP2="$T/verdict-bodies"; : > "$VCAP2"
@@ -384,7 +402,14 @@ grep -q "class=" "$VCAP7" \
 cat > "$T/glab-dup-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${VCAP:?}"; echo '{}'; exit 0 ;; esac; done
-cat "${NOTES_FIXTURE:?}"
+# P86: the notes thread is the point of this stub, but `verdict` also reads the
+# ISSUE (the hold guard) and writes its label. The driver maps each response
+# into loom's shape, so those have to answer as objects rather than being
+# handed the notes array.
+case "$*" in
+  *"/notes"*) cat "${NOTES_FIXTURE:?}" ;;
+  *)          echo '{"iid":9,"state":"opened","labels":[]}' ;;
+esac
 EOF
 chmod +x "$T/glab-dup-stub.sh"
 NOTES_FIXTURE="$T/dup-notes.json"
@@ -479,11 +504,11 @@ echo "gate green at the fixture HEAD" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-
 jq -Rs '[{system: false, created_at: "2026-08-07T10:00:00Z", author: {username: "gate"}, body: .}]' \
     < "$VCAP72" > "$P72FX/notes-12.json"
 LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" "$TICK" snapshot 2>/dev/null > "$T/p72-snap.json"
-if [ "$(jq -r '.tickets[]|select(.iid==12)|.gate.last_verdict.verdict' "$T/p72-snap.json")" = "PASS" ] \
-   && [ "$(jq -r '.tickets[]|select(.iid==12)|.gate.eligible' "$T/p72-snap.json")" = "false" ]; then
+if [ "$(jq -r '.tickets[]|select(.id==12)|.gate.last_verdict.verdict' "$T/p72-snap.json")" = "PASS" ] \
+   && [ "$(jq -r '.tickets[]|select(.id==12)|.gate.eligible' "$T/p72-snap.json")" = "false" ]; then
     ok "P72: a verdict lane.sh wrote is found by the snapshot at the same HEAD"
 else
-    bad "P72: trailer roundtrip broken ($(jq -c '.tickets[]|select(.iid==12)|.gate' "$T/p72-snap.json" 2>&1))"
+    bad "P72: trailer roundtrip broken ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p72-snap.json" 2>&1))"
 fi
 # Planted violation: change the trailer regex in the ONE place it now lives.
 # Both readers must go blind together — that is the claim. Three writings
@@ -513,7 +538,7 @@ else
 fi
 ( cd "$V72" && LOOM_HOME="$P72HOME" GLAB_CMD="$P72FX/glab-stub.sh" \
     "$V72/tick.sh" snapshot 2>/dev/null ) > "$T/p72-snap-v2.json"
-v2read=$(jq -r '.tickets[]|select(.iid==12)|.gate.last_verdict' "$T/p72-snap-v2.json")
+v2read=$(jq -r '.tickets[]|select(.id==12)|.gate.last_verdict' "$T/p72-snap-v2.json")
 if ( cd "$V72" && echo "same SHA, same outcome, again" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
     VCAP="$T/p72-dup-bodies" NOTES_FIXTURE="$NOTES_FIXTURE" \
     "$V72/lane.sh" verdict 9 pass cafe0000 >/dev/null 2>&1 ); then

@@ -15,8 +15,15 @@
 # that is not also a forge (Linear has no merge requests) needs exactly the
 # second group pointed somewhere else, and grouping them costs nothing today.
 #
-# CONTRACT
-#   * stdout is JSON for every read verb, and a JSON array wherever GitLab
+# CONTRACT — the SHAPE is loom's, not GitLab's (P86 stage 3)
+#   * every read verb emits the loom document: `id`, `state` (open | closed,
+#     plus `merged` for a merge request), `labels`, `assignees` (usernames),
+#     `epic`, `url`, `body`, `updated_at`. Nothing downstream of this file
+#     knows the words `iid`, `opened`, `milestone` or `web_url`.
+#     This is what makes the verbs a contract rather than a passthrough: a
+#     second driver implements what loom asked for, instead of fabricating
+#     GitLab fields to satisfy readers that were never told what they need.
+#   * stdout is JSON for every read verb, and a JSON array wherever the tracker
 #     returns a list — never a bare page, never GitLab's human sentence for an
 #     empty list (see `_list` below).
 #   * a failed call exits non-zero and prints nothing on stdout, so every
@@ -60,11 +67,50 @@ _one() { "$GLAB" api "$1"; }   # a single object read, passed through as-is
 # one form here means the driver resolves the project one way, always.
 _p() { printf 'projects/:fullpath/%s' "$1"; }
 
+# --- the loom shape -------------------------------------------------------
+# One jq program per kind of thing, applied on the way out. Every GitLab field
+# name in this skill is now inside these four filters.
+#
+# `state` collapses GitLab's vocabulary to loom's: an issue is open or closed,
+# and a merge request is additionally `merged` — a distinct fact the merge
+# queue turns on, not a synonym for closed.
+_MAP_ISSUE='
+  def st: if . == "closed" then "closed" else "open" end;
+  { id: .iid, title: (.title // ""), state: (.state | st),
+    labels: (.labels // []), assignees: [ (.assignees // [])[] | .username ],
+    epic: (.milestone.title // null), url: (.web_url // null),
+    project: (.project_id // null),
+    body: (.description // ""), updated_at: (.updated_at // null) }'
+# A link that carries no state at all is UNKNOWN, and stays unknown: the
+# open-set inference behind it is only valid inside one project, and inventing
+# "open" here is exactly how a cross-project blocker gets guessed at.
+_MAP_LINK='
+  def st: if . == "closed" then "closed" else "open" end;
+  { id: .iid, state: (if (.state // null) == null then null else (.state | st) end),
+    project: (.project_id // null), type: (.link_type // "") }'
+_MAP_NOTE='
+  { body: (.body // ""), created_at: (.created_at // null),
+    system: (.system // false), author: (.author.username // null) }'
+_MAP_MR='
+  def st: if . == "merged" then "merged" elif . == "closed" then "closed" else "open" end;
+  { id: .iid, title: (.title // ""), state: ((.state // "opened") | st),
+    draft: (.draft // false), url: (.web_url // null),
+    branch: (.source_branch // null), sha: (.sha // null),
+    body: (.description // "") }'
+_MAP_MILESTONE='
+  def st: if . == "closed" then "closed" else "open" end;
+  { id: .id, title: (.title // ""), state: ((.state // "active") | st),
+    description: (.description // "") }'
+_MAP_LABEL='{ name: .name }'
+
+_shape()     { jq "map($1)"; }   # a list
+_shape_one() { jq "$1"; }        # a single object
+
 need_id() { case "${1:-}" in ''|*[!0-9]*) die "$2: needs a numeric id, got '${1:-}'" ;; esac; }
 
 # --- board reads ----------------------------------------------------------
 
-v_issues_open() { _list "$(_p 'issues?state=opened&per_page=100')"; }
+v_issues_open() { _list "$(_p 'issues?state=opened&per_page=100')" | _shape "$_MAP_ISSUE"; }
 
 v_issues_by_label() { # <label> <opened|closed>
     local label="${1:-}" state="${2:-opened}"
@@ -73,30 +119,31 @@ v_issues_by_label() { # <label> <opened|closed>
     # state BEFORE labels, which is the order every existing call site used.
     # Query-parameter order is not semantics to GitLab, but it is to anything
     # matching on the request — including this skill's own test stubs.
-    _list "$(_p "issues?state=$state&labels=$label&per_page=100")"
+    _list "$(_p "issues?state=$state&labels=$label&per_page=100")" | _shape "$_MAP_ISSUE"
 }
 
-v_issue() { need_id "${1:-}" issue; _one "$(_p "issues/$1")"; }
+v_issue() { need_id "${1:-}" issue; _one "$(_p "issues/$1")" | _shape_one "$_MAP_ISSUE"; }
 
 v_issue_notes() { # <id> [--limit N] — newest first, capped (never paginated)
     local id="${1:-}" limit=30
     need_id "$id" issue-notes
     case "${2:-}" in --limit) limit="${3:-30}" ;; esac
-    _list --capped "$(_p "issues/$id/notes?sort=desc&order_by=created_at&per_page=$limit")"
+    _list --capped "$(_p "issues/$id/notes?sort=desc&order_by=created_at&per_page=$limit")" \
+        | _shape "$_MAP_NOTE"
 }
 
 # Native blocking links. A 403 here is the EXPECTED path on a tier without
 # them — the caller degrades to body-parsed edges — so this reports the failure
 # and lets the caller decide, rather than deciding for it.
-v_issue_links() { need_id "${1:-}" issue-links; _list "$(_p "issues/$1/links?per_page=100")"; }
+v_issue_links() { need_id "${1:-}" issue-links; _list "$(_p "issues/$1/links?per_page=100")" | _shape "$_MAP_LINK"; }
 
 v_milestones() { # [--state active]
     local q="milestones?per_page=100"
     case "${1:-}" in --state) q="milestones?state=${2:-active}&per_page=100" ;; esac
-    _list "$(_p "$q")"
+    _list "$(_p "$q")" | _shape "$_MAP_MILESTONE"
 }
 
-v_labels() { _list "$(_p 'labels?per_page=100')"; }
+v_labels() { _list "$(_p 'labels?per_page=100')" | _shape "$_MAP_LABEL"; }
 
 v_whoami() { _one user; }
 
@@ -178,19 +225,19 @@ v_milestone_close() { # <milestone-id>
 # Not through `_list`: `closed_by` is a short, unpaginated list and the callers
 # that matter (submit, merge, close, merge-failed) each apply their own jq to
 # it. Paginating it would change the request these guards have always made.
-v_issue_closed_by() { need_id "${1:-}" issue-closed-by; _one "$(_p "issues/$1/closed_by")"; }
+v_issue_closed_by() { need_id "${1:-}" issue-closed-by; _one "$(_p "issues/$1/closed_by")" | _shape "$_MAP_MR"; }
 
 # The looser one, wanted deliberately by the snapshot: it is showing a human
 # every MR touching a ticket, not choosing one to merge.
-v_issue_mrs() { need_id "${1:-}" issue-mrs; _list "$(_p "issues/$1/related_merge_requests?per_page=100")"; }
+v_issue_mrs() { need_id "${1:-}" issue-mrs; _list "$(_p "issues/$1/related_merge_requests?per_page=100")" | _shape "$_MAP_MR"; }
 
-v_mr() { need_id "${1:-}" mr; _one "$(_p "merge_requests/$1")"; }
+v_mr() { need_id "${1:-}" mr; _one "$(_p "merge_requests/$1")" | _shape_one "$_MAP_MR"; }
 
 v_mr_for_branch() { # <branch> [--state merged]
     local br="${1:-}" state="merged"
     [ -n "$br" ] || die "mr-for-branch: needs a branch"
     case "${2:-}" in --state) state="${3:-merged}" ;; esac
-    _list --capped "$(_p "merge_requests?source_branch=$br&state=$state&per_page=1")"
+    _list --capped "$(_p "merge_requests?source_branch=$br&state=$state&per_page=1")" | _shape "$_MAP_MR"
 }
 
 v_mr_create() { # --source B --target B --title T --body-file F → the new mr id

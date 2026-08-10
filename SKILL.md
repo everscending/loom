@@ -1,6 +1,6 @@
 ---
 name: loom
-description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over GitLab-tracked state. Verbs: plan, epics, tickets, build, tick, watch, unblock, replan, qa, retro."
+description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over tracker-backed state. Verbs: plan, epics, tickets, build, tick, watch, unblock, replan, qa, retro."
 disable-model-invocation: true
 ---
 
@@ -12,9 +12,9 @@ technique of its own.
 
 ## Constitution (violations are bugs)
 
-1. **No shadow state.** The GitLab tracker is the only mutable **build**
+1. **No shadow state.** The declared tracker is the only mutable **build**
    state — every decision about a ticket. Config is read-only input. If a
-   fresh session can't reconstruct the *build* by querying `glab`, it's a
+   fresh session can't reconstruct the *build* by querying the tracker, it's a
    bug. Scoped deliberately: the run directory (`~/.loom/<repo>/`)
    holds locks, pid files and pause markers — plumbing for the machine, not
    decisions, and not reconstructible by design.
@@ -27,8 +27,7 @@ technique of its own.
 
 ## Tracker vocabulary
 
-- **Epic** = GitLab epic if the instance tier has them, else one milestone
-  per epic. Epic completeness is always derived (all member tickets
+- **Epic** = one milestone per epic (a native epic where the tracker has them). Epic completeness is always derived (all member tickets
   closed), never stored.
 - **Build** = a `Build N` issue listing the selected epics, plus a
   `build-N` label on every member ticket. The scheduler's universe is
@@ -118,7 +117,7 @@ could not be read at all — skips on the timer, and only `active` and `complete
 buy a wave. Every skip writes a `tick_skipped` event naming its reason, so the
 ticker can say why nothing ran. *(paid: the gate used to name only the states
 that block, so `unknown` fell through. A sleeping laptop runs the missed firing
-the instant it darkwakes, before WiFi is back; `glab` fails, the board reads
+the instant it darkwakes, before WiFi is back; the tracker read fails, the board reads
 `unknown`, and a full model session launches on a build where every ticket is
 blocked — four overnight waves, one of them 84 minutes, build-3 2026-08-06.)*
 
@@ -361,7 +360,7 @@ refuses outside herdr anyway.
    merge --abort`, record the attempt with `lane.sh merge-failed <iid>`
    explaining the conflict, exit — **never ask a question; no one is there**.
    Then re-run its tier gates → **`lane.sh merge <iid>`**, one verb that merges
-   the MR, waits until GitLab reports it actually `merged`, then closes the
+   the MR, waits until the tracker reports it actually `merged`, then closes the
    ticket and strips its state labels. Never hand-roll the merge, and never
    reach for `close` to finish a ticket: `close` closes an *issue* and merges
    nothing, so a lane that calls it alone reports success over unmerged work
@@ -387,7 +386,7 @@ refuses outside herdr anyway.
    branches, backing up `.env` to the state dir first, never touching a live
    lane's cwd and never a worktree holding uncommitted work — untracked files
    git does not ignore are a lane's unsaved work, not debris. Repos with a non-git `worktree_cmd`
-   tear down via their own mechanism in the wave. Plain GitLab auto-merge is
+   tear down via their own mechanism in the wave. Plain tracker-side auto-merge is
    **not** this queue — with parallel lanes it merges MRs that were never
    gate-tested together; use merge trains or let this step own merging.
 

@@ -27,7 +27,7 @@ cat > "$FX/snap.json" <<'EOF'
   "config": {"max_lanes": 4, "max_aux_lanes": 4, "rejection_cap": 2, "crash_cap": 2,
              "merge_attempt_cap": 2, "lane_turn_cap": 150, "heartbeat_stale_minutes": 30,
              "lane_model": "sonnet", "rework_model": "opus", "base": "develop"},
-  "build": {"iid": 1, "label": "build-2", "title": "Build 2", "url": "https://x/1"},
+  "build": {"id": 1, "label": "build-2", "title": "Build 2", "url": "https://x/1"},
   "epics": [
     {"name": "Ledger core", "milestone": "Ledger core", "acceptance": "- [ ] a ledger balances",
      "needs_probe": true, "complete": true, "open_tickets": 0, "accepted": false},
@@ -35,62 +35,62 @@ cat > "$FX/snap.json" <<'EOF'
      "needs_probe": true, "complete": true, "open_tickets": 0, "accepted": false}
   ],
   "tickets": [
-    {"iid": 40, "title": "pregate rejected", "state": "review", "tier": "logic", "fix": false,
+    {"id": 40, "title": "pregate rejected", "state": "review", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null,
-     "related_merge_requests": [{"iid": 90, "state": "opened", "source_branch": "t40", "sha": "aaaa111"}],
+     "related_merge_requests": [{"id": 90, "state": "open", "branch": "t40", "sha": "aaaa111"}],
      "gate": {"eligible": true, "reason": null, "head": "aaaa111", "last_verdict": null}},
-    {"iid": 41, "title": "wedged lane", "state": "in-progress", "tier": "api", "fix": false,
+    {"id": 41, "title": "wedged lane", "state": "in-progress", "tier": "api", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
+    {"id": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "opus", "source": "rework_model"},
      "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 43, "title": "stranded, two same class", "state": "in-progress", "tier": "logic", "fix": false,
+    {"id": 43, "title": "stranded, two same class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "opus", "source": "rework_model"},
      "rejections": {"total": 2, "last_class": "marks-attribution", "same_class_tail": 2},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 44, "title": "ready, but a repair stands against it", "state": "ready-for-agent",
+    {"id": 44, "title": "ready, but a repair stands against it", "state": "ready-for-agent",
      "tier": "api", "fix": false,
      "unblocked": true, "assignees": [], "model": {"effective": null, "source": "session-default"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 45, "title": "ready, fix", "state": "ready-for-agent", "tier": "logic", "fix": true,
+    {"id": 45, "title": "ready, fix", "state": "ready-for-agent", "tier": "logic", "fix": true,
      "unblocked": true, "assignees": [], "model": {"effective": "haiku", "source": "label"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 46, "title": "ready, blocked by an open blocker", "state": "ready-for-agent", "tier": "ui",
+    {"id": 46, "title": "ready, blocked by an open blocker", "state": "ready-for-agent", "tier": "ui",
      "fix": false, "unblocked": false, "assignees": [], "model": {"effective": null, "source": "session-default"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 47, "title": "merge-queue, held", "state": "merge-queue", "tier": "api", "fix": false,
+    {"id": 47, "title": "merge-queue, held", "state": "merge-queue", "tier": "api", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 1, "merge_hold": {"checks": ["pytest::x"], "fixes": [70]},
-     "related_merge_requests": [{"iid": 97, "state": "opened", "source_branch": "t47", "sha": "cccc333"}],
+     "related_merge_requests": [{"id": 97, "state": "open", "branch": "t47", "sha": "cccc333"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 48, "title": "merge-queue, free", "state": "merge-queue", "tier": "api", "fix": false,
+    {"id": 48, "title": "merge-queue, free", "state": "merge-queue", "tier": "api", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null,
-     "related_merge_requests": [{"iid": 98, "state": "opened", "source_branch": "t48", "sha": "dddd444"}],
+     "related_merge_requests": [{"id": 98, "state": "open", "branch": "t48", "sha": "dddd444"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 49, "title": "merge-queue, cap spent", "state": "merge-queue", "tier": "api", "fix": false,
+    {"id": 49, "title": "merge-queue, cap spent", "state": "merge-queue", "tier": "api", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 2, "merge_hold": null,
-     "related_merge_requests": [{"iid": 99, "state": "opened", "source_branch": "t49", "sha": "eeee555"}],
+     "related_merge_requests": [{"id": 99, "state": "open", "branch": "t49", "sha": "eeee555"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
-    {"iid": 50, "title": "running past the turn cap", "state": "in-progress", "tier": "logic", "fix": false,
+    {"id": 50, "title": "running past the turn cap", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
@@ -111,7 +111,7 @@ cat > "$FX/snap.json" <<'EOF'
     "lanes_running_by_type": {"impl": 2, "gate": 0, "merge": 0, "probe": 0, "unknown": 0},
     "impl_slots_free": 2, "merge_in_flight": false,
     "stranded": [42, 43],
-    "repairs": [{"iid": 44, "shape": "mr-open-not-in-review", "state": "ready-for-agent", "mr": 91,
+    "repairs": [{"id": 44, "shape": "mr-open-not-in-review", "state": "ready-for-agent", "mr": 91,
                  "fix": "lane.sh transition 44 review"}]
   },
   "warnings": []
@@ -326,7 +326,7 @@ jq '.lanes = [] | .summary.stranded = [] | .summary.repairs = []
     | .summary.epics_awaiting_probe = [] | .summary.ready_set_empty = true
     | .summary.lanes_running = 0 | .summary.all_blocked = false
     | .summary.open_tickets = 1
-    | .tickets = [.tickets[] | select(.iid == 46)]' "$FX/snap.json" > "$FX/snap-quiet.json"
+    | .tickets = [.tickets[] | select(.id == 46)]' "$FX/snap.json" > "$FX/snap-quiet.json"
 qout=$(PLAN "$FX/snap-quiet.json" 2>/dev/null)
 [ "$(printf '%s' "$qout" | jq '(.actions|length) + (.residue|length)')" = "0" ] \
    && [ "$(printf '%s' "$qout" | jq -r '.reason // ""')" != "" ] \
@@ -347,7 +347,7 @@ jq '.summary.all_blocked = true | .lanes = [] | .summary.stranded = []
     | .summary.repairs = [] | .summary.epics_awaiting_probe = []
     | .summary.ready_set_empty = true | .summary.lanes_running = 0
     | .summary.open_tickets = 1
-    | .tickets = [.tickets[] | select(.iid == 46)]' "$FX/snap.json" > "$FX/snap-halted.json"
+    | .tickets = [.tickets[] | select(.id == 46)]' "$FX/snap.json" > "$FX/snap-halted.json"
 [ "$(PLAN "$FX/snap-halted.json" | jq -r '[.residue[] | select(.kind=="halted-report")] | length')" = "1" ] \
     && ok "plan: an all-blocked board leaves the halted report as residue" \
     || bad "plan: no halted residue on an all-blocked board"

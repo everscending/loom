@@ -35,7 +35,7 @@ include "lib";
     # pick a suite (#52, 2026-08-03 — and #51 before it, both filed by probe
     # lanes that set the label and not the section).
     def tier_of($labels):
-        ([(.description | section("Risk tier")) | scan("\\b(docs|logic|api|ui)\\b") | .[0]] | first)
+        ([(.body | section("Risk tier")) | scan("\\b(docs|logic|api|ui)\\b") | .[0]] | first)
         // ($labels | map(select(test("^(tier::)?(docs|logic|api|ui)$")) | ltrimstr("tier::"))
                     | first) // null;
     # P11. Build 2 spawned a 12m53s verifier on a ticket whose code had merged
@@ -72,7 +72,7 @@ include "lib";
                   | sort_by([.at, -.i]) | last)
         end;
     def gate_of($iid; $state; $mrs; $notes; $gating):
-        ($mrs | map(select((.state // "") == "opened")) | first) as $mr
+        ($mrs | map(select((.state // "") == "open")) | first) as $mr
       | ($mr.sha // null) as $head
       | judged_at($notes; $head) as $judged
       | if $state != "review" then
@@ -110,20 +110,20 @@ include "lib";
     # issue, and repairing off the wrong branch is the cmd_merge trap again.
     def repairs_of($iid; $state; $mrs; $notes; $working):
         ((($iid | tostring) as $i | $working | index($i)) != null) as $busy
-      | ($mrs | map(select((.state // "") == "opened"
-                           and ((.description // "")
+      | ($mrs | map(select((.state // "") == "open"
+                           and ((.body // "")
                                 | test("(?i)\\bcloses\\s+#" + ($iid | tostring) + "\\b"))))
               | first) as $mr
-      | ($mrs | map(select((.state // "") == "opened")) | first | .sha // null) as $head
+      | ($mrs | map(select((.state // "") == "open")) | first | .sha // null) as $head
       | judged_at($notes; $head) as $judged
       | if $busy or $state == "blocked" then []
         else
           [ (if $mr != null and (($state == "review" or $state == "merge-queue") | not)
-             then {iid: $iid, shape: "mr-open-not-in-review", state: $state, mr: $mr.iid,
+             then {id: $iid, shape: "mr-open-not-in-review", state: $state, mr: $mr.id,
                    fix: "lane.sh transition \($iid) review"}
              else empty end),
             (if $judged != null and $judged.verdict == "PASS" and $state != "merge-queue"
-             then {iid: $iid, shape: "pass-not-in-merge-queue", state: $state, sha: $judged.sha,
+             then {id: $iid, shape: "pass-not-in-merge-queue", state: $state, sha: $judged.sha,
                    fix: "lane.sh transition \($iid) merge-queue"}
              else empty end) ]
         end;
@@ -258,7 +258,7 @@ include "lib";
     def blocker($iid; $src; $state; $proj; $open_iids; $home):
         # State comes straight off a native link when present; otherwise the
         # open-set inference, which is only valid inside this project.
-        { iid: $iid, source: $src,
+        { id: $iid, source: $src,
           closed: (if $state != null then ($state == "closed")
                    elif ($proj != null and $home != null and $proj != $home) then null
                    else (($open_iids | index($iid)) == null) end) };
@@ -278,13 +278,13 @@ include "lib";
         or ($t.state == "review" and ($t.gate.eligible // false))
         or ($t.state == "merge-queue")
         or ($t.state == "in-progress"
-            and ((($t.iid | tostring) as $i | $working | index($i)) == null))
-        or ((($t.iid | tostring) as $i | $working | index($i)) != null);
+            and ((($t.id | tostring) as $i | $working | index($i)) == null))
+        or ((($t.id | tostring) as $i | $working | index($i)) != null);
 
     ($open[0]) as $issues
-    | ($issues | map(.iid)) as $open_iids
-    | ($issues | map(select((.title // "") | test("^Build [0-9]+$"))) | sort_by(.iid) | last) as $bi
-    | ($bi.project_id? // null) as $home
+    | ($issues | map(.id)) as $open_iids
+    | ($issues | map(select((.title // "") | test("^Build [0-9]+$"))) | sort_by(.id) | last) as $bi
+    | ($bi.project? // null) as $home
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
        | map({id: .[0], pid: .[1], state: .[2], type: (.[3] // "unknown"),
@@ -314,55 +314,55 @@ include "lib";
     | (if $label == "" then [] else $issues | map(select((.labels // []) | index($label))) end) as $members
     | ($members | map(
         . as $t | ($t.labels // []) as $lb
-        | (($L[$t.iid | tostring]) // []) as $lk
-        | ($lk | map(select((.link_type // "") == "is_blocked_by"))) as $nat
-        | ($t.description | section("Blocked by")
+        | (($L[$t.id | tostring]) // []) as $lk
+        | ($lk | map(select((.type // "") == "is_blocked_by"))) as $nat
+        | ($t.body | section("Blocked by")
            | [scan("#([0-9]+)") | .[0] | tonumber] | unique) as $body
-        | ($nat | map(.iid)) as $natids
-        | (($nat | map(.iid as $n
+        | ($nat | map(.id)) as $natids
+        | (($nat | map(.id as $n
                        | blocker($n; (if ($body | index($n)) then "both" else "native" end);
-                                 (.state // null); (.project_id // null); $open_iids; $home)))
+                                 (.state // null); (.project // null); $open_iids; $home)))
            + ($body | map(select(. as $b | ($natids | index($b)) == null))
                     | map(blocker(.; "body"; null; null; $open_iids; $home)))) as $bb
-        | rejections_of((($N[$t.iid | tostring]) // [])) as $rej
+        | rejections_of((($N[$t.id | tostring]) // [])) as $rej
         # P53: depth, like width, is decided when the ticket is written. Two cheap
         # proxies read straight off the body `graph` can flag before a lane ever
         # opens it — how many acceptance criteria it promises, and how many
         # distinct files it already names. Both are heuristics (a stray "e.g."-
         # shaped token can inflate file_surface by one), which is why `graph`
         # only ever uses them to flag, never to block.
-        | ($t.description // "") as $desc
+        | ($t.body // "") as $desc
         | ($desc | section("Acceptance criteria")
            | [scan("(?m)^[ \\t]*[-*+][ \\t]+\\[[ xX]\\][ \\t]+")] | length) as $criteria_count
         | ($desc
            | [scan("[A-Za-z0-9_][A-Za-z0-9_./-]*\\.(?:ts|tsx|js|jsx|py|go|rb|rs|java|c|cpp|h|hpp|cs|md|json|ya?ml|sh|sql|css|html|vue)\\b")]
            | unique | length) as $file_surface
-        | { iid: $t.iid, title: $t.title, url: ($t.web_url // null), labels: $lb,
+        | { id: $t.id, title: $t.title, url: ($t.url // null), labels: $lb,
             state: state_of($lb), tier: ($t | tier_of($lb)),
             fix: (($lb | index("fix")) != null),
-            assignees: [($t.assignees // [])[] | .username],
+            assignees: ($t.assignees // []),
             updated_at: ($t.updated_at // null),
-            epic: ($t.epic.title? // $t.milestone.title? // null),
+            epic: ($t.epic // null),
             criteria_count: $criteria_count,
             file_surface: $file_surface,
             blocked_by: $bb,
             unblocked: ($bb | all(.closed == true)),
-            related: ($lk | map(select((.link_type // "") == "relates_to") | .iid)),
-            related_merge_requests: ((($M[$t.iid | tostring]) // [])
-                | map({iid, title, state, draft, web_url, source_branch, sha})),
+            related: ($lk | map(select((.type // "") == "relates_to") | .id)),
+            related_merge_requests: ((($M[$t.id | tostring]) // [])
+                | map({id, title, state, draft, url, branch, sha})),
             rejections: $rej,
-            blocked_report: blocked_report_of((($N[$t.iid | tostring]) // [])),
-            merge_attempts: merge_attempts_of((($N[$t.iid | tostring]) // [])),
-            merge_hold: merge_hold_of((($N[$t.iid | tostring]) // []); $open_iids),
+            blocked_report: blocked_report_of((($N[$t.id | tostring]) // [])),
+            merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
+            merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),
             model: model_of($lb; $rej; $config),
-            gate: gate_of($t.iid; state_of($lb);
-                          (($M[$t.iid | tostring]) // []);
-                          (($N[$t.iid | tostring]) // []); $gating) })) as $tickets
+            gate: gate_of($t.id; state_of($lb);
+                          (($M[$t.id | tostring]) // []);
+                          (($N[$t.id | tostring]) // []); $gating) })) as $tickets
     # Computed off $members, not off the rows above, because it needs two
     # fields no row carries: an MR description and the note thread.
     | ([$members[] | . as $t | ($t.labels // []) as $lb
-        | repairs_of($t.iid; state_of($lb); (($M[$t.iid | tostring]) // []);
-                     (($N[$t.iid | tostring]) // []); $working)[]]) as $repairs
+        | repairs_of($t.id; state_of($lb); (($M[$t.id | tostring]) // []);
+                     (($N[$t.id | tostring]) // []); $working)[]]) as $repairs
     | ([$tickets[] | .epic | select(. != null)] | group_by(.)
        | map({name: .[0], open_tickets: length, complete: false, source: "open-members"})) as $epics_open
     # An epic whose last ticket closed is invisible in an open-issue payload,
@@ -371,7 +371,7 @@ include "lib";
     # selected-epics list where the body marks one (so a "deliberately
     # dropped" list below cannot masquerade as build epics), stripped of
     # `(#12)` / `— 2h` trailers, minus config-snapshot `key: value` lines.
-    | (($bi.description // "")
+    | (($bi.body // "")
        | (if test("(?i)selected epic")
           then (capture("(?is)selected epic(?<b>.*?)(?=\\n[ \\t]*\\n(?![ \\t]*[-*+][ \\t]))") // {b: .}) | .b
           else . end)
@@ -386,7 +386,7 @@ include "lib";
     # moment it becomes probe-ready. Milestone titles on closed members are
     # the same fact without the guesswork; the parse stays only as a fallback
     # for a build whose tickets carry no milestone at all.
-    | (($closed[0] // []) | map(.milestone.title? // empty) | unique
+    | (($closed[0] // []) | map(.epic // empty) | unique
        | map(select(. as $t | ($epics_open | map(.name) | index($t)) | not))
        | map({name: ., open_tickets: 0, complete: true, source: "closed-members"})) as $epics_closed
     | ($items | map(select(ascii_downcase as $it
@@ -429,8 +429,8 @@ include "lib";
                      needs_probe: (.complete and $ms != null and $ms.state != "closed") }))
       as $epics
     | (($warn_raw | split("\n") | map(select(length > 0)))
-       + [$tickets[] | select(.state == null) | "ticket #\(.iid): no state label"]
-       + [$tickets[] | select(.tier == null) | "ticket #\(.iid): no `## Risk tier` section"]
+       + [$tickets[] | select(.state == null) | "ticket #\(.id): no state label"]
+       + [$tickets[] | select(.tier == null) | "ticket #\(.id): no `## Risk tier` section"]
        # An epic about to be probed with nothing to probe against. Fires
        # exactly when it matters — not for every epic, only the one whose
        # last ticket has closed and whose milestone is still open. A brief
@@ -442,7 +442,7 @@ include "lib";
             + "`## Acceptance criteria` section — the probe brief would have "
             + "nothing to check against but the defect history"]
        + [$tickets[] | select((.model.labels_seen | length) > 1)
-          | "ticket #\(.iid): \(.model.labels_seen | length) `model::` labels "
+          | "ticket #\(.id): \(.model.labels_seen | length) `model::` labels "
             + "(\(.model.labels_seen | join(", "))) — using \(.model.label)"]
        # A ticket still holding the assignee its lane wrote, after returning to
        # `ready-for-agent` falls between BOTH fill paths: `summary.stranded`
@@ -454,9 +454,9 @@ include "lib";
        # composed by hand.
        + [$tickets[] | select(.state == "ready-for-agent" and .unblocked
                               and ((.assignees | length) > 0))
-          | "ticket #\(.iid): `ready-for-agent` but still assigned to "
+          | "ticket #\(.id): `ready-for-agent` but still assigned to "
             + "\(.assignees | join(", ")) — invisible to the ready set AND to "
-            + "`summary.stranded`. Clear it: lane.sh transition \(.iid) ready-for-agent"]
+            + "`summary.stranded`. Clear it: lane.sh transition \(.id) ready-for-agent"]
        # The same shape one state along, and it has no warning of its own until
        # here: `review` with a verdict already standing at HEAD. `gate_of` calls
        # that ticket ineligible ("already judged"), and nothing else in the wave
@@ -477,22 +477,22 @@ include "lib";
        # `last_verdict: null` and never reaches this select.
        + [$tickets[] | select(.state == "review"
                               and (.gate.last_verdict.verdict // "") == "FAIL")
-          | "ticket #\(.iid): `review` with a FAIL verdict standing at "
+          | "ticket #\(.id): `review` with a FAIL verdict standing at "
             + "\(.gate.head) — \(.gate.reason), and no gate lane is running, so "
             + "no step will ever pick it up again. Requeue it: "
-            + "lane.sh transition \(.iid) ready-for-agent"]
+            + "lane.sh transition \(.id) ready-for-agent"]
        # Loud as well as listed: a stranded finish is invisible to every other
        # step (harvest reads lanes, gate needs `review`, fill needs unclaimed),
        # which is exactly how four of them sat for hours.
        + [$repairs[] | if .shape == "mr-open-not-in-review"
-          then "ticket #\(.iid): MR !\(.mr) is open and closes it, but the "
+          then "ticket #\(.id): MR !\(.mr) is open and closes it, but the "
                + "ticket is `\(.state // "unlabeled")` — a lane died between "
                + "opening the MR and moving the label. Repair: \(.fix)"
-          else "ticket #\(.iid): the gate PASSed at \(.sha) but the ticket is "
+          else "ticket #\(.id): the gate PASSed at \(.sha) but the ticket is "
                + "`\(.state // "unlabeled")`, not `merge-queue` — the verdict "
                + "note landed and the label flip did not. Repair: \(.fix)" end]
        + [$tickets[] | select(.blocked_by | any(.closed == null))
-          | "ticket #\(.iid): blocker closed-state unknown (cross-project link) — treated as not closed"]
+          | "ticket #\(.id): blocker closed-state unknown (cross-project link) — treated as not closed"]
        + (if ($bi != null and ($items | length) == 0)
           then ["build issue body has no parseable epic list — epics[] shows only epics with open tickets"]
           else [] end)
@@ -506,7 +506,7 @@ include "lib";
             + "NOT complete until one does: spawn probe-\((.milestone // .name) | epic_norm)"]) as $warnings
     | { generated_at: $generated_at, logs_dir: $logs_dir, config: $config,
         build: (if $bi == null then null
-                else { iid: $bi.iid, label: $label, title: $bi.title, url: ($bi.web_url // null) } end),
+                else { id: $bi.id, label: $label, title: $bi.title, url: ($bi.url // null) } end),
         # P57: --brief drops `acceptance` from every epic that isn't awaiting
         # a probe — it's 88% of the epics block and only step 6's probe-brief
         # assembly ever reads it. `needs_probe` IS `epics_awaiting_probe`'s own
@@ -523,11 +523,11 @@ include "lib";
         # never filters: `$brief` is false and every ticket keeps its row.
         tickets: (if $brief then [$tickets[] | select(is_actionable(.; $working))]
                   else $tickets end),
-        other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .iid]
+        other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .id]
                      else [] end),
         lanes: $lanes,
         lessons_tail: ($notes[0] | map(select((.system // false) | not))
-                       | map({author: (.author.username? // null), created_at, body})),
+                       | map({author: (.author // null), created_at, body})),
         summary: {
             open_tickets: ($tickets | length),
             by_state: ($tickets | map(.state // "unlabeled") | group_by(.)
@@ -575,9 +575,9 @@ include "lib";
             # build-3 2026-08-02 — #11/#12 gate-FAILed and sat unworked.)
             stranded: ($tickets
                        | map(select(.state == "in-progress"
-                              and (((.iid | tostring) as $i
+                              and (((.id | tostring) as $i
                                     | $working | index($i)) | not)))
-                       | map(.iid)),
+                       | map(.id)),
             # P63: tickets whose finishing lane wrote one half of a two-write
             # finish and died. Each item names its shape and the single
             # command that completes it, so the wave repairs from a list

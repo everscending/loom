@@ -213,7 +213,7 @@ _open_mr_closing() { # <iid> <what-a-failed-read-would-mean> — sets _OPEN_MR, 
     body=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
         || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — $refusal"
-    _OPEN_MR=$(printf '%s' "$body" | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+    _OPEN_MR=$(printf '%s' "$body" | jq -r '[.[] | select(.state == "open")] | .[0].id // empty' || true)
     return 0
 }
 
@@ -364,7 +364,7 @@ cmd_merge_failed() { # <iid> [--file F]
     _closed_by=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
         || die "issue $iid: could not read closed_by (tracker read failed, rc=$rc) — refusing to record a merge-failed attempt blind; cannot rule out the merge having already succeeded."
-    merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].iid // empty' || true)
+    merged_mr=$(printf '%s' "$_closed_by" | jq -r '[.[] | select(.state == "merged")] | .[0].id // empty' || true)
     [ -z "$merged_mr" ] \
         || die "issue $iid already has MERGED MR !$merged_mr — the merge succeeded; refusing to record a failed attempt. Re-read the ticket: your snapshot is stale."
     # P62: an attempt that failed on a check that is ALSO red on clean
@@ -637,7 +637,7 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     local blabel
     blabel=$("$TRACKER" issues-open 2>/dev/null \
         | jq -r '[.[] | select((.title // "") | test("^Build [0-9]+$"))]
-                 | sort_by(.iid) | last | (.title // "") | sub("^Build "; "build-")')
+                 | sort_by(.id) | last | (.title // "") | sub("^Build "; "build-")')
     case "$blabel" in build-[0-9]*) ;; *) die "fix-ticket: no open \`Build N\` issue — cannot derive the build label" ;; esac
     local mid
     mid=$("$TRACKER" milestones 2>/dev/null \
@@ -656,7 +656,7 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
             | jq -c --arg ms "$ms" --arg newt "$title" '
                 def words: ascii_downcase | gsub("[^a-z0-9]+"; " ") | split(" ") | map(select(length > 0));
                 ($newt | words) as $nw
-                | [ .[] | select((.milestone.title // "") == $ms)
+                | [ .[] | select((.epic // "") == $ms)
                     | . + {sim: ((.title // "" | words) as $ew
                                  | (($nw - ($nw - $ew)) | length) as $inter
                                  | (($nw + $ew) | unique | length) as $uni
@@ -664,7 +664,7 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
                     | select(.sim >= 0.5)
                     | {iid, title, sim} ]')
         if [ -n "$dups" ] && [ "$dups" != "[]" ] && [ "$dups" != "null" ]; then
-            local hits; hits=$(printf '%s' "$dups" | jq -r '.[] | "#\(.iid) \"\(.title)\""' | tr '\n' ';' | sed 's/;$//')
+            local hits; hits=$(printf '%s' "$dups" | jq -r '.[] | "#\(.id) \"\(.title)\""' | tr '\n' ';' | sed 's/;$//')
             die "fix-ticket: near-duplicate open fix ticket(s) in milestone '$ms' — $hits — refile with --force if this is genuinely separate work"
         fi
     fi
@@ -1027,7 +1027,7 @@ cmd_merge() { # <iid> — merge THIS ticket's MR, verify it landed, then close.
     _check_iid "$iid"
     _blocked_guard "$iid" merge
     mr=$("$TRACKER" issue-closed-by "$iid" 2>/dev/null \
-         | jq -r '[.[] | select(.state == "opened")] | .[0].iid // empty' || true)
+         | jq -r '[.[] | select(.state == "open")] | .[0].id // empty' || true)
     [ -n "$mr" ] || die "no open MR closes issue $iid — its description must contain 'Closes #$iid'"
     # P84: delete the source branch as part of the merge. Nothing else in the
     # loop ever deletes a branch — sweep's `git branch -d` only fires as a side

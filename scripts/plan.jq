@@ -91,7 +91,7 @@ else
 | ($s.logs_dir // "") as $logs
 
 # One lookup, so every rule below reads the same row for the same ticket.
-| def ticket($iid): ($tickets | map(select((.iid | tostring) == ($iid | tostring))) | first);
+| def ticket($iid): ($tickets | map(select((.id | tostring) == ($iid | tostring))) | first);
 
 # =========================================================================
 # Step 2 — harvest. The lane states are already classified by `lane-status`
@@ -144,7 +144,7 @@ else
 # `snapshot.jq` located them (P63); the plan is where they stop being a warning
 # a wave has to notice and become work with a place in the order.
 | ([ ($sum.repairs // [])[]
-     | { step: "harvest", kind: "repair", ticket: .iid,
+     | { step: "harvest", kind: "repair", ticket: .id,
          via: "lane.sh", argv: (.fix | ltrimstr("lane.sh ") | split(" ")),
          why: "\(.shape) — a lane died between its two writes" } ])
   as $repairs
@@ -194,26 +194,26 @@ else
                   | lane_round(.id) ] | max) as $r
     | if $r == null then "gate-\($iid)" else "gate-\($iid)-r\($r + 1)" end;
 
-  ([ $tickets[] | select(.gate.eligible // false) ] | sort_by(.iid)) as $gate_all
+  ([ $tickets[] | select(.gate.eligible // false) ] | sort_by(.id)) as $gate_all
 | ($gate_all[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
-     | (gate_lane(.iid)) as $lid
+     | (gate_lane(.id)) as $lid
      | select(spawnable($lid))
-     | { step: "gate", kind: "spawn", lane: $lid, ticket: .iid,
+     | { step: "gate", kind: "spawn", lane: $lid, ticket: .id,
          spawn: { id: $lid, type: "gate", model: $lane_model, pregate: .tier,
                   merge_lock: false,
-                  cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "opened") | .source_branch] | first) // "unknown"))",
+                  cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                   brief: { step: 3,
-                           inputs: ["ticket #\(.iid) body and its `PRD requirement`",
+                           inputs: ["ticket #\(.id) body and its `PRD requirement`",
                                     "the open MR at HEAD \(.gate.head // "unknown")",
                                     "the merge spawn line to run on a PASS"] } },
          why: "gate.eligible — in `review`, an open MR, and no verdict standing at this HEAD" } ])
   as $gate_actions
-| ([ $gate_take[] | (gate_lane(.iid)) as $lid | select(spawnable($lid) | not)
-     | { step: "gate", ticket: .iid, lane: $lid,
+| ([ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
+     | { step: "gate", ticket: .id, lane: $lid,
          why: "lane id `\($lid)` is not one `spawn-lane` accepts — a planner bug, not a lane failure" } ]
    + [ $gate_all[$aux_free:][]
-     | { step: "gate", ticket: .iid,
+     | { step: "gate", ticket: .id,
          why: "no aux slot free (\($aux_alive) of \($aux_cap) held by gates, merges and probes)" } ])
   as $gate_deferred
 | (($aux_free - ($gate_actions | length)) | if . < 0 then 0 else . end) as $aux_left
@@ -232,9 +232,9 @@ else
 # really in — and a lane spawned from the stale label would be working on a
 # ticket that has already left this step. (paid: the P63 shapes, four
 # stranded finishes in one build.)
-| ([ ($sum.repairs // [])[] | .iid ]) as $repairing
+| ([ ($sum.repairs // [])[] | .id ]) as $repairing
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
-     | select(.iid as $i | ($repairing | index($i)) == null) ] | sort_by(.iid)) as $stranded
+     | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded
 
 # Two same-class rejections mean stop, not respawn: block for a design
 # decision instead of a third same-tier guess. The cap stays for DIFFERENT
@@ -242,8 +242,8 @@ else
 # already named.)
 | ([ $stranded[] | select((.rejections.same_class_tail // 0) >= 2) ]) as $same_class
 | ([ $same_class[]
-     | { step: "fill", kind: "transition", ticket: .iid,
-         via: "lane.sh", argv: ["transition", (.iid | tostring), "blocked"],
+     | { step: "fill", kind: "transition", ticket: .id,
+         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
          why: "\(.rejections.same_class_tail) consecutive `\(.rejections.last_class)` rejections — a third same-tier guess is not the next step, a design decision is",
          needs_report: true } ])
   as $block_same_class
@@ -256,41 +256,41 @@ else
 # two plans over one snapshot are the same plan.
 | ([ $tickets[] | select(.state == "ready-for-agent" and (.unblocked // false)
                          and ((.assignees | length) == 0))
-                | select(.iid as $i | ($repairing | index($i)) == null) ]
-   | sort_by([(if .fix then 0 else 1 end), .iid])) as $ready
+                | select(.id as $i | ($repairing | index($i)) == null) ]
+   | sort_by([(if .fix then 0 else 1 end), .id])) as $ready
 
 | ($rework[0:$impl_free]) as $rework_take
 | (($impl_free - ($rework_take | length)) | if . < 0 then 0 else . end) as $impl_left
 | ($ready[0:$impl_left]) as $ready_take
 
 | ([ $rework_take[]
-     | ("impl-\(.iid)") as $lid
+     | ("impl-\(.id)") as $lid
      | select(spawnable($lid))
-     | { step: "fill", kind: "spawn", lane: $lid, ticket: .iid,
+     | { step: "fill", kind: "spawn", lane: $lid, ticket: .id,
          spawn: { id: $lid, type: "impl", model: (.model.effective), pregate: null,
                   merge_lock: false,
                   cwd_from: "the ticket's SURVIVING worktree — this is a respawn, not a new lane",
                   brief: { step: 4,
-                           inputs: ["ticket #\(.iid) body",
-                                    "the latest rejection comment on #\(.iid)",
+                           inputs: ["ticket #\(.id) body",
+                                    "the latest rejection comment on #\(.id)",
                                     "the build lessons thread"] } },
          why: "stranded rework (round \((.rejections.total // 0) + 1), model source `\(.model.source)`) — closest to done and its rejection cap is already counting" } ]
    + [ $ready_take[]
-     | ("impl-\(.iid)") as $lid
+     | ("impl-\(.id)") as $lid
      | select(spawnable($lid))
-     | { step: "fill", kind: "spawn", lane: $lid, ticket: .iid,
+     | { step: "fill", kind: "spawn", lane: $lid, ticket: .id,
          spawn: { id: $lid, type: "impl", model: (.model.effective), pregate: null,
                   merge_lock: false,
                   cwd_from: "a NEW worktree cut from the freshly-fetched `origin/\($cfg.base // "<base>")`, a sibling of the repo; copy the repo root's untracked .env in when present",
                   brief: { step: 4,
-                           inputs: ["ticket #\(.iid) body",
+                           inputs: ["ticket #\(.id) body",
                                     "the build lessons thread"] } },
          claim_first: true,
          why: (if .fix then "ready `fix:` ticket — fix tickets outrank the rest of the ready set"
                else "ready, unblocked and unclaimed" end) } ])
   as $fill_actions
 | ([ ($rework[$impl_free:] + $ready[$impl_left:])[]
-     | { step: "fill", ticket: .iid,
+     | { step: "fill", ticket: .id,
          why: "no implementation slot free (`summary.impl_slots_free` was \($impl_free))" } ])
   as $fill_deferred
 
@@ -301,15 +301,15 @@ else
 # while one is in flight.
 # =========================================================================
 
-| ([ $tickets[] | select(.state == "merge-queue") ] | sort_by(.iid)) as $queue
+| ([ $tickets[] | select(.state == "merge-queue") ] | sort_by(.id)) as $queue
 # At `merge_attempt_cap` recorded attempts, stop retrying that ticket: block
 # it so the queue ADVANCES to the next-oldest instead of feeding every later
 # lane into the same wall. (paid: three consecutive lanes wedged on one ticket
 # while two gate-passed tickets waited behind it.) Attempts recorded
 # `base-red` never count — `snapshot.jq` already excludes them.
 | ([ $queue[] | select((.merge_attempts // 0) >= $merge_cap)
-     | { step: "merge", kind: "transition", ticket: .iid,
-         via: "lane.sh", argv: ["transition", (.iid | tostring), "blocked"],
+     | { step: "merge", kind: "transition", ticket: .id,
+         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
          why: "\(.merge_attempts) merge attempts against a cap of \($merge_cap) — blocking it advances the queue instead of feeding the next lane into the same wall",
          needs_report: true } ])
   as $block_merge_cap
@@ -317,25 +317,25 @@ else
   as $merge_head
 | (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1 then []
    else [ $merge_head
-          | ("merge-\(.iid)") as $lid
+          | ("merge-\(.id)") as $lid
           | select(spawnable($lid))
-          | { step: "merge", kind: "spawn", lane: $lid, ticket: .iid,
+          | { step: "merge", kind: "spawn", lane: $lid, ticket: .id,
               spawn: { id: $lid, type: "merge", model: $lane_model, pregate: null,
                        merge_lock: true,
-                       cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "opened") | .source_branch] | first) // "unknown"))",
+                       cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                        brief: { step: 5,
-                                inputs: ["ticket #\(.iid) and its open MR",
+                                inputs: ["ticket #\(.id) and its open MR",
                                          "the integration base `\($cfg.base // "<declared base, else develop, else main>")`"] } },
               why: "oldest `merge-queue` ticket with no merge hold" } ]
    end) as $merge_actions
 | ([ $queue[] | select(.merge_hold != null)
-     | { step: "merge", ticket: .iid,
+     | { step: "merge", ticket: .id,
          why: "parked behind an open base-red fix (\(.merge_hold.fixes | map("#\(.)") | join(", "))) — it re-enters the queue on its own when the fix merges" } ]
    + (if ($sum.merge_in_flight // false)
       then [ { step: "merge",
                why: "a merge lane already holds the merge lock — a second merge waits" } ]
       elif $merge_head != null and $aux_left < 1
-      then [ { step: "merge", ticket: $merge_head.iid,
+      then [ { step: "merge", ticket: $merge_head.id,
                why: "no aux slot free (\($aux_alive) of \($aux_cap) held by gates, merges and probes)" } ]
       else [] end))
   as $merge_deferred
@@ -405,7 +405,7 @@ else
 # means the build is not finished, however many tickets merged. (paid:
 # build-2's completion wave closed the build over three unprobed epics.)
 | (if ($sum.all_blocked // false)
-   then [ { kind: "halted-report", build: ($s.build.iid),
+   then [ { kind: "halted-report", build: ($s.build.id),
             why: "every open ticket is blocked or waiting on a blocker — the build is halted and a human has to move it",
             verb: "tick.sh notify build_halted …" } ]
    elif ($sum.ready_set_empty // false)
@@ -413,9 +413,9 @@ else
       and (($sum.epics_awaiting_probe // []) | length) == 0
       and ($gate_all | length) == 0 and ($queue | length) == 0
       and ($stranded | length) == 0 and $open_count == 0
-   then [ { kind: "completion-report", build: ($s.build.iid),
+   then [ { kind: "completion-report", build: ($s.build.id),
             why: "no open ticket, no lane, no unaccepted epic — the completion report, the digest and closing the `Build N` issue are all prose",
-            verb: "tick.sh notify build_complete …, then lane.sh close \($s.build.iid)" } ]
+            verb: "tick.sh notify build_complete …, then lane.sh close \($s.build.id)" } ]
    else [] end) as $res_build
 
 # =========================================================================
@@ -432,7 +432,7 @@ else
   as $residue
 | ($gate_deferred + $fill_deferred + $merge_deferred + $probe_deferred) as $deferred
 | { generated_at: $s.generated_at,
-    build: { iid: $s.build.iid, label: $s.build.label },
+    build: { id: $s.build.id, label: $s.build.label },
     reason: (if ($actions | length) == 0 and ($residue | length) == 0
              then "nothing to schedule: \($open_count) open ticket(s), \($sum.lanes_running // 0) lane(s) running"
              else null end),
