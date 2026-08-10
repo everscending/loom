@@ -86,6 +86,7 @@ writing a new proposal that touches the same machinery.
 | P84 | Branch hygiene is owned, not inherited | implemented 2026-08-09 (`lane.sh merge` passes `should_remove_source_branch=true` on the merge request it already makes, so the remote branch dies at the one moment it is provably disposable — rather than surviving unless the project happens to set `remove_source_branch_after_merge`, which this skill neither reads nor writes. Sweep's fetch gains `--prune`, so a tracking ref expires with the branch it tracks; without it five builds left 122 stale `origin/ticket-*` refs, which is also what made `git branch -r` report 122 remote branches when `ls-remote` said 3. Section 18: 3 → 8, including a fixture that deletes server-side because `push --delete` updates the local ref and would never leave one stale. No SKILL.md change) |
 | P85 | Sweep reports what it kept | implemented 2026-08-09 (`cmd_sweep` counts what it kept and emits **one `sweep_held` per pass** — count plus dominant reason, not one line per worktree — and `sweep_removed` when it removes; a clean pass emits nothing, so a count that never falls is the signal. `render-events.jq` renders both, and the test asserts the RENDERED line because D-TICK-11 is still open and drops any event without `.state`. The inventory is rewritten whole each pass into `$LOOM_HOME/sweep-held.txt`, so a worktree cleared by hand stops being reported; `cmd_notify` appends it to `build_complete` and `build_halted` bodies, which is mechanical rather than asked of the wave. Section 17: 14 → 25; one SKILL.md line edited, none added) |
 | P86 | The tracker is declared once, and every tracker call goes through one driver | implemented 2026-08-10 (three stages. **Declare and halt**: `docs/agents/issue-tracker.md` — the sibling skills' own output, which every lane already reads through the repo's `CLAUDE.md` — is the single source of truth, read via its `# Issue tracker: <Name>` heading by `_tracker_declared` in `lib.sh`. Four distinct refusals hang off it: missing, present-but-untracked (a worktree is a checkout, so an untracked declaration is visible to the human and to no lane), present with no heading, and naming a tracker loom has no driver for. The halt sits in `bootstrap.sh` before any write, `cmd_tick` before a wave is paid for, `cmd_snapshot` — the read every other read verb funnels through, so `plan` keeps P81's no-tracker-call guarantee — and `lane.sh` at verb dispatch; the usage path is deliberately exempt, because `tick.sh` derives the wave prompt's verb roster from it (P48 caught that). `resolve-config` gains a derived `tracker` scalar and never halts. `.loom.yml` gets NO tracker key: a second place to say it is a way for `tick.sh` to read one board while its lanes write to another. **The driver**: `scripts/trackers/gitlab.sh` implements a 20-verb contract named for what loom needs — board reads, board writes, and a forge group kept separate because a tracker that is not also a code host (Linear has no merge requests) needs exactly that group pointed elsewhere. All 29 call sites across `tick.sh`, `lane.sh`, `bootstrap.sh` and `watch-panes.sh` go through it; `lib.sh`'s `_glab_list` moved in with it. The read-only guarantee was re-pointed rather than inherited — `07-snapshot.sh`'s glab-argv scan would have kept passing while checking a condition that can no longer arise, so section 29 asserts it against the contract's own write verbs, `snapshot` and `plan` alike, with a planted write to prove the scan bites. `Bash(glab *)` stays in the generated allowlist, settled rather than assumed: nothing needs it to write any more, but it is not there for writes — it keeps a wave's compound exploration command from being denied whole (build-1 2026-08-02). **The document**: the driver maps every response into loom's shape (`id`, `state` open/closed plus `merged` for an MR, `labels`, `assignees`, `epic`, `url`, `body`, `project`, `updated_at`), so no GitLab payload field survives in `scripts/*.jq` — asserted by grep, and proved by a fixture driver containing no GitLab field at all that drives a full `snapshot` → `plan`. One mapping bug caught by the suite and worth recording: a blocking link carrying no state is UNKNOWN and must stay unknown, or a cross-project blocker gets guessed at. SKILL.md 624 → 623 and names GitLab nowhere. Suite 786 → 818, new section 29. NOT shipped: any second driver. A tracker with no driver — including Linear — is refused by name, and Linear additionally needs the forge group pointed at a code host, which is where stage 2's grouping plugs in) |
+| P87 | A second driver: Linear | implemented 2026-08-10 (four stages. **Board and forge are two roles**: P86 grouped the verbs that way in a comment; this makes it load-bearing, because Linear is a board with no merge requests at all. The forge is DERIVED, never declared — a tracker that is itself a code host is its own forge, and otherwise `origin` decides — so every GitLab repo keeps the forge it always had, self-hosted instances on unrecognisable domains included, and there is no second place for a human to contradict themselves. `forges/gitlab.sh` and `forges/github.sh` hold the `mr-*` group, `issue-mrs` and the ticket link; `trackers/gitlab-common.sh` is the transport GitLab's two halves share, so `glab` is still named in one place. `resolve-config` gains a derived `forge` scalar and a fourth halt fires for a board that is not a code host on a remote loom cannot drive. **The ticket link is the real work**: `issue-closed-by` does not survive the split. GitLab answers it natively by parsing `Closes #41`; GitHub does the same for GITHUB issues, which with a Linear board belong to somebody else and would be closed on merge. So the link is one loom WRITES — the forge owns both halves, `ticket-marker` saying what to write and `mr-for-ticket` finding it again. GitLab keeps the native endpoint and the same marker, so a GitLab build is unchanged; GitHub writes a `Loom-Ticket: N` trailer and matches on the pull request LIST, not the search index, because three fail-closed guards in `lane.sh` rest on the answer and a search index both lags the writes these calls read and matches loosely — the failure that made `related_merge_requests` unusable on build-1 2026-08-03. **The transport** (`trackers/http.sh`): the API key travels in a mode-600 `curl --config` file and never in argv, where `ps` reads it and where this suite's own captured-argv logs would keep it; failure is non-zero with nothing on stdout; a GraphQL error arrives as HTTP 200 with an `errors` array, which a driver reading the status code alone calls success every time; retries are bounded and only for 429, 5xx and no-answer. **The driver** (`trackers/linear.sh`): `id` stays an INTEGER because `Issue.number` is team-scoped and sequential, structurally what GitLab's `iid` is project-scoped — which is what kept this cheap, since the jq layer does arithmetic on ticket ids in four places. The UUID stays private, resolved into every mutation. `canceled` maps to closed rather than being dropped; an unassigned ticket emits `[]` rather than null (the ready set tests `assignees | length == 0`, and `null | length` is 0 in jq, so null would have worked until it didn't); Projects are epics; `inverseRelations` of type `blocks` is the `is_blocked_by` edge. Labels are written whole because Linear has no add/remove, so the current set is read first — writing only the additions would strip the board's entire state machine. The team comes from a `Team: <KEY>` LINE in the one declaration file, or from the API key when it sees exactly one team, and several with no line is a halt naming them. Two contract leaks fixed on the way: `whoami` was being read outside the driver by seding a numeric `"id":` out of GitLab's raw payload, and `--assignee 0` became `--unassign`. One bug of my own the suite caught: `_resolve_team` sets shell variables and several verbs called it from inside a pipeline, so the team resolved in a subshell and every single-issue read reported a blank project. SKILL.md untouched. Suite 818 → 884, new sections 30, 31 and 32. NOT shipped: a GitHub BOARD driver, and — stated in `references/setup.md` rather than implied away — loom's half is perhaps a third of a build's tracker traffic. The rest comes from inside lanes, through sibling skills that read the same declaration file for the whole workflow and are off limits, so whether a Linear build works end to end rests on a file the human writes) |
 
 ## Independent review round (2026-08-01)
 
@@ -3829,3 +3830,234 @@ seeding helper to `scripts/test-lib.sh` and call it from shared setup — not 75
 **Consumer.** Every verb, in every repo. Immediately: any repo other than `openemr-base-clean`, where
 loom today spawns lanes that guess. Next: whichever second driver gets written, which is a new file
 against a written contract rather than a rewrite of the machinery.
+
+## P87 · A second driver: Linear
+
+**Problem.** P86 made loom tracker-agnostic in shape and left it single-tracker in fact. A repo
+that declares Linear gets an honest refusal — "this repo declares linear; loom drives gitlab" —
+and nothing else. The contract that refusal points at has never been implemented twice, so it is
+a contract by intention rather than by demonstration.
+
+Linear is the tracker worth proving it against, and not only because it is the one asked for. It
+breaks the contract in three places GitHub would not, and each break is a real design question
+rather than a mapping chore:
+
+1. **Linear is a board and not a forge.** It has no merge requests. The `mr-*` group,
+   `issue-closed-by` and `issue-mrs` have no Linear answer at all. Code for a Linear-tracked repo
+   lives on GitHub or GitLab, so a Linear build needs *two* backends, and loom currently resolves
+   one.
+2. **Linear has no CLI.** It is GraphQL over HTTPS at `https://api.linear.app/graphql`, keyed by
+   `LINEAR_API_KEY`. The GitLab driver's whole transport — `glab api`, which also silently supplies
+   auth, host resolution and project resolution from the git remote — has no counterpart.
+3. **Linear's issue model is not GitLab's.** One assignee rather than many, a workflow *state*
+   with a type rather than open/closed, Projects rather than milestones, and two identifiers per
+   issue where GitLab has one.
+
+**Evidence.** Structural, from the code and from Linear's published API — no Linear build has been
+attempted, so there is no run to quote. The refusal path is already tested
+(`scripts/tests/29-tracker-driver.sh:137`, a fixture repo declaring Linear, asserting both the halt
+and that no tracker call escaped). `_tracker_drivers` in `scripts/lib.sh` returns exactly `gitlab`.
+
+**The one thing that decides whether this works, stated first.** Loom's own tracker calls are
+maybe a third of the tracker traffic a build produces. The rest comes from *inside lanes*: each
+lane is a `claude -p` session running `/implement`, `/code-review` and the rest, and those skills
+do their own tracker work by reading the repo's `docs/agents/issue-tracker.md`. That file is the
+sibling skills' declaration of the whole workflow — how to create an issue, apply a label, open and
+merge an MR — not just the tracker's name.
+
+Those skills are off limits under constitution rule 2. Loom cannot teach them Linear. So this
+proposal makes *loom* speak Linear and leaves the lanes' half resting entirely on the quality of a
+file the human writes. `/setup-matt-pocock-skills` templates GitHub, GitLab and Local Markdown, and
+files Linear under "Other" as freeform prose. A thin "Other" entry produces lanes that improvise.
+
+This is not a reason to skip the work — loom's half is the half with the fail-closed guards, the
+merge-queue invariants and the read-only guarantee, and it has to be right regardless. But the
+proposal must not claim to deliver a working Linear build. It delivers loom's side of one, and
+`references/setup.md` must say plainly that a Linear repo needs a hand-written declaration file
+describing the Linear workflow to the sibling skills, with an example.
+
+**Fix.** Four stages, in order. Stages 1 and 2 are useful on their own and each ships as a
+behaviour-preserving change; per the preamble's partial-implementation rule, a stage that ships
+alone updates this row in place and leaves the section here.
+
+### Stage 1 — the board and the forge are two roles
+
+P86 grouped the driver's verbs into board and forge *in comments*, deliberately, "because they are
+two different systems that GitLab happens to merge". Stage 1 makes the grouping load-bearing.
+
+- `lib.sh` gains `_forge_cmd`, beside `_tracker_cmd`. The forge is **derived from the git remote
+  host**, not declared: `github.com` → `forges/github.sh`, a GitLab host → `forges/gitlab.sh`. This
+  is deliberately not a second human declaration — the remote already answers the question, and
+  P86's whole finding was that a second place to say the same thing is a split brain rather than a
+  configuration.
+- `scripts/trackers/gitlab.sh` keeps the board verbs. The forge verbs — `mr-create`, `mr-merge`,
+  `mr`, `mr-for-branch`, `issue-mrs`, `issue-closed-by` — move to `scripts/forges/gitlab.sh`.
+- `resolve-config` grows a second derived scalar, `forge`, beside `tracker`.
+- The halt gains a fourth refusal: a declared tracker whose remote host has no forge driver.
+- `tick.sh` and `lane.sh` resolve both and call the right one. Read-only against the tracker still
+  means read-only against *both*; the re-pointed argv denylist from P86 stage 2 must cover the
+  forge driver's write verbs too, or the guarantee quietly halves.
+
+**Behaviour change in this stage is a bug.** For a GitLab repo both roles resolve to GitLab files
+holding the code they hold today.
+
+**`issue-closed-by` does not survive the split intact, and that is the real work here.** GitLab
+answers "which MR closes issue 41" natively, because GitLab parses `Closes #41` out of the MR
+description and links the two. A Linear board on a GitHub remote has no such link: `Closes #41` in
+a GitHub PR body means GitHub issue 41. Three call sites depend on the answer, and all three are
+fail-closed guards where a wrong answer is worse than an error — `lane.sh:213` (`_open_mr_closing`),
+`lane.sh:364` (the merge-failed guard that refuses to record a failure it cannot rule out having
+succeeded) and `lane.sh:1029` (`cmd_merge`'s "no open MR closes issue N").
+
+The verb becomes `mr-for-ticket <id>` on the forge, and the link becomes one loom *writes* rather
+than one it hopes the forge inferred. Loom already composes every MR body (`lane.sh:995`,
+`mr-create --body-file`), so it can guarantee a marker line, and the forge implements the verb as a
+search for it. GitLab's implementation keeps the native `closed_by` endpoint and therefore changes
+no behaviour at all; only a split board/forge needs the search.
+
+Two things to settle before writing it, because a fail-closed guard built on a fuzzy search is
+worse than one built on nothing: whether the forge's search is exact enough to never return a
+neighbour's MR (this is the exact failure P86's driver comment records against
+`related_merge_requests` — on build-1, 2026-08-03, issue #1 listed #21's open MR), and whether it
+is *fresh* enough, since search indexes lag and these three call sites read state that the writes
+around them just changed. If either answer is no, the marker search is not fit for these guards and
+the honest outcome is that stage 3 ships without them — a Linear build that can open MRs and not
+merge them — rather than a merge guard that guesses.
+
+### Stage 2 — the HTTP transport, shared
+
+`scripts/trackers/http.sh`, sourced by any driver that talks to an API rather than a CLI. This is
+the convention the GitLab driver did not need and every subsequent driver will.
+
+- One request helper. Non-zero exit and nothing on stdout for any failure, matching the contract
+  P86 wrote down, so every caller's fail-closed path fires unchanged.
+- **The token never reaches argv.** `curl -H "Authorization: $TOKEN"` puts a credential in the
+  process table, in any shell trace, and in the captured argv this repo's own test harness writes
+  to disk and greps. The header goes through `curl --config <file>` with mode 600, or stdin. This
+  is the single hardest rule in the file and the tests assert it: a planted token must not appear
+  in a captured argv log.
+- Retry and rate-limit handling in one place. Linear's published limit for a personal API key is on
+  the order of 1,500 requests per hour plus a complexity budget — verify the current figures against
+  the docs before building, do not take this number on trust.
+- Errors mapped once. GraphQL returns HTTP 200 with an `errors` array, so "did it work" is not the
+  status code, and a driver that reads the status code alone will report success on failure.
+
+**This collides with P77 and the collision is worth naming.** P77 measures the snapshot's
+per-ticket fan-out at roughly 250 calls per snapshot on a 100-ticket board, two snapshots a wave.
+Against GitLab that is a wall-clock problem. Against Linear's hourly cap it is a hard stop: a
+medium build would exhaust the key. GraphQL is also the natural cure — one query can fetch issues,
+labels, comments and relations together — but the per-verb contract has no way to express that, so
+the driver cannot use it without a batch verb the contract does not have. Two honest options, and
+this proposal picks neither: treat P77 as a prerequisite for Linear at any real board size, or
+extend the contract with an optional bulk read that drivers may implement and callers may skip.
+Decide it with P77's own numbers in hand.
+
+### Stage 3 — `linear.sh`, board verbs only
+
+The board half of the P86 contract, implemented against Linear's GraphQL API. The mapping, which is
+the substance of the stage:
+
+| Loom field | Linear source | Note |
+|---|---|---|
+| `id` | `Issue.number` | see below — this is the load-bearing one |
+| `title` | `Issue.title` | |
+| `state` | `Issue.state.type` | `completed`/`canceled` → `closed`; everything else → `open` |
+| `labels` | `Issue.labels.nodes[].name` | |
+| `assignees` | `Issue.assignee` | Linear has one; emit a 0- or 1-element array |
+| `epic` | `Issue.project.name` | Projects are the closest thing to a milestone |
+| `url` | `Issue.url` | |
+| `body` | `Issue.description` | |
+| `updated_at` | `Issue.updatedAt` | |
+| notes | `Issue.comments.nodes` | `body`, `createdAt`, `user.name`; `system` is always false |
+| links | `Issue.relations.nodes` | `type: "blocks"` is the blocking edge |
+
+**`id` stays an integer, and that decision is what keeps stage 3 cheap.** Linear issues carry both a
+UUID and a human identifier like `ENG-123`. Neither is what loom wants: the jq layer does arithmetic
+on ticket ids in at least four places (`graph.jq:46` `tonumber`, `snapshot.jq:320` scanning
+`#([0-9]+)` out of a ticket's `## Blocked by` list, `plan.jq:124` and `plan.jq:170` parsing a lane
+name back to a ticket number), and lane names encode the ticket number with a round suffix. Making
+`id` an opaque string is a rewrite of all of it.
+
+`Issue.number` is an integer, sequential within a team — structurally the same thing GitLab's `iid`
+is within a project. So the contract needs no change at all, and the driver's job is to hold the
+UUID privately: reads project `number` outward, and writes resolve `number` back to the UUID Linear
+mutations require. That resolution is one extra query per write unless the driver keeps the UUID
+from the read that preceded it.
+
+**Team scoping.** Linear issues belong to a Team, and unlike GitLab there is no git remote to derive
+it from. Resolution order: the declaration file may carry a `Team: ENG` line, which loom reads from
+the same single source it already reads the tracker name from — a second *line* in the one file, not
+a second file, so P86's finding holds. If the line is absent and the API key sees exactly one team,
+use it. If it sees several, halt naming them. Never guess.
+
+**Writes.** `issue-create` → `issueCreate`, `issue-relabel` → `issueUpdate` with a resolved label id
+set, `issue-close` → `issueUpdate` to the team's completed-type state, `note-add` → `commentCreate`,
+`label-create` → `issueLabelCreate`, `milestone-close` → `projectUpdate`. Label and state names
+resolve to ids, which is the extra round trip GraphQL charges for everything.
+
+**`whoami`** → `viewer`, which the halt and the assignee checks both use.
+
+**The forge group is absent from this file, by construction.** A Linear repo's forge came from its
+git remote in stage 1. If `linear.sh` ever grows an `mr-*` verb, stage 1 failed.
+
+### Stage 4 — declaration, refusal, documentation
+
+- `_tracker_drivers` returns `gitlab` and `linear`.
+- The refusal for a declared-but-undriven tracker keeps working and now names a shorter list.
+- A Linear repo with no forge-capable remote refuses, naming both facts.
+- `references/setup.md` gains the Linear section: the H1, the `Team:` line, `LINEAR_API_KEY`, and —
+  the part that actually decides whether builds work — an example of what the rest of
+  `docs/agents/issue-tracker.md` must tell the sibling skills about the Linear workflow.
+- `references/loom-config.md` documents the derived `forge` scalar beside `tracker`.
+- `README.md`'s requirements table stops saying GitLab is the only driver.
+
+**SKILL.md.** Budget zero net new lines. Nothing here is a wave decision: the driver resolution, the
+forge resolution and every refusal are script behaviour, and SKILL.md already speaks in tracker-neutral
+terms after P86.
+
+**What this does not do.** It ships no GitHub *board* driver — `forges/github.sh` implements the
+forge role only, which is a much smaller surface than the board. It does not touch the sibling
+skills, so it does not make a Linear lane's own tracker work correct; see the boundary stated above.
+It does not solve P77, and stage 2 explains why that becomes urgent rather than merely expensive on
+a rate-limited API.
+
+**New machine contracts.** Later compaction passes must preserve: the helper name `_forge_cmd` and
+the path `scripts/forges/<name>.sh`; the `resolve-config` key `forge`; the verb rename
+`issue-closed-by` → `mr-for-ticket`; the declaration line form `Team: <key>`; the rule that a
+credential never appears in argv; and the decision that the contract's `id` is an integer, with
+`Issue.number` as Linear's source for it.
+
+**Tests.** Extending `scripts/tests/29-tracker-driver.sh` where the guard is about resolution, and a
+new section for the Linear driver itself. Each guard shown both holding and failing once its
+mechanism is removed.
+
+*Stage 1.*
+- A GitLab repo behaves exactly as it does today — the whole existing suite, green, unedited except
+  where a fixture must now stub two drivers instead of one.
+- `resolve-config` prints `forge` with source `derived`, and prints it correctly for both a
+  `github.com` remote and a GitLab one.
+- A repo whose remote host has no forge driver refuses, and no tracker call is captured.
+- The argv denylist catches a write verb planted in a `tick.sh` path *through the forge driver*, and
+  is shown failing when the forge half of the denylist is emptied.
+
+*Stage 2.*
+- A planted credential does not appear in any captured argv.
+- A GraphQL response carrying HTTP 200 with a non-empty `errors` array exits non-zero and prints
+  nothing on stdout.
+- A transport failure produces no output at all, so the caller's fail-closed path fires — asserted
+  against a real caller, not against the helper in isolation.
+
+*Stage 3.*
+- A fixture Linear API — canned GraphQL responses, no network — drives a full `snapshot` → `plan`
+  run. This is the proof P86's stage-3 fixture driver only gestured at: the same jq layer, the same
+  plan, from a tracker whose native JSON shares no field name with GitLab's.
+- Each mapping row asserted individually, especially the two that are lossy: a Linear issue with no
+  assignee emits `[]` rather than null, and a `canceled` issue maps to `closed` rather than being
+  dropped.
+- A blocking relation produces the same `blocked_by` edge in `graph.jq` output that a GitLab
+  `blocks` link produces.
+- `id` is an integer in every read verb's output.
+
+*Stage 4.*
+- A repo declaring Linear with a Linear driver present no longer halts.
+- A repo declaring Linear with no forge-capable remote halts naming both facts.
