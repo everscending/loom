@@ -117,7 +117,12 @@ v_milestones() { # [--state active]
 
 v_labels() { _list "$(_p 'labels?per_page=100')" | _shape "$_MAP_LABEL"; }
 
-v_whoami() { _one user; }
+# P87: the loom document, not GitLab's user object. `claim` used to sed an
+# `"id":<digits>` out of the raw payload at its call site — a GitLab field name
+# and a GitLab id SHAPE, both living outside the driver. The id is opaque from
+# here on: it goes back in through `issue-relabel --assignee` and nothing else
+# ever looks inside it.
+v_whoami() { _one user | _shape_one '{ id: .id, name: (.username // .name // null) }'; }
 
 # --- board writes ---------------------------------------------------------
 
@@ -133,17 +138,19 @@ v_note_add() { # <id> <body-file>
     "$GLAB" api --method POST "$(_p "issues/$id/notes")" --field "body=@$f" >/dev/null
 }
 
-v_issue_relabel() { # <id> [--add <csv>] [--remove <csv>] [--assignee <user-id>]
+v_issue_relabel() { # <id> [--add <csv>] [--remove <csv>] [--assignee <user-id>] [--unassign]
     local id="${1:-}" add="" rm="" assignee=""
     need_id "$id" issue-relabel
     shift
     while [ $# -gt 0 ]; do case "$1" in
         --add)      add="${2:-}"; shift 2 ;;
         --remove)   rm="${2:-}";  shift 2 ;;
-        # 0 is GitLab's "unassign", and the caller that needs it (the
-        # ready-for-agent transition) means exactly that: a claimed "ready"
-        # ticket is invisible to the scheduler.
         --assignee) assignee="${2:-}"; shift 2 ;;
+        # A named verb, not a magic number. 0 happens to be GitLab's way of
+        # saying it, and the caller that needs it (the ready-for-agent
+        # transition) means exactly "nobody" — a claimed `ready` ticket is
+        # invisible to the scheduler. Another tracker spells it null.
+        --unassign) assignee=0; shift ;;
         *) die "issue-relabel: unknown option '$1'" ;;
     esac; done
     "$GLAB" api --method PUT "$(_p "issues/$id")" \

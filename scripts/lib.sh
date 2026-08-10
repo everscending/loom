@@ -81,11 +81,26 @@ _tracker_declared() { # <dir inside the repo> → tracker name, or empty
         | head -1 | tr 'A-Z' 'a-z'
 }
 
+# A coordinate the declaration carries beside the tracker's name, read as a
+# `Field: value` line in the opening lines of the same file (P87). Linear needs
+# one — its issues belong to a Team and, unlike a GitLab project, no git remote
+# names it — and this is a second LINE in the one file rather than a second
+# file, so P86's finding holds: there is still exactly one place a human writes
+# down what tracker this repo uses and where in it the tickets live.
+_tracker_decl_field() { # <dir inside the repo> <Field> → value, or empty
+    local root f
+    root=$(_repo_toplevel "${1:-.}")
+    f="$root/$(_tracker_decl_path)"
+    [ -f "$f" ] || return 0
+    sed -nE "1,20s/^[[:space:]]*$2:[[:space:]]*([^[:space:]].*[^[:space:]]|[^[:space:]])[[:space:]]*$/\\1/p" "$f" \
+        | head -1
+}
+
 # The drivers this build of loom actually has, one per line. A declared tracker
 # outside this set is a HALT, never a fallback: resolving `linear` and then
 # running the gitlab driver at it is precisely the failure the declaration
 # exists to prevent.
-_tracker_drivers() { printf 'gitlab\n'; }
+_tracker_drivers() { printf 'gitlab\nlinear\n'; }
 
 # The driver for this repo's declared tracker (P86 stage 2). Every tracker call
 # in this skill goes through the returned script, so `glab` appears in exactly

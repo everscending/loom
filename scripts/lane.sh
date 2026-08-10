@@ -909,7 +909,7 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
             _post_note issue "$iid" "$f"
         fi
     fi
-    if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" --assignee 0
+    if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" --unassign
     else _set_state "$iid" "$state"; fi
     _lane_ev ticket_transition ticket "$iid" state "$state"
 }
@@ -933,7 +933,12 @@ _release_noted() { # <iid>
 
 cmd_claim() { # <iid>
     _check_iid "${1:-}"
-    local me; me=$("$TRACKER" whoami | sed -n 's/.*"id":\([0-9]*\).*/\1/p' | head -1)
+    # P87: the driver answers with the loom document `{id, name}` and the id is
+    # opaque — it goes straight back in through `--assignee` and nothing here
+    # looks inside it. This used to sed a numeric `"id":` out of GitLab's raw
+    # user payload, which is both a GitLab field name and a GitLab id shape,
+    # sitting outside the one file allowed to know either.
+    local me; me=$("$TRACKER" whoami 2>/dev/null | jq -r '.id // empty' || true)
     [ -n "$me" ] || die "cannot resolve current user id"
     _set_state "$1" in-progress --assignee "$me"
     _lane_ev ticket_claim ticket "$1"

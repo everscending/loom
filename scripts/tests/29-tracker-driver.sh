@@ -131,23 +131,26 @@ out=$(P86ENV "$TD/noheading" "$TICK" snapshot 2>&1); rc=$?
     || bad "halt: a headingless declaration was accepted (rc=$rc)"
 
 # --- p86-4. A tracker loom has no driver for ------------------------------
-# The honest half of the derivation. Resolving `linear` and then running the
-# gitlab driver at it is exactly the failure the declaration exists to prevent,
+# The honest half of the derivation. Resolving a tracker and then running some
+# other driver at it is exactly the failure the declaration exists to prevent,
 # so an undriven tracker halts and NO tracker call is made.
-mkrepo "$TD/linear"
-mkdir -p "$TD/linear/docs/agents"
-printf '# Issue tracker: Linear\n' > "$TD/linear/docs/agents/issue-tracker.md"
-git -C "$TD/linear" add docs/agents/issue-tracker.md >/dev/null 2>&1
-: > "$TD/calls-linear.log"
-out=$(P86ENV "$TD/linear" "$TICK" snapshot 2>&1); rc=$?
+# Jira, not Linear: P87 shipped a Linear driver, so Linear is no longer an
+# example of an undriven tracker and using it here would leave this assertion
+# passing for a different reason than the one it is written about.
+mkrepo "$TD/jira"
+mkdir -p "$TD/jira/docs/agents"
+printf '# Issue tracker: Jira\n' > "$TD/jira/docs/agents/issue-tracker.md"
+git -C "$TD/jira" add docs/agents/issue-tracker.md >/dev/null 2>&1
+: > "$TD/calls-jira.log"
+out=$(P86ENV "$TD/jira" "$TICK" snapshot 2>&1); rc=$?
 if [ "$rc" != 0 ] \
-   && printf '%s' "$out" | grep -q "linear" \
+   && printf '%s' "$out" | grep -q "jira" \
    && printf '%s' "$out" | grep -q "gitlab"; then
     ok "halt: an undriven tracker is refused, naming both what was declared and what loom drives"
 else
-    bad "halt: 'Linear' was not refused by name (rc=$rc, out=$(printf '%s' "$out" | head -1))"
+    bad "halt: 'Jira' was not refused by name (rc=$rc, out=$(printf '%s' "$out" | head -1))"
 fi
-[ ! -s "$TD/calls-linear.log" ] \
+[ ! -s "$TD/calls-jira.log" ] \
     && ok "halt: not one tracker call was made against the undriven board" \
     || bad "halt: loom called the tracker anyway ($(head -1 "$TD/calls-linear.log"))"
 
@@ -225,11 +228,11 @@ printf '%s' "$out" | grep -q "issue-tracker.md" \
     && bad "guard-violation: lane.sh still refused on the declaration with the guard gone" \
     || ok "guard-violation: with the guard gone lane.sh proceeds to its own verb — the halt was the cause"
 # The undriven-tracker case is the one that degrades most usefully. With the
-# guard gone the resolver still points at `trackers/linear.sh`, so the run
+# guard gone the resolver still points at `trackers/jira.sh`, so the run
 # still fails — but on a missing FILE, saying nothing about what the repo
 # declared or what loom drives. That difference is the guard's whole value:
 # it turns "some file is not there" into an answer a human can act on.
-out=$(P86ENV "$TD/linear" "$TD/nolib/tick.sh" snapshot 2>&1); rc=$?
+out=$(P86ENV "$TD/jira" "$TD/nolib/tick.sh" snapshot 2>&1); rc=$?
 if [ "$rc" != 0 ] && ! printf '%s' "$out" | grep -q "loom has drivers for"; then
     ok "guard-violation: without the check, 'Linear' fails on a missing driver file and explains nothing"
 else
