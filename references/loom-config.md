@@ -47,6 +47,38 @@ and then ignoring it is the failure the declaration exists to prevent.
 `tick.sh resolve-config` reports the resolved name and never halts — it is how
 the halt gets diagnosed.
 
+Drivers today: **gitlab** and **linear**.
+
+## The forge is derived too (P87)
+
+A board holds tickets; a **forge** holds branches and merge requests. GitLab is
+both, which is why loom never had to tell them apart. Linear is a board and
+nothing else, so a Linear repo keeps its code somewhere else and loom resolves
+two backends.
+
+`forge` is a second derived scalar beside `tracker`, and like it has **no
+`.loom.yml` key**. The repo already answers the question twice: a tracker that
+is itself a code host is its own forge, and otherwise `origin` says where the
+code lives (`github.com` → github, a GitLab host → gitlab). Asking the board
+first means every GitLab repo keeps the forge it has always had, including a
+self-hosted instance on a domain with no `gitlab` in its name.
+
+A board that is not a code host, on a remote loom has no forge driver for, is
+the fourth halt — in `cmd_tick`, in `cmd_snapshot` and at `lane.sh`'s dispatch.
+
+One thing the forge owns that looks like the board's: **the ticket marker**.
+GitLab answers "which merge request closes issue 41" natively because it parses
+`Closes #41`. GitHub does the same for *GitHub* issues, which with a Linear
+board belong to somebody else and would be closed on merge — so on that pairing
+loom writes a `Loom-Ticket: 41` trailer instead and looks for that. The forge
+decides both halves; `lane.sh` asks it rather than composing a link itself.
+
+Linear needs one more thing from the declaration file: a `Team: <KEY>` line,
+because Linear issues belong to a team and no git remote names one. That is a
+second *line* in the one file, not a second file, so the single-source rule
+above still holds. Its API key is `LINEAR_API_KEY`, read from the environment
+and never passed on a command line.
+
 A repo `gates:` block overrides the derived pack wholesale. The one extra repo
 key is `worktree_cmd:` — a non-git worktree helper such as `openemr-cmd`. It is
 declared, never probed from `PATH`: a machine-wide binary must not leak an

@@ -23,6 +23,51 @@ reads its `# Issue tracker: <Name>` heading rather than keeping an answer of
 its own. Without it every loom verb refuses: no bootstrap, no wave, no
 snapshot, no lane. Details and the reasoning: [loom-config.md](loom-config.md).
 
+Loom drives **GitLab** and **Linear**. It also needs somewhere for a lane's
+branch and merge request to go, and that is a second thing — a *forge* —
+which it derives rather than asks for: a tracker that is itself a code host
+is its own forge, and otherwise the repo's `origin` remote decides
+(`github.com` or a GitLab host).
+
+### If you use Linear
+
+Linear is a board and not a code host, so a Linear repo needs three things
+rather than one.
+
+1. **The declaration.** `/setup-matt-pocock-skills` templates GitHub, GitLab
+   and Local Markdown, and files everything else under "Other" as freeform
+   prose. So write the heading yourself, and a `Team:` line beside it —
+   Linear issues belong to a team and no git remote names one:
+
+   ```markdown
+   # Issue tracker: Linear
+
+   Team: ENG
+   ```
+
+   The `Team:` line is optional when your API key can see exactly one team.
+   With several and no line, loom halts and lists them rather than picking.
+
+2. **`LINEAR_API_KEY`** in the environment the loop runs in. A launchd agent
+   does not read your shell profile, so exporting it in `.zshrc` is not
+   enough — put it where the agent will see it.
+
+3. **`origin` pointing at the code.** That is where the merge requests go.
+
+**And the part that decides whether builds actually work.** Loom's own
+tracker calls are perhaps a third of what a build makes. The rest come from
+inside lanes: each lane is a `claude -p` session running `/implement`,
+`/code-review` and the rest, and those skills do their own tracker work by
+reading this same file — not just its heading, but the whole workflow it
+describes: how to create an issue, apply a label, open and merge a merge
+request. Loom cannot teach them Linear; they are somebody else's skills.
+
+So the rest of `docs/agents/issue-tracker.md` is yours to write, and a thin
+"Other" entry produces lanes that improvise. Describe the workflow the way
+the GitLab template does — name the states, the labels, the commands, and
+say plainly that merge requests live on GitHub (or GitLab) while tickets
+live in Linear.
+
 ## New repo bootstrap
 
 Mostly derived, not authored, and it runs itself. The **first `tick` in a

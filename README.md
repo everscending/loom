@@ -4,7 +4,8 @@ Loom turns a product requirements document (PRD) into a finished, reviewed,
 merged product — mostly while you are not watching.
 
 You bring a PRD. Loom grills the open architecture and design questions with
-you until none are left, breaks the work into epics and tickets in GitLab, and
+you until none are left, breaks the work into epics and tickets on your issue
+tracker, and
 then runs an unattended loop that implements those tickets in parallel, reviews
 each one, merges the passing ones, and tests each epic like a user would. It
 tells you when it needs a decision and when it is done.
@@ -26,8 +27,8 @@ git worktree and its own headless Claude session ("a lane"). The default is
 four implementation lanes plus a smaller pool for review, merge, and test
 lanes.
 
-**Keeps all its state in the tracker.** Every decision about a ticket lives in
-GitLab as a label, a link, or a comment. A ticket moves
+**Keeps all its state in the tracker.** Every decision about a ticket lives on
+the board as a label, a link, or a comment. A ticket moves
 `ready-for-agent` → `in-progress` → `review` → `merge-queue` → closed, with
 `blocked` as the escape hatch. Nothing important lives in a file on your
 laptop, so a fresh session can pick up a running build by reading the tracker.
@@ -72,8 +73,9 @@ time and money went and writes up proposals for improving the next one.
 | **Claude Code** | Loom is a skill. Every wave, implementer, reviewer, merger, and probe is a headless `claude -p` session that Loom spawns. |
 | **A git repository** | Each in-flight ticket gets its own git worktree, cut as a sibling directory of the repo. Local-only repos will not work — lanes always branch from the remote. |
 | **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. It is what `/setup-matt-pocock-skills` writes and what every lane reads through your `CLAUDE.md`, so Loom reads that same file rather than keeping an answer of its own. Without it, every Loom verb refuses. |
-| **GitLab** *(today's only driver)* | Milestones or epics, issues, labels, blocking links, and merge requests are where **all** build state lives. Loom needs a project it can create labels in and open and merge merge requests against. Every tracker call goes through `scripts/trackers/gitlab.sh`, which is the one file that knows GitLab; a repo declaring anything else is refused by name until a driver for it exists. |
-| **`glab`**, logged in | The GitLab command-line tool, used by that driver. Run `glab auth status` in the repo before starting; if `glab` cannot resolve the project, Loom reads the board as unknown and skips the wave. |
+| **A board Loom drives** — GitLab or Linear | Epics, issues, labels, blocking links and comments are where **all** build state lives. Loom needs a board it can create labels in. Every board call goes through `scripts/trackers/<name>.sh`, the one file that knows that tracker; a repo declaring anything else is refused by name until a driver for it exists. |
+| **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom **derives** it rather than asking: a board that is itself a code host is its own forge, and otherwise your `origin` remote decides. |
+| **`glab`** or **`gh`**, logged in — or `LINEAR_API_KEY` | Whatever your drivers need. GitLab and GitHub are driven through their command-line tools: run `glab auth status` (or `gh auth status`) in the repo first, because a tool that cannot resolve the project makes Loom read the board as unknown and skip the wave. Linear has no CLI and is driven over its API, so it wants `LINEAR_API_KEY` in the environment the loop runs in — a launchd agent does not read your shell profile. |
 | **`jq`** | Every snapshot, dependency graph, report, and log render is a `jq` query. Missing `jq` is a hard error, not a downgrade. macOS 15 and later ship it at `/usr/bin/jq`; on anything older, `brew install jq`. |
 | **A scheduler — launchd (macOS) or cron** | The once-a-minute heartbeat that watches lanes, makes the first wave fire, and resumes a build after a full stall. `/loom start` writes and loads the launchd agent for you. Without one, a build only advances when a lane hands off to the next lane, and a single wedge stops it for good. |
 | **A gate runner in your repo** | `scripts/gate.sh <tier>` — yours, not Loom's. Every branch is gated by it before review and again before merge. You do not have to write it up front — it is normally the first epic of your first build. |
@@ -120,7 +122,7 @@ they sit. Install `lavish`, `grilling`, `to-tickets`, `implement`,
 `code-review`, `domain-modeling`, and `prototype` beside it; the planning
 verbs hand off to them.
 
-### 2. Declare the tracker, authenticate `glab`, and trust the repo
+### 2. Declare the tracker, authenticate, and trust the repo
 
 Run `/setup-matt-pocock-skills` in the repo once. It writes
 `docs/agents/issue-tracker.md` — the file every lane follows and the one Loom
@@ -132,6 +134,13 @@ Loom refuses on exactly that.
 glab auth login          # then, in the repo:
 glab repo view           # should resolve your project
 ```
+
+**On Linear**, that verb has no template — it files anything but GitHub,
+GitLab and Local Markdown under "Other" — so write the heading yourself, add
+a `Team: <KEY>` line beside it, and export `LINEAR_API_KEY`. Your `origin`
+remote is then the forge, and the rest of that file is what tells the sibling
+skills how to work the board. [setup.md](references/setup.md) has the detail,
+including why that last part is the thing that decides whether builds work.
 
 Then open the repo once in Claude Code and accept the workspace trust dialog.
 Untrusted, Claude Code ignores `.claude/settings.json`, so lanes run without
@@ -241,8 +250,8 @@ way?" from the architecture records and the UX spec alone.
 ### Step 2 — `/loom epics`
 
 A proposed epic breakdown and dependency sketch, on a surface you can annotate
-— merge, split, reorder. On approval the epics (or milestones) are created in
-GitLab.
+— merge, split, reorder. On approval the epics (or milestones, or projects) are
+created on the board.
 
 Each one gets an **acceptance criteria** section: a handful of observable,
 user-level statements, each traceable to a PRD requirement. This is the one
