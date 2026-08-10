@@ -224,78 +224,49 @@ singleton per repo (a second launch exits quietly), so doing this on every
 manual tick is safe. Headless waves have no herdr and skip it; watch-panes
 refuses outside herdr anyway.
 
-1. **Read**: `tick.sh snapshot --brief` — one JSON document: open `build-N`
-   tickets (labels, assignees, tier, blocking edges + closed flags), epic
-   rollup, lane states, lessons tail. Derived and disposable; after your own
-   writes (claims, merges, verdicts) re-run it, never query piecemeal.
-   `--brief` is the wave's default: a full row only for a ticket this turn can
-   act on (ready+unblocked+unclaimed, gateable, in the merge queue, stranded,
-   or holding a lane) — everything else is a bare iid in `.other_iids`, since
-   `summary` already carries the counts. Plain `snapshot` (no flag) is for
-   `watch`, `graph` and a human. *(paid: 54 tickets cost 73k characters, 59%
-   of it rows a wave could not act on that turn.)*
+1. **Read, then plan**: `tick.sh snapshot --brief | tick.sh plan`. The
+   snapshot is the board — one JSON document: open `build-N` tickets (labels,
+   assignees, tier, blocking edges + closed flags), epic rollup, lane states,
+   lessons tail. `plan` turns it into the schedule: `.actions[]` in the order
+   to run them, `.residue[]` — the items needing prose a script cannot write —
+   and `.deferred[]`, what a cap or a hold cut and why. Both are derived and
+   disposable; after your own writes (claims, merges, verdicts) re-run them,
+   never query piecemeal. `--brief` is the wave's default: a full row only for
+   a ticket this turn can act on (ready+unblocked+unclaimed, gateable, in the
+   merge queue, stranded, or holding a lane) — everything else is a bare iid
+   in `.other_iids`, since `summary` already carries the counts. Plain
+   `snapshot` (no flag) is for `watch`, `graph` and a human. *(paid: 54
+   tickets cost 73k characters, 59% of it rows a wave could not act on that
+   turn.)* An empty plan carrying a `.reason` is the whole answer: do the
+   residue, if any, and stop.
 
-2. **Harvest lanes.** `rc` 7 = its pregate rejected the branch, not a crash —
-   post the rejection straight from the lane log, no verifier. Other `dead`
-   before reaching `review` → crash (resume from the surviving worktree;
-   `crash_cap` crashes → blocked). `stale` → **`tick.sh kill-lane`**, never a
-   bare `kill`: that orphans the agent session inside, which keeps pushing
-   *(paid: a ticket merged through a human hold that way)*. Then treat as
-   crash — an alive-but-silent lane still holds its ticket, so until its pid
-   file is gone the ticket cannot be gated again.
+2. **Run the actions, in order.** Each one is already decided — steps 3–6
+   below say only how to carry one out, and nothing in this file re-derives a
+   choice the plan made. `clear-lane`, `kill-lane`, `repair` and `transition`
+   carry `via` + `argv`: run them verbatim. `spawn` carries the lane id, the
+   `--cwd` to cut or reuse, the `--model` (already resolved per ticket), the
+   pregate tier and its brief inputs — you write the brief and spawn it. An
+   action carrying `needs_report` is paired with a `blocked-report` residue
+   item: post the report first (**`lane.sh blocked-report <n> --category
+   <slug>`**, body on stdin), then the label. An action you believe is wrong
+   is a **planner bug** — say so on the Build issue and skip that one; never
+   substitute a decision of your own for it.
 
-   Staleness counts *model turns*, not log bytes: the watcher stamps
-   `<id>.progress` with the count of `assistant` stream events alone — every
-   other record is chatter — and `lane-status` clocks off the stamp, so all
-   wedge shapes read as `stale`: silent API gaps, retry storms, a lane blocked
-   on a polling tool whose child will never return, and a thinking-heavy lane
-   emitting nothing but `thinking_tokens`. *(paid: retry chatter kept a
-   zero-progress gate "fresh" for 2h40m; a merge lane whose gate run the
-   harness auto-backgrounded blocked on `TaskOutput` over a deadlocked pytest
-   and read `running` for 33 minutes; 23 turns read as 162 and killed two
-   healthy lanes.)*
+   Two residue kinds come out of the harvest, and each needs a reader. A
+   `pregate-rejection` is a lane that exited **rc 7** — its pregate rejected
+   the branch, not a crash: post the rejection straight from the lane log, no
+   verifier. A `merge-failed` needs the ticket **re-checked live first** —
+   chained lanes land while a wave is mid-flight, so `merge-queue` in a
+   snapshot is not evidence a merge did not happen — then
+   `lane.sh merge-failed <iid>` (body: what it died on). Both verbs refuse the
+   stale-snapshot case outright, `merge-failed` when a merged MR closes the
+   ticket and `transition` when the ticket is closed, so treat either refusal
+   as "re-run `snapshot`", never as something to work around. *(paid: #23
+   merged at 22:23:17 and was blocked at 22:24:29 by a wave harvesting against
+   a photograph taken 90s before the merge; a later wave then requeued the
+   closed ticket to `ready-for-agent`.)*
 
-   A lane can also be `running` — genuinely making turns — and still be a
-   problem: past `lane_turn_cap` (`lane-status`'s `turns` column, the same
-   stamp staleness reads), that is effort, not progress. Treat it the way a
-   spent `rejection_cap` is treated: `tick.sh kill-lane`, then
-   `lane.sh transition <iid> blocked` with a report naming the turn count and
-   the last thing the lane was doing. A ticket that needs that many turns was
-   either written too big or the lane is lost — either way the next step is a
-   human decision, not more turns. *(paid: impl-43 ran 456 turns, ~$300, with
-   nothing watching the cost.)*
-
-   A **dead merge lane whose ticket is still `merge-queue`** did not merge —
-   but **`merge-queue` in the snapshot is not evidence of that**. Chained lanes
-   land while a wave is mid-flight, and because the wave did not perform that
-   write, nothing tells it to re-read: re-check the ticket live before
-   concluding anything. Then record with `lane.sh merge-failed <iid>` (body:
-   what it died on) and respawn. At `merge_attempt_cap` recorded attempts,
-   **stop retrying that ticket**: `lane.sh transition <iid> blocked` with a
-   report, so the queue advances to the next-oldest instead of feeding every
-   later lane into the same wall. `snapshot` surfaces the count as
-   `.merge_attempts`. *(paid: three consecutive lanes wedged on one ticket
-   while two gate-passed tickets waited behind it.)*
-
-   Both verbs now refuse the stale-snapshot case outright — `merge-failed` when
-   a merged MR closes the ticket, `transition` when the ticket is closed — so a
-   wave that skipped the re-read gets an error naming the reason instead of a
-   wrong write. Treat either refusal as "re-run `snapshot`", never as something
-   to work around. *(paid: #23 merged at 22:23:17 and was blocked at 22:24:29
-   by a wave harvesting against a photograph taken 90s before the merge; its
-   blocked report confidently described a merge lane "stale for ~5h" on a
-   ticket 13 minutes old, and a later wave then requeued the closed ticket to
-   `ready-for-agent`.)*
-
-   A gate lane `dead` with rc 0 whose ticket is still `gate.eligible` ended
-   **without a verdict** — clear-lane and respawn `-r<n+1>`, and read its log
-   tail before counting caps: an API stream stall is neither a crash nor a
-   rejection. *(paid: a verdictless gate exit left a ticket in `review` with no
-   lane.)* Finished (label moved) → `tick.sh clear-lane`.
-
-3. **Gate** — for each ticket where `gate.eligible`, never merely "in
-   `review`" (the snapshot already dropped tickets whose MR merged underneath,
-   and HEADs an existing verdict covers; `gate.reason` says which):
+3. **Gate** — a `gate` spawn action:
 
        spawn-lane gate-<ticket>[-r<round>] --pregate <tier> --cwd <worktree> -- <cmd>
 
@@ -306,8 +277,8 @@ refuses outside herdr anyway.
    PRD-faithfulness check against its `PRD requirement`.
 
    Verdict is a label change: pass → `merge-queue`; fail → `in-progress` with
-   a rejection comment (`rejection_cap` → blocked). End every verdict comment
-   with `<!-- orch-verdict PASS|FAIL <head-sha> -->` — that trailer is how the
+   a rejection comment. End every verdict comment with
+   `<!-- orch-verdict PASS|FAIL <head-sha> -->` — that trailer is how the
    next wave knows this HEAD is judged. A FAIL also names its defect class:
    `lane.sh verdict <iid> fail <sha> --class <kebab-slug>` folds
    `class=<slug>` into the trailer. Reuse the previous rejection's slug when
@@ -334,33 +305,11 @@ refuses outside herdr anyway.
    the handoff removes a scheduler hop, it does not grant its own ticket
    cutting rights.
 
-4. **Fill lanes — rework before new work.** `summary.stranded` lists claimed
-   `in-progress` tickets with no alive lane: where every gate rejection lands
-   (verdict fail → `in-progress`, assignee kept) and no other step looks —
-   harvest reads lanes, gate needs `review`, the fill below needs *unclaimed*.
-
-   For each, spend an impl slot first: respawn `impl-<ticket>` in its
-   surviving worktree with the latest rejection comment injected, **on the
-   ticket's `.model.effective`** — a rework round is exactly where the
-   escalation chain differs from `lane_model`, so a respawn that ignores it
-   silently spends the round on the tier that just failed. Rework outranks the
-   backlog: the ticket is closest to done and its rejection cap is already
-   counting. *(paid: gate-FAILed tickets stranded while fresh backlog tickets
-   took the slots.)*
-
-   **Except: two same-class rejections mean stop, not respawn.** When a
-   stranded ticket's `rejections.same_class_tail` ≥ 2, block it for a design
-   decision — report citing both rejections and the single call needed —
-   instead of a third same-tier guess. The cap stays for *different* failures.
-   *(paid: a ticket burned round 3 on a class the round-2 verdict had named.)*
-
-   Then, while `summary.impl_slots_free` > 0 (implementers alone fill
-   `max_lanes`; gates, merges and probes share `max_aux_lanes`) and ready
-   tickets exist, take **`fix: true` tickets before the rest of the ready
-   set** — every open fix ticket holds an epic's re-probe hostage and widens
-   the defect window for lanes building on that epic. Ready means
-   **unblocked = every blocker issue closed / its MR merged** (not merely
-   opened — auto-merge is async), unclaimed, and `build-N`. Then:
+4. **Fill lanes** — an `impl` spawn action. A **rework** respawn (its
+   `cwd_from` names the *surviving* worktree) reuses that worktree and injects
+   the latest rejection comment; its `--model` is the ticket's own
+   `.model.effective`, which on a rework round is exactly where the escalation
+   chain differs from `lane_model`. A **new** one:
 
    - claim (assignee + `in-progress`, the first write), `git fetch origin`;
    - create the lane worktree from the **freshly-fetched remote base**
@@ -375,9 +324,9 @@ refuses outside herdr anyway.
      present** — keys are canonical at root and worktrees stay disposable
      *(paid: a hand-filled `.env` trapped in one worktree became hostage
      state)*;
-   - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` (with the ticket's
-     `.model.effective`) a headless session whose brief **inlines** the work
-     rather than naming `/implement` (headless has no slash commands): the
+   - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` a headless session
+     whose brief **inlines** the work rather than naming `/implement`
+     (headless has no slash commands): the
      ticket body + lessons thread, no trailing self-review (the gate owns
      review), its own tier gate with what it reports fixed **before** pushing,
      a commit with the `Assisted-by` trailer, a push, then finishes with
@@ -386,17 +335,14 @@ refuses outside herdr anyway.
      reads) and moves the label to `review`. Its final act is the gate spawn
      line (step 3) the wave handed it.
 
-5. **Merge queue** — never inline:
+5. **Merge queue** — a `merge` spawn action, never inline:
 
        spawn-lane merge-<ticket> --merge-lock --cwd <worktree> -- <cmd>
 
    which holds the single-writer merge lock for that lane alone, so scheduling
-   continues while it runs and a second merge is refused (skip this step when
-   `summary.merge_in_flight`). It comes *after* filling lanes: a ticket ready
-   at wave start must not wait out a whole merge before its worktree exists.
+   continues while it runs and a second merge is refused.
 
-   The lane does, for the oldest `merge-queue` ticket whose `.merge_hold` is
-   null (a held ticket is parked behind an open base-red fix) only:
+   The lane does only:
    `lane.sh reconcile` — fetch + **merge** `origin/<base>` into the branch,
    **never rebase**. This skill's own guardrails deny force-push, so rebased history
    can never be pushed; the verb exists because two lanes chose rebase off
@@ -445,16 +391,8 @@ refuses outside herdr anyway.
    **not** this queue — with parallel lanes it merges MRs that were never
    gate-tested together; use merge trains or let this step own merging.
 
-6. **Epic acceptance**: for **every** epic in `summary.epics_awaiting_probe`
-   (all members closed, milestone still open — a *level*, re-read every wave,
-   not an edge you had to be awake for). That list is derived from the
-   milestones of the build's **closed** members, so an epic with zero open
-   tickets is in it — trust it and do not go hunting for finished epics by
-   hand. *(paid: it used to be parsed out of the Build issue body as markdown
-   list items, so a build listing its epics in a table showed no finished epic
-   ever; E4 hit zero open tickets six times with the list empty each time, and
-   in build-2 the same gap let E6 and E7 close unprobed.)* Spawn
-   `spawn-lane probe-<epic-slug> --cwd <worktree> -- <cmd>` — a lane that
+6. **Epic acceptance** — a `probe` spawn action:
+   `spawn-lane probe-<epic-slug> --cwd <worktree> -- <cmd>`, a lane that
    exercises the epic the way a *user* would, against a really-running stack,
    not the test suite again.
 
@@ -466,11 +404,11 @@ refuses outside herdr anyway.
    criteria say what must be true, the regressions say what has broken before.
    Written only from the defect history, a brief can never catch what nobody
    has broken yet, and two runs of it are not comparable — each one tests the
-   previous round's damage. `snapshot` warns when an epic is probe-ready with
-   no criteria; that warning means "write them first", not noise. *(paid: E4
-   failed five straight probes, every brief enumerated backwards from the last
-   round's tickets, and no run ever checked the FR-2/TR-2/PF-1 the epic itself
-   cites.)*
+   previous round's damage. An epic with no criteria arrives as a
+   `probe-criteria` residue item instead of a spawn: that means "write them
+   first", not noise. *(paid: E4 failed five straight probes, every brief
+   enumerated backwards from the last round's tickets, and no run ever checked
+   the FR-2/TR-2/PF-1 the epic itself cites.)*
 
    **Each failure files a fix ticket with
    `lane.sh fix-ticket --title <t> --tier <tier> --milestone <epic>`** — one
@@ -502,13 +440,13 @@ refuses outside herdr anyway.
    a pinned seam: then kill and requeue behind the fix.
 
    **A FAILed epic is not accepted, and its fix tickets closing does not
-   accept it.** The milestone stays open, so the epic reappears in
-   `epics_awaiting_probe` the moment its fixes merge, and the re-probe is the
-   same step as the first probe — never a judgement call about whether the
-   fixes looked small enough. *(paid: build-2's E4 probe found two real
-   defects, both fixed and merged, and the closing wave then wrote "re-probe
-   not re-run… both fixes shipped as small, well-scoped, verified diffs" and
-   closed the build. E6 and E7 were never probed at all.)*
+   accept it.** The milestone stays open, so the epic returns as a `probe`
+   action the moment its fixes merge, and the re-probe is the same step as the
+   first probe — never a judgement call about whether the fixes looked small
+   enough. *(paid: build-2's E4 probe found two real defects, both fixed and
+   merged, and the closing wave then wrote "re-probe not re-run… both fixes
+   shipped as small, well-scoped, verified diffs" and closed the build. E6 and
+   E7 were never probed at all.)*
 
 7. **Notify + write back**: `tick.sh notify` for `ticket_blocked` /
    `build_halted` (no progress past staleness, or all remaining blocked) /

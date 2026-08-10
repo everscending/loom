@@ -65,7 +65,8 @@ They are machine contracts. Quote them byte-for-byte.
   `blocked`, `fix`, `build-N`, `model::<tier>`, `tier::<tier>`
 - jq paths: `.scalars.<key>.value`, `.model.effective`, `.gate.eligible`,
   `.rejections.same_class_tail`, `.summary.stranded`,
-  `.summary.impl_slots_free`, `.summary.merge_in_flight`
+  `.summary.impl_slots_free`, `.summary.merge_in_flight`, and the plan
+  document's own `.actions[]`, `.residue[]`, `.deferred[]`, `.reason`
 
 **Every script invocation and every flag.** If a flag is named in the current
 file it is named in the rewrite, attached to the same verb: `--pregate`,

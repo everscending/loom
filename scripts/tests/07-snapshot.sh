@@ -907,7 +907,7 @@ _p71jq report-ticket.jq report --ticket 1
 _p71jq retro.jq retro
 _p71jq graph.jq graph "$PJ/snap.json"
 
-# 7j4. P72: all eight of those programs open with `include "lib";`, and the
+# 7j4. P72: all nine of those programs open with `include "lib";`, and the
 #      prelude they include — lib.jq, the jq counterpart of lib.sh — ships
 #      beside them. Same two checks again: it compiles on its own, and a verb
 #      whose program includes it names the MISSING FILE rather than leaving jq
@@ -922,7 +922,7 @@ err=$(jq -L "$(dirname "$TICK")" -n 'include "lib"; empty' 2>&1 || true)
 # includes the prelude, so there is no per-file question about which ones need
 # `-L` and no second mechanism for sharing a definition.
 noinc=""
-for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+for jf in snapshot.jq plan.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
     grep -q '^include "lib";$' "$(dirname "$TICK")/$jf" || noinc="$noinc $jf"
 done
 [ -z "$noinc" ] \

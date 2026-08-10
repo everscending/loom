@@ -1172,7 +1172,7 @@ Wave context from tick.sh — trust it over rediscovery:
 - repo root: $REPO_ROOT (this repo IS loom-managed; bootstrap already ran)
 - tick.sh: $SELF_PATH
 - state dir: $LOOM_HOME
-- FIRST action: run \"$SELF_PATH\" snapshot — it is the entire read step. Absence of .loom.yml is normal (config resolves from derived/global layers).
+- FIRST action: run \"$SELF_PATH\" snapshot --brief | \"$SELF_PATH\" plan — the read step and the schedule. The plan's .actions[] are already decided: run them in order (each carries via + argv, or everything a spawn needs but its brief). .residue[] is what needs prose from you; .deferred[] is what a cap or a hold cut. Absence of .loom.yml is normal (config resolves from derived/global layers).
 - Spawn every lane with: --permission-mode $perm_mode. The model is per ticket, not global: pass --model from that ticket's .model.effective in the snapshot, and omit the flag when it is null.
 - Lanes make EVERY tracker write through the verb script $lane_path (${verb_txt}long bodies via stdin or --file; run it bare for usage).
 - Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree, appends the headless execution rules every lane needs, and swaps @brief for a pointer prompt. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Inline arguments over 1000 chars are refused. Never hand-roll glab mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
@@ -2411,6 +2411,50 @@ cmd_snapshot() {
     cat "$SNAP_TMP/snapshot.json"
 }
 
+# --- plan (P81): the schedule, derived rather than reasoned about ---------
+# Steps 2-6 of SKILL.md's `tick` were a decision table in prose, and every
+# input to it is already in the snapshot. A wave read those fields and applied
+# rules that are total, adding no information the document did not carry —
+# for 2m28s a wave, 36 waves, 57.5% of one build's span.
+#
+# READ-ONLY, like every other verb here, and load-bearing so: `tick.sh` never
+# mutates the tracker, and `scripts/tests/07-snapshot.sh` enforces it by
+# scanning every captured argv. This verb makes no tracker call AT ALL — it
+# reads one document from stdin or a file and derives from it. The executor
+# runs the actions: `spawn-lane` for a spawn, the `lane.sh` verb named in
+# `.argv` for a write.
+cmd_plan() { # plan [<snapshot.json>]  (default: stdin)
+    command -v jq >/dev/null 2>&1 || die "plan: jq required"
+    local jqd jqf
+    # Same resolution as `snapshot`: the program is a file beside this script,
+    # and this directory is jq's -L path because it opens with `include "lib"`.
+    jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    jqf="$jqd/plan.jq"
+    [ -f "$jqf" ] || die "plan: $jqf is missing — it holds the scheduling rules and ships beside tick.sh"
+    local src="${1:-}"
+    [ "$#" -le 1 ] || die "plan: unknown argument '$2' (usage: plan [<snapshot.json>])"
+    # A global, not a local: the EXIT trap below runs after this function has
+    # returned, and a `local` would be out of scope and unbound by then.
+    PLAN_TMP=$(mktemp)
+    # Safe only because cmd_tick never calls cmd_plan: an EXIT trap here would
+    # clobber the tick lock's. The wave invokes `tick.sh plan` itself.
+    trap 'rm -f "$PLAN_TMP"' EXIT
+    if [ -n "$src" ]; then
+        [ -f "$src" ] || die "plan: '$src' is not a file"
+        cat "$src" > "$PLAN_TMP"
+    else
+        cat > "$PLAN_TMP"
+    fi
+    # An unreadable snapshot produces an EMPTY plan and a named reason, never
+    # a partial one: `null` in gives the planner's own guard, so the refusal
+    # is written once, in the program that owns the document shape.
+    if jq -e . "$PLAN_TMP" >/dev/null 2>&1; then
+        jq -L "$jqd" -f "$jqf" "$PLAN_TMP"
+    else
+        printf 'null\n' | jq -L "$jqd" -f "$jqf"
+    fi
+}
+
 # --- report (P23): what the events add up to ------------------------------
 # Two views over one file, because "tune the loop" and "diagnose this build"
 # want the same events shaped differently. Neither reads anything but
@@ -3277,6 +3321,7 @@ case "${1:-}" in
     clear-lane)   shift; cmd_clear_lane "$@" ;;
     kill-lane)    shift; cmd_kill_lane "$@" ;;
     snapshot)     shift; cmd_snapshot "$@" ;;
+    plan)         shift; cmd_plan "$@" ;;
     graph)        shift; cmd_graph "$@" ;;
     gate-deps)    shift; cmd_gate_deps "$@" ;;
     resolve-config)   shift; cmd_resolve_config "$@" ;;
@@ -3288,5 +3333,5 @@ case "${1:-}" in
     agent-status) shift; cmd_agent_status "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
-    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
+    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
 esac

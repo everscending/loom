@@ -63,6 +63,16 @@ this file is worth reading on its own: read each `//` and name the value it actu
 (P72), so the drift to look for is a program that re-declares one of them locally instead of
 using the shared def — a second answer to a question that must have one.
 
+### `scripts/plan.jq` — the schedule a wave runs
+
+Every rule here must already be written in SKILL.md steps 2–6; a rule that is only in this file is
+policy nobody decided, and a rule only in SKILL.md is one the plan will quietly skip. Read the two
+side by side. Then look for the shapes that make a plan *wrong rather than empty*: a ticket that
+gets two actions in one plan (a lane spawned for something the same plan is also blocking or
+repairing), a cap counted against the wrong lane set (`max_lanes` is implementers alone,
+`max_aux_lanes` is gates + merges + probes), a candidate dropped without a `deferred` entry naming
+why, and any `//` fallback that turns a missing field into a decision instead of a refusal.
+
 ### `scripts/tests/*.sh` and `scripts/test-lib.sh` — the suite
 
 `tick-test.sh` itself is only the driver now; the tests are one file per section over a shared
