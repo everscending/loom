@@ -87,6 +87,7 @@ writing a new proposal that touches the same machinery.
 | P85 | Sweep reports what it kept | implemented 2026-08-09 (`cmd_sweep` counts what it kept and emits **one `sweep_held` per pass** — count plus dominant reason, not one line per worktree — and `sweep_removed` when it removes; a clean pass emits nothing, so a count that never falls is the signal. `render-events.jq` renders both, and the test asserts the RENDERED line because D-TICK-11 is still open and drops any event without `.state`. The inventory is rewritten whole each pass into `$LOOM_HOME/sweep-held.txt`, so a worktree cleared by hand stops being reported; `cmd_notify` appends it to `build_complete` and `build_halted` bodies, which is mechanical rather than asked of the wave. Section 17: 14 → 25; one SKILL.md line edited, none added) |
 | P86 | The tracker is declared once, and every tracker call goes through one driver | implemented 2026-08-10 (three stages. **Declare and halt**: `docs/agents/issue-tracker.md` — the sibling skills' own output, which every lane already reads through the repo's `CLAUDE.md` — is the single source of truth, read via its `# Issue tracker: <Name>` heading by `_tracker_declared` in `lib.sh`. Four distinct refusals hang off it: missing, present-but-untracked (a worktree is a checkout, so an untracked declaration is visible to the human and to no lane), present with no heading, and naming a tracker loom has no driver for. The halt sits in `bootstrap.sh` before any write, `cmd_tick` before a wave is paid for, `cmd_snapshot` — the read every other read verb funnels through, so `plan` keeps P81's no-tracker-call guarantee — and `lane.sh` at verb dispatch; the usage path is deliberately exempt, because `tick.sh` derives the wave prompt's verb roster from it (P48 caught that). `resolve-config` gains a derived `tracker` scalar and never halts. `.loom.yml` gets NO tracker key: a second place to say it is a way for `tick.sh` to read one board while its lanes write to another. **The driver**: `scripts/trackers/gitlab.sh` implements a 20-verb contract named for what loom needs — board reads, board writes, and a forge group kept separate because a tracker that is not also a code host (Linear has no merge requests) needs exactly that group pointed elsewhere. All 29 call sites across `tick.sh`, `lane.sh`, `bootstrap.sh` and `watch-panes.sh` go through it; `lib.sh`'s `_glab_list` moved in with it. The read-only guarantee was re-pointed rather than inherited — `07-snapshot.sh`'s glab-argv scan would have kept passing while checking a condition that can no longer arise, so section 29 asserts it against the contract's own write verbs, `snapshot` and `plan` alike, with a planted write to prove the scan bites. `Bash(glab *)` stays in the generated allowlist, settled rather than assumed: nothing needs it to write any more, but it is not there for writes — it keeps a wave's compound exploration command from being denied whole (build-1 2026-08-02). **The document**: the driver maps every response into loom's shape (`id`, `state` open/closed plus `merged` for an MR, `labels`, `assignees`, `epic`, `url`, `body`, `project`, `updated_at`), so no GitLab payload field survives in `scripts/*.jq` — asserted by grep, and proved by a fixture driver containing no GitLab field at all that drives a full `snapshot` → `plan`. One mapping bug caught by the suite and worth recording: a blocking link carrying no state is UNKNOWN and must stay unknown, or a cross-project blocker gets guessed at. SKILL.md 624 → 623 and names GitLab nowhere. Suite 786 → 818, new section 29. NOT shipped: any second driver. A tracker with no driver — including Linear — is refused by name, and Linear additionally needs the forge group pointed at a code host, which is where stage 2's grouping plugs in) |
 | P87 | A second driver: Linear | implemented 2026-08-10 (four stages. **Board and forge are two roles**: P86 grouped the verbs that way in a comment; this makes it load-bearing, because Linear is a board with no merge requests at all. The forge is DERIVED, never declared — a tracker that is itself a code host is its own forge, and otherwise `origin` decides — so every GitLab repo keeps the forge it always had, self-hosted instances on unrecognisable domains included, and there is no second place for a human to contradict themselves. `forges/gitlab.sh` and `forges/github.sh` hold the `mr-*` group, `issue-mrs` and the ticket link; `trackers/gitlab-common.sh` is the transport GitLab's two halves share, so `glab` is still named in one place. `resolve-config` gains a derived `forge` scalar and a fourth halt fires for a board that is not a code host on a remote loom cannot drive. **The ticket link is the real work**: `issue-closed-by` does not survive the split. GitLab answers it natively by parsing `Closes #41`; GitHub does the same for GITHUB issues, which with a Linear board belong to somebody else and would be closed on merge. So the link is one loom WRITES — the forge owns both halves, `ticket-marker` saying what to write and `mr-for-ticket` finding it again. GitLab keeps the native endpoint and the same marker, so a GitLab build is unchanged; GitHub writes a `Loom-Ticket: N` trailer and matches on the pull request LIST, not the search index, because three fail-closed guards in `lane.sh` rest on the answer and a search index both lags the writes these calls read and matches loosely — the failure that made `related_merge_requests` unusable on build-1 2026-08-03. **The transport** (`trackers/http.sh`): the API key travels in a mode-600 `curl --config` file and never in argv, where `ps` reads it and where this suite's own captured-argv logs would keep it; failure is non-zero with nothing on stdout; a GraphQL error arrives as HTTP 200 with an `errors` array, which a driver reading the status code alone calls success every time; retries are bounded and only for 429, 5xx and no-answer. **The driver** (`trackers/linear.sh`): `id` stays an INTEGER because `Issue.number` is team-scoped and sequential, structurally what GitLab's `iid` is project-scoped — which is what kept this cheap, since the jq layer does arithmetic on ticket ids in four places. The UUID stays private, resolved into every mutation. `canceled` maps to closed rather than being dropped; an unassigned ticket emits `[]` rather than null (the ready set tests `assignees | length == 0`, and `null | length` is 0 in jq, so null would have worked until it didn't); Projects are epics; `inverseRelations` of type `blocks` is the `is_blocked_by` edge. Labels are written whole because Linear has no add/remove, so the current set is read first — writing only the additions would strip the board's entire state machine. The team comes from a `Team: <KEY>` LINE in the one declaration file, or from the API key when it sees exactly one team, and several with no line is a halt naming them. Two contract leaks fixed on the way: `whoami` was being read outside the driver by seding a numeric `"id":` out of GitLab's raw payload, and `--assignee 0` became `--unassign`. One bug of my own the suite caught: `_resolve_team` sets shell variables and several verbs called it from inside a pipeline, so the team resolved in a subshell and every single-issue read reported a blank project. SKILL.md untouched. Suite 818 → 884, new sections 30, 31 and 32. NOT shipped: a GitHub BOARD driver, and — stated in `references/setup.md` rather than implied away — loom's half is perhaps a third of a build's tracker traffic. The rest comes from inside lanes, through sibling skills that read the same declaration file for the whole workflow and are off limits, so whether a Linear build works end to end rests on a file the human writes) |
+| P88 | The tracker credential has nowhere durable to live | implemented 2026-08-10 (`secrets:` is a map in the config files loom already reads, exported once and early — before any verb runs — because every tracker call in a build descends from the launchd agent and environment only travels downward. The plist's fixed four-key dict left `launchctl setenv` as the only route: machine-wide, and no reboot survives it. **The refusal is the load-bearing part**: `.loom.yml` is committed, so a `secrets:` block there is refused by name in all three scripts, and the message says to ROTATE the key rather than move it — removing it from the working copy does not unwrite it. Resolution order falls out of one rule, `a variable that already has a value is left alone`: the caller passes files most specific first, so the repo's own `$LOOM_HOME/config.yml` beats the global one and the real environment beats both. That answers the two-workspaces case with no new mechanism and leaves CI untouched. A secret is read WHOLE — no `#` comment stripping, unlike `_yaml_scalar`, because `#` is an ordinary character in a token and truncating one there would be unreadable off the file. `install` gained a preflight and refuses to arm a build whose tracker needs a credential nothing supplies: arming it is worse than refusing, since the failure would be the already-paid-for `unknown`-board silent wave skip and the refusal is at least visible. `resolve-config` reports `credential: {name, present, source}` and never a value, because its output is pasted into every wave prompt; a CLI-driven tracker reports an empty name rather than a false alarm. `bootstrap` seeds the global config at 600 and WARNS — rather than silently chmods, the file being the human's — when a `secrets:` block sits in something others can read. SKILL.md untouched; the one prose change is `references/setup.md`, whose Linear section had been giving advice that could not work. Suite 884 → 909, new section 33) |
 
 ## Independent review round (2026-08-01)
 
@@ -4061,3 +4062,67 @@ mechanism is removed.
 *Stage 4.*
 - A repo declaring Linear with a Linear driver present no longer halts.
 - A repo declaring Linear with no forge-capable remote halts naming both facts.
+
+
+## P88 · The tracker credential has nowhere durable to live
+
+**Problem.** A Linear repo authenticates over HTTP with `LINEAR_API_KEY`, and the driver reads it
+from the process environment and nowhere else: `scripts/trackers/http.sh:39` does
+`eval "tok=\${$var:-}"` and dies when it is empty, with a message that correctly says there is no
+CLI to fall back on. The environment it has to appear in is the launchd agent's, because every
+tracker call in a build descends from it — agent → `tick.sh tick --auto` → wave session → lane
+session → `lane.sh` → `linear.sh` → `curl` — and environment only travels downward.
+
+But the plist `install` generates carries a fixed four-key dict (`tick.sh:2628-2634`):
+`LOOM_REPO`, `LOOM_HOME`, `HOME`, `PATH`. No passthrough for a credential, and nothing anywhere
+reads one off disk — every `export` in `tick.sh` is a `LOOM_*` internal.
+
+That leaves exactly one route, `launchctl setenv`, which the README does not name (it says
+"export it in the environment the loop runs in", which reads as a shell instruction and is the
+one thing that cannot work) and which does not survive a reboot or a logout.
+
+**The failure after a reboot is one this skill has already paid for.** The key is gone,
+`linear.sh` dies, the snapshot read fails, the board classifies `unknown`, and the timer's
+allowlist skips the wave — the identical silent stall as SKILL.md's sleeping-laptop note, reached
+by a route no amount of care prevents. The build stops and the only evidence is a `tick_skipped`
+event naming a reason that describes the symptom, not the cause.
+
+Two smaller costs. `launchctl setenv` puts the secret in the environment of **every** process
+launchd starts for that user, not just loom's — a wider blast radius than a `600` file would be.
+And because the variable is machine-wide, two repos cannot point at two different Linear
+workspaces.
+
+Found by inspection on 2026-08-10 while standing up a Linear repo, not by a production failure —
+no Linear build on disk has run long enough to reboot through. The mechanism is read off the
+source, not inferred.
+
+**Fix direction.** `~/.loom/config.yml` is already read as the `global` layer
+(`tick.sh:2716`) and is already a file this skill writes. Give it a `secrets:` map and export
+from it once, early, before any tracker call:
+
+- `secrets: { LINEAR_API_KEY: … }` in the **global** config only. A `secrets:` block in a repo
+  `.loom.yml` is **refused, loudly, by name** — that file is committed, and a credential in it
+  would be pushed to the forge. This refusal is the load-bearing part of the proposal, not a
+  nicety; the whole change is only safe if the committed layer can never carry a secret.
+- Real environment wins. Export only when the variable is unset, so a one-off override still
+  works and CI, which supplies its own, is untouched.
+- Per-repo keys fall out for free by resolving `$LOOM_HOME/config.yml` after the global one —
+  that directory is already per-repo and already outside every working tree. It answers the
+  two-workspaces case without a second mechanism.
+- `bootstrap.sh` sets the file to `600` when it writes a `secrets:` block, and warns when it
+  finds one at looser permissions.
+- The value never becomes an argument and never reaches an event log, matching `_http_init`'s
+  existing "never an argument to anything" rule. `resolve-config` prints the key's **presence**
+  only — its output is dumped into wave prompts, so printing the value would leak it into every
+  session transcript.
+- `install` gains a preflight: when the declared tracker needs a credential and neither the
+  environment nor `secrets:` supplies one, refuse to load the agent and name what is missing.
+  Arming a build that cannot read its own board is worse than refusing to arm it, because the
+  refusal is visible and the stall is not.
+
+Scope note: this is the machinery layer, so it costs `SKILL.md` nothing. The one prose change
+belongs in `references/setup.md`, replacing the Linear section's item 2 — which currently gives
+advice that cannot work.
+
+**Consumer.** Every repo on an HTTP-driven tracker, at setup and after every reboot; and
+`install`, which today will happily arm a build whose first wave cannot read the board.

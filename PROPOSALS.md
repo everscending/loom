@@ -382,3 +382,4 @@ falls back to `[]` with a warning rather than failing the document.
 
 **Consumer.** Every wave, on any build big enough to matter; and `watch`, which takes the full
 snapshot rather than `--brief`.
+
