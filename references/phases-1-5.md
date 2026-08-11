@@ -13,7 +13,11 @@ hand-coding under a deadline.)*
 ## Phase 1–2 · `plan <PRD>`
 
 1. Read the PRD fully. Explore the repo (respect `CONTEXT.md`, existing ADRs).
-   Facts are looked up; only *decisions* go to the human.
+   Facts are looked up; only *decisions* go to the human. If the PRD lacks
+   stable identifiers, mint them first (`REQUIREMENTS.md`: one ID per
+   requirement, plus electives, cuts and open GAPs) — nothing downstream may
+   cite PRD prose directly. A promised input that never arrived is a GAP with
+   a written contingency, not a blocker.
 2. Split open architectural questions: **dependent chains** → `/grilling` one
    at a time with a recommendation each; **independent batches** → one
    `/lavish` decision surface (options, tradeoffs, recommendation badged — the
@@ -25,9 +29,47 @@ hand-coding under a deadline.)*
    `/lavish` surface (`/prototype` for anything worth clicking). Output: a
    **written UX spec with annotated mockups** — the source of truth the build's
    UI verification checks against. Store beside the PRD.
+5. **Pin every shared surface.** ADRs close decisions; they do not pin seams.
+   A surface named in no document of record is decided by whichever lane
+   starts first. The test for a seam: two lanes both touch it, or its writer
+   and reader sit in different epics. Pin: every wire shape (request and
+   response), a module map for **every** deliverable (ownership, layering,
+   forbidden imports) — not just the one an audit named — a vocabulary file
+   with a words-we-avoid table, every environment variable with default and
+   reader, the URL map, test-hook names. One unpinned word between a writer
+   and a reader is a system that looks correct and silently fails.
+6. **Execute code-shaped artifacts against the real substrate.** SQL, state
+   machines and schemas in a spec read as verified and are not; careful
+   reading catches almost none of what matters. Run them at a scale where the
+   defect class can appear — large backlogs, concurrent writers, mid-scan
+   settles — and always with **more rows available than the operation should
+   touch**, asserting the bound held. Mark executed sections with the date;
+   re-execute anything edited since, however small the edit.
+7. **The exit criterion is a test that is run, never a state that is
+   declared — and the author cannot run it.** Knowing what you meant makes
+   gaps read as filled. Delegate to fresh agents given only the files, one
+   per consumer role: implementer, ticket-writer, drift-checker, executor.
+   Re-audit after **every** fix pass — fixes carry the same author's blind
+   spots and reliably introduce new defects. Aim each round where the last
+   did **not** point: statements a fix *added*, and the oldest most-reviewed
+   artifacts, hide the worst defects. Sweep renames and concept changes by
+   grep, never from memory. A fix is not applied until the file on disk says
+   so — read it back before recording done.
+8. **Terminate with a bounded confirmation, not zero findings.** Zero never
+   arrives — each fix pass adds surface. Stopping rule: one final fresh
+   ticket-writer drafts the **complete** breakdown from the files alone and
+   reports only questions that **block a ticket** — blocking means two
+   engineers would build incompatible things and neither could know. Known
+   external GAPs are excluded from the count. Close each true blocker **in
+   the documents** (phase-1 escape), then stop — no further round. Everything
+   else is logged for build; local decisions invisible outside one ticket are
+   build's to make.
 
-Exit criterion: a ticket-writer with no access to the human could answer every
-"which way?" from the ADRs + UX spec alone.
+Exit criterion: a ticket-writer with no access to the human **has drafted the
+full breakdown** from the ADRs + UX spec + seam documents alone, and every
+question it could not answer is closed in a document of record or is a named
+GAP with a written contingency. This criterion is verified by an agent
+performing the test, never by the author asserting it.
 
 ## Phase 3 · `epics`
 
