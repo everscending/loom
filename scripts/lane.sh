@@ -1039,7 +1039,13 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         # opened — a hold placed while this verb was running must still bounce
         # the label move (#29's stomp is what the guard is for).
         _forget_issue
-        echo "lane.sh: MR !$mr opened ($branch → $base), closes #$iid"
+        # The marker names what it did: a native `Closes #N` really closes the
+        # issue on merge, a `Loom-Ticket:` trailer only links it — `lane.sh
+        # merge` closes that ticket itself, through the tracker driver (P89).
+        case "$marker" in
+            Closes\ \#*) echo "lane.sh: MR !$mr opened ($branch → $base), closes #$iid" ;;
+            *)           echo "lane.sh: MR !$mr opened ($branch → $base), links to #$iid" ;;
+        esac
         _lane_ev mr_opened ticket "$iid" mr "$mr"
     fi
     _set_state "$iid" review

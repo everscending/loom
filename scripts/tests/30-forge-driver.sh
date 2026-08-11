@@ -242,9 +242,9 @@ w=$(scan_forge_writes "$TD/frg-planted.log")
 # that is a trap, not a feature: `Closes #41` would close an unrelated GitHub
 # issue on merge. So the marker depends on whose issues the board holds.
 GLF="$SD/forges/gitlab.sh"; GHF="$SD/forges/github.sh"
-[ "$("$GLF" ticket-marker 41)" = "Closes #41" ] \
-    && ok "marker: the GitLab forge keeps GitLab's own closing syntax — nothing about a GitLab build changes" \
-    || bad "marker: the gitlab forge's marker changed ($("$GLF" ticket-marker 41))"
+[ "$(LOOM_REPO="$TD/gl-nohost" "$GLF" ticket-marker 41)" = "Closes #41" ] \
+    && ok "marker: a GitLab board still gets Closes #41 — nothing about a GitLab build changes" \
+    || bad "marker: the gitlab forge's marker changed on a GitLab board ($(LOOM_REPO="$TD/gl-nohost" "$GLF" ticket-marker 41))"
 [ "$(LOOM_REPO="$TD/lin-gh" "$GHF" ticket-marker 41)" = "Loom-Ticket: 41" ] \
     && ok "marker: on a GitHub forge with a Linear board it is loom's own trailer, which GitHub closes nothing for" \
     || bad "marker: the github forge would have written a GitHub closing keyword for a Linear ticket ($(LOOM_REPO="$TD/lin-gh" "$GHF" ticket-marker 41))"
@@ -271,6 +271,47 @@ n=$(LOOM_REPO="$TD/lin-gh" GH_CMD="$GH_STUB" "$GHF" mr-for-ticket 410 | jq 'leng
 [ "$n" = 1 ] \
     && ok "marker: and its own MR is found — the boundary is not simply refusing everything" \
     || bad "marker: ticket 410 could not find its own MR"
+
+# P89: forges/gitlab.sh carries the same split, for a GitLab repo whose board
+# is not GitLab. `$TD/lin-gl` (Linear board, gitlab.com remote) was seeded in
+# p87-1.
+[ "$(LOOM_REPO="$TD/lin-gl" "$GLF" ticket-marker 41)" = "Loom-Ticket: 41" ] \
+    && ok "marker: on a GitLab forge with a Linear board it is loom's own trailer, which GitLab closes nothing for" \
+    || bad "marker: the gitlab forge would have written Closes # for a Linear ticket ($(LOOM_REPO="$TD/lin-gl" "$GLF" ticket-marker 41))"
+GLAB_STUB="$TD/glab-stub.sh"
+cat > "$GLAB_STUB" <<'EOF'
+#!/usr/bin/env bash
+[ -n "${STUB_LOG:-}" ] && printf '%s\n' "$*" >> "$STUB_LOG"
+case "$*" in
+    *"merge_requests?state=all"*)
+        cat <<'JSON'
+[{"iid":9,"title":"t","state":"opened","draft":false,"web_url":"u",
+  "source_branch":"ticket-410","sha":"abc","description":"work\n\nLoom-Ticket: 410\n"}]
+JSON
+        ;;
+    *"closed_by"*) echo '[]' ;;
+    *) echo '[]' ;;
+esac
+EOF
+chmod +x "$GLAB_STUB"
+n=$(LOOM_REPO="$TD/lin-gl" GLAB_CMD="$GLAB_STUB" "$GLF" mr-for-ticket 41 | jq 'length')
+[ "$n" = 0 ] \
+    && ok "marker: ticket 41 does not match the MR of ticket 410 on the GitLab split path either — the digit boundary holds" \
+    || bad "marker: a neighbouring ticket's MR matched ($n found) on the GitLab forge's split path"
+n=$(LOOM_REPO="$TD/lin-gl" GLAB_CMD="$GLAB_STUB" "$GLF" mr-for-ticket 410 | jq 'length')
+[ "$n" = 1 ] \
+    && ok "marker: and its own MR is found on the GitLab split path — the boundary is not simply refusing everything" \
+    || bad "marker: ticket 410 could not find its own MR on the GitLab forge's split path"
+# A GitLab board's mr-for-ticket must still be the native endpoint, never the
+# split path's MR-list walk — without this one the native branch could be
+# dead code and every assertion above would still pass.
+GLOG="$TD/glab-calls.log"; : > "$GLOG"
+LOOM_REPO="$TD/gl-nohost" GLAB_CMD="$GLAB_STUB" STUB_LOG="$GLOG" "$GLF" mr-for-ticket 41 >/dev/null
+if grep -q "closed_by" "$GLOG" && ! grep -q "merge_requests?state=all" "$GLOG"; then
+    ok "marker: a GitLab board's mr-for-ticket still reaches issues/<id>/closed_by, not the MR list"
+else
+    bad "marker: a GitLab board's mr-for-ticket did not use the native endpoint ($(cat "$GLOG"))"
+fi
 
 # --- p87-7. lane.sh writes the marker the forge asked for ------------------
 # The link is one loom WRITES, not one it hopes the forge inferred, so the verb
