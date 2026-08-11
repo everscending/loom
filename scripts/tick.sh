@@ -2714,6 +2714,18 @@ _ensure_armed() {
 # (derived). Config at every scope stays read-only input — never build state.
 
 GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
+# P88: this repo's own config, in its state directory. Same keys as the global
+# one and read ahead of it, so a machine that runs two repos against two
+# workspaces needs no new mechanism — the directory is already per-repo and
+# already outside every working tree.
+REPO_STATE_CONFIG="$LOOM_HOME/config.yml"
+
+# P88: the tracker credential, exported ONCE, here — after the config paths are
+# known and before any verb runs, because every tracker call in a build descends
+# from this process and environment only travels downward. `launchctl setenv`
+# was the only other route: machine-wide, and no reboot survives it.
+_refuse_repo_secrets "$CONFIG" "tick.sh"
+_load_secrets repo-state "$REPO_STATE_CONFIG" global "$GLOBAL_CONFIG"
 
 # This repo's ecosystem, off lib.sh's one toolchain table — the same table
 # lane.sh's installer reads, so an ecosystem added there is detected here.
@@ -3091,6 +3103,8 @@ cmd_resolve_config() {
         --arg rmod "$(cfg rework_model '')"              --arg rmod_s  "$(cfg_source rework_model)" \
         --arg trk  "$(_tracker_declared "$REPO_ROOT")" \
         --arg frg  "$(_forge_declared "$REPO_ROOT")" \
+        --arg cvar "$(_tracker_credential "$(_tracker_declared "$REPO_ROOT")")" \
+        --arg csrc "$(_secret_source "$(_tracker_credential "$(_tracker_declared "$REPO_ROOT")")")" \
         '{repo: $repo, stack: $stack, base: $base, runner: $runner,
           gates: $gates, gates_source: $gsrc,
           settings: {permissions: {allow: $allow, deny: $deny}},
@@ -3112,7 +3126,8 @@ cmd_resolve_config() {
             rework_model:            {value: $rmod,   source: $rmod_s},
             tracker:                 {value: $trk,    source: "derived"},
             forge:                   {value: $frg,    source: "derived"}
-          }}'
+          },
+          credential: {name: $cvar, present: ($csrc != ""), source: $csrc}}'
 }
 
 cmd_install_settings() { # install-settings [--force]
@@ -3150,9 +3165,33 @@ _raise_viewer() {
     echo "loom: viewer raised — a pane per live worker, plus the build ticker."
 }
 
+# P88: arming a build that cannot read its own board is worse than refusing to
+# arm it, because the refusal is visible and the stall is not. A missing
+# credential fails the first snapshot, the board classifies `unknown`, and the
+# timer's own allowlist skips every wave — the identical silent stall as a
+# sleeping laptop, with a `tick_skipped` event naming the symptom.
+_require_credential() { # <who is refusing>
+    local trk var
+    trk=$(_tracker_declared "$REPO_ROOT")
+    var=$(_tracker_credential "$trk")
+    [ -n "$var" ] || return 0            # a CLI-driven tracker owns its own auth
+    [ -z "${!var:-}" ] || return 0
+    die "${1:-loom}: this repo's tracker is '$trk', which authenticates over HTTP with
+  \$$var — and nothing supplies one. Refusing to arm a build whose first wave
+  cannot read the board: the failure would be a silent skip, not an error.
+  Put it in $GLOBAL_CONFIG (machine-wide) or $REPO_STATE_CONFIG (this repo only):
+
+    secrets:
+      $var: <the key>
+
+  Both sit outside every working tree. NEVER in .loom.yml, which is committed."
+}
+
 cmd_install() {  # install [--dry-run] [interval-seconds]
     local dry=0; [ "${1:-}" = "--dry-run" ] && { dry=1; shift; }
     local interval="${1:-$HEARTBEAT_INTERVAL}"
+    _require_tracker "$REPO_ROOT" "install" >/dev/null
+    _require_credential "install"
     if [ "$dry" -eq 1 ]; then
         # A preview, written OUTSIDE the LaunchAgents directory. Written where
         # the real one goes, it would leave a plist launchd never loaded, and

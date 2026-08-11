@@ -48,9 +48,28 @@ rather than one.
    The `Team:` line is optional when your API key can see exactly one team.
    With several and no line, loom halts and lists them rather than picking.
 
-2. **`LINEAR_API_KEY`** in the environment the loop runs in. A launchd agent
-   does not read your shell profile, so exporting it in `.zshrc` is not
-   enough — put it where the agent will see it.
+2. **The API key, in a `secrets:` block.** Put it in `~/.loom/config.yml`
+   (every repo on this machine) or in this repo's own state directory,
+   `$LOOM_HOME/config.yml` (this repo only — which is how two repos point at
+   two different Linear workspaces):
+
+   ```yaml
+   secrets:
+     LINEAR_API_KEY: lin_api_…
+   ```
+
+   `chmod 600` it. Loom exports it once, early, before any tracker call, and
+   only when the variable is not already set — so a one-off `LINEAR_API_KEY=…`
+   in front of a command still wins, and CI that supplies its own is untouched.
+
+   **Never in `.loom.yml`.** That file is committed, so a key in it goes to the
+   forge on your next push. Loom refuses by name if it finds one there.
+
+   Exporting in `.zshrc` does not work, and neither does `launchctl setenv`
+   for long: the loop runs from a launchd agent, which reads no shell profile,
+   and a `setenv` value is gone after a reboot. `/loom start` refuses to arm a
+   build whose tracker needs a key nothing supplies — a build that cannot read
+   its own board fails as a *silent skipped wave*, not as an error.
 
 3. **`origin` pointing at the code.** That is where the merge requests go.
 

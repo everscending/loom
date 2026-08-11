@@ -75,7 +75,7 @@ time and money went and writes up proposals for improving the next one.
 | **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. It is what `/setup-matt-pocock-skills` writes and what every lane reads through your `CLAUDE.md`, so Loom reads that same file rather than keeping an answer of its own. Without it, every Loom verb refuses. |
 | **A board Loom drives** — GitLab or Linear | Epics, issues, labels, blocking links and comments are where **all** build state lives. Loom needs a board it can create labels in. Every board call goes through `scripts/trackers/<name>.sh`, the one file that knows that tracker; a repo declaring anything else is refused by name until a driver for it exists. |
 | **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom **derives** it rather than asking: a board that is itself a code host is its own forge, and otherwise your `origin` remote decides. |
-| **`glab`** or **`gh`**, logged in — or `LINEAR_API_KEY` | Whatever your drivers need. GitLab and GitHub are driven through their command-line tools: run `glab auth status` (or `gh auth status`) in the repo first, because a tool that cannot resolve the project makes Loom read the board as unknown and skip the wave. Linear has no CLI and is driven over its API, so it wants `LINEAR_API_KEY` in the environment the loop runs in — a launchd agent does not read your shell profile. |
+| **`glab`** or **`gh`**, logged in — or `LINEAR_API_KEY` | Whatever your drivers need. GitLab and GitHub are driven through their command-line tools: run `glab auth status` (or `gh auth status`) in the repo first, because a tool that cannot resolve the project makes Loom read the board as unknown and skip the wave. Linear has no CLI and is driven over its API, so it wants `LINEAR_API_KEY` in a `secrets:` block in `~/.loom/config.yml` — not in `.loom.yml`, which is committed, and not in your shell profile, which the launchd agent never reads. |
 | **`jq`** | Every snapshot, dependency graph, report, and log render is a `jq` query. Missing `jq` is a hard error, not a downgrade. macOS 15 and later ship it at `/usr/bin/jq`; on anything older, `brew install jq`. |
 | **A scheduler — launchd (macOS) or cron** | The once-a-minute heartbeat that watches lanes, makes the first wave fire, and resumes a build after a full stall. `/loom start` writes and loads the launchd agent for you. Without one, a build only advances when a lane hands off to the next lane, and a single wedge stops it for good. |
 | **A gate runner in your repo** | `scripts/gate.sh <tier>` — yours, not Loom's. Every branch is gated by it before review and again before merge. You do not have to write it up front — it is normally the first epic of your first build. |
@@ -137,7 +137,8 @@ glab repo view           # should resolve your project
 
 **On Linear**, that verb has no template — it files anything but GitHub,
 GitLab and Local Markdown under "Other" — so write the heading yourself, add
-a `Team: <KEY>` line beside it, and export `LINEAR_API_KEY`. Your `origin`
+a `Team: <KEY>` line beside it, and put `LINEAR_API_KEY` in a `secrets:` block
+in `~/.loom/config.yml`. Your `origin`
 remote is then the forge, and the rest of that file is what tells the sibling
 skills how to work the board. [setup.md](references/setup.md) has the detail,
 including why that last part is the thing that decides whether builds work.

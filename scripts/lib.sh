@@ -241,6 +241,103 @@ EOF
     printf '%s\n' "$name"
 }
 
+# --- the tracker credential (P88) -----------------------------------------
+# A CLI-driven tracker owns its own auth: `glab` and `gh` keep a token where
+# they keep it, and loom never sees one. An HTTP-driven tracker has no such
+# place, so `linear.sh` reads `LINEAR_API_KEY` out of the process environment
+# and dies without it — and the environment it must appear in is the launchd
+# agent's, because every tracker call in a build descends from that one process
+# and environment only travels downward. The plist carries a fixed four-key
+# dict, so the only route was `launchctl setenv`: machine-wide, no reboot
+# survives it, and the failure that follows is the silent `unknown`-board wave
+# skip this skill has already paid for once.
+#
+# So the credential lives in a config file loom already reads, and is exported
+# once, early, before any tracker call.
+_tracker_credential() { # <tracker name> → the env var it needs, or empty
+    case "${1:-}" in
+        linear) printf 'LINEAR_API_KEY\n' ;;
+        *)      : ;;   # gitlab, github: their CLI owns the token
+    esac
+}
+
+_has_secrets_block() { # <config file>
+    [ -f "${1:-}" ] && grep -qE '^secrets:[[:space:]]*$' "$1"
+}
+
+# The `secrets:` map, as NAME<TAB>VALUE. A value is taken WHOLE: no `#` comment
+# stripping, unlike `_yaml_scalar`, because `#` is an ordinary character in a
+# token and silently truncating a credential at one would be a failure nobody
+# could read off the file. Surrounding quotes come off, since a human writing a
+# token that starts with a digit will reach for them.
+_secret_pairs() { # <config file> → NAME<TAB>VALUE lines
+    [ -f "${1:-}" ] || return 0
+    awk '
+      /^secrets:[[:space:]]*$/ { s = 1; next }
+      s && /^[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:/ {
+          k = $0; sub(/^[[:space:]]+/, "", k); sub(/[[:space:]]*:.*$/, "", k)
+          v = $0; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]+$/, "", v)
+          if (v ~ /^".*"$/ || v ~ /^'"'"'.*'"'"'$/) v = substr(v, 2, length(v) - 2)
+          if (v != "") print k "\t" v
+          next }
+      s && /^[^[:space:]#]/ { s = 0 }
+    ' "$1"
+}
+
+# THE LOAD-BEARING REFUSAL. `.loom.yml` is committed, so a credential in it
+# would be pushed to the forge — and this whole mechanism is only safe because
+# the committed layer can never carry one. Loud, by name, everywhere.
+_refuse_repo_secrets() { # <repo config path> <who is refusing>
+    _has_secrets_block "${1:-}" || return 0
+    die "${2:-loom}: '$1' contains a 'secrets:' block, and that file is COMMITTED — a
+  credential in it goes to the forge on the next push. Move it to the global
+  config (~/.loom/config.yml) or to this repo's own state directory
+  (\$LOOM_HOME/config.yml); both sit outside every working tree. Then rotate the
+  key, because it has already been written to a tracked file."
+}
+
+# The one function in this file that changes anything, and it changes only the
+# environment of the process that calls it.
+#
+# THE REAL ENVIRONMENT ALWAYS WINS, and after it the most specific file does.
+# Both fall out of one rule — a variable that already has a value is left
+# alone — so the caller passes the files MOST SPECIFIC FIRST. That keeps a
+# one-off override working, leaves CI (which supplies its own) untouched, and
+# lets a repo's own state directory point at a different workspace from the
+# machine-wide answer without a second mechanism.
+_load_secrets() { # <source-label> <file> [<source-label> <file>]... — most specific first
+    local lbl f k v
+    while [ $# -ge 2 ]; do
+        lbl="$1"; f="$2"; shift 2
+        [ -n "$f" ] && [ -f "$f" ] || continue
+        # A heredoc rather than a pipe: a `while read` on the right of a pipe
+        # runs in a subshell, and every export would be lost on the way out.
+        while IFS="$(printf '\t')" read -r k v; do
+            [ -n "$k" ] || continue
+            [ -z "${!k:-}" ] || continue
+            export "$k=$v"
+            LOOM_SECRET_SRC="${LOOM_SECRET_SRC:-} $k:$lbl"
+        done <<EOF
+$(_secret_pairs "$f")
+EOF
+    done
+}
+
+# Where a credential came from, for a human diagnosing its absence. NEVER the
+# value: `resolve-config` prints this, and its output is pasted into every wave
+# prompt, so a value here would land in every session transcript the build ever
+# writes.
+_secret_source() { # <var name> → global | repo-state | environment | empty
+    local k="${1:-}" e
+    [ -n "$k" ] || return 0
+    for e in ${LOOM_SECRET_SRC:-}; do
+        case "$e" in "$k":*) printf '%s\n' "${e#*:}"; return 0 ;; esac
+    done
+    # Set, but not by anything this process loaded — so it was already there.
+    if [ -n "${!k:-}" ]; then printf 'environment\n'; return 0; fi
+    printf '\n'
+}
+
 # --- config readers (flat keys) -------------------------------------------
 _yaml_scalar() { # _yaml_scalar <file> <key> -> value or empty
     local f="$1" k="$2" v=""

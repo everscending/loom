@@ -31,6 +31,12 @@ LIB_SH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/lib.sh"
     || { echo "bootstrap.sh: $LIB_SH is missing — it holds the shared derivations and ships beside bootstrap.sh" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1
+# P88: the same credential load the other two halves do, and the same refusal.
+# Bootstrap creates labels, which on an HTTP-driven tracker is a tracker call
+# like any other.
+REPO_STATE_CONFIG="${LOOM_HOME:-}${LOOM_HOME:+/config.yml}"
+_refuse_repo_secrets "$REPO_ROOT/.loom.yml" "bootstrap.sh"
+_load_secrets repo-state "$REPO_STATE_CONFIG" global "$GLOBAL_CONFIG"
 
 # REPO_ROOT falls back to $PWD, so every repo-scoped write must first prove it
 # is pointed at a repo ROOT, not merely somewhere inside one. Without this,
@@ -72,12 +78,35 @@ model::fable|#7D3C98|P31: run this ticket's next implementation lane on fable
 model::sonnet|#5499C7|P31: pin this ticket's next implementation lane to sonnet
 model::haiku|#48C9B0|P31: pin this ticket's next implementation lane to haiku"
 
+# P88: a config file carrying a `secrets:` block is a credential store, and a
+# credential store readable by anyone else on the machine is the thing this
+# whole mechanism exists to be better than — `launchctl setenv` put the key in
+# every process launchd started for the user. Warn rather than chmod: the file
+# is the human's, and silently changing the permissions of a file loom did not
+# write teaches nobody anything.
+_warn_loose_secrets() { # <config file>
+    local f="${1:-}" mode
+    [ -n "$f" ] && _has_secrets_block "$f" || return 0
+    mode=$(ls -l "$f" 2>/dev/null | cut -c1-10)
+    case "$mode" in
+        -rw-------|-r--------) return 0 ;;
+    esac
+    echo "bootstrap: '$f' holds a 'secrets:' block and is $mode — other users on this
+  machine can read the credential. Fix it:  chmod 600 $f" >&2
+    return 0
+}
+
 cmd_global_config() { # global-config [--force]
     local force=0; [ "${1:-}" = "--force" ] && force=1
     if [ -f "$GLOBAL_CONFIG" ] && [ "$force" -eq 0 ]; then
-        echo "global-config: already present — $GLOBAL_CONFIG"; return 0
+        echo "global-config: already present — $GLOBAL_CONFIG"
+        _warn_loose_secrets "$GLOBAL_CONFIG"
+        return 0
     fi
     mkdir -p "$(dirname "$GLOBAL_CONFIG")"
+    # Created at 600 from the start, because the file this seeds is exactly
+    # where a human is told to put the tracker credential.
+    ( umask 077; : > "$GLOBAL_CONFIG" )
     cat > "$GLOBAL_CONFIG" <<'EOF'
 # Loom global preferences — machine- and person-level, shared by every
 # repo. Read-only input, never build state. A repo's .loom.yml
@@ -220,6 +249,7 @@ cmd_all() {
         return 0
     fi
     cmd_global_config
+    _warn_loose_secrets "$REPO_STATE_CONFIG"
     # A hand-edited allowlist is a refusal, not a failure — install-settings
     # declines rather than clobbering it. Other failures are swallowed here too;
     # run `bootstrap.sh settings` directly to see the real status.

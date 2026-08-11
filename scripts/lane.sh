@@ -125,6 +125,14 @@ LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
     || { echo "lane.sh: $LIB_SH is missing — it holds the shared derivations and ships beside lane.sh" >&2; exit 2; }
 . "$LIB_SH"
 DIE_RC=2   # every refusal in this file exits 2, and briefs read that code
+# P88: the tracker credential. A lane normally inherits it from the wave that
+# spawned it, which inherited it from the agent — but a human running a verb by
+# hand has inherited nothing, and that is the case that used to need
+# `launchctl setenv`. Most specific file first; anything already in the
+# environment wins over both, so the inherited value is never overwritten.
+_refuse_repo_secrets "${LOOM_REPO:-.}/.loom.yml" "lane.sh"
+_load_secrets repo-state "${LOOM_HOME:-}${LOOM_HOME:+/config.yml}" \
+              global "${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 # Same seam as tick.sh, for the same reason: the test suite exercises these
 # verbs against a capture stub, never the real tracker.
 # P86: every tracker call this file makes goes through the driver for the

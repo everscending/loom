@@ -76,8 +76,41 @@ decides both halves; `lane.sh` asks it rather than composing a link itself.
 Linear needs one more thing from the declaration file: a `Team: <KEY>` line,
 because Linear issues belong to a team and no git remote names one. That is a
 second *line* in the one file, not a second file, so the single-source rule
-above still holds. Its API key is `LINEAR_API_KEY`, read from the environment
-and never passed on a command line.
+above still holds.
+
+## `secrets:` — the credential a CLI-driven tracker never needed (P88)
+
+`glab` and `gh` keep their own tokens, so loom never saw one. Linear has no CLI,
+and the variable it wants has to reach the launchd agent — every tracker call in
+a build descends from that one process, and environment only travels downward.
+The plist carries a fixed four-key dict, which left `launchctl setenv`: it puts
+the secret in every process launchd starts for you, no reboot survives it, and
+what follows a reboot is a board that reads `unknown` and a wave silently
+skipped.
+
+So a `secrets:` map lives in the config files loom already reads:
+
+```yaml
+secrets:
+  LINEAR_API_KEY: lin_api_…
+```
+
+- **In the global config** (`~/.loom/config.yml`) or **in the repo's own state
+  config** (`$LOOM_HOME/config.yml`). The second is read first, so it wins —
+  which is how two repos on one machine reach two different workspaces.
+- **Never in `.loom.yml`.** That file is committed. A `secrets:` block there is
+  refused by name, everywhere, and the refusal tells you to rotate the key.
+- **The real environment wins over both.** A variable already set is left
+  alone, so a one-off override works and CI is untouched.
+- The value is exported once, early, before any tracker call, and never becomes
+  a command argument. `resolve-config` reports `credential: {name, present,
+  source}` — presence and origin only, because its output is pasted into every
+  wave prompt.
+- `/loom start` **refuses to arm** a build whose tracker needs a credential
+  nothing supplies. Arming one is worse than refusing: the refusal is visible,
+  and the stall that would follow is not.
+- `bootstrap` seeds the global config at mode 600 and warns when it finds a
+  `secrets:` block in a file others can read.
 
 A repo `gates:` block overrides the derived pack wholesale. The one extra repo
 key is `worktree_cmd:` — a non-git worktree helper such as `openemr-cmd`. It is
