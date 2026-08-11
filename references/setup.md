@@ -11,8 +11,10 @@ in-file). Canonical key names: [loom-config.md](loom-config.md).
 Only values are repo-specific; renaming keys per repo is a bug.
 
 There is deliberately **no tick-interval key**: the heartbeat is a fixed
-backstop and lane self-triggers set the pace. The loom never writes
-`.loom.yml`.
+backstop and lane self-triggers set the pace. Nothing headless — no wave, no
+lane, no bootstrap — ever writes `.loom.yml`; the one exception is a human
+answering the forge question below through an interactive verb, and even
+then it is the human's answer being recorded, never a guess.
 
 ## Before anything: declare the tracker
 
@@ -25,9 +27,21 @@ snapshot, no lane. Details and the reasoning: [loom-config.md](loom-config.md).
 
 Loom drives **GitLab** and **Linear**. It also needs somewhere for a lane's
 branch and merge request to go, and that is a second thing — a *forge* —
-which it derives rather than asks for: a tracker that is itself a code host
-is its own forge, and otherwise the repo's `origin` remote decides
-(`github.com` or a GitLab host).
+which it guesses first rather than asking: a tracker that is itself a code
+host is its own forge, and otherwise the repo's `origin` remote decides
+(`github.com` or a `gitlab`-named host). When neither answers it (a
+self-hosted GitLab on a domain with no `gitlab` in it, say), the halt names
+the fix: confirm which forge it is and record `forge: gitlab` (or `github`)
+in `.loom.yml` once — checked before the guess on every later run, so it is
+asked at most once. Details: [loom-config.md](loom-config.md).
+
+**Hitting this halt inside any interactive verb** (`plan`, `epics`, `tickets`,
+`build`, `start`, a manual `tick`): the guess already ran and failed — do not
+re-run it, do not assume a forge from context. Ask the human once which forge
+the repo's remote actually is, write their answer as `forge: <name>` in
+`.loom.yml`, and only then retry the command that halted. A headless wave
+hits the same halt with nobody to ask, so it can only report it — never guess
+past it and never write the key itself.
 
 ### If you use Linear
 

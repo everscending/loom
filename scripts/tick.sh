@@ -3103,6 +3103,7 @@ cmd_resolve_config() {
         --arg rmod "$(cfg rework_model '')"              --arg rmod_s  "$(cfg_source rework_model)" \
         --arg trk  "$(_tracker_declared "$REPO_ROOT")" \
         --arg frg  "$(_forge_declared "$REPO_ROOT")" \
+        --arg frg_s "$(_forge_source "$REPO_ROOT")" \
         --arg cvar "$(_tracker_credential "$(_tracker_declared "$REPO_ROOT")")" \
         --arg csrc "$(_secret_source "$(_tracker_credential "$(_tracker_declared "$REPO_ROOT")")")" \
         '{repo: $repo, stack: $stack, base: $base, runner: $runner,
@@ -3125,7 +3126,7 @@ cmd_resolve_config() {
             lane_model:              {value: $lmod,   source: $lmod_s},
             rework_model:            {value: $rmod,   source: $rmod_s},
             tracker:                 {value: $trk,    source: "derived"},
-            forge:                   {value: $frg,    source: "derived"}
+            forge:                   {value: $frg,    source: $frg_s}
           },
           credential: {name: $cvar, present: ($csrc != ""), source: $csrc}}'
 }

@@ -162,11 +162,40 @@ EOF
 # no merge requests at all, so a Linear-tracked repo keeps its code on GitHub or
 # GitLab and loom has to resolve two backends rather than one.
 #
-# The forge is DERIVED, never declared. A second thing for a human to write down
-# is the split brain P86 exists to close, and the repo already answers the
-# question twice over — once by naming a tracker that is itself a code host, and
-# once through its own git remote.
+# The forge tries a BEST GUESS first, every time: a tracker that is itself a
+# code host is its own forge, and otherwise the git remote is checked for a
+# recognisable host. Neither costs a human anything. Only when both come up
+# empty is a human asked (an interactive verb does the asking; a script only
+# ever refuses), and that answer is recorded as `forge: gitlab` (or `github`)
+# in `.loom.yml` rather than re-asked every run. The recorded key is checked
+# BEFORE the guess, not after — a human's own answer is the one place someone
+# can override the heuristic, and without checking it first the guess would
+# fail identically on the very next run and the human would be asked forever.
+# *(paid: a self-hosted GitLab whose own domain carries no `gitlab` substring —
+# `labs.gauntletai.com` — had no way to answer this at all, since `.loom.yml`
+# carried no key for it; every read-only verb refused the repo outright.)*
 _forge_drivers() { printf 'gitlab\ngithub\n'; }
+
+# The explicit override. Read straight off `.loom.yml` by path — not through
+# the ambient `CONFIG` var `cfg`/`cfg_source` use — because `lane.sh` (unlike
+# tick.sh) never sets `CONFIG`, and a forge answer that only tick.sh could see
+# would make lanes and waves disagree about where their own merge requests go.
+_forge_configured() { # <dir inside the repo> → forge name from .loom.yml, or empty
+    local root
+    root=$(_repo_toplevel "${1:-.}")
+    _yaml_scalar "$root/.loom.yml" forge | tr 'A-Z' 'a-z'
+}
+
+# Beside `cfg_source`: not "repo | global | default" (this key is never
+# global — a forge answer is per-repo by nature) but "config | derived | empty",
+# so `resolve-config` can tell a human's recorded answer from a guess.
+_forge_source() { # <dir inside the repo> → config | derived | empty
+    local root
+    root=$(_repo_toplevel "${1:-.}")
+    [ -n "$(_forge_configured "$root")" ] && { echo config; return; }
+    [ -n "$(_forge_declared "$root")" ] && { echo derived; return; }
+    echo ""
+}
 
 # Trackers that are also code hosts. A repo declaring one of these needs no
 # remote inspection at all, which is the whole reason resolution asks this
@@ -199,10 +228,13 @@ _forge_from_remote() { # <dir inside the repo> → forge name, or empty
 }
 
 _forge_declared() { # <dir inside the repo> → forge name, or empty
-    local trk
-    trk=$(_tracker_declared "${1:-.}")
+    local root cfg trk
+    root=$(_repo_toplevel "${1:-.}")
+    cfg=$(_forge_configured "$root")
+    [ -n "$cfg" ] && { printf '%s\n' "$cfg"; return 0; }
+    trk=$(_tracker_declared "$root")
     if [ -n "$trk" ] && _is_forge_capable "$trk"; then printf '%s\n' "$trk"; return 0; fi
-    _forge_from_remote "${1:-.}"
+    _forge_from_remote "$root"
 }
 
 # Same shape as `_tracker_cmd`, same reason for the fallback: a resolver must
@@ -216,28 +248,40 @@ _forge_cmd() { # <dir the scripts ship in> [<dir inside the repo>]
 }
 
 # The fourth refusal. It only ever fires for a board that is not also a code
-# host — every GitLab repo answers at the first line — so its message is written
-# for exactly that case and says both halves: what the repo declared, and why
-# the remote could not supply the rest.
+# host, on a remote the heuristic could not read AND with no explicit answer
+# recorded — every GitLab repo answers at the first line, and every repo that
+# has already been asked once answers at the config line — so its message is
+# written for exactly the leftover case and says both halves: what the repo
+# declared, and why the remote could not supply the rest, plus the escape
+# hatch a human (never a lane, never a wave — this halt is not theirs to
+# resolve) can use to answer it once and for all.
 _require_forge() { # <dir inside the repo> <who is refusing> → forge name
-    local root trk name drivers d have=0
+    local root cfg trk name drivers d have=0
     root=$(_repo_toplevel "${1:-.}")
-    trk=$(_tracker_declared "$root")
-    if [ -n "$trk" ] && _is_forge_capable "$trk"; then printf '%s\n' "$trk"; return 0; fi
+    cfg=$(_forge_configured "$root")
+    if [ -n "$cfg" ]; then
+        name="$cfg"
+    else
+        trk=$(_tracker_declared "$root")
+        if [ -n "$trk" ] && _is_forge_capable "$trk"; then printf '%s\n' "$trk"; return 0; fi
+        name=$(_forge_from_remote "$root")
+    fi
     drivers=$(_forge_drivers | tr '\n' ' '); drivers="${drivers% }"
-    name=$(_forge_from_remote "$root")
     [ -n "$name" ] \
         || die "${2:-loom}: this repo declares '${trk:-nothing}' as its issue tracker, which is a
   board and not a code host — it has no merge requests — and its 'origin' remote
   does not name a forge loom drives ($drivers). Loom needs both: the board for
-  tickets and the forge for the branches and merge requests a lane opens. Point
-  'origin' at the repository the code actually lives in."
+  tickets and the forge for the branches and merge requests a lane opens. Either
+  point 'origin' at the repository the code actually lives in, or, once a human
+  has confirmed which forge this is, record it once in .loom.yml:
+
+    forge: gitlab   # or: github"
     while IFS= read -r d; do [ "$d" = "$name" ] && have=1; done <<EOF
 $(_forge_drivers)
 EOF
+    local src=derived; [ -n "$cfg" ] && src=".loom.yml"
     [ "$have" = 1 ] \
-        || die "${2:-loom}: this repo's remote resolves to forge '$name', and loom has forge
-  drivers for: $drivers."
+        || die "${2:-loom}: this repo's forge resolves to '$name' (source: $src), and loom has forge drivers for: $drivers."
     printf '%s\n' "$name"
 }
 

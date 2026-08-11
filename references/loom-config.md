@@ -49,22 +49,43 @@ the halt gets diagnosed.
 
 Drivers today: **gitlab** and **linear**.
 
-## The forge is derived too (P87)
+## The forge is derived first, declared as a fallback (P87)
 
 A board holds tickets; a **forge** holds branches and merge requests. GitLab is
 both, which is why loom never had to tell them apart. Linear is a board and
 nothing else, so a Linear repo keeps its code somewhere else and loom resolves
 two backends.
 
-`forge` is a second derived scalar beside `tracker`, and like it has **no
-`.loom.yml` key**. The repo already answers the question twice: a tracker that
-is itself a code host is its own forge, and otherwise `origin` says where the
-code lives (`github.com` → github, a GitLab host → gitlab). Asking the board
-first means every GitLab repo keeps the forge it has always had, including a
-self-hosted instance on a domain with no `gitlab` in its name.
+`forge` is guessed the same way `tracker` is derived, and for free: a tracker
+that is itself a code host is its own forge, and otherwise `origin` says where
+the code lives (`github.com` → github, a GitLab host recognisable by a
+`gitlab` substring in its domain → gitlab). That covers every GitLab repo, on
+any remote host, without a human writing anything down.
 
-A board that is not a code host, on a remote loom has no forge driver for, is
-the fourth halt — in `cmd_tick`, in `cmd_snapshot` and at `lane.sh`'s dispatch.
+**When the guess fails, `forge:` is a real `.loom.yml` key** — the one
+exception to "derived, never declared" this file used to state flatly, paid
+for by a self-hosted GitLab whose own domain carries no `gitlab` substring
+(`labs.gauntletai.com`): nothing on the repo answers the question, so every
+read-only verb refused it outright with no way to resolve short of renaming
+the remote. A human confirms which forge it actually is — once — and the
+answer is recorded:
+
+```yaml
+forge: gitlab   # or: github
+```
+
+Checked **before** the guess on every later resolution, not after: the guess
+would fail identically next time, so without checking the recorded answer
+first, a human would be asked again on every run. `tick.sh resolve-config`
+reports which path won at `.scalars.forge.source` — `config` for a recorded
+answer, `derived` for a successful guess, empty when neither resolved.
+
+Recording it is a human's decision, never a lane's or a wave's: nothing
+headless may write `.loom.yml`'s `forge:` key on its own guess, only report
+that the guess failed. A board that is not a code host, on a remote loom
+cannot place AND with no `forge:` key recorded, is the fourth halt — in
+`cmd_tick`, in `cmd_snapshot` and at `lane.sh`'s dispatch — and its message
+names the fix.
 
 One thing the forge owns that looks like the board's: **the ticket marker**.
 GitLab answers "which merge request closes issue 41" natively because it parses
@@ -127,6 +148,9 @@ because `CRUCIBLE_LIVE=1 uv run pytest` does not match `Bash(uv *)`.
 ## Repo-layer schema
 
 ```yaml
+forge: gitlab                   # gitlab | github — ONLY when the derivation (tracker-as-forge,
+                                 # then a github.com/gitlab substring in origin) fails. A human
+                                 # writes this after confirming; loom never writes it itself.
 max_lanes: 4                    # 1-6; each lane is a full worktree (+ stack where the repo has one)
 rejection_cap: 2                # gate-review rejections before a ticket is blocked
 crash_cap: 2                    # implementer crashes before blocked (crashes are not rejections)

@@ -66,6 +66,45 @@ seed_tracker_decl "$TD/lin-gl" Linear
     && ok "forge: a Linear board on a GitLab remote resolves to the gitlab forge" \
     || bad "forge: a Linear repo with a gitlab remote did not resolve to gitlab"
 
+# --- p87-1b. A recorded .loom.yml answer is the escape hatch for a host the
+# heuristic cannot read, and it is checked BEFORE the guess so a repo already
+# answered once is never asked again. (paid: labs.gauntletai.com — a
+# self-hosted GitLab with no 'gitlab' substring in its domain.)
+mkrepo87 "$TD/lin-unreadable" "ssh://git@labs.example.com:22022/acme/app.git"
+seed_tracker_decl "$TD/lin-unreadable" Linear
+[ "$(ask _forge_declared "$TD/lin-unreadable")" = "" ] \
+    && ok "forge: the unreadable-host repo resolves to nothing before it is told" \
+    || bad "forge: the unreadable-host repo guessed a forge with no basis to"
+printf 'forge: gitlab\n' > "$TD/lin-unreadable/.loom.yml"
+[ "$(ask _require_forge "$TD/lin-unreadable")" = gitlab ] \
+    && ok "forge: a recorded 'forge: gitlab' in .loom.yml resolves a host the heuristic could not read" \
+    || bad "forge: the recorded .loom.yml answer was not honoured ($(ask _require_forge "$TD/lin-unreadable"))"
+
+mkrepo87 "$TD/gh-unreadable" "ssh://git@labs.example.com:22022/acme/app.git"
+seed_tracker_decl "$TD/gh-unreadable" Linear
+printf 'forge: github\n' > "$TD/gh-unreadable/.loom.yml"
+[ "$(ask _require_forge "$TD/gh-unreadable")" = github ] \
+    && ok "forge: a recorded 'forge: github' resolves the same way" \
+    || bad "forge: the recorded github answer was not honoured ($(ask _require_forge "$TD/gh-unreadable"))"
+
+# The recorded answer is checked FIRST — it must win even against a remote the
+# heuristic could read differently, since it is the one place a human's answer
+# is allowed to override the guess.
+mkrepo87 "$TD/override" "git@gitlab.com:acme/app.git"
+seed_tracker_decl "$TD/override" Linear
+printf 'forge: github\n' > "$TD/override/.loom.yml"
+[ "$(ask _require_forge "$TD/override")" = github ] \
+    && ok "forge: a recorded .loom.yml answer overrides a conflicting remote guess" \
+    || bad "forge: the recorded answer lost to the guess ($(ask _require_forge "$TD/override"))"
+
+# The halt message names the fix once nothing else answers.
+mkrepo87 "$TD/lin-none2"
+seed_tracker_decl "$TD/lin-none2" Linear
+out=$(ask _require_forge "$TD/lin-none2")
+printf '%s' "$out" | grep -q "forge: gitlab" \
+    && ok "forge: the unresolved halt names the .loom.yml fix" \
+    || bad "forge: the unresolved halt did not mention the .loom.yml escape hatch ($(printf '%s' "$out" | head -3))"
+
 # --- p87-2. The fourth refusal --------------------------------------------
 # A board with no merge requests and no forge-capable remote is half an answer,
 # and the half that is missing is where a lane's work would have landed.
@@ -100,6 +139,17 @@ rc_json=$(P87ENV "$TD/cfg-gh" "$TICK" resolve-config 2>/dev/null)
 [ "$(printf '%s' "$rc_json" | jq -r '.scalars.forge.value' 2>/dev/null)" = github ] \
     && ok "resolve-config: it reports github for a Linear board on a GitHub remote" \
     || bad "resolve-config: forge did not follow the remote ($(printf '%s' "$rc_json" | jq -c '.scalars.forge' 2>/dev/null))"
+
+mkrepo87 "$TD/cfg-recorded" "ssh://git@labs.example.com:22022/acme/app.git"
+seed_tracker_decl "$TD/cfg-recorded" Linear
+printf 'forge: gitlab\n' > "$TD/cfg-recorded/.loom.yml"
+rc_json=$(P87ENV "$TD/cfg-recorded" "$TICK" resolve-config 2>/dev/null)
+if printf '%s' "$rc_json" | jq -e '.scalars.forge.value == "gitlab"
+                                   and .scalars.forge.source == "config"' >/dev/null 2>&1; then
+    ok "resolve-config: a recorded .loom.yml answer reports source 'config', not 'derived'"
+else
+    bad "resolve-config: recorded forge answer mis-sourced ($(printf '%s' "$rc_json" | jq -c '.scalars.forge' 2>/dev/null))"
+fi
 
 # --- p87-4. The merge-request calls really do go to the forge --------------
 # Two stubs, two logs. The split is only worth anything if the calls landed on
