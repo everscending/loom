@@ -56,6 +56,7 @@ evidence, and implementation notes belong in this file, not there.
 
 | ID | Proposal | Status |
 |----|----------|--------|
+| P89 | The GitLab forge assumes the board is GitLab too | open — proposed 2026-08-11; blocks every ticket in triggers-api build-1 at `submit`, on a `forge: gitlab` + Linear-board repo. `forges/github.sh` already carries the branch `forges/gitlab.sh` is missing |
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
@@ -382,4 +383,71 @@ falls back to `[]` with a warning rather than failing the document.
 
 **Consumer.** Every wave, on any build big enough to matter; and `watch`, which takes the full
 snapshot rather than `--brief`.
+
+## P89 · The GitLab forge assumes the board is GitLab too
+
+**Problem.** `forges/gitlab.sh` hardcodes the same-service assumption that P87 stage 1 split apart
+everywhere else. `v_ticket_marker` emits GitLab's native `Closes #<id>`, and `v_mr_for_ticket` /
+`v_issue_mrs` read `issues/<id>/closed_by` and `issues/<id>/related_merge_requests` — three calls
+that only mean anything if the ticket is a GitLab issue. The file says so itself, in the comment
+above the marker: *"the tracker and the forge are the same service here"*. That was true of every
+GitLab repo loom had seen, and it is not a property of the forge role.
+
+`forges/github.sh` already carries the branch this file is missing. `_board_is_github` picks between
+GitHub's closing syntax and a `Loom-Ticket: <id>` trailer of loom's own, and `_mrs_for_ticket` finds
+that trailer again by walking the pull list and matching the marker as a literal. There is no
+`_board_is_gitlab`.
+
+The failure is worse than the 404 that exposed it. On a GitLab project that *does* have issues but
+tracks its work on a Linear board, `Closes #5` is not a dead link — it is a live one to a stranger's
+issue #5, which the merge closes. That is the exact trap github.sh's header was written to name.
+
+**Evidence.** triggers-api, 2026-08-11, build-1. `.loom.yml` records `forge: gitlab` (self-hosted,
+`labs.gauntletai.com`, the repo whose domain paid for the `forge:` key in the first place);
+`docs/agents/issue-tracker.md` declares Linear. Ticket 5 was implemented, gate green, branch pushed
+to origin — and `lane.sh submit 5` cannot finish. `glab issue list --all` returns zero issues in
+`jordanphillips/triggers-api`, so `issues/5/closed_by` 404s, `mr-for-ticket` returns nothing, and
+`submit` would open an MR carrying a marker no later verb could find. The lane blocked the ticket
+and posted the analysis rather than inventing tracker writes, which is the headless rule working as
+intended. Nothing about this is specific to ticket 5: every ticket in the build meets it at submit.
+
+**Fix.** Mirror `forges/github.sh`, verb for verb, in `forges/gitlab.sh`:
+
+- `_board_is_gitlab() { [ "$(_tracker_declared "${LOOM_REPO:-.}")" = gitlab ]; }` — the same
+  question github.sh asks, from the same declaration, per P86.
+- `v_ticket_marker`: `Closes #<id>` when the board is GitLab, `Loom-Ticket: <id>` when it is not.
+- `_mrs_for_ticket <id>`: `_list "$(_p 'merge_requests?state=all&per_page=100')"` filtered on
+  `.description` against the marker, with github.sh's digit-boundary test
+  (`test("\($m)([^0-9]|$)"; "i")`) so ticket 41 never matches ticket 410's MR.
+- `v_mr_for_ticket` and `v_issue_mrs`: keep the native endpoints untouched when the board is
+  GitLab — `closed_by` for the merge decision and `related_merge_requests` for the snapshot's
+  looser view, both for the reasons already recorded in the file — and route to `_mrs_for_ticket`
+  only on the other branch.
+
+Nothing about a GitLab-board build changes. That is the point of the branch, and the fourth test
+below pins it. The list walk costs a full pass over the project's merge requests, which is the price
+github.sh already pays for the same answer, and only on the split path.
+
+One thing the marker does not do, and does not need to: with `Loom-Ticket:` the forge closes no
+ticket on merge. `lane.sh merge` closes it through the tracker driver after it has observed the MR
+reach `merged`, which is where a Linear ticket has to be closed from anyway.
+
+Not in scope, but worth one line while the file is open: `lane.sh` prints `"MR !$mr opened ($branch
+→ $base), closes #$iid"` after a successful submit. On the split path nothing is being closed by the
+forge, and the message should say what the marker it just wrote actually did.
+
+**Tests.** Section p87-6 of `scripts/tests/30-forge-driver.sh` already tests every one of these for
+GitHub. Extend it symmetrically, with a `GLAB_CMD` stub beside the existing `GH_STUB`:
+
+- a GitLab board still gets `Closes #41` — the no-change guarantee, and it is the assertion that
+  fails first if the branch is wired backwards;
+- a Linear board on a GitLab forge gets `Loom-Ticket: 41`;
+- `mr-for-ticket 41` against a stub MR whose description carries `Loom-Ticket: 410` returns 0, and
+  `mr-for-ticket 410` returns 1 — the boundary holds and is not simply refusing everything;
+- a GitLab board's `mr-for-ticket` still reaches `issues/<id>/closed_by` and not the MR list,
+  asserted against the stub's request log. Without this one the native branch could be dead code
+  and every assertion above would still pass.
+
+**Consumer.** Every repo whose code is on GitLab and whose board is not — at `submit`, `merge`,
+`merge-failed` and the snapshot, which is to say every verb in the back half of a lane's life.
 
