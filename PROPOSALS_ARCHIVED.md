@@ -89,6 +89,7 @@ writing a new proposal that touches the same machinery.
 | P87 | A second driver: Linear | implemented 2026-08-10 (four stages. **Board and forge are two roles**: P86 grouped the verbs that way in a comment; this makes it load-bearing, because Linear is a board with no merge requests at all. The forge is DERIVED, never declared — a tracker that is itself a code host is its own forge, and otherwise `origin` decides — so every GitLab repo keeps the forge it always had, self-hosted instances on unrecognisable domains included, and there is no second place for a human to contradict themselves. `forges/gitlab.sh` and `forges/github.sh` hold the `mr-*` group, `issue-mrs` and the ticket link; `trackers/gitlab-common.sh` is the transport GitLab's two halves share, so `glab` is still named in one place. `resolve-config` gains a derived `forge` scalar and a fourth halt fires for a board that is not a code host on a remote loom cannot drive. **The ticket link is the real work**: `issue-closed-by` does not survive the split. GitLab answers it natively by parsing `Closes #41`; GitHub does the same for GITHUB issues, which with a Linear board belong to somebody else and would be closed on merge. So the link is one loom WRITES — the forge owns both halves, `ticket-marker` saying what to write and `mr-for-ticket` finding it again. GitLab keeps the native endpoint and the same marker, so a GitLab build is unchanged; GitHub writes a `Loom-Ticket: N` trailer and matches on the pull request LIST, not the search index, because three fail-closed guards in `lane.sh` rest on the answer and a search index both lags the writes these calls read and matches loosely — the failure that made `related_merge_requests` unusable on build-1 2026-08-03. **The transport** (`trackers/http.sh`): the API key travels in a mode-600 `curl --config` file and never in argv, where `ps` reads it and where this suite's own captured-argv logs would keep it; failure is non-zero with nothing on stdout; a GraphQL error arrives as HTTP 200 with an `errors` array, which a driver reading the status code alone calls success every time; retries are bounded and only for 429, 5xx and no-answer. **The driver** (`trackers/linear.sh`): `id` stays an INTEGER because `Issue.number` is team-scoped and sequential, structurally what GitLab's `iid` is project-scoped — which is what kept this cheap, since the jq layer does arithmetic on ticket ids in four places. The UUID stays private, resolved into every mutation. `canceled` maps to closed rather than being dropped; an unassigned ticket emits `[]` rather than null (the ready set tests `assignees | length == 0`, and `null | length` is 0 in jq, so null would have worked until it didn't); Projects are epics; `inverseRelations` of type `blocks` is the `is_blocked_by` edge. Labels are written whole because Linear has no add/remove, so the current set is read first — writing only the additions would strip the board's entire state machine. The team comes from a `Team: <KEY>` LINE in the one declaration file, or from the API key when it sees exactly one team, and several with no line is a halt naming them. Two contract leaks fixed on the way: `whoami` was being read outside the driver by seding a numeric `"id":` out of GitLab's raw payload, and `--assignee 0` became `--unassign`. One bug of my own the suite caught: `_resolve_team` sets shell variables and several verbs called it from inside a pipeline, so the team resolved in a subshell and every single-issue read reported a blank project. SKILL.md untouched. Suite 818 → 884, new sections 30, 31 and 32. NOT shipped: a GitHub BOARD driver, and — stated in `references/setup.md` rather than implied away — loom's half is perhaps a third of a build's tracker traffic. The rest comes from inside lanes, through sibling skills that read the same declaration file for the whole workflow and are off limits, so whether a Linear build works end to end rests on a file the human writes) |
 | P88 | The tracker credential has nowhere durable to live | implemented 2026-08-10 (`secrets:` is a map in the config files loom already reads, exported once and early — before any verb runs — because every tracker call in a build descends from the launchd agent and environment only travels downward. The plist's fixed four-key dict left `launchctl setenv` as the only route: machine-wide, and no reboot survives it. **The refusal is the load-bearing part**: `.loom.yml` is committed, so a `secrets:` block there is refused by name in all three scripts, and the message says to ROTATE the key rather than move it — removing it from the working copy does not unwrite it. Resolution order falls out of one rule, `a variable that already has a value is left alone`: the caller passes files most specific first, so the repo's own `$LOOM_HOME/config.yml` beats the global one and the real environment beats both. That answers the two-workspaces case with no new mechanism and leaves CI untouched. A secret is read WHOLE — no `#` comment stripping, unlike `_yaml_scalar`, because `#` is an ordinary character in a token and truncating one there would be unreadable off the file. `install` gained a preflight and refuses to arm a build whose tracker needs a credential nothing supplies: arming it is worse than refusing, since the failure would be the already-paid-for `unknown`-board silent wave skip and the refusal is at least visible. `resolve-config` reports `credential: {name, present, source}` and never a value, because its output is pasted into every wave prompt; a CLI-driven tracker reports an empty name rather than a false alarm. `bootstrap` seeds the global config at 600 and WARNS — rather than silently chmods, the file being the human's — when a `secrets:` block sits in something others can read. SKILL.md untouched; the one prose change is `references/setup.md`, whose Linear section had been giving advice that could not work. Suite 884 → 909, new section 33) |
 | P89 | The GitLab forge assumes the board is GitLab too | implemented 2026-08-11 (`forges/gitlab.sh` gained the branch `forges/github.sh` already had: `_board_is_gitlab` asks the same declaration question as `_board_is_github` (P86); `v_ticket_marker` writes GitLab's native `Closes #<id>` only when the board is GitLab, else a `Loom-Ticket: <id>` trailer; `v_mr_for_ticket`/`v_issue_mrs` keep the native `closed_by`/`related_merge_requests` endpoints on a GitLab board and route to a new `_mrs_for_ticket` — a full merge-request-list walk matched on the marker with github.sh's digit-boundary test — on every other board. `lane.sh submit`'s confirmation line now says "closes #N" only for a native marker and "links to #N" for the trailer, so it stops claiming a close the forge never performs. `scripts/tests/30-forge-driver.sh` section p87-6 extended with the GitLab-forge/Linear-board case: the no-change assertion re-pointed at a repo actually declared GitLab, the trailer marker, the digit-boundary pair against a `GLAB_CMD` stub, and a call-log assertion that a GitLab board still reaches `closed_by` and never the list walk. Suite 919, 0 failed) |
+| P90 | Linear's state machine is its Status field, not a label | implemented 2026-08-11 (the whole mapping lives in `trackers/linear.sh`, both directions. On read, `_MAP_ISSUE` synthesises the matching loom label into `labels` from the issue's Status name, resolved against a per-repo map (`_state_map_json`) built from five defaults (`Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked`) or `Status <loom-state>: <name>` overrides in the declaration file; an unrecognised Status matches nothing, so the ticket reads as untracked rather than guessed at. On write, `v_issue_relabel` and `v_issue_create` (the latter needed because `fix-ticket` creates with `ready-for-agent` inline in `--labels`) split a loom state name out into a `stateId` mutation — dropped from `--remove` outright, since Status is single-valued — and refuse two state names in one `--add`. `v_issue_close` and the new `_close_state_id` share one `_team_states` query (cached) and honor a `Status closed:` override. `duplicate` joins `completed`/`canceled` as closed everywhere the driver decides open/closed (`_MAP_ISSUE`, `v_issues_open`, `v_issues_by_label`, `v_issue_links`) — the same failure `canceled` would have been if dropped instead of closed. `v_labels` reports the five state names present so `bootstrap.sh cmd_labels` never tries to create them; `bootstrap.sh states` (new, part of `all`) creates whichever of the five a team is missing, as workflow states of type `started`, idempotent by name and covered by `--dry-run` — a no-op, named plainly, on any non-Linear tracker. `references/setup.md` documents the override syntax and warns that a workflow state is a column in every one of the team's views, more invasive than a label. One driver bug the suite caught before it shipped: splitting `--add`/`--labels` CSVs with a `while read` loop over `tr ',' '\n'` silently dropped the last token when the input had no trailing newline — fixed by feeding `printf '%s\n'` into `tr` instead of `printf '%s'`. SKILL.md, `lane.sh`, `tick.sh` and the jq layer untouched, per the proposal's own boundary. Suite 919 → 939, section 32 (`32-linear-driver.sh`) extended with the round trip (read AND write directions, proving the mapping injective), the blocked-hold-via-Status integration through `lane.sh transition`, the duplicate case, and the bootstrap states tests) |
 
 ## Independent review round (2026-08-01)
 
@@ -4195,3 +4196,134 @@ GitHub. Extend it symmetrically, with a `GLAB_CMD` stub beside the existing `GH_
 `merge-failed` and the snapshot, which is to say every verb in the back half of a lane's life.
 
 
+
+## P90 · Linear's state machine is its Status field, not a label
+
+**Problem.** `trackers/linear.sh` implements loom's ticket state machine as labels, because that is
+what the GitLab driver it was written against does. Linear does not work that way. Every Linear
+issue carries a **Status** — a workflow state belonging to the team, with a name, a position and a
+type of `backlog`, `unstarted`, `started`, `completed`, `canceled` or `duplicate` — and that field
+is the board. Loom wrote none of it. `bootstrap.sh labels` created `ready-for-agent`,
+`in-progress`, `review`, `merge-queue` and `blocked` as Linear labels; `lane.sh:_set_state` moved
+them through `issue-relabel`; `snapshot.jq:state_of` read them back out of `.labels`. The Status
+field was touched exactly once in the whole skill, by `v_issue_close`, which picks the team's first
+`completed`-type state.
+
+So on a Linear board a ticket sat in **Todo** while a lane implemented it, sat in **Todo** while
+its merge request was open, sat in **Todo** while it waited on a human decision, and then became
+**Done**. Everything Linear itself computes off Status — the board columns, cycle progress, the
+"active issues" views, anything the human has built on top — was wrong for the entire build. The
+label carrying the truth was visible only to someone who knew to look for it.
+
+**Evidence.** Read off the code, not off a run: P87 shipped the Linear driver on 2026-08-10 and no
+Linear build had been run. The team states quoted below were read from a live Linear workspace on
+2026-08-11 (team `Jordan`): `Backlog` (backlog), `Todo` (unstarted), `In Progress` (started),
+`Done` (completed), `Canceled` (canceled), `Duplicate` (duplicate). Linear's own default template
+usually also ships an `In Review` (started); this team has none, which is exactly the case the
+implementation had to survive.
+
+**Fix.** The whole mapping lives inside `trackers/linear.sh`, in both directions, and nothing else
+changed:
+
+- **On read**, `_MAP_ISSUE` synthesises the state label into `labels` from the issue's Status.
+- **On write**, `v_issue_relabel` intercepts the five state names: `--add <state>` becomes a
+  `stateId` in the same `issueUpdate` input that already carries `labelIds` and `assigneeId`, so a
+  claim stays one mutation; `--remove <state>` is dropped, because Status is single-valued and
+  the `--add` in the same call has already decided it. Names outside the five are real labels and
+  keep the read-modify-write path. Two state names in one `--add` is an error rather than a
+  coin flip — `_set_state` cannot produce it, and if some future caller does, it means something
+  the driver must not guess at. `v_issue_create` splits the same way, because `fix-ticket` creates
+  with `ready-for-agent` inline in `--labels` like every other driver.
+
+`fix`, `tier::*` and `model::*` stay labels on both trackers: they are not states, and Linear has
+one Status per issue.
+
+**The mapping is injective, in both directions.** Loom has five open states; this team offered two
+usable non-terminal ones. Collapsing any pair would not have been cosmetic — each collapse breaks a
+specific guard:
+
+| Collapse | What breaks |
+|---|---|
+| `review` reads back as `in-progress` | `summary.stranded` (`snapshot.jq:577`) is "in-progress with no alive lane". Every ticket with an open merge request looks stranded, and a wave requeues work that is already in the gate. |
+| `merge-queue` reads back as `in-progress` | The merge step never sees its queue; passed work sits forever. |
+| `blocked` reads back as anything else | `_blocked_guard` (`lane.sh:266`) stops firing, and a human hold is silently released by the next lane. This is the worst of the three: the guard exists precisely because nothing written in a ticket may authorise advancing it. |
+
+Section 32's round trip proves the read direction (five issues, one Status each, each reads back
+exactly one loom label) and the write direction (each of the five resolves to a distinct
+workflow-state id) separately, so a collapsed pair fails at least one of them.
+
+Two ways to get five distinct Statuses, both shipped:
+
+1. **Loom creates the ones the team lacks, at bootstrap, the same way it creates labels.**
+   `workflowStateCreate`, idempotent by name, covered by `--dry-run`. Defaults:
+   `ready-for-agent` → `Todo`, `in-progress` → `In Progress`, `review` → `In Review`,
+   `merge-queue` → `Merge Queue`, `blocked` → `Blocked`, closed → the first `completed` state by
+   position (`Done`, which is what `v_issue_close` already resolved). Every one loom creates gets
+   type `started`: work exists on all three it usually has to add (review, merge-queue, blocked),
+   Linear's UI groups `started` as in-flight, and the driver's open/closed mapping only cares that
+   it is neither `completed` nor `canceled` nor `duplicate`. Settled: `blocked` is `started`, not
+   `unstarted` — loom keeps the assignee on a blocked ticket, which argues for `started` over the
+   read of "not yet begun" `unstarted` implies.
+2. **The human can override any of the six.** `Status <loom-state>: <Linear name>` lines in
+   `docs/agents/issue-tracker.md`, beside the `Team:` line already read from that file by
+   `_tracker_decl_field`. This is what a team whose review column is called `Code Review` needs, and
+   what a team that will not accept new workflow states needs. A name the team does not have is a
+   halt naming it, never a silent fall back to the default.
+
+Creating workflow states is more invasive than creating labels — they appear as columns in every
+view of that team, for all of the human's non-loom work — so `references/setup.md` says so plainly
+in the Linear section, and bootstrap's dry run names each one it would add.
+
+**Three smaller things in the same function, fixed while it was open.**
+
+- **`duplicate` was a sixth state type reading as open.** `_MAP_ISSUE`'s `st` now maps `completed`,
+  `canceled` AND `duplicate` to closed, and `v_issues_open`/`v_issues_by_label`/`v_issue_links`
+  filter/map all three — the identical failure the file header already recorded as the reason
+  `canceled` maps to closed rather than being dropped.
+- **An unrecognised Status produces no state label at all**, never a guessed one. If a human
+  drags a ticket into a column loom does not know, `state_of` returns null and the ticket reads as
+  untracked — it does not read as `ready-for-agent`, which would hand it to a lane.
+- **`v_labels` reports the five state names as present** even though they are Statuses, so
+  `bootstrap.sh cmd_labels` skips creating them rather than attempting a create on every run.
+  `v_issues_by_label` gets the matching translation — a state name becomes a Status filter — so the
+  contract holds even though no caller passes one today (`tick.sh` passes `build-N`, `lane.sh:676`
+  passes `fix`).
+
+**Cost.** One extra query per driver process for the team's state list (`id`, `name`, `type`,
+`position`), cached in the process (`_team_states`) beside `TEAM_ID`. `v_issue_close` already made
+that query and now shares it, so on the close path this is free. Not a rate-limit concern: it is
+per process, not per ticket.
+
+**One bug the suite caught before shipping.** Splitting a CSV (`--add`, `--remove`, `--labels`)
+with a `while IFS= read -r tok; done < <(printf '%s' "$csv" | tr ',' '\n')` loop silently dropped
+the LAST token whenever the CSV had no trailing newline — a classic shell pitfall (`read` returns
+nonzero on a final line with no newline, so the loop condition fails before the body runs for it).
+`fix,tier::logic` came out of the loop as `fix` alone. Fixed by feeding `printf '%s\n'` (the
+newline loom's own strings never end in) into `tr` instead of `printf '%s'`.
+
+**What the suite proves.** Section 32 (`32-linear-driver.sh`), extended:
+
+- The round trip, both directions, for all five states — the injectivity proof, and the one test
+  that would catch a `blocked` collapse.
+- A blocked hold set through Status makes `_blocked_guard` fire, exercised through a real
+  `lane.sh transition` call against the driver (not a stub).
+- An unknown Status yields a null state, not a wrong one.
+- A `duplicate`-type issue reads `closed` and is absent from `issues-open`.
+- `bootstrap.sh states` creates only the missing states, is idempotent across two runs (a
+  fixture standing in for "already has all five" second run), its dry run creates nothing, and it
+  is a plain no-op on a GitLab-boarded repo.
+- Overrides from the declaration file win over the defaults, and a name in a `Status` line the
+  team does not have is a halt naming it.
+- `fix-ticket`'s `issue-create --labels ...,ready-for-agent` splits the state out into the initial
+  Status rather than failing `_label_ids` on a name that was never a real Linear label.
+
+Suite 919 → 939, 0 failed.
+
+**Boundary.** All of this is `trackers/linear.sh`, `bootstrap.sh`, `scripts/tests/`, and the Linear
+section of `references/setup.md`. SKILL.md, `lane.sh`, `tick.sh` and the jq layer are untouched,
+which is the test of whether the mapping belongs where this proposal puts it. Carrying the honest
+caveat P87 recorded: loom's own writes are perhaps a third of a build's tracker traffic, and the
+sibling skills a lane runs inside will keep doing whatever they do to these tickets. This makes
+loom's half of the board true; it cannot make theirs.
+
+**Consumer.** Every Linear build, and every human looking at one.

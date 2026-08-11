@@ -39,10 +39,10 @@ case "$q" in
       # API to apply it and a stub that ignored it would let this suite pass a
       # driver that never sent one.
       case "$q" in
-        *'nin: ["completed", "canceled"]'*)
-            jq -c '.data.issues.nodes |= map(select(.state.type != "completed" and .state.type != "canceled"))' "${ISSUES_JSON:?}" > "$out" ;;
-        *'in: ["completed", "canceled"]'*)
-            jq -c '.data.issues.nodes |= map(select(.state.type == "completed" or .state.type == "canceled"))' "${ISSUES_JSON:?}" > "$out" ;;
+        *'nin: ["completed", "canceled", "duplicate"]'*)
+            jq -c '.data.issues.nodes |= map(select(.state.type != "completed" and .state.type != "canceled" and .state.type != "duplicate"))' "${ISSUES_JSON:?}" > "$out" ;;
+        *'in: ["completed", "canceled", "duplicate"]'*)
+            jq -c '.data.issues.nodes |= map(select(.state.type == "completed" or .state.type == "canceled" or .state.type == "duplicate"))' "${ISSUES_JSON:?}" > "$out" ;;
         *)  cat "${ISSUES_JSON:?}" > "$out" ;;
       esac
       echo 200 ;;
@@ -54,37 +54,42 @@ case "$q" in
   *"labels { nodes { id name } }"*) file "${CURLABELS_JSON:?}" ;;
   *"projects(first: 250)"*)  file "${PROJECTS_JSON:?}" ;;
   *"labels(first: 250)"*)    file "${LABELS_JSON:?}" ;;
-  *"states(first: 50)"*)
-      say '{"data":{"team":{"states":{"nodes":[{"id":"st-done","type":"completed","position":1}]}}}}' ;;
+  *"states(first: 50)"*)     file "${STATES_JSON:?}" ;;
   *viewer*)
       say '{"data":{"viewer":{"id":"user-uuid","name":"loom","displayName":"Loom Bot"}}}' ;;
-  *issueUpdate*|*issueCreate*|*commentCreate*|*issueLabelCreate*|*projectUpdate*)
+  *issueUpdate*|*issueCreate*|*commentCreate*|*issueLabelCreate*|*projectUpdate*|*workflowStateCreate*)
       jq -c '.variables' "$data" >> "${MUT_LOG:-/dev/null}"
-      say '{"data":{"issueCreate":{"success":true,"issue":{"number":99}},"issueUpdate":{"success":true},"commentCreate":{"success":true},"issueLabelCreate":{"success":true},"projectUpdate":{"success":true}}}' ;;
+      say '{"data":{"issueCreate":{"success":true,"issue":{"number":99}},"issueUpdate":{"success":true},"commentCreate":{"success":true},"issueLabelCreate":{"success":true},"projectUpdate":{"success":true},"workflowStateCreate":{"success":true}}}' ;;
   *)  printf '{"errors":[{"message":"unrecognised query"}]}' > "$out"; echo 200 ;;
 esac
 STUB
 chmod +x "$TD/api"
 
-# The board. One Build issue and three tickets, chosen to exercise the three
-# places Linear does not look like GitLab: a canceled ticket (a state type with
-# no GitLab equivalent), an unassigned one, and one with an assignee.
+# The board. One Build issue and four tickets, chosen to exercise the places
+# Linear does not look like GitLab: a canceled ticket and a duplicate one (two
+# state types with no GitLab equivalent), an unassigned one, and one with an
+# assignee. Loom's state now lives in `state.name` (P90) — a Status, not a
+# label — so only `build-7` (a real label) survives on 2 and 3.
 cat > "$TD/issues.json" <<'JSON'
 {"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
  {"id":"u1","number":1,"title":"Build 7","description":"**Selected epics**\n- Ledger (#2)\n",
   "url":"https://linear.app/acme/issue/ENG-1","updatedAt":"2026-08-10T00:00:00Z",
-  "state":{"type":"started"},"labels":{"nodes":[]},"assignee":null,"project":null},
+  "state":{"type":"started","name":"In Progress"},"labels":{"nodes":[]},"assignee":null,"project":null},
  {"id":"u2","number":2,"title":"Add the ledger","description":"## Risk tier\n\nlogic\n\n## Blocked by\n\nNone - can start immediately\n",
   "url":"https://linear.app/acme/issue/ENG-2","updatedAt":"2026-08-10T00:00:00Z",
-  "state":{"type":"unstarted"},"labels":{"nodes":[{"name":"build-7"},{"name":"ready-for-agent"}]},
+  "state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[{"name":"build-7"}]},
   "assignee":null,"project":{"name":"Ledger"}},
  {"id":"u3","number":3,"title":"Wire the ledger up","description":"## Risk tier\n\napi\n",
   "url":"https://linear.app/acme/issue/ENG-3","updatedAt":"2026-08-10T00:00:00Z",
-  "state":{"type":"started"},"labels":{"nodes":[{"name":"build-7"},{"name":"in-progress"}]},
+  "state":{"type":"started","name":"In Progress"},"labels":{"nodes":[{"name":"build-7"}]},
   "assignee":{"name":"jo","displayName":"Jo"},"project":{"name":"Ledger"}},
  {"id":"u4","number":4,"title":"Dropped idea","description":"nope\n",
   "url":"https://linear.app/acme/issue/ENG-4","updatedAt":"2026-08-10T00:00:00Z",
-  "state":{"type":"canceled"},"labels":{"nodes":[{"name":"build-7"}]},
+  "state":{"type":"canceled","name":"Canceled"},"labels":{"nodes":[{"name":"build-7"}]},
+  "assignee":null,"project":{"name":"Ledger"}},
+ {"id":"u5","number":5,"title":"Same as #2, filed twice","description":"oops\n",
+  "url":"https://linear.app/acme/issue/ENG-5","updatedAt":"2026-08-10T00:00:00Z",
+  "state":{"type":"duplicate","name":"Duplicate"},"labels":{"nodes":[{"name":"build-7"}]},
   "assignee":null,"project":{"name":"Ledger"}}
 ]}}}
 JSON
@@ -104,12 +109,29 @@ printf '{"data":{"issue":{"relations":{"nodes":[]},"inverseRelations":{"nodes":[
 printf '{"data":{"issue":{"labels":{"nodes":[]}}}}' > "$TD/curlabels.json"
 printf '{"data":{"team":{"projects":{"nodes":[]}}}}' > "$TD/projects.json"
 printf '{"data":{"team":{"labels":{"nodes":[]}}}}' > "$TD/labels.json"
+# A team that, like the real one P90 was written against, has Todo, In
+# Progress and Done already and is missing the three loom has to create.
+printf '{"data":{"team":{"states":{"nodes":[
+  {"id":"st-todo","name":"Todo","type":"unstarted","position":1},
+  {"id":"st-doing","name":"In Progress","type":"started","position":2},
+  {"id":"st-done","name":"Done","type":"completed","position":3}
+]}}}}' > "$TD/states.json"
+# The same team after `bootstrap.sh states` has run: all five plus Done.
+printf '{"data":{"team":{"states":{"nodes":[
+  {"id":"st-todo","name":"Todo","type":"unstarted","position":1},
+  {"id":"st-doing","name":"In Progress","type":"started","position":2},
+  {"id":"st-review","name":"In Review","type":"started","position":3},
+  {"id":"st-merge","name":"Merge Queue","type":"started","position":4},
+  {"id":"st-blocked","name":"Blocked","type":"started","position":5},
+  {"id":"st-done","name":"Done","type":"completed","position":6}
+]}}}}' > "$TD/states-full.json"
 
 API_ENV() { # the canned API, with every fixture defaulted
-    printf '%s\n' "LINEAR_API_KEY=k" "CURL_CMD=$TD/api" "ISSUES_JSON=$TD/issues.json" \
+    printf '%s\n' "LINEAR_API_KEY=k" "CURL_CMD=$TD/api" "ISSUES_JSON=${ISSUES_JSON:-$TD/issues.json}" \
         "TEAMS_JSON=${TEAMS_JSON:-$TD/teams.json}" "COMMENTS_JSON=${COMMENTS_JSON:-$TD/comments.json}" \
         "RELATIONS_JSON=${RELATIONS_JSON:-$TD/relations.json}" "CURLABELS_JSON=${CURLABELS_JSON:-$TD/curlabels.json}" \
         "PROJECTS_JSON=${PROJECTS_JSON:-$TD/projects.json}" "LABELS_JSON=${LABELS_JSON:-$TD/labels.json}" \
+        "STATES_JSON=${STATES_JSON:-$TD/states.json}" \
         "LOOM_REPO=$TD/repo" "MUT_LOG=${MUT_LOG:-/dev/null}"
 }
 L() { # L <verb...> — the driver, against the canned API
@@ -214,14 +236,15 @@ printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tr
 # --- p87-l6. Writes go through Linear's shape ------------------------------
 # Linear has no add/remove for labels: the set is written whole. So the current
 # set has to be READ first — writing only the additions would silently strip
-# every label the ticket has, which on this board is its entire state machine.
-printf '%s' '{"data":{"team":{"labels":{"nodes":[{"id":"l1","name":"build-7"},{"id":"l2","name":"ready-for-agent"},{"id":"l3","name":"in-progress"}]}}}}' > "$TD/lbl.json"
-printf '%s' '{"data":{"issue":{"labels":{"nodes":[{"id":"l1","name":"build-7"},{"id":"l2","name":"ready-for-agent"}]}}}}' > "$TD/curlbl.json"
+# every label the ticket has. Real labels (P90 left these alone) still get the
+# whole-set rewrite.
+printf '%s' '{"data":{"team":{"labels":{"nodes":[{"id":"l1","name":"build-7"},{"id":"l2","name":"fix"},{"id":"l3","name":"tier::logic"}]}}}}' > "$TD/lbl.json"
+printf '%s' '{"data":{"issue":{"labels":{"nodes":[{"id":"l1","name":"build-7"}]}}}}' > "$TD/curlbl.json"
 : > "$TD/mut.log"
 MUT_LOG="$TD/mut.log" LABELS_JSON="$TD/lbl.json" CURLABELS_JSON="$TD/curlbl.json" \
-  L issue-relabel 2 --add in-progress --remove ready-for-agent >/dev/null 2>&1 || true
-if grep -q '"l1"' "$TD/mut.log" && grep -q '"l3"' "$TD/mut.log" && ! grep -q '"l2"' "$TD/mut.log"; then
-    ok "relabel: the whole label set is rewritten — the ticket keeps build-7, gains in-progress, loses ready-for-agent"
+  L issue-relabel 2 --add fix,tier::logic --remove build-7 >/dev/null 2>&1 || true
+if grep -q '"l2"' "$TD/mut.log" && grep -q '"l3"' "$TD/mut.log" && ! grep -q '"l1"' "$TD/mut.log"; then
+    ok "relabel: real labels (fix, tier::logic) still get the whole-set rewrite — build-7 dropped, both new ones added"
 else
     bad "relabel: the label set written was wrong ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
 fi
@@ -241,6 +264,159 @@ MUT_LOG="$TD/mut.log" L issue-close 2 >/dev/null 2>&1 || true
 grep -q 'st-done' "$TD/mut.log" \
     && ok "close: closing is a move to the team's own completed-type state, not a name this driver invented" \
     || bad "close: the completed state was not used ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+
+# --- p90-1. Linear's Status field is loom's state machine ------------------
+# P90: `ready-for-agent`, `in-progress`, `review`, `merge-queue`, `blocked`
+# used to be written as labels. They are Statuses now — a loom state name in
+# --add becomes stateId in the SAME mutation, never a labelIds entry, and a
+# state name in --remove is dropped rather than attempted as a label removal.
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" STATES_JSON="$TD/states.json" \
+  L issue-relabel 2 --add in-progress --remove ready-for-agent >/dev/null 2>&1 || true
+if grep -q '"stateId":"st-doing"' "$TD/mut.log" && ! grep -q 'labelIds' "$TD/mut.log"; then
+    ok "state: --add in-progress writes a stateId mutation, and the --remove of another state name writes no label change at all"
+else
+    bad "state: the state-add mutation was wrong ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+fi
+out=$(MUT_LOG="$TD/mut.log" STATES_JSON="$TD/states-full.json" \
+        L issue-relabel 2 --add in-progress,blocked 2>&1); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q "two ticket states" \
+    && ok "state: two ticket states in one --add is refused, never a coin flip" \
+    || bad "state: two states in one --add was accepted (rc=$rc, $out)"
+# fix-ticket creates with 'ready-for-agent' inline in --labels, the way every
+# other driver does — this must set the initial Status, not fail `_label_ids`
+# on a name that was never a real Linear label.
+printf '%s' '{"data":{"team":{"labels":{"nodes":[{"id":"l1","name":"build-7"},{"id":"l2","name":"fix"},{"id":"l3","name":"tier::logic"}]}}}}' > "$TD/lbl.json"
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" LABELS_JSON="$TD/lbl.json" STATES_JSON="$TD/states.json" \
+  L issue-create --title "t" --body-file "$TD/note.md" --labels "build-7,fix,ready-for-agent" >/dev/null 2>&1 || true
+if grep -q '"stateId":"st-todo"' "$TD/mut.log" && grep -q '"l1"' "$TD/mut.log" && grep -q '"l2"' "$TD/mut.log"; then
+    ok "state: issue-create splits 'ready-for-agent' out of --labels into the initial Status, the reals into labelIds"
+else
+    bad "state: issue-create did not split the state name out of --labels ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+fi
+
+# --- p90-2. The mapping is injective, in both directions --------------------
+# Loom has five open states; collapsing any pair breaks a specific scheduler
+# guard (SKILL.md). Read direction: five issues, one per Status, must each read
+# back exactly the ONE matching loom label — never zero, never two.
+cat > "$TD/rt-issues.json" <<'JSON'
+{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+ {"id":"r1","number":101,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"r2","number":102,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"started","name":"In Progress"},"labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"r3","number":103,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"started","name":"In Review"},"labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"r4","number":104,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"started","name":"Merge Queue"},"labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"r5","number":105,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"started","name":"Blocked"},"labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"r6","number":106,"title":"t","description":"","url":null,"updatedAt":null,"state":{"type":"unstarted","name":"Icebox"},"labels":{"nodes":[]},"assignee":null,"project":null}
+]}}}
+JSON
+rt=$(ISSUES_JSON="$TD/rt-issues.json" L issues-open)
+for pair in "101 ready-for-agent" "102 in-progress" "103 review" "104 merge-queue" "105 blocked"; do
+    set -- $pair
+    got=$(printf '%s' "$rt" | jq -c --argjson n "$1" '[.[] | select(.id == $n)][0].labels')
+    if printf '%s' "$got" | jq -e --arg w "$2" 'index($w) != null and length == 1' >/dev/null 2>&1; then
+        ok "state round trip: issue $1 (Status '$2's default) reads back exactly that one loom label — a collapsed pair would fail this"
+    else
+        bad "state round trip: issue $1 expected only '$2', got $got"
+    fi
+done
+[ "$(printf '%s' "$rt" | jq -c '[.[] | select(.id == 106)][0].labels')" = "[]" ] \
+    && ok "state: an unrecognised Status ('Icebox') produces no state label at all — never a guessed one" \
+    || bad "state: issue 106 (unrecognised Status) got a state label it should not have ($(printf '%s' "$rt" | jq -c '[.[] | select(.id == 106)][0].labels'))"
+# Write direction: each of the five resolves to its OWN distinct state id.
+: > "$TD/rt-write.log"
+for s in ready-for-agent in-progress review merge-queue blocked; do
+    : > "$TD/mut.log"
+    MUT_LOG="$TD/mut.log" STATES_JSON="$TD/states-full.json" L issue-relabel 2 --add "$s" >/dev/null 2>&1 || true
+    jq -r '.input.stateId' "$TD/mut.log" >> "$TD/rt-write.log" 2>/dev/null
+done
+[ "$(sort -u "$TD/rt-write.log" | wc -l | tr -d ' ')" = 5 ] \
+    && ok "state round trip: all five states resolve to five DISTINCT workflow-state ids on write" \
+    || bad "state round trip (write): $(tr '\n' ' ' < "$TD/rt-write.log")"
+
+# --- p90-3. `duplicate` reads closed and is absent from issues-open ---------
+# The same failure canceled would have been, dropped instead of closed: a
+# ticket that will never move sitting in the scheduler's universe forever.
+[ "$(printf '%s' "$open_json" | jq '[.[] | select(.id == 5)] | length')" = 0 ] \
+    && ok "duplicate: a duplicate-type ticket is not in the open set" \
+    || bad "duplicate: a duplicate ticket was listed as open"
+[ "$(L issue 5 | jq -r '.state')" = closed ] \
+    && ok "duplicate: and asked about directly it reads CLOSED, like canceled — never dropped" \
+    || bad "duplicate: a duplicate issue did not map to closed ($(L issue 5 | jq -r '.state'))"
+
+# --- p90-4. A human hold set through Status still trips _blocked_guard -----
+jq '(.data.issues.nodes[] | select(.number == 2) | .state) = {"type":"started","name":"Blocked"}' \
+   "$TD/issues.json" > "$TD/blocked-issues.json"
+out=$(env $(API_ENV | tr '\n' ' ') TRACKER_CMD="$LIN" ISSUES_JSON="$TD/blocked-issues.json" \
+        STATES_JSON="$TD/states-full.json" LOOM_HOME="$TD/home" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+        "$LANE" transition 2 review 2>&1); rc=$?
+[ "$rc" = 2 ] && printf '%s' "$out" | grep -q "blocked" \
+    && ok "blocked: a hold set through Status (not a label) still makes _blocked_guard fire" \
+    || bad "blocked: the guard did not fire against a Status-held ticket (rc=$rc, $(printf '%s' "$out" | head -1))"
+
+# --- p90-5. bootstrap.sh states: create only what is missing ---------------
+BOOT="$SD/bootstrap.sh"
+BOOTENV() { env $(API_ENV | tr '\n' ' ') TRACKER_CMD="$LIN" LOOM_HOME="$TD/boot-home" \
+              LOOM_GLOBAL_CONFIG="$TD/g.yml" "$@"; }
+: > "$TD/mut.log"
+out=$(MUT_LOG="$TD/mut.log" BOOTENV "$BOOT" states --dry-run 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "would create 'In Review'" \
+   && printf '%s' "$out" | grep -q "would create 'Merge Queue'" \
+   && printf '%s' "$out" | grep -q "would create 'Blocked'" \
+   && printf '%s' "$out" | grep -q "would create 3, 2 already present" \
+   && [ ! -s "$TD/mut.log" ]; then
+    ok "bootstrap states: dry run names the three missing states (Todo and In Progress already exist) and writes nothing"
+else
+    bad "bootstrap states: dry run was wrong (rc=$rc, mut=$(tr -d '\n' < "$TD/mut.log"), out=$out)"
+fi
+: > "$TD/mut.log"
+out=$(MUT_LOG="$TD/mut.log" BOOTENV "$BOOT" states 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$out" | grep -q "states: 3 created, 2 already present" \
+   && [ "$(wc -l < "$TD/mut.log" | tr -d ' ')" = 3 ] \
+   && grep -q '"name":"In Review"' "$TD/mut.log" && grep -q '"type":"started"' "$TD/mut.log"; then
+    ok "bootstrap states: creates exactly the three missing states, all of type 'started'"
+else
+    bad "bootstrap states: real run was wrong (rc=$rc, out=$out, mut=$(tr -d '\n' < "$TD/mut.log"))"
+fi
+: > "$TD/mut.log"
+out=$(MUT_LOG="$TD/mut.log" STATES_JSON="$TD/states-full.json" BOOTENV "$BOOT" states 2>&1); rc=$?
+[ "$rc" = 0 ] && printf '%s' "$out" | grep -q "states: 0 created, 5 already present" && [ ! -s "$TD/mut.log" ] \
+    && ok "bootstrap states: idempotent — a team that already has all five creates nothing" \
+    || bad "bootstrap states: a complete board was not a no-op (rc=$rc, out=$out)"
+# Not applicable on a tracker that already carries these five as real labels.
+GLTD="$T/p90gl"; mkdir -p "$GLTD/repo/docs/agents"
+git -C "$GLTD/repo" init -q >/dev/null 2>&1
+printf '# Issue tracker: GitLab\n' > "$GLTD/repo/docs/agents/issue-tracker.md"
+git -C "$GLTD/repo" add -A >/dev/null 2>&1
+out=$(LOOM_REPO="$GLTD/repo" LOOM_HOME="$GLTD/home" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+        "$BOOT" states 2>&1); rc=$?
+[ "$rc" = 0 ] && printf '%s' "$out" | grep -q "not applicable" \
+    && ok "bootstrap states: a no-op, plainly, on a GitLab-boarded repo — these five are already real labels there" \
+    || bad "bootstrap states: did not recognise GitLab as not applicable (rc=$rc, $out)"
+
+# --- p90-6. Overrides win over defaults, and a name the team lacks halts ---
+printf '# Issue tracker: Linear\n\nTeam: ENG\nStatus review: Code Review\nStatus closed: Shipped\n' \
+    > "$TD/repo/docs/agents/issue-tracker.md"
+printf '%s' '{"data":{"team":{"states":{"nodes":[
+  {"id":"st-cr","name":"Code Review","type":"started","position":1},
+  {"id":"st-ship","name":"Shipped","type":"completed","position":2}
+]}}}}' > "$TD/override-states.json"
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" STATES_JSON="$TD/override-states.json" \
+  L issue-relabel 2 --add review >/dev/null 2>&1 || true
+grep -q '"stateId":"st-cr"' "$TD/mut.log" \
+    && ok "override: 'Status review: Code Review' in the declaration file wins over the default 'In Review'" \
+    || bad "override: the review override was not used ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" STATES_JSON="$TD/override-states.json" L issue-close 2 >/dev/null 2>&1 || true
+grep -q '"stateId":"st-ship"' "$TD/mut.log" \
+    && ok "override: 'Status closed: Shipped' picks the named completed state, not the lowest-position one" \
+    || bad "override: the closed override was not used ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+out=$(STATES_JSON="$TD/states.json" L issue-relabel 2 --add review 2>&1); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q "Code Review" \
+    && ok "override: a name the team does not have is a halt naming it, never a silent fall back to the default" \
+    || bad "override: a missing override name was silently accepted (rc=$rc, $out)"
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
 
 # --- p87-l7. The proof: a whole snapshot, then a plan ----------------------
 # P86's stage-3 fixture driver emitted the loom document directly, which proved

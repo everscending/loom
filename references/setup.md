@@ -62,6 +62,33 @@ rather than one.
    The `Team:` line is optional when your API key can see exactly one team.
    With several and no line, loom halts and lists them rather than picking.
 
+   **Linear's board is its Status field, not its labels** (P90): loom's five
+   ticket states — `ready-for-agent`, `in-progress`, `review`, `merge-queue`,
+   `blocked` — are written and read as Status, the same field that drives your
+   team's own board columns and cycle progress. `bootstrap.sh states` (part of
+   `bootstrap.sh all`) creates whichever of the five your team is missing —
+   defaults `Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked` — as
+   new workflow states of type `started`. **This is more invasive than
+   creating a label**: a workflow state is a column in every view your team
+   has, not a tag. `bootstrap.sh states --dry-run` names each one it would
+   add before you commit to it.
+
+   Override any of the five, or the completed state loom closes tickets into,
+   with `Status <loom-state>: <Linear name>` lines beside `Team:` — useful if
+   your review column is already called something else, or your team will not
+   accept new workflow states:
+
+   ```markdown
+   # Issue tracker: Linear
+
+   Team: ENG
+   Status review: Code Review
+   Status closed: Shipped
+   ```
+
+   A name that does not exist on the team is a halt naming it, never a guess
+   — run `bootstrap.sh states` to create it, or fix the line.
+
 2. **The API key, in a `secrets:` block.** Put it in `~/.loom/config.yml`
    (every repo on this machine) or in this repo's own state directory,
    `$LOOM_HOME/config.yml` (this repo only — which is how two repos point at
@@ -105,8 +132,9 @@ live in Linear.
 
 Mostly derived, not authored, and it runs itself. The **first `tick` in a
 repo** invokes `scripts/bootstrap.sh all` — seed `~/.loom/config.yml`,
-write `.claude/settings.json`, create the missing ticket-state labels — then
-proceeds with the wave. A sentinel in the repo's state dir makes every later
+write `.claude/settings.json`, create the missing ticket-state labels (and,
+on Linear, the missing ticket-state Statuses) — then proceeds with the wave.
+A sentinel in the repo's state dir makes every later
 tick skip it; a *failed* bootstrap writes no sentinel, so the next tick
 retries, and it never blocks the wave. It is hooked to `tick`, not `start`,
 because `tick` is the verb that always runs. Run it by hand any time:

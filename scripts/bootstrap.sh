@@ -13,8 +13,9 @@
 # Subcommands:
 #   global-config       seed ~/.loom/config.yml if absent
 #   labels              create the five missing ticket-state labels
+#   states              Linear only: create the five missing ticket-state Statuses (P90)
 #   settings            write .claude/settings.json (delegates to tick.sh)
-#   all                 all three, in dependency order
+#   all                 all four, in dependency order
 #
 # Test seams (env): LOOM_REPO, LOOM_GLOBAL_CONFIG, TRACKER_CMD (the driver),
 # GLAB_CMD (inside the gitlab driver).
@@ -190,6 +191,27 @@ EOF
     return 0
 }
 
+# P90: on Linear, loom's five ticket states live in the Status field, not in
+# labels, and Status columns are visible in every view the team has — more
+# invasive than a label, so this is its own step rather than folded into
+# `labels`. A no-op message on any other tracker, same as `cmd_labels`
+# reporting "0 created" would, except said plainly rather than by running an
+# empty loop: GitLab already carries these five as real labels.
+cmd_states() { # states [--dry-run]
+    local dry=""; [ "${1:-}" = "--dry-run" ] && dry="--dry-run"
+    command -v jq >/dev/null 2>&1 || die "states: jq required"
+    _require_repo states
+    local name; name=$(_require_tracker "$REPO_ROOT" states)
+    if [ "$name" != linear ]; then
+        echo "states: not applicable — $name tracks loom's ticket states as labels, not workflow states"
+        return 0
+    fi
+    local TRACKER; TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "$REPO_ROOT")"
+    [ -x "$TRACKER" ] || die "states: tracker driver '$TRACKER' is missing or not executable"
+    cd "$REPO_ROOT" || die "states: cannot cd to $REPO_ROOT"
+    "$TRACKER" states-sync $dry
+}
+
 # `.claude/settings.json` is an artifact whose ENTIRE effect depends on the repo
 # root being a trusted workspace — untrusted, Claude Code ignores every allow
 # entry in it, so bootstrap would be writing an artifact with no consumer
@@ -228,8 +250,8 @@ cmd_settings() { # settings [--force]
 
 # `all` used to discard its arguments entirely, so `bootstrap.sh all --dry-run`
 # really created labels and really wrote settings — the exact opposite of what
-# the flag promises. Only --dry-run is meaningful here (it belongs to labels);
-# anything else is refused rather than silently ignored.
+# the flag promises. Only --dry-run is meaningful here (it belongs to labels
+# and states); anything else is refused rather than silently ignored.
 cmd_all() {
     local dry=""
     case "${1:-}" in
@@ -246,6 +268,7 @@ cmd_all() {
     if [ -n "$dry" ]; then
         echo "bootstrap: dry run — nothing will be written"
         cmd_labels --dry-run
+        cmd_states --dry-run
         return 0
     fi
     cmd_global_config
@@ -255,6 +278,7 @@ cmd_all() {
     # run `bootstrap.sh settings` directly to see the real status.
     cmd_settings || true
     cmd_labels
+    cmd_states
     # Last, and after the writes: the settings file is written either way, so it
     # is ready the moment trust lands, and the labels above are unaffected by it.
     if ! _check_trust; then
@@ -269,8 +293,9 @@ cmd_all() {
 case "${1:-}" in
     global-config) shift; cmd_global_config "$@" ;;
     labels)        shift; cmd_labels "$@" ;;
+    states)        shift; cmd_states "$@" ;;
     settings)      shift; cmd_settings "$@" ;;
     all)           shift; cmd_all "$@" ;;
     "")            cmd_all ;;
-    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | settings [--force]" ;;
+    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | states [--dry-run] | settings [--force]" ;;
 esac

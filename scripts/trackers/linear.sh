@@ -26,10 +26,26 @@
 #      writes Linear's mutations require.
 #
 #   3. STATES, NOT OPEN AND CLOSED. A Linear issue is in a workflow state whose
-#      TYPE is one of backlog, unstarted, started, completed, canceled. The
-#      contract's `state` is open or closed, so completed and canceled both map
-#      to closed — canceled especially, because dropping it instead would leave
-#      a ticket that will never move sitting in the scheduler's universe forever.
+#      TYPE is one of backlog, unstarted, started, completed, canceled,
+#      duplicate. The contract's `state` is open or closed, so completed,
+#      canceled and duplicate all map to closed — dropping any of them instead
+#      would leave a ticket that will never move sitting in the scheduler's
+#      universe forever.
+#
+# LOOM'S OWN STATE MACHINE LIVES HERE TOO (P90). `ready-for-agent`,
+# `in-progress`, `review`, `merge-queue` and `blocked` used to be written as
+# Linear LABELS, because that is what the GitLab driver this file was written
+# against does. Linear's board is its Status field, not its labels — every
+# view a human has built (columns, cycle progress, "active issues") reads
+# Status, and none of it ever saw the label. So a loom state name in
+# `issue-relabel --add` becomes a `stateId` mutation instead, and `_MAP_ISSUE`
+# synthesises the matching state name back INTO `labels` on the way out, so
+# every reader above this file — `state_of` in snapshot.jq included — keeps
+# working unchanged. The five names still map to a fixed default Status
+# (`Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked`), overridable
+# per repo with a `Status <loom-state>: <Linear name>` line beside `Team:` in
+# the same declaration file. `fix`, `tier::*` and `model::*` stay real labels:
+# they are not states, and Linear has one Status per issue.
 #
 # THE TEAM. Linear issues belong to a Team and no git remote names it. Read from
 # a `Team: <key>` line in the same declaration file the tracker's name comes
@@ -85,6 +101,113 @@ _resolve_team() {
     TEAM_KEY=$(printf '%s' "$teams" | jq -r '.teams.nodes[0].key')
 }
 
+# --- loom's ticket states, mapped onto Linear's Status field (P90) --------
+
+# The fixed order SKILL.md defines the state machine in. Every place below
+# that needs to ask "is this a state name or a real label" walks this list.
+_STATE_NAMES="ready-for-agent in-progress review merge-queue blocked"
+
+# The Linear name a repo gets for one of loom's five states when it writes no
+# override — the three this driver actually has to CREATE (review,
+# merge-queue, blocked) plus the two most Linear teams already carry under
+# these names (backlog's `Todo`, started's `In Progress`).
+_state_default_name() { # <loom-state> → default Linear Status name
+    case "$1" in
+        ready-for-agent) printf 'Todo\n' ;;
+        in-progress)     printf 'In Progress\n' ;;
+        review)          printf 'In Review\n' ;;
+        merge-queue)     printf 'Merge Queue\n' ;;
+        blocked)         printf 'Blocked\n' ;;
+        *) die "linear.sh: '$1' is not one of loom's five ticket states" ;;
+    esac
+}
+# Same palette bootstrap.sh's LABELS constant uses for these five on GitLab,
+# so a state reads the same color whichever board it lives on.
+_state_default_color() { # <loom-state> → hex color for a state this driver creates
+    case "$1" in
+        ready-for-agent) printf '#428BCA\n' ;;
+        in-progress)     printf '#5CB85C\n' ;;
+        review)          printf '#F0AD4E\n' ;;
+        merge-queue)     printf '#8E44AD\n' ;;
+        blocked)         printf '#D9534F\n' ;;
+    esac
+}
+
+# The Status name THIS repo actually uses for one of loom's states: an
+# override — a `Status <loom-state>: <Linear name>` line beside `Team:` in the
+# same declaration file (P87) — else the default above.
+_state_name() { # <loom-state> → the Linear Status name this repo resolves it to
+    local want
+    want=$(_tracker_decl_field "${LOOM_REPO:-.}" "Status $1")
+    [ -n "$want" ] && printf '%s\n' "$want" || _state_default_name "$1"
+}
+
+# loom-state → the name this repo uses, as one JSON object — what `_MAP_ISSUE`
+# needs to turn a Status back into a label, and what a Status filter needs to
+# turn a label name back into a Status. Reads only the local declaration file,
+# so caching it costs nothing and saves five file reads per shaped document.
+_STATE_MAP_JSON=""
+_state_map_json() {
+    [ -n "$_STATE_MAP_JSON" ] && { printf '%s\n' "$_STATE_MAP_JSON"; return 0; }
+    local s obj='{}'
+    for s in $_STATE_NAMES; do
+        obj=$(jq -nc --argjson o "$obj" --arg k "$s" --arg v "$(_state_name "$s")" '$o + {($k): $v}')
+    done
+    _STATE_MAP_JSON="$obj"
+    printf '%s\n' "$obj"
+}
+
+# The team's actual workflow states (id, name, type, position), fetched once
+# per process and shared by `issue-close`, `states-sync` and the relabel
+# intercept below — the same query `issue-close` always made, now paid for
+# once rather than per verb.
+_TEAM_STATES=""
+_team_states() {
+    [ -n "$_TEAM_STATES" ] && { printf '%s\n' "$_TEAM_STATES"; return 0; }
+    _resolve_team
+    local out
+    out=$(_graphql 'query($team: String!) {
+  team(id: $team) { states(first: 50) { nodes { id name type position } } }
+}' "$(jq -nc --arg t "$TEAM_ID" '{team: $t}')") || return 1
+    _TEAM_STATES=$(printf '%s' "$out" | jq -c '.team.states.nodes')
+    printf '%s\n' "$_TEAM_STATES"
+}
+
+# The workflow state id for one of loom's five, by the name this repo
+# resolves it to. A name the team does not have is a HALT, never a guess —
+# `states-sync` (below) is what creates it.
+_state_id_for() { # <loom-state> → Linear state id, or a halt naming it
+    local loom="$1" name states id
+    name=$(_state_name "$loom")
+    states=$(_team_states) || return 1
+    id=$(printf '%s' "$states" | jq -r --arg n "$name" '[.[] | select(.name == $n)][0].id // empty')
+    [ -n "$id" ] \
+        || die "linear.sh: team $TEAM_KEY has no workflow state named '$name' (loom's
+  '$loom'). Run 'bootstrap.sh states' to create it, or fix the Status override
+  in $(_tracker_decl_path)."
+    printf '%s\n' "$id"
+}
+
+# The Status this repo's completed tickets close into: an override
+# (`Status closed: <name>`) or the team's own lowest-position `completed`
+# state — never a name this driver invents, because teams rename `Done`.
+_close_state_id() {
+    local want states id
+    want=$(_tracker_decl_field "${LOOM_REPO:-.}" "Status closed")
+    states=$(_team_states) || return 1
+    if [ -n "$want" ]; then
+        id=$(printf '%s' "$states" | jq -r --arg n "$want" '[.[] | select(.name == $n)][0].id // empty')
+        [ -n "$id" ] \
+            || die "linear.sh: team $TEAM_KEY has no workflow state named '$want' (the
+  'Status closed' override in $(_tracker_decl_path))."
+    else
+        id=$(printf '%s' "$states" | jq -r \
+            '[.[] | select(.type == "completed")] | sort_by(.position) | .[0].id // empty')
+        [ -n "$id" ] || die "issue-close: team $TEAM_KEY has no workflow state of type 'completed'"
+    fi
+    printf '%s\n' "$id"
+}
+
 # --- the loom shape -------------------------------------------------------
 # One jq program per kind of thing, applied on the way out. Every Linear field
 # name in this skill is inside these filters.
@@ -94,16 +217,22 @@ _resolve_team() {
 # break every reader — the scheduler's ready set is `assignees | length == 0`,
 # and `null | length` is 0 in jq, so it would silently work until the day it
 # didn't.
+# `. as $i` up front: the labels field below needs both the raw label list AND
+# a lookup against `.state.name`, and jq's `to_entries[] | select(...)` inside
+# the object constructor changes what `.` means, so the issue has to be a
+# named variable rather than the ambient input.
 _MAP_ISSUE='
-  def st: if . == "completed" or . == "canceled" then "closed" else "open" end;
-  { id: .number, title: (.title // ""),
-    state: ((.state.type // "backlog") | st),
-    labels: [ (.labels.nodes // [])[] | .name ],
-    assignees: (if (.assignee // null) == null then []
-                else [ (.assignee.displayName // .assignee.name) ] end),
-    epic: (.project.name // null), url: (.url // null),
-    project: $team,
-    body: (.description // ""), updated_at: (.updatedAt // null) }'
+  def st: if . == "completed" or . == "canceled" or . == "duplicate" then "closed" else "open" end;
+  . as $i
+  | { id: $i.number, title: ($i.title // ""),
+      state: (($i.state.type // "backlog") | st),
+      labels: ([ ($i.labels.nodes // [])[] | .name ]
+               + [ $states | to_entries[] | select(.value == $i.state.name) | .key ]),
+      assignees: (if ($i.assignee // null) == null then []
+                  else [ ($i.assignee.displayName // $i.assignee.name) ] end),
+      epic: ($i.project.name // null), url: ($i.url // null),
+      project: $team,
+      body: ($i.description // ""), updated_at: ($i.updatedAt // null) }'
 _MAP_NOTE='
   { body: (.body // ""), created_at: (.createdAt // null),
     system: false, author: (.user.displayName // .user.name // null) }'
@@ -112,16 +241,17 @@ _MAP_PROJECT='
   { id: .id, title: (.name // ""), state: ((.state // "planned") | st),
     description: (.description // "") }'
 
-_shape() { # <filter> — a list, with the team in scope for `project`
-    jq --arg team "$TEAM_KEY" "map($1)"
+_shape() { # <filter> — a list, with the team and state map in scope
+    jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" "map($1)"
 }
-_shape_one() { jq --arg team "$TEAM_KEY" "$1"; }
+_shape_one() { jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" "$1"; }
 
 # The issue selection every read shares. Written once: a field added to one read
 # and forgotten in another is how a ticket looks different depending on which
-# call fetched it.
+# call fetched it. `state { name }` joins `type` here for P90: the label
+# synthesis above needs the Status's own name, not just its type.
 _ISSUE_FIELDS='id number title description url updatedAt
-               state { type } labels { nodes { name } }
+               state { type name } labels { nodes { name } }
                assignee { name displayName } project { name }'
 
 # Linear pages at 250 and answers with a cursor. Folded here for the same reason
@@ -152,25 +282,35 @@ _issues_all() { # <extra filter clauses> → one JSON array of raw issue nodes
 
 # --- board reads ----------------------------------------------------------
 
-# "Open" is every state type that is not completed or canceled — backlog,
-# unstarted and started alike. The scheduler's universe is `open issues labeled
-# build-N`, and a ticket sitting in backlog is unquestionably still to do.
+# "Open" is every state type that is not completed, canceled or duplicate —
+# backlog, unstarted and started alike. The scheduler's universe is `open
+# issues labeled build-N`, and a ticket sitting in backlog is unquestionably
+# still to do.
 v_issues_open() {
     _resolve_team
-    _issues_all ', state: { type: { nin: ["completed", "canceled"] } }' | _shape "$_MAP_ISSUE"
+    _issues_all ', state: { type: { nin: ["completed", "canceled", "duplicate"] } }' | _shape "$_MAP_ISSUE"
 }
 
 v_issues_by_label() { # <label> <opened|closed>
     local label="${1:-}" state="${2:-opened}" f
     [ -n "$label" ] || die "issues-by-label: needs a label"
     case "$state" in
-        opened) f=', state: { type: { nin: ["completed", "canceled"] } }' ;;
-        closed) f=', state: { type: { in: ["completed", "canceled"] } }' ;;
+        opened) f=', state: { type: { nin: ["completed", "canceled", "duplicate"] } }' ;;
+        closed) f=', state: { type: { in: ["completed", "canceled", "duplicate"] } }' ;;
         *) die "issues-by-label: state must be opened|closed" ;;
     esac
     _resolve_team
-    _issues_all "$f" | jq --arg l "$label" '[ .[] | select([.labels.nodes[].name] | index($l)) ]' \
-        | _shape "$_MAP_ISSUE"
+    case " $_STATE_NAMES " in
+        *" $label "*)
+            # One of loom's five: not a label at all here (P90) — a Status
+            # filter on the name this repo resolves it to.
+            local want; want=$(_state_name "$label")
+            _issues_all "$f" | jq --arg n "$want" '[ .[] | select(.state.name == $n) ]' \
+                | _shape "$_MAP_ISSUE" ;;
+        *)
+            _issues_all "$f" | jq --arg l "$label" '[ .[] | select([.labels.nodes[].name] | index($l)) ]' \
+                | _shape "$_MAP_ISSUE" ;;
+    esac
 }
 
 # CAREFUL: `_resolve_team` sets shell variables, so it has to run in the verb's
@@ -230,7 +370,7 @@ v_issue_links() { # <id>
   }
 }' "$(jq -nc --arg i "$uuid" '{id: $i}')") || return 1
     printf '%s' "$out" | jq --arg team "$TEAM_KEY" '
-      def st: if . == "completed" or . == "canceled" then "closed" else "open" end;
+      def st: if . == "completed" or . == "canceled" or . == "duplicate" then "closed" else "open" end;
       def row($n; $s; $t): { id: $n, state: ($s | st), project: $team, type: $t };
       [ (.issue.inverseRelations.nodes // [])[]
         | select(.issue != null)
@@ -259,12 +399,18 @@ v_milestones() { # [--state active]
 }
 
 v_labels() {
-    local out
+    local out real
     _resolve_team
     out=$(_graphql 'query($team: String!) {
   team(id: $team) { labels(first: 250) { nodes { id name } } }
 }' "$(jq -nc --arg t "$TEAM_ID" '{team: $t}')") || return 1
-    printf '%s' "$out" | jq '[.team.labels.nodes[] | { name: .name }]'
+    real=$(printf '%s' "$out" | jq '[.team.labels.nodes[] | { name: .name }]')
+    # The five ticket-state names are Statuses here, not labels (P90) — but
+    # `bootstrap.sh cmd_labels` walks this list to decide what still needs
+    # creating, and reports them present unconditionally so it never attempts
+    # a label-create against a state that already exists a different way.
+    jq -n --argjson real "$real" --arg names "$_STATE_NAMES" \
+        '$real + ($names | split(" ") | map({name: .}))'
 }
 
 v_whoami() {
@@ -302,9 +448,18 @@ v_note_add() { # <id> <body-file>
 # Linear has no add/remove: an issue's labels are set whole. So the current set
 # is read, the delta applied here, and the result written back. That read is not
 # optional — writing only the additions would silently strip every label the
-# ticket already had, which on this board is its entire state machine.
+# ticket already had.
+#
+# P90: one of loom's five ticket states in `--add` is not a label here — Status
+# is single-valued, so it becomes a `stateId` in the SAME mutation a claim's
+# labelIds/assigneeId already ride in. A state name in `--remove` is dropped
+# outright: Status can hold only one value, and whatever `--add` in the same
+# call decides (or, with no `--add`, whatever it already is) has already
+# answered "what happens to it". Two state names in one `--add` cannot come out
+# of `_set_state`, so it is an error here rather than a coin flip.
 v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassign]
     local id="${1:-}" add="" rm="" assignee="" unassign=false uuid cur want input
+    local state_add="" label_add="" label_rm="" tok
     _resolve_team
     need_id "$id" issue-relabel
     shift
@@ -315,12 +470,29 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
         --unassign) unassign=true; shift ;;
         *) die "issue-relabel: unknown option '$1'" ;;
     esac; done
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        case " $_STATE_NAMES " in
+            *" $tok "*)
+                [ -z "$state_add" ] \
+                    || die "issue-relabel: two ticket states in one --add ('$state_add' and '$tok') — _set_state cannot produce this"
+                state_add="$tok" ;;
+            *) label_add="${label_add:+$label_add,}$tok" ;;
+        esac
+    done < <(printf '%s\n' "$add" | tr ',' '\n')
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        case " $_STATE_NAMES " in
+            *" $tok "*) : ;;
+            *) label_rm="${label_rm:+$label_rm,}$tok" ;;
+        esac
+    done < <(printf '%s\n' "$rm" | tr ',' '\n')
     uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || die "issue-relabel: no issue $id"
     input='{}'
-    if [ -n "$add" ] || [ -n "$rm" ]; then
+    if [ -n "$label_add" ] || [ -n "$label_rm" ]; then
         cur=$(_graphql 'query($id: String!) { issue(id: $id) { labels { nodes { id name } } } }' \
                 "$(jq -nc --arg i "$uuid" '{id: $i}')") || return 1
-        want=$(printf '%s' "$cur" | jq -c --arg a "$add" --arg r "$rm" '
+        want=$(printf '%s' "$cur" | jq -c --arg a "$label_add" --arg r "$label_rm" '
             [.issue.labels.nodes[].name]
             + ($a | split(",") | map(select(length > 0)))
             | unique
@@ -328,6 +500,10 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
             | join(",")')
         want=$(_label_ids "$(printf '%s' "$want" | jq -r '.')") || return 1
         input=$(jq -nc --argjson l "$want" '{labelIds: $l}')
+    fi
+    if [ -n "$state_add" ]; then
+        local sid; sid=$(_state_id_for "$state_add") || return 1
+        input=$(jq -nc --argjson i "$input" --arg s "$sid" '$i + {stateId: $s}')
     fi
     if $unassign; then input=$(jq -nc --argjson i "$input" '$i + {assigneeId: null}')
     elif [ -n "$assignee" ]; then input=$(jq -nc --argjson i "$input" --arg a "$assignee" '$i + {assigneeId: $a}')
@@ -338,8 +514,9 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
 }
 
 # Closing means moving to a workflow state of type `completed` — Linear has no
-# close verb of its own. The team's own state is used rather than a name this
-# file invents, because teams rename them.
+# close verb of its own. `_close_state_id` picks the team's own state (or the
+# repo's `Status closed:` override) rather than a name this file invents,
+# because teams rename `Done`.
 v_issue_close() { # <id> [--remove CSV]
     local id="${1:-}" rm="" uuid sid input
     _resolve_team
@@ -348,13 +525,7 @@ v_issue_close() { # <id> [--remove CSV]
     case "${1:-}" in --remove) rm="${2:-}" ;; esac
     [ -z "$rm" ] || v_issue_relabel "$id" --remove "$rm"
     uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || die "issue-close: no issue $id"
-    _resolve_team
-    sid=$(_graphql 'query($team: String!) {
-  team(id: $team) { states(first: 50) { nodes { id type position } } }
-}' "$(jq -nc --arg t "$TEAM_ID" '{team: $t}')" \
-        | jq -r '[.team.states.nodes[] | select(.type == "completed")]
-                 | sort_by(.position) | .[0].id // empty') || return 1
-    [ -n "$sid" ] || die "issue-close: team $TEAM_KEY has no workflow state of type 'completed'"
+    sid=$(_close_state_id) || return 1
     input=$(jq -nc --arg s "$sid" '{stateId: $s}')
     _graphql 'mutation($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
@@ -363,6 +534,7 @@ v_issue_close() { # <id> [--remove CSV]
 
 v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] → the new id
     local title="" f="" labels="" ms="" input ids
+    local state_add="" real_labels="" tok
     while [ $# -gt 0 ]; do case "$1" in
         --title)        title="${2:-}"; shift 2 ;;
         --body-file)    f="${2:-}";     shift 2 ;;
@@ -373,11 +545,29 @@ v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] �
     [ -n "$title" ] || die "issue-create: --title is required"
     [ -f "$f" ] || die "issue-create: no such body file: '$f'"
     _resolve_team
-    ids='[]'; [ -z "$labels" ] || { ids=$(_label_ids "$labels") || return 1; }
+    # `fix-ticket` creates with `ready-for-agent` in --labels like every other
+    # driver — here it is a Status too (P90), so it splits the same way
+    # `issue-relabel`'s --add does rather than failing `_label_ids` on a name
+    # that was never a real Linear label.
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        case " $_STATE_NAMES " in
+            *" $tok "*)
+                [ -z "$state_add" ] \
+                    || die "issue-create: two ticket states in --labels ('$state_add' and '$tok')"
+                state_add="$tok" ;;
+            *) real_labels="${real_labels:+$real_labels,}$tok" ;;
+        esac
+    done < <(printf '%s\n' "$labels" | tr ',' '\n')
+    ids='[]'; [ -z "$real_labels" ] || { ids=$(_label_ids "$real_labels") || return 1; }
     input=$(jq -n --rawfile b "$f" --arg t "$title" --arg team "$TEAM_ID" \
                   --argjson l "$ids" --arg p "$ms" \
         '{teamId: $team, title: $t, description: $b, labelIds: $l}
          + (if $p == "" then {} else {projectId: $p} end)')
+    if [ -n "$state_add" ]; then
+        local sid; sid=$(_state_id_for "$state_add") || return 1
+        input=$(jq -nc --argjson i "$input" --arg s "$sid" '$i + {stateId: $s}')
+    fi
     _graphql 'mutation($input: IssueCreateInput!) {
   issueCreate(input: $input) { success issue { number } }
 }' "$(jq -nc --argjson in "$input" '{input: $in}')" \
@@ -405,6 +595,43 @@ v_milestone_close() { # <project-id> — the id `milestones` handed out
 }' "$(jq -nc --arg i "$id" '{id: $i}')" >/dev/null
 }
 
+# `bootstrap.sh states` — creates whichever of loom's five ticket states this
+# team is missing, under the name this repo resolves it to. Idempotent by
+# name, like `label-create`: a name that already exists is left alone. Every
+# one loom creates gets type `started` — work exists on all three it usually
+# has to add (review, merge-queue, blocked), Linear's UI groups `started` as
+# in-flight, and the open/closed mapping above only cares that it is neither
+# `completed` nor `canceled` nor `duplicate`.
+v_states_sync() { # [--dry-run]
+    local dry=0; [ "${1:-}" = "--dry-run" ] && dry=1
+    _resolve_team
+    local states s name id created=0 skipped=0
+    states=$(_team_states) || return 1
+    for s in $_STATE_NAMES; do
+        name=$(_state_name "$s")
+        id=$(printf '%s' "$states" | jq -r --arg n "$name" '[.[] | select(.name == $n)][0].id // empty')
+        if [ -n "$id" ]; then
+            skipped=$((skipped+1)); continue
+        fi
+        if [ "$dry" -eq 1 ]; then
+            echo "linear.sh: states: would create '$name' (loom's '$s')"
+            created=$((created+1)); continue
+        fi
+        _graphql 'mutation($input: WorkflowStateCreateInput!) {
+  workflowStateCreate(input: $input) { success }
+}' "$(jq -nc --arg t "$TEAM_ID" --arg n "$name" --arg c "$(_state_default_color "$s")" \
+        '{input: {teamId: $t, name: $n, type: "started", color: $c}}')" >/dev/null \
+            || die "states: failed creating workflow state '$name'"
+        echo "linear.sh: states: created '$name' (loom's '$s')"
+        created=$((created+1))
+    done
+    if [ "$dry" -eq 1 ]; then
+        echo "linear.sh: states: would create $created, $skipped already present (dry run — nothing written)"
+    else
+        echo "linear.sh: states: $created created, $skipped already present"
+    fi
+}
+
 _usage() {
     die "usage: linear.sh <verb> [args]
   board reads : issues-open | issues-by-label <label> <opened|closed> | issue <id> |
@@ -413,7 +640,8 @@ _usage() {
   board writes: issue-create --title T --body-file F --labels CSV [--milestone-id ID] |
                 issue-relabel <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassign] |
                 issue-close <id> [--remove CSV] | note-add <id> <body-file> |
-                label-create <name> <color> <desc> | milestone-close <id>
+                label-create <name> <color> <desc> | milestone-close <id> |
+                states-sync [--dry-run]
   Linear has no merge requests: the forge is resolved from this repo's remote."
 }
 # The roster comes FIRST and needs no credential. Printing what a driver can do
@@ -440,5 +668,6 @@ case "${1:-}" in
     issue-create)     shift; v_issue_create "$@" ;;
     label-create)     shift; v_label_create "$@" ;;
     milestone-close)  shift; v_milestone_close "$@" ;;
+    states-sync)      shift; v_states_sync "$@" ;;
     *) _usage ;;
 esac
