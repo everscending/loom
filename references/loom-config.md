@@ -168,10 +168,23 @@ usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_m
                                 # stop_and_wait:    pause and stay paused; `tick.sh resume` clears it
                                 # downshift_model:  pass --fallback-model to waves and lanes
 fallback_model: sonnet          # only read under downshift_model; an alias (sonnet|opus|haiku) or full id
+min_wave_gap_minutes: 10        # floor between wave STARTS, measured from the last
+                                # `wave_start` event (not from when the wave ended, and
+                                # not from a second state file that could drift). This is
+                                # the one knob that paces spending: the 60s heartbeat only
+                                # starts a wave once the gap has passed. 0 disables it;
+                                # a non-numeric value falls back to 10.
+                                # Only gates the TIMER (`tick --auto`). A lane's own
+                                # finish-trigger (`--from-lane`) and a hand-run `tick` are
+                                # not gated — a finishing lane must be able to start the
+                                # next one immediately.
 base: develop                   # integration base; the merge queue rebases onto origin/<base>
                                 # NOTE: there is deliberately no tick_interval key — the
-                                # heartbeat is a fixed 900s backstop (tick.sh cmd_install).
-                                # Lane self-triggers, not the timer, set the loop's pace.
+                                # heartbeat is a fixed 60s (tick.sh HEARTBEAT_INTERVAL). One
+                                # agent does both jobs: it watches on every firing, and starts
+                                # a wave only once min_wave_gap_minutes has passed. That gap,
+                                # not the timer, paces spending — so the fast tick costs
+                                # nothing. Lane self-triggers set the loop's real pace.
 
 wave_model: ""                  # model for scheduling waves (alias like sonnet|opus|haiku
                                 # or a full id). EMPTY INHERITS THE HUMAN'S SAVED

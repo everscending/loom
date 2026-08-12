@@ -114,6 +114,46 @@ input line and exits 0, so the ticker loses the line rather than failing loudly.
 line (`:2167`) report too small a number, which can invert the conclusion printed at `:2168-2169`
 on a build that really was graph-bound.
 
+### D-TICK-19 · a lane inherits no `PATH` to `lane.sh`, so every handoff must spell the absolute path and nothing checks that it did
+`cmd_spawn_lane` (`tick.sh:1599`) exports `LOOM_LANE_ID` (`:1662`), `LOOM_REPO`/`LOOM_HOME`
+(`:1757`) and `LOOM_SCRATCH` (`:1758`) into the lane's environment, and never `PATH`. The scripts
+directory that holds `lane.sh` and `tick.sh` is therefore unreachable by name inside a lane: the
+only form that works is the full absolute path, which a *model* has to type correctly into every
+handoff line it composes. `spawn-lane` validates the lane id, the cwd's trust, a live id
+collision, the `--brief`/`@brief` pair, the 1000-char inline cap and the pregate tier — it never
+asks whether the command it was handed can resolve. A handoff naming a script that does not exist
+in the child's environment spawns exactly like a correct one.
+
+This is the same hazard class as D-TICK-18, one layer out: that one caught a placeholder with no
+file behind it, this one is a *command* with no binary behind it. `SKILL.md`'s handoff paragraph
+says briefs travel as files but never says the commands inside one must be absolute, so nothing —
+prose or code — states the requirement the machinery silently imposes. It also sits against the
+file's own doctrine ("models judge, scripts plumb"; "the durable fix for a denial is never a
+longer allowlist"): a 60-character path retyped by a model on every chained spawn is plumbing
+pushed onto judgement.
+
+**Failure:** triggers-api build-2, 2026-08-12. `gate-49` passed its ticket and chained
+`merge-49` at 20:59:14 with a bare `lane.sh reconcile` and no `--brief`, then exited 8s later. The
+lane's first tool call returned `Exit code 1 / lane.sh not found`. Recovery made it worse: its
+`find / -maxdepth 6` misses `/Users/<u>/.claude/skills/loom/scripts/lane.sh` by exactly one level
+(the path is depth 7), and `find $HOME -maxdepth 4` misses it for the same reason, so the lane
+concluded the script "does not exist anywhere — not in repo, not in `$PATH`, not in home dir". It
+then ran `ps aux | grep "find /"`, saw its own orphaned searches still running, and reported them
+as "two other background shell processes on this machine also searching for `lane.sh`". It ended
+by asking which host the script lives on — a dead lane, into a headless void. 322 seconds, rc 0,
+nothing done. It survived only by luck: the next spawn happened to use `--brief`, and the staged
+brief carries the absolute path twice.
+
+Cost is bounded but the failure is silent to the machine — the lane exits rc 0, so no harvest
+residue names it, `crash_cap` never counts it, and the ticker shows an ordinary lane exit. Under
+`permission_mode: dontAsk` the same class is worse than a not-found: a repo allowlist can only
+prefix-match what it was written for, and triggers-api's `.claude/settings.json` allows
+`Bash(scripts/gate.sh*)` with no `lane.sh` entry in any form.
+
+**Test:** nothing in the suite spawns a lane and asserts it can reach `lane.sh` at all. Section 23
+covers the brief plumbing (D-TICK-18's guard) but only whether a lane *spawns*, never whether the
+command it carries resolves once it does.
+
 ---
 
 ## `scripts/snapshot.jq`
