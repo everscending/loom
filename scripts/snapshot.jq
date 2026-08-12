@@ -108,6 +108,20 @@ include "lib";
     # Shape 1 reads the MR that carries `Closes #<iid>`, never merely the
     # first open one: `related_merge_requests` lists any MR that MENTIONS the
     # issue, and repairing off the wrong branch is the cmd_merge trap again.
+    # Shape 1 is also blind on its own to the state a FAIL verdict leaves:
+    # `in-progress` with the MR still open, which is byte-identical on labels
+    # to the death it repairs. So a rejected ticket got shoved back to
+    # `review` by the very next wave, where `gate_of` calls it "already judged
+    # FAIL at this HEAD" and nothing in the wave reads `review` at all — the
+    # ticket parks forever, exactly the wedge the residue warning further down
+    # this file was written for. Not a race: once the gate lane exits the
+    # ticket is never $busy again, so this fires on EVERY FAIL. (Paid for:
+    # triggers-api build-2 #57, gate FAIL at 05:00:47 undone at 05:01:06,
+    # 2026-08-12.) The trailer is the signal that tells the two apart, and
+    # `$judged` already has it — shape 2 has read it since P63. Guarded on the
+    # verdict rather than on `in-progress` because `ready-for-agent` is the
+    # sanctioned recovery from a standing FAIL, and dragging THAT back to
+    # `review` re-wedges the ticket the same way.
     def repairs_of($iid; $state; $mrs; $notes; $working):
         ((($iid | tostring) as $i | $working | index($i)) != null) as $busy
       | ($mrs | map(select((.state // "") == "open"
@@ -119,6 +133,7 @@ include "lib";
       | if $busy or $state == "blocked" then []
         else
           [ (if $mr != null and (($state == "review" or $state == "merge-queue") | not)
+                and (($judged.verdict // "") != "FAIL")
              then {id: $iid, shape: "mr-open-not-in-review", state: $state, mr: $mr.id,
                    fix: "lane.sh transition \($iid) review"}
              else empty end),

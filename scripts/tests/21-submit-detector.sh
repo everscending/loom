@@ -22,7 +22,11 @@ cat > "$RP/open.json" <<'EOF'
  {"iid":36,"title":"Healthy, queued","project_id":1,"labels":["build-3","merge-queue"],
   "assignees":[],"description":"## Risk tier\n\napi\n"},
  {"iid":10,"title":"An MR that merely mentions another ticket","project_id":1,
-  "labels":["build-3","in-progress"],"assignees":[],"description":"## Risk tier\n\napi\n"}
+  "labels":["build-3","in-progress"],"assignees":[],"description":"## Risk tier\n\napi\n"},
+ {"iid":57,"title":"Rejected by its gate, awaiting round 2","project_id":1,
+  "labels":["build-3","in-progress"],"assignees":[],"description":"## Risk tier\n\napi\n"},
+ {"iid":58,"title":"Rejected, then requeued by a human","project_id":1,
+  "labels":["build-3","ready-for-agent"],"assignees":[],"description":"## Risk tier\n\napi\n"}
 ]
 EOF
 printf '[{"iid":8,"state":"opened","description":"Closes #31","sha":"aaa1111000000000000000000000000000000000"}]\n' > "$RP/mrs-31.json"
@@ -31,6 +35,10 @@ printf '[{"iid":6,"state":"opened","description":"Closes #36","sha":"ccc33330000
 printf '[{"iid":7,"state":"opened","description":"Related to Closes #31 work","sha":"ddd4444000000000000000000000000000000000"}]\n' > "$RP/mrs-10.json"
 printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"green\\n\\n<!-- orch-verdict PASS bbb2222 -->"}]\n' > "$RP/notes-26.json"
 printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"green\\n\\n<!-- orch-verdict PASS ccc3333 -->"}]\n' > "$RP/notes-36.json"
+printf '[{"iid":9,"state":"opened","description":"Closes #57","sha":"eee5555000000000000000000000000000000000"}]\n' > "$RP/mrs-57.json"
+printf '[{"iid":11,"state":"opened","description":"Closes #58","sha":"fff6666000000000000000000000000000000000"}]\n' > "$RP/mrs-58.json"
+printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"rejected\\n\\n<!-- orch-verdict FAIL eee5555 -->"}]\n' > "$RP/notes-57.json"
+printf '[{"system":false,"created_at":"2026-08-07T04:00:00Z","body":"rejected\\n\\n<!-- orch-verdict FAIL fff6666 -->"}]\n' > "$RP/notes-58.json"
 cat > "$RP/glab-stub.sh" <<'EOF'
 #!/usr/bin/env bash
 FX="$(cd "$(dirname "$0")" && pwd)"
@@ -70,6 +78,20 @@ if [ "$(qr '[.summary.repairs[] | select(.id==36 or .id==10)] | length')" = "0" 
     ok "repairs: a queued ticket and a mentions-only MR produce no repair item"
 else
     bad "repairs: false positive ($(qr '[.summary.repairs[] | select(.id==36 or .id==10)] | tostring'))"
+fi
+# The state a FAIL verdict leaves behind is byte-identical on labels to the
+# death shape 1 repairs: `in-progress`, MR still open. Repairing it shoves the
+# rejected ticket back to `review`, where the gate calls it already judged and
+# nothing else in the wave reads it — parked forever (triggers-api build-2 #57,
+# 2026-08-12). #57 is the case the guard actually decides. #58 is the same FAIL
+# one state along — `ready-for-agent`, the sanctioned recovery — and it is clean
+# for a second, independent reason: MRs are fetched only for active tickets, so
+# its MR list is empty here whatever the guard says. It is pinned anyway, so
+# that widening the fetch scope cannot quietly re-wedge the recovery state.
+if [ "$(qr '[.summary.repairs[] | select(.id==57 or .id==58)] | length')" = "0" ]; then
+    ok "repairs: a standing FAIL at HEAD blocks the MR-open repair"
+else
+    bad "repairs: FAIL verdict repaired into review ($(qr '[.summary.repairs[] | select(.id==57 or .id==58)] | tostring'))"
 fi
 # A ticket whose lane is still ALIVE is never flagged: the second write may
 # simply not have happened yet. Same live-lane set `summary.stranded` uses.
