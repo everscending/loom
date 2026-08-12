@@ -53,6 +53,17 @@
 # Several teams and no line is a HALT naming them — a board driver that picked
 # one would be filing a build's tickets somewhere nobody asked for.
 #
+# THE PROJECT (P92). SKILL.md's model is "epic = one milestone per epic".
+# `epic` used to always read a Linear PROJECT — the natural fit for a board
+# with several products, one project each — but a board whose whole product
+# is ONE Linear project keeps its epics as ProjectMilestones INSIDE it, and
+# closing an epic there must never complete the whole product. A `Project:
+# <name or id>` line beside `Team:` opts a repo into that shape: `epic` reads
+# a ProjectMilestone, `issue-create --milestone-id` takes one, and
+# `milestone-close` records acceptance in the milestone's own description
+# rather than trying to complete a project that isn't the epic. No `Project:`
+# line keeps every one of those exactly as it was.
+#
 # RATE LIMITS. A personal API key is capped per hour, which turns P77's snapshot
 # fan-out from a wall-clock problem into a hard stop on a board of any size:
 # roughly 250 calls per snapshot at 100 tickets, twice a wave. `issues-open`
@@ -99,6 +110,36 @@ _resolve_team() {
   Add a line to it:  Team: <KEY>"
     TEAM_ID=$(printf '%s' "$teams" | jq -r '.teams.nodes[0].id')
     TEAM_KEY=$(printf '%s' "$teams" | jq -r '.teams.nodes[0].key')
+}
+
+# --- the project, and P92's fork in behaviour ------------------------------
+#
+# A board whose whole product is one Linear Project keeps loom's epics as
+# ProjectMilestones INSIDE it, not as separate Projects on the team — that is
+# Linear's actual analogue of "one milestone per epic". A `Project: <name or
+# id>` line beside `Team:` in the declaration file opts a repo into that
+# shape; PROJECT_MODE stays false with no such line, which is every place
+# below keeping its pre-P92 behaviour (a Linear Project IS the epic).
+PROJECT_ID=""; PROJECT_NAME=""; _PROJECT_MODE=false; _PROJECT_RESOLVED=false
+_resolve_project() {
+    $_PROJECT_RESOLVED && return 0
+    _PROJECT_RESOLVED=true
+    local want projects
+    want=$(_tracker_decl_field "${LOOM_REPO:-.}" Project)
+    [ -n "$want" ] || return 0
+    _resolve_team
+    projects=$(_graphql 'query($team: String!) {
+  team(id: $team) { projects(first: 250) { nodes { id name } } }
+}' "$(jq -nc --arg t "$TEAM_ID" '{team: $t}')") \
+        || die "linear.sh: could not list team $TEAM_KEY's projects"
+    PROJECT_ID=$(printf '%s' "$projects" | jq -r --arg w "$want" \
+        '[.team.projects.nodes[] | select(.id == $w or (.name | ascii_downcase) == ($w | ascii_downcase))][0].id // empty')
+    [ -n "$PROJECT_ID" ] \
+        || die "linear.sh: '$(_tracker_decl_path)' declares 'Project: $want', and team $TEAM_KEY
+  has no project by that name or id. It has: $(printf '%s' "$projects" | jq -r '[.team.projects.nodes[].name] | join(", ")')."
+    PROJECT_NAME=$(printf '%s' "$projects" | jq -r --arg id "$PROJECT_ID" \
+        '[.team.projects.nodes[] | select(.id == $id)][0].name')
+    _PROJECT_MODE=true
 }
 
 # --- loom's ticket states, mapped onto Linear's Status field (P90) --------
@@ -221,6 +262,12 @@ _close_state_id() {
 # a lookup against `.state.name`, and jq's `to_entries[] | select(...)` inside
 # the object constructor changes what `.` means, so the issue has to be a
 # named variable rather than the ambient input.
+# `epic` (P92): a repo with a declared `Project:` keeps its epics as
+# ProjectMilestones INSIDE that one project, so the epic is
+# `$i.projectMilestone.name`. A repo with no `Project:` line keeps its
+# pre-P92 shape unchanged — the Linear Project itself is the epic. `$pm`
+# (project mode) is the switch, resolved once per process by `_resolve_project`
+# and threaded through `_shape`/`_shape_one` like `$team` and `$states`.
 _MAP_ISSUE='
   def st: if . == "completed" or . == "canceled" or . == "duplicate" then "closed" else "open" end;
   . as $i
@@ -230,7 +277,8 @@ _MAP_ISSUE='
                + [ $states | to_entries[] | select(.value == $i.state.name) | .key ]),
       assignees: (if ($i.assignee // null) == null then []
                   else [ ($i.assignee.displayName // $i.assignee.name) ] end),
-      epic: ($i.project.name // null), url: ($i.url // null),
+      epic: (if $pm then ($i.projectMilestone.name // null) else ($i.project.name // null) end),
+      url: ($i.url // null),
       project: $team,
       body: ($i.description // ""), updated_at: ($i.updatedAt // null) }'
 _MAP_NOTE='
@@ -240,19 +288,32 @@ _MAP_PROJECT='
   def st: if . == "completed" or . == "canceled" then "closed" else "open" end;
   { id: .id, title: (.name // ""), state: ((.state // "planned") | st),
     description: (.description // "") }'
+# A ProjectMilestone (P92) has no state field of its own — Linear only derives
+# a completion PERCENTAGE from its issues, which is completeness, not
+# acceptance, and loom needs the two kept apart (a probe may FAIL an epic
+# whose tickets all closed). So acceptance lives in a trailer
+# `v_milestone_close` appends to the description; its presence is what
+# `state: closed` means here.
+_MAP_MILESTONE='
+  { id: .id, title: (.name // ""),
+    state: (if ((.description // "") | test("<!-- loom-accepted ")) then "closed" else "open" end),
+    description: (.description // "") }'
 
-_shape() { # <filter> — a list, with the team and state map in scope
-    jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" "map($1)"
+_shape() { # <filter> — a list, with the team, state map and project mode in scope
+    jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" --argjson pm "$_PROJECT_MODE" "map($1)"
 }
-_shape_one() { jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" "$1"; }
+_shape_one() { jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" --argjson pm "$_PROJECT_MODE" "$1"; }
 
 # The issue selection every read shares. Written once: a field added to one read
 # and forgotten in another is how a ticket looks different depending on which
 # call fetched it. `state { name }` joins `type` here for P90: the label
 # synthesis above needs the Status's own name, not just its type.
+# `projectMilestone { id name }` (P92) is fetched unconditionally — cheap, and
+# `_MAP_ISSUE` above only reads it when `$pm` says this repo actually uses it.
 _ISSUE_FIELDS='id number title description url updatedAt
                state { type name } labels { nodes { name } }
-               assignee { name displayName } project { name }'
+               assignee { name displayName } project { name }
+               projectMilestone { id name }'
 
 # Linear pages at 250 and answers with a cursor. Folded here for the same reason
 # GitLab's `--paginate` is folded in its driver: a caller that saw one page
@@ -288,6 +349,7 @@ _issues_all() { # <extra filter clauses> → one JSON array of raw issue nodes
 # still to do.
 v_issues_open() {
     _resolve_team
+    _resolve_project
     _issues_all ', state: { type: { nin: ["completed", "canceled", "duplicate"] } }' | _shape "$_MAP_ISSUE"
 }
 
@@ -300,6 +362,7 @@ v_issues_by_label() { # <label> <opened|closed>
         *) die "issues-by-label: state must be opened|closed" ;;
     esac
     _resolve_team
+    _resolve_project
     case " $_STATE_NAMES " in
         *" $label "*)
             # One of loom's five: not a label at all here (P90) — a Status
@@ -331,7 +394,7 @@ _issue_node() { # <number> → the raw issue node, or fails
     printf '%s' "$out" | jq '.issues.nodes[0]'
 }
 
-v_issue() { _resolve_team; need_id "${1:-}" issue; _issue_node "$1" | _shape_one "$_MAP_ISSUE"; }
+v_issue() { _resolve_team; _resolve_project; need_id "${1:-}" issue; _issue_node "$1" | _shape_one "$_MAP_ISSUE"; }
 
 _issue_uuid() { # <number> → the UUID Linear's mutations take
     _issue_node "$1" | jq -r '.id // empty'
@@ -383,19 +446,33 @@ v_issue_links() { # <id>
           else empty end ]'
 }
 
-# Linear Projects are the closest thing it has to a milestone: a named container
-# an epic's tickets belong to, whose completion is the epic acceptance record.
+# A repo with a declared `Project:` (P92) keeps its epics as ProjectMilestones
+# INSIDE that one project — Linear's actual analogue of "one milestone per
+# epic" — so this lists THAT project's milestones. Back-compat: no `Project:`
+# line lists the team's own Projects, exactly as before this repo's whole
+# product was one Linear Project and each epic was one too.
 v_milestones() { # [--state active]
     local want="" out
     case "${1:-}" in --state) want="${2:-active}" ;; esac
     _resolve_team
-    out=$(_graphql 'query($team: String!) {
+    _resolve_project
+    if $_PROJECT_MODE; then
+        out=$(_graphql 'query($id: String!) {
+  project(id: $id) { projectMilestones(first: 250) { nodes { id name description } } }
+}' "$(jq -nc --arg i "$PROJECT_ID" '{id: $i}')") || return 1
+        printf '%s' "$out" | jq '[.project.projectMilestones.nodes[]]' | _shape "$_MAP_MILESTONE" \
+            | jq --arg w "$want" '
+                if $w == "" then . elif $w == "active" then [ .[] | select(.state == "open") ]
+                else [ .[] | select(.state == $w) ] end'
+    else
+        out=$(_graphql 'query($team: String!) {
   team(id: $team) { projects(first: 250) { nodes { id name state description } } }
 }' "$(jq -nc --arg t "$TEAM_ID" '{team: $t}')") || return 1
-    printf '%s' "$out" | jq '[.team.projects.nodes[]]' | _shape "$_MAP_PROJECT" \
-        | jq --arg w "$want" '
-            if $w == "" then . elif $w == "active" then [ .[] | select(.state == "open") ]
-            else [ .[] | select(.state == $w) ] end'
+        printf '%s' "$out" | jq '[.team.projects.nodes[]]' | _shape "$_MAP_PROJECT" \
+            | jq --arg w "$want" '
+                if $w == "" then . elif $w == "active" then [ .[] | select(.state == "open") ]
+                else [ .[] | select(.state == $w) ] end'
+    fi
 }
 
 v_labels() {
@@ -545,6 +622,7 @@ v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] �
     [ -n "$title" ] || die "issue-create: --title is required"
     [ -f "$f" ] || die "issue-create: no such body file: '$f'"
     _resolve_team
+    _resolve_project
     # `fix-ticket` creates with `ready-for-agent` in --labels like every other
     # driver — here it is a Status too (P90), so it splits the same way
     # `issue-relabel`'s --add does rather than failing `_label_ids` on a name
@@ -560,10 +638,21 @@ v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] �
         esac
     done < <(printf '%s\n' "$labels" | tr ',' '\n')
     ids='[]'; [ -z "$real_labels" ] || { ids=$(_label_ids "$real_labels") || return 1; }
-    input=$(jq -n --rawfile b "$f" --arg t "$title" --arg team "$TEAM_ID" \
-                  --argjson l "$ids" --arg p "$ms" \
-        '{teamId: $team, title: $t, description: $b, labelIds: $l}
-         + (if $p == "" then {} else {projectId: $p} end)')
+    # P92: `--milestone-id` used to be a Linear Project id (the epic itself).
+    # A repo with a declared `Project:` puts every ticket in THAT project and
+    # `--milestone-id` becomes the ProjectMilestone inside it instead —
+    # back-compat unchanged with no `Project:` line.
+    if $_PROJECT_MODE; then
+        input=$(jq -n --rawfile b "$f" --arg t "$title" --arg team "$TEAM_ID" \
+                      --argjson l "$ids" --arg p "$PROJECT_ID" --arg ms "$ms" \
+            '{teamId: $team, title: $t, description: $b, labelIds: $l, projectId: $p}
+             + (if $ms == "" then {} else {projectMilestoneId: $ms} end)')
+    else
+        input=$(jq -n --rawfile b "$f" --arg t "$title" --arg team "$TEAM_ID" \
+                      --argjson l "$ids" --arg p "$ms" \
+            '{teamId: $team, title: $t, description: $b, labelIds: $l}
+             + (if $p == "" then {} else {projectId: $p} end)')
+    fi
     if [ -n "$state_add" ]; then
         local sid; sid=$(_state_id_for "$state_add") || return 1
         input=$(jq -nc --argjson i "$input" --arg s "$sid" '$i + {stateId: $s}')
@@ -587,12 +676,33 @@ v_label_create() { # <name> <color> <description>
                  + (if $c == "" then {} else {color: $c} end)}')" >/dev/null 2>&1 || true
 }
 
-v_milestone_close() { # <project-id> — the id `milestones` handed out
-    local id="${1:-}"
-    [ -n "$id" ] || die "milestone-close: needs a project id"
-    _graphql 'mutation($id: String!) {
+# P92: in project mode `milestones` hands out ProjectMilestone ids, which have
+# no state field — Linear only derives a completion PERCENTAGE from their
+# issues, which is completeness, not acceptance. So acceptance is recorded the
+# only way a ProjectMilestone can hold it: a trailer appended to its
+# description, `<!-- loom-accepted <ISO8601> -->`, idempotent by presence.
+# Back-compat: no declared `Project:` means the id is still a Linear Project,
+# closed the old way.
+v_milestone_close() { # <id> — the id `milestones` handed out
+    local id="${1:-}" cur desc trailer
+    [ -n "$id" ] || die "milestone-close: needs a milestone id"
+    _resolve_team
+    _resolve_project
+    if $_PROJECT_MODE; then
+        cur=$(_graphql 'query($id: String!) { projectMilestone(id: $id) { description } }' \
+                "$(jq -nc --arg i "$id" '{id: $i}')") || return 1
+        desc=$(printf '%s' "$cur" | jq -r '.projectMilestone.description // ""')
+        printf '%s' "$desc" | grep -q '<!-- loom-accepted ' && return 0
+        trailer="<!-- loom-accepted $(date -u +%Y-%m-%dT%H:%M:%SZ) -->"
+        [ -n "$desc" ] && desc="$desc"$'\n\n'"$trailer" || desc="$trailer"
+        _graphql 'mutation($id: String!, $d: String!) {
+  projectMilestoneUpdate(id: $id, input: { description: $d }) { success }
+}' "$(jq -nc --arg i "$id" --arg d "$desc" '{id: $i, d: $d}')" >/dev/null
+    else
+        _graphql 'mutation($id: String!) {
   projectUpdate(id: $id, input: { state: "completed" }) { success }
 }' "$(jq -nc --arg i "$id" '{id: $i}')" >/dev/null
+    fi
 }
 
 # `bootstrap.sh states` — creates whichever of loom's five ticket states this

@@ -90,6 +90,7 @@ writing a new proposal that touches the same machinery.
 | P88 | The tracker credential has nowhere durable to live | implemented 2026-08-10 (`secrets:` is a map in the config files loom already reads, exported once and early — before any verb runs — because every tracker call in a build descends from the launchd agent and environment only travels downward. The plist's fixed four-key dict left `launchctl setenv` as the only route: machine-wide, and no reboot survives it. **The refusal is the load-bearing part**: `.loom.yml` is committed, so a `secrets:` block there is refused by name in all three scripts, and the message says to ROTATE the key rather than move it — removing it from the working copy does not unwrite it. Resolution order falls out of one rule, `a variable that already has a value is left alone`: the caller passes files most specific first, so the repo's own `$LOOM_HOME/config.yml` beats the global one and the real environment beats both. That answers the two-workspaces case with no new mechanism and leaves CI untouched. A secret is read WHOLE — no `#` comment stripping, unlike `_yaml_scalar`, because `#` is an ordinary character in a token and truncating one there would be unreadable off the file. `install` gained a preflight and refuses to arm a build whose tracker needs a credential nothing supplies: arming it is worse than refusing, since the failure would be the already-paid-for `unknown`-board silent wave skip and the refusal is at least visible. `resolve-config` reports `credential: {name, present, source}` and never a value, because its output is pasted into every wave prompt; a CLI-driven tracker reports an empty name rather than a false alarm. `bootstrap` seeds the global config at 600 and WARNS — rather than silently chmods, the file being the human's — when a `secrets:` block sits in something others can read. SKILL.md untouched; the one prose change is `references/setup.md`, whose Linear section had been giving advice that could not work. Suite 884 → 909, new section 33) |
 | P89 | The GitLab forge assumes the board is GitLab too | implemented 2026-08-11 (`forges/gitlab.sh` gained the branch `forges/github.sh` already had: `_board_is_gitlab` asks the same declaration question as `_board_is_github` (P86); `v_ticket_marker` writes GitLab's native `Closes #<id>` only when the board is GitLab, else a `Loom-Ticket: <id>` trailer; `v_mr_for_ticket`/`v_issue_mrs` keep the native `closed_by`/`related_merge_requests` endpoints on a GitLab board and route to a new `_mrs_for_ticket` — a full merge-request-list walk matched on the marker with github.sh's digit-boundary test — on every other board. `lane.sh submit`'s confirmation line now says "closes #N" only for a native marker and "links to #N" for the trailer, so it stops claiming a close the forge never performs. `scripts/tests/30-forge-driver.sh` section p87-6 extended with the GitLab-forge/Linear-board case: the no-change assertion re-pointed at a repo actually declared GitLab, the trailer marker, the digit-boundary pair against a `GLAB_CMD` stub, and a call-log assertion that a GitLab board still reaches `closed_by` and never the list walk. Suite 919, 0 failed) |
 | P90 | Linear's state machine is its Status field, not a label | implemented 2026-08-11 (the whole mapping lives in `trackers/linear.sh`, both directions. On read, `_MAP_ISSUE` synthesises the matching loom label into `labels` from the issue's Status name, resolved against a per-repo map (`_state_map_json`) built from five defaults (`Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked`) or `Status <loom-state>: <name>` overrides in the declaration file; an unrecognised Status matches nothing, so the ticket reads as untracked rather than guessed at. On write, `v_issue_relabel` and `v_issue_create` (the latter needed because `fix-ticket` creates with `ready-for-agent` inline in `--labels`) split a loom state name out into a `stateId` mutation — dropped from `--remove` outright, since Status is single-valued — and refuse two state names in one `--add`. `v_issue_close` and the new `_close_state_id` share one `_team_states` query (cached) and honor a `Status closed:` override. `duplicate` joins `completed`/`canceled` as closed everywhere the driver decides open/closed (`_MAP_ISSUE`, `v_issues_open`, `v_issues_by_label`, `v_issue_links`) — the same failure `canceled` would have been if dropped instead of closed. `v_labels` reports the five state names present so `bootstrap.sh cmd_labels` never tries to create them; `bootstrap.sh states` (new, part of `all`) creates whichever of the five a team is missing, as workflow states of type `started`, idempotent by name and covered by `--dry-run` — a no-op, named plainly, on any non-Linear tracker. `references/setup.md` documents the override syntax and warns that a workflow state is a column in every one of the team's views, more invasive than a label. One driver bug the suite caught before it shipped: splitting `--add`/`--labels` CSVs with a `while read` loop over `tr ',' '\n'` silently dropped the last token when the input had no trailing newline — fixed by feeding `printf '%s\n'` into `tr` instead of `printf '%s'`. SKILL.md, `lane.sh`, `tick.sh` and the jq layer untouched, per the proposal's own boundary. Suite 919 → 939, section 32 (`32-linear-driver.sh`) extended with the round trip (read AND write directions, proving the mapping injective), the blocked-hold-via-Status integration through `lane.sh transition`, the duplicate case, and the bootstrap states tests) |
+| P92 | On Linear, an epic is a project milestone, not a project | implemented 2026-08-11 (all inside `trackers/linear.sh`. A `Project: <name or id>` line beside `Team:` in the declaration file — resolved once by the new `_resolve_project`, cached like `_resolve_team` — opts a repo into keeping its epics as ProjectMilestones INSIDE that one project rather than as separate Projects on the team; no such line keeps every pre-P92 behaviour unchanged. `_ISSUE_FIELDS` gains `projectMilestone { id name }`, fetched unconditionally but read by `_MAP_ISSUE` only when project mode (`$pm`) is on, so `epic` becomes the milestone's name instead of the project's. `v_milestones` forks: project mode queries the resolved project's own `projectMilestones`, never the team's other Projects; back-compat keeps the old `team.projects` read. `v_issue_create --milestone-id` forks the same way — `projectId` from the declaration plus `projectMilestoneId` for the milestone, versus the old `projectId` alone. `v_milestone_close` stops calling `projectUpdate` in project mode, because a ProjectMilestone has no state field — Linear only derives a completion percentage from its issues, which is completeness, not acceptance, and a probe may FAIL an epic whose tickets all closed. Acceptance instead lives in a trailer appended to the milestone's own description, `<!-- loom-accepted <ISO8601> -->`, idempotent by presence; `_MAP_MILESTONE` reports `state: closed` exactly when it is there, which `snapshot.jq`'s existing `accepted: ($ms.state == "closed")` already reads unchanged. One `lib.sh` fix travels with it: `_tracker_decl_field` used to read only a bare `Field: value` line, so a human-written bullet like `- Team: **Jordan** (key JOR)` came back empty; it now accepts an optional leading list marker and strips a `**bold**` wrapper and a trailing ` (...)` parenthetical, which both `Team:` and the new `Project:` read through. Suite 939 → 949, section 32 extended with ten p92 assertions: milestone-not-project epic mapping, the declared project's own milestones versus the team's others, trailer-derived state, `--state active` filtering, the append-once close, the `--milestone-id` split, the back-compat contrast with no `Project:` line, and the bulleted-declaration parse for both `Team:` and `Project:`. SKILL.md untouched) |
 
 ## Independent review round (2026-08-01)
 
@@ -4327,3 +4328,84 @@ sibling skills a lane runs inside will keep doing whatever they do to these tick
 loom's half of the board true; it cannot make theirs.
 
 **Consumer.** Every Linear build, and every human looking at one.
+
+## P92 · On Linear, an epic is a project milestone, not a project
+
+**Problem.** SKILL.md fixes the model: *"Epic = one milestone per epic."* The milestone carries the
+epic's `## Acceptance criteria` — phase 3 authors them there, the probe reads them from there — and
+a probe PASS closes it, which is the bit that stops the epic being probed again.
+
+`trackers/linear.sh` maps that onto the wrong Linear object. `_MAP_ISSUE` sets
+`epic: $i.project.name` and `v_milestones` lists `team { projects }`, so loom's epic is a Linear
+**Project**. Linear's actual analogue of "one milestone per epic" is the **ProjectMilestone**: a
+named, described container *inside* a project, which is where a repo whose whole product is one
+project keeps its epics. Three things follow, and the third is destructive:
+
+1. **One epic for the whole board.** Every ticket reads `epic: "<the project>"`, so epic
+   completeness — all member tickets closed — can only be true when the entire product is done, and
+   `snapshot`'s epic list has one row instead of one per epic.
+2. **The acceptance criteria are unreachable.** The probe reads them from the milestone's
+   description; the project's description is a different field that these boards leave empty.
+3. **A probe PASS closes the product.** `_close_epic_milestone` calls `milestone-close`, which on
+   this driver is `projectUpdate(state: "completed")`. Against a project-as-epic mapping that
+   completes the whole Linear project on the first epic that passes. And `v_milestones` lists every
+   project on the *team*, so unrelated products share the namespace the slug match runs over.
+
+**Evidence.** triggers-api, 2026-08-11, build-1 (Linear board, GitLab forge). The board is built
+exactly as SKILL.md describes: fourteen epics as ProjectMilestones under one `Triggers API`
+project, each carrying a full `## Acceptance criteria` section — E1's names six criteria against
+INF-3 through INF-9. The project's own `description` is `null`. Every ticket reads
+`epic: "Triggers API"`, and `linear.sh milestones` returns three unrelated team projects
+(`Triggers API`, `Demand Letter Generator`, `Patient Portal`). `fix-ticket --milestone "E1 ·
+Bootstrap & gates"` dies `no milestone titled` and only accepts a project name. Nothing has broken
+yet only because no epic has finished: E1 sits at 75%.
+
+Both API shapes were checked live rather than assumed: `project.projectMilestones.nodes` returns
+`{id, name}` per milestone, and `issue.projectMilestone` returns the one it belongs to.
+
+**Fix.** All of it inside `trackers/linear.sh`, in the same read-and-write pair P90 used:
+
+- Resolve the repo's project once, beside `_resolve_team`, from a `Project: <name or id>` line in
+  the declaration file — the same place `Team:` and the `Status <state>:` overrides already live.
+- `_ISSUE_FIELDS` gains `projectMilestone { id name }`, and `_MAP_ISSUE` reads `epic` from it.
+- `v_milestones` lists the resolved project's `projectMilestones` — `{id, title: .name, state,
+  description}`, the shape the contract already promises.
+- `v_issue_create` sets `projectId` (the resolved project) *and* `projectMilestoneId` (what
+  `--milestone-id` now means). Today it puts the milestone id into `projectId`.
+- `v_milestone_close` stops calling `projectUpdate`. **A ProjectMilestone has no state field** —
+  Linear derives a progress percentage from its issues, which is completeness, not acceptance, and
+  loom needs the two kept apart (a probe may FAIL an epic whose tickets all closed). So acceptance
+  is recorded where the milestone can hold it: a trailer appended to the description,
+  `<!-- loom-accepted <ISO8601> -->`, with `v_milestones` reporting `state: "closed"` when it is
+  present. Idempotent — a second close appends nothing.
+- **Back-compat.** No `Project:` line means today's behaviour, unchanged: project-as-epic,
+  `projectUpdate` on close. A board that really does keep one Linear project per epic keeps working
+  and says so by omission.
+
+One parser note that belongs with this, because `Project:` is read the same way `Team:` is:
+`_tracker_decl_field` matches `^[[:space:]]*<Field>:` in the first 20 lines, so a declaration
+written as a markdown list item — `- Team: **Jordan** (key JOR)`, which is what a human writes and
+what this repo has committed — reads as empty. `Team` is documented as optional when the API key
+sees one team, so that failure is silent and stays silent until a workspace has two teams, at which
+point loom picks `teams.nodes[0]` and drives the wrong board. Accept an optional leading list
+marker, strip surrounding `**`, and take the value up to a trailing ` (`.
+
+**Tests.** Section 32 (`32-linear-driver.sh`), against the existing stub transport:
+
+- an issue whose Status and ProjectMilestone are both set reads back the milestone's name as
+  `epic`, not the project's;
+- `milestones` returns the declared project's milestones and *not* the team's other projects — the
+  assertion that fails today;
+- `milestone-close` writes the accepted trailer and no `projectUpdate` mutation, and `milestones`
+  then reports that milestone `closed` while its siblings stay open; running it twice appends one
+  trailer;
+- `issue-create --milestone-id X` sends `projectMilestoneId: X` with `projectId` from the
+  declaration;
+- with no `Project:` line every one of the above keeps its pre-P92 behaviour;
+- `_tracker_decl_field` reads `- Team: **ENG** (key ENG)` as `ENG`, and the bare `Team: ENG` form
+  still reads the same.
+
+**Consumer.** Every Linear board with more than one epic — the probe step, epic completeness in
+`snapshot`, `fix-ticket`, and the milestone close. Until it ships, an epic probe on a Linear board
+is unsafe: the first PASS closes the whole project.
+

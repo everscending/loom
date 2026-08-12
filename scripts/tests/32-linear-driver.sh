@@ -52,14 +52,19 @@ case "$q" in
   *"comments(first:"*)       file "${COMMENTS_JSON:?}" ;;
   *"inverseRelations"*)      file "${RELATIONS_JSON:?}" ;;
   *"labels { nodes { id name } }"*) file "${CURLABELS_JSON:?}" ;;
+  # P92: the ONE project's milestones, and one milestone's own description —
+  # matched before the plain "projects(first: 250)" team-projects listing,
+  # which is a different query (no "Milestones") and stays the back-compat path.
+  *"projectMilestones(first: 250)"*) file "${MILESTONES_JSON:?}" ;;
+  *'projectMilestone(id: $id) { description }'*) file "${MSDESC_JSON:?}" ;;
   *"projects(first: 250)"*)  file "${PROJECTS_JSON:?}" ;;
   *"labels(first: 250)"*)    file "${LABELS_JSON:?}" ;;
   *"states(first: 50)"*)     file "${STATES_JSON:?}" ;;
   *viewer*)
       say '{"data":{"viewer":{"id":"user-uuid","name":"loom","displayName":"Loom Bot"}}}' ;;
-  *issueUpdate*|*issueCreate*|*commentCreate*|*issueLabelCreate*|*projectUpdate*|*workflowStateCreate*)
+  *issueUpdate*|*issueCreate*|*commentCreate*|*issueLabelCreate*|*projectMilestoneUpdate*|*projectUpdate*|*workflowStateCreate*)
       jq -c '.variables' "$data" >> "${MUT_LOG:-/dev/null}"
-      say '{"data":{"issueCreate":{"success":true,"issue":{"number":99}},"issueUpdate":{"success":true},"commentCreate":{"success":true},"issueLabelCreate":{"success":true},"projectUpdate":{"success":true},"workflowStateCreate":{"success":true}}}' ;;
+      say '{"data":{"issueCreate":{"success":true,"issue":{"number":99}},"issueUpdate":{"success":true},"commentCreate":{"success":true},"issueLabelCreate":{"success":true},"projectUpdate":{"success":true},"projectMilestoneUpdate":{"success":true},"workflowStateCreate":{"success":true}}}' ;;
   *)  printf '{"errors":[{"message":"unrecognised query"}]}' > "$out"; echo 200 ;;
 esac
 STUB
@@ -109,6 +114,9 @@ printf '{"data":{"issue":{"relations":{"nodes":[]},"inverseRelations":{"nodes":[
 printf '{"data":{"issue":{"labels":{"nodes":[]}}}}' > "$TD/curlabels.json"
 printf '{"data":{"team":{"projects":{"nodes":[]}}}}' > "$TD/projects.json"
 printf '{"data":{"team":{"labels":{"nodes":[]}}}}' > "$TD/labels.json"
+# P92 defaults — never hit unless a test declares a 'Project:' line.
+printf '{"data":{"project":{"projectMilestones":{"nodes":[]}}}}' > "$TD/milestones.json"
+printf '{"data":{"projectMilestone":{"description":""}}}' > "$TD/msdesc.json"
 # A team that, like the real one P90 was written against, has Todo, In
 # Progress and Done already and is missing the three loom has to create.
 printf '{"data":{"team":{"states":{"nodes":[
@@ -132,6 +140,7 @@ API_ENV() { # the canned API, with every fixture defaulted
         "RELATIONS_JSON=${RELATIONS_JSON:-$TD/relations.json}" "CURLABELS_JSON=${CURLABELS_JSON:-$TD/curlabels.json}" \
         "PROJECTS_JSON=${PROJECTS_JSON:-$TD/projects.json}" "LABELS_JSON=${LABELS_JSON:-$TD/labels.json}" \
         "STATES_JSON=${STATES_JSON:-$TD/states.json}" \
+        "MILESTONES_JSON=${MILESTONES_JSON:-$TD/milestones.json}" "MSDESC_JSON=${MSDESC_JSON:-$TD/msdesc.json}" \
         "LOOM_REPO=$TD/repo" "MUT_LOG=${MUT_LOG:-/dev/null}"
 }
 L() { # L <verb...> — the driver, against the canned API
@@ -416,6 +425,113 @@ out=$(STATES_JSON="$TD/states.json" L issue-relabel 2 --add review 2>&1); rc=$?
 [ "$rc" != 0 ] && printf '%s' "$out" | grep -q "Code Review" \
     && ok "override: a name the team does not have is a halt naming it, never a silent fall back to the default" \
     || bad "override: a missing override name was silently accepted (rc=$rc, $out)"
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+
+# --- p92. A declared Project keeps epics as ProjectMilestones inside it ----
+# A board whose whole product is one Linear Project (like the pre-P92 default
+# read a board with several products) keeps its epics as ProjectMilestones
+# INSIDE that project. A `Project:` line beside `Team:` opts a repo in; no
+# such line keeps every case above — read all the way through p90-6 — exactly
+# as it was, which is the back-compat half of this proposal.
+printf '%s' '{"data":{"team":{"projects":{"nodes":[
+ {"id":"proj-tapi","name":"Triggers API"},
+ {"id":"proj-other","name":"Demand Letter Generator"}
+]}}}}' > "$TD/p92-teamprojects.json"
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: Triggers API\n' > "$TD/repo/docs/agents/issue-tracker.md"
+
+# p92-1: an issue whose Status and ProjectMilestone are both set reads back
+# the MILESTONE's name as epic, never the project's — the opposite of the
+# pre-P92 (and still back-compat) mapping proven above.
+cat > "$TD/p92-issues.json" <<'JSON'
+{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+ {"id":"u201","number":201,"title":"Bootstrap gate script","description":"","url":null,"updatedAt":null,
+  "state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[]},"assignee":null,
+  "project":{"name":"Triggers API"},"projectMilestone":{"id":"ms-e1","name":"E1 Bootstrap"}}
+]}}}
+JSON
+[ "$(PROJECTS_JSON="$TD/p92-teamprojects.json" ISSUES_JSON="$TD/p92-issues.json" L issue 201 | jq -r '.epic')" = "E1 Bootstrap" ] \
+    && ok "p92: epic reads the ProjectMilestone's name, not the project's, once a Project: line is declared" \
+    || bad "p92: epic did not read the milestone name ($(PROJECTS_JSON="$TD/p92-teamprojects.json" ISSUES_JSON="$TD/p92-issues.json" L issue 201 | jq -c .))"
+
+# p92-2: `milestones` returns the declared project's OWN milestones, never the
+# team's other projects — the assertion that failed before this proposal,
+# when `milestones` on this same declaration listed "Triggers API" and
+# "Demand Letter Generator" as if they were epics.
+cat > "$TD/p92-milestones.json" <<'JSON'
+{"data":{"project":{"projectMilestones":{"nodes":[
+ {"id":"ms-e1","name":"E1 Bootstrap","description":"## Acceptance criteria\n\n- [ ] it gates\n"},
+ {"id":"ms-e2","name":"E2 Ledger","description":"## Acceptance criteria\n\n- [ ] it balances\n\n<!-- loom-accepted 2026-08-10T00:00:00Z -->"}
+]}}}}
+JSON
+ms=$(MILESTONES_JSON="$TD/p92-milestones.json" PROJECTS_JSON="$TD/p92-teamprojects.json" L milestones)
+[ "$(printf '%s' "$ms" | jq -r '[.[].title] | sort | join(",")')" = "E1 Bootstrap,E2 Ledger" ] \
+    && ok "p92: milestones lists the declared project's own ProjectMilestones, not the team's other projects" \
+    || bad "p92: milestones returned the wrong set ($(printf '%s' "$ms" | jq -c '[.[].title]'))"
+[ "$(printf '%s' "$ms" | jq -r '[.[] | select(.title == "E1 Bootstrap")][0].state')" = open ] \
+    && [ "$(printf '%s' "$ms" | jq -r '[.[] | select(.title == "E2 Ledger")][0].state')" = closed ] \
+    && ok "p92: a ProjectMilestone's state is derived from the loom-accepted trailer in its description, not a Linear state field it doesn't have" \
+    || bad "p92: milestone state was not derived from the trailer ($(printf '%s' "$ms" | jq -c .))"
+[ "$(MILESTONES_JSON="$TD/p92-milestones.json" PROJECTS_JSON="$TD/p92-teamprojects.json" L milestones --state active \
+      | jq -r '[.[].title] | join(",")')" = "E1 Bootstrap" ] \
+    && ok "p92: --state active returns only the un-accepted milestone" \
+    || bad "p92: --state active did not filter to the open milestone"
+
+# p92-3: closing a ProjectMilestone appends the trailer and calls
+# projectMilestoneUpdate, never projectUpdate (which would complete the whole
+# product) — and a second close appends nothing.
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" PROJECTS_JSON="$TD/p92-teamprojects.json" MSDESC_JSON="$TD/msdesc.json" \
+  L milestone-close ms-e1 >/dev/null 2>&1 || true
+if grep -q '"d":".*loom-accepted' "$TD/mut.log"; then
+    ok "p92: milestone-close appends the loom-accepted trailer to the milestone's own description"
+else
+    bad "p92: milestone-close did not write the accepted trailer ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+fi
+: > "$TD/mut.log"
+printf '{"data":{"projectMilestone":{"description":"## Acceptance criteria\n\n- [ ] it gates\n\n<!-- loom-accepted 2026-08-10T00:00:00Z -->"}}}' \
+    > "$TD/p92-msdesc-done.json"
+MUT_LOG="$TD/mut.log" PROJECTS_JSON="$TD/p92-teamprojects.json" MSDESC_JSON="$TD/p92-msdesc-done.json" \
+  L milestone-close ms-e1 >/dev/null 2>&1 || true
+[ ! -s "$TD/mut.log" ] \
+    && ok "p92: closing an already-accepted milestone appends nothing — idempotent by the trailer's presence" \
+    || bad "p92: a second close appended another trailer ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+
+# p92-4: issue-create --milestone-id sends projectMilestoneId, with projectId
+# from the declaration — not the pre-P92 shape where --milestone-id WAS the
+# projectId.
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" LABELS_JSON="$TD/lbl.json" STATES_JSON="$TD/states.json" PROJECTS_JSON="$TD/p92-teamprojects.json" \
+  L issue-create --title "t" --body-file "$TD/note.md" --labels "ready-for-agent" --milestone-id ms-e1 >/dev/null 2>&1 || true
+if grep -q '"projectMilestoneId":"ms-e1"' "$TD/mut.log" && grep -q '"projectId":"proj-tapi"' "$TD/mut.log"; then
+    ok "p92: issue-create sends projectMilestoneId for --milestone-id and projectId from the declared Project"
+else
+    bad "p92: issue-create did not split project and milestone ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+fi
+
+# p92-5: back-compat — with NO Project: line, --milestone-id is still the
+# pre-P92 projectId, exactly as before this proposal.
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+: > "$TD/mut.log"
+MUT_LOG="$TD/mut.log" LABELS_JSON="$TD/lbl.json" STATES_JSON="$TD/states.json" \
+  L issue-create --title "t" --body-file "$TD/note.md" --labels "ready-for-agent" --milestone-id proj-x >/dev/null 2>&1 || true
+if grep -q '"projectId":"proj-x"' "$TD/mut.log" && ! grep -q projectMilestoneId "$TD/mut.log"; then
+    ok "p92: back-compat — no Project: line, --milestone-id is still projectId, unchanged"
+else
+    bad "p92: back-compat issue-create shape changed with no Project: line ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+fi
+
+# p92-6: `_tracker_decl_field` reads a markdown list item — `- Team: **ENG**
+# (key ENG)`, what a human actually writes — the same as the bare `Team: ENG`
+# form, for both fields it drives.
+printf '# Issue tracker: Linear\n\n- Team: **ENG** (key ENG)\n' > "$TD/repo/docs/agents/issue-tracker.md"
+[ "$(TEAMS_JSON="$TWO" L issue 2 2>&1 | jq -r '.project' 2>/dev/null)" = ENG ] \
+    && ok "p92: '- Team: **ENG** (key ENG)' reads as 'ENG', a bullet list item with bold and a parenthetical" \
+    || bad "p92: the bulleted Team: line was not parsed"
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: **Triggers API** (the one product)\n' \
+    > "$TD/repo/docs/agents/issue-tracker.md"
+[ "$(PROJECTS_JSON="$TD/p92-teamprojects.json" ISSUES_JSON="$TD/p92-issues.json" L issue 201 | jq -r '.epic')" = "E1 Bootstrap" ] \
+    && ok "p92: the same bold-and-parenthetical parsing applies to 'Project:'" \
+    || bad "p92: a bold Project: value was not resolved"
 printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
 
 # --- p87-l7. The proof: a whole snapshot, then a plan ----------------------

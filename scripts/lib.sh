@@ -87,13 +87,23 @@ _tracker_declared() { # <dir inside the repo> → tracker name, or empty
 # names it — and this is a second LINE in the one file rather than a second
 # file, so P86's finding holds: there is still exactly one place a human writes
 # down what tracker this repo uses and where in it the tickets live.
+#
+# P92: a human writes this as a markdown list item — `- Team: **Jordan** (key
+# JOR)` — which the plain `Field:` match above used to read as empty. Accept an
+# optional leading list marker, then strip a `**bold**` wrapper and a trailing
+# ` (...)` parenthetical, so `- Team: **Jordan** (key JOR)` and the bare
+# `Team: JOR` read the same value.
 _tracker_decl_field() { # <dir inside the repo> <Field> → value, or empty
-    local root f
+    local root f raw
     root=$(_repo_toplevel "${1:-.}")
     f="$root/$(_tracker_decl_path)"
     [ -f "$f" ] || return 0
-    sed -nE "1,20s/^[[:space:]]*$2:[[:space:]]*([^[:space:]].*[^[:space:]]|[^[:space:]])[[:space:]]*$/\\1/p" "$f" \
-        | head -1
+    raw=$(sed -nE "1,20s/^[[:space:]]*([-*][[:space:]]+)?$2:[[:space:]]*([^[:space:]].*[^[:space:]]|[^[:space:]])[[:space:]]*\$/\\2/p" "$f" \
+        | head -1)
+    raw="${raw#\*\*}"
+    raw="${raw%% \(*}"
+    raw="${raw%\*\*}"
+    printf '%s\n' "$raw"
 }
 
 # The drivers this build of loom actually has, one per line. A declared tracker
