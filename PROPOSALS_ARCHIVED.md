@@ -91,6 +91,7 @@ writing a new proposal that touches the same machinery.
 | P89 | The GitLab forge assumes the board is GitLab too | implemented 2026-08-11 (`forges/gitlab.sh` gained the branch `forges/github.sh` already had: `_board_is_gitlab` asks the same declaration question as `_board_is_github` (P86); `v_ticket_marker` writes GitLab's native `Closes #<id>` only when the board is GitLab, else a `Loom-Ticket: <id>` trailer; `v_mr_for_ticket`/`v_issue_mrs` keep the native `closed_by`/`related_merge_requests` endpoints on a GitLab board and route to a new `_mrs_for_ticket` — a full merge-request-list walk matched on the marker with github.sh's digit-boundary test — on every other board. `lane.sh submit`'s confirmation line now says "closes #N" only for a native marker and "links to #N" for the trailer, so it stops claiming a close the forge never performs. `scripts/tests/30-forge-driver.sh` section p87-6 extended with the GitLab-forge/Linear-board case: the no-change assertion re-pointed at a repo actually declared GitLab, the trailer marker, the digit-boundary pair against a `GLAB_CMD` stub, and a call-log assertion that a GitLab board still reaches `closed_by` and never the list walk. Suite 919, 0 failed) |
 | P90 | Linear's state machine is its Status field, not a label | implemented 2026-08-11 (the whole mapping lives in `trackers/linear.sh`, both directions. On read, `_MAP_ISSUE` synthesises the matching loom label into `labels` from the issue's Status name, resolved against a per-repo map (`_state_map_json`) built from five defaults (`Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked`) or `Status <loom-state>: <name>` overrides in the declaration file; an unrecognised Status matches nothing, so the ticket reads as untracked rather than guessed at. On write, `v_issue_relabel` and `v_issue_create` (the latter needed because `fix-ticket` creates with `ready-for-agent` inline in `--labels`) split a loom state name out into a `stateId` mutation — dropped from `--remove` outright, since Status is single-valued — and refuse two state names in one `--add`. `v_issue_close` and the new `_close_state_id` share one `_team_states` query (cached) and honor a `Status closed:` override. `duplicate` joins `completed`/`canceled` as closed everywhere the driver decides open/closed (`_MAP_ISSUE`, `v_issues_open`, `v_issues_by_label`, `v_issue_links`) — the same failure `canceled` would have been if dropped instead of closed. `v_labels` reports the five state names present so `bootstrap.sh cmd_labels` never tries to create them; `bootstrap.sh states` (new, part of `all`) creates whichever of the five a team is missing, as workflow states of type `started`, idempotent by name and covered by `--dry-run` — a no-op, named plainly, on any non-Linear tracker. `references/setup.md` documents the override syntax and warns that a workflow state is a column in every one of the team's views, more invasive than a label. One driver bug the suite caught before it shipped: splitting `--add`/`--labels` CSVs with a `while read` loop over `tr ',' '\n'` silently dropped the last token when the input had no trailing newline — fixed by feeding `printf '%s\n'` into `tr` instead of `printf '%s'`. SKILL.md, `lane.sh`, `tick.sh` and the jq layer untouched, per the proposal's own boundary. Suite 919 → 939, section 32 (`32-linear-driver.sh`) extended with the round trip (read AND write directions, proving the mapping injective), the blocked-hold-via-Status integration through `lane.sh transition`, the duplicate case, and the bootstrap states tests) |
 | P92 | On Linear, an epic is a project milestone, not a project | implemented 2026-08-11 (all inside `trackers/linear.sh`. A `Project: <name or id>` line beside `Team:` in the declaration file — resolved once by the new `_resolve_project`, cached like `_resolve_team` — opts a repo into keeping its epics as ProjectMilestones INSIDE that one project rather than as separate Projects on the team; no such line keeps every pre-P92 behaviour unchanged. `_ISSUE_FIELDS` gains `projectMilestone { id name }`, fetched unconditionally but read by `_MAP_ISSUE` only when project mode (`$pm`) is on, so `epic` becomes the milestone's name instead of the project's. `v_milestones` forks: project mode queries the resolved project's own `projectMilestones`, never the team's other Projects; back-compat keeps the old `team.projects` read. `v_issue_create --milestone-id` forks the same way — `projectId` from the declaration plus `projectMilestoneId` for the milestone, versus the old `projectId` alone. `v_milestone_close` stops calling `projectUpdate` in project mode, because a ProjectMilestone has no state field — Linear only derives a completion percentage from its issues, which is completeness, not acceptance, and a probe may FAIL an epic whose tickets all closed. Acceptance instead lives in a trailer appended to the milestone's own description, `<!-- loom-accepted <ISO8601> -->`, idempotent by presence; `_MAP_MILESTONE` reports `state: closed` exactly when it is there, which `snapshot.jq`'s existing `accepted: ($ms.state == "closed")` already reads unchanged. One `lib.sh` fix travels with it: `_tracker_decl_field` used to read only a bare `Field: value` line, so a human-written bullet like `- Team: **Jordan** (key JOR)` came back empty; it now accepts an optional leading list marker and strips a `**bold**` wrapper and a trailing ` (...)` parenthetical, which both `Team:` and the new `Project:` read through. Suite 939 → 949, section 32 extended with ten p92 assertions: milestone-not-project epic mapping, the declared project's own milestones versus the team's others, trailer-derived state, `--state active` filtering, the append-once close, the `--milestone-id` split, the back-compat contrast with no `Project:` line, and the bulleted-declaration parse for both `Team:` and `Project:`. SKILL.md untouched) |
+| P93 | The merge queue drains itself | implemented 2026-08-12 (`tick.sh`'s merge-lane epilogue now spawns its successor directly instead of firing a wave: `_spawn_build_epilogue` calls the new `chain-merge` verb for a `--merge-lock` lane in place of `tick --from-lane`, after the lock release already there. `chain-merge` reads `snapshot --merge-queue` — a new narrow mode in `cmd_snapshot`/`cmd_snapshot_merge_queue` that skips links, non-queue MRs, non-queue comment threads, milestones and closed members, computed by the new `scripts/merge-queue.jq` off `state_of`/`merge_attempts_of`/`merge_hold_of` (moved into `lib.jq` so both it and `snapshot.jq` share one definition) — resolves the head ticket's worktree with the new `_worktree_for_branch` (`git worktree list --porcelain`, keyed by branch, never by the `<repo>-wt-<n>` name), and spawns `merge-<next>` from the new templated `references/merge-brief.md` (three substitutions: ticket iid, worktree, base). Every step that cannot proceed — empty queue, no open MR, no worktree checked out on the branch, a refused spawn (lock race, stopped loop, live id collision) — falls back to firing `tick --from-lane`, unchanged from before; nothing depends on the fast path succeeding. New section 35 (`35-merge-chain.sh`, 11 assertions): the narrow read's ordering and cap exclusion, the end-to-end chain off a real git worktree with no wave firing, and both fallback paths. Full suite green, no regressions. SKILL.md untouched — chaining was never something a wave decided) |
 | P77 | The snapshot's per-ticket fan-out grows with the board | implemented 2026-08-12 (the fix is NOT the caching the proposal sketched — it is removing the calls. Linear meters two budgets an hour and they are three orders of magnitude apart: 2,500 REQUESTS against 3,000,000 COMPLEXITY points, with any one query capped at 10,000, so the fan-out was spending the scarce budget to protect the abundant one. Two mechanisms in `trackers/linear.sh`. First `_issue_ref` replaces `_issue_uuid`: Linear resolves the human identifier (`JOR-12`) in the `issue(id:)` query, in `issueUpdate(id:)` and in `commentCreate`'s `issueId`, all three verified against the live API, so the request that translated a number into a UUID was pure waste and DOUBLED every per-ticket read and every lane mutation. Second `board [--label L]` nests `relations`, `inverseRelations` and `comments` into the list query — pages of 50, not 250, because the nested connections cost ~100 points per issue and a 250-page would exceed the single-query cap. `tick.sh cmd_snapshot` gains a stage 1b that calls it and splits the result into the same per-iid files the fan-out wrote; a driver without the verb exits non-zero, which IS the capability probe, and the old fan-out runs unchanged — so GitLab is untouched and the fallback is the previously-shipped path rather than new code. MEASURED on a live 63-ticket build, not predicted as the proposal warned it would have to be: 393 requests and 28s before, 15 requests and 5.5s after, with the two snapshot documents byte-identical across every ticket and field. The proposal's two open questions are moot — nothing is cached, so nothing needs an `updated_at` key or a cold-run cost. `LOOM_SNAP_KEEP` added as a debugging seam, since the only way to compare the two paths is to see the intermediate files each wrote. Suite 949 → 966, new section 34 (`34-linear-batching.sh`), which counts REQUESTS rather than asserting output shape — including the planted violation where a UUID-resolving driver spends the extra call, and the assertion that the batched and fanned-out snapshots agree ticket for ticket. SKILL.md untouched) |
 
 ## Independent review round (2026-08-01)
@@ -4409,4 +4410,126 @@ marker, strip surrounding `**`, and take the value up to a trailing ` (`.
 **Consumer.** Every Linear board with more than one epic — the probe step, epic completeness in
 `snapshot`, `fix-ticket`, and the milestone close. Until it ships, an epic probe on a Linear board
 is unsafe: the first PASS closes the whole project.
+
+## P93 · The merge queue drains itself
+
+**Problem.** A merge costs one wave, so a queue of N tickets costs N waves. The merge work
+itself is not what takes the time.
+
+Measured on triggers-api build-2, 2026-08-11/12 (`~/.loom/triggers-api-1488592972/events.jsonl`).
+Seven merge lanes ran; their runtimes were 33s, 58s, 65s, 67s, 108s, 250s and 304s — median
+**67s**, and that includes `lane.sh reconcile` plus a full `api`-tier gate re-run with Docker
+integration tests. What separates them is not work:
+
+| merge lane exits | next merge lane spawns | dead time |
+|---|---|---|
+| `merge-19` 02:28:27 | `merge-26` 02:35:59 | 7m32 |
+| `merge-21` 04:19:48 | `merge-24` 04:40:50 | 21m02 |
+| `merge-24` 04:41:55 | `merge-28` 04:45:19 | 3m24 |
+| `merge-28` 04:46:26 | `merge-22` 04:48:11 | 1m45 |
+| `merge-22` 04:53:15 | `merge-44` 04:56:18 | 3m03 |
+
+So #24 merged at 04:41:49 and #28 at 04:46:20 — 4m31 apart, of which 67s was the merge and
+3m24 was nothing. The dead time is consistently as large as the work or larger.
+
+Three causes, in order of size:
+
+1. **Merge-to-merge is not chained.** The chain SKILL.md describes is implement → gate → merge;
+   merge is its terminus. A merge lane's exit fires a wave, and that wave — a full model session,
+   recently 24s, 130s, 186s, 325s, 383s — boots, snapshots the whole board, runs `plan.jq` and
+   composes a brief, in order to reach a decision that is already deterministic: merge the oldest
+   `merge-queue` ticket with no hold.
+2. **One merge per wave.** `plan.jq:316` takes `first` of the queue by design, correctly — the
+   merge lock permits only one at a time. But it means the queue can only shorten once per wave
+   however fast the merges are. build-2 sat six deep.
+3. **When nothing chains, `min_wave_gap_minutes` is the floor.** The 21m02 gap above is that
+   fallback (the repo runs a 20-minute gap): `merge-21` exited, no handoff reached the next merge,
+   and the queue waited for the timer. The 60s heartbeat fires throughout and writes
+   `tick_skipped wave_gap` each time.
+
+**Why the obvious fix does not work.** A merge lane cannot spawn its own successor the way an
+impl lane spawns its gate. `spawn-lane --merge-lock` holds the lock for the whole lane and
+releases it in the post-exit hook, *after* the command exits — so a `--merge-lock` child spawned
+as the parent's last act is refused by the lock the parent still holds. Naive chaining deadlocks.
+
+**Fix direction.** Put the handoff in the post-exit hook, where the release already happens, and
+make it a script decision rather than a model one. In `tick.sh`, the merge lane's post-exit
+sequence becomes: release the lock → **spawn the next merge directly** → only then fall back to
+firing a wave. That needs two pieces:
+
+- **A queue read cheaper than a snapshot.** `snapshot` already computes `merge_attempts` and
+  `merge_hold` per ticket; expose the same derivation as a narrow mode (`snapshot --merge-queue`)
+  returning just the ordered eligible queue — oldest first, cap-exhausted and held tickets
+  excluded. That is the entire input the choice needs.
+- **A templated merge brief.** The merge brief is already the same document every time except the
+  ticket iid, its worktree and the integration base — it is step 5 of SKILL.md rendered. Move it
+  to `references/merge-brief.md` with those three substitutions, so the hook can render and spawn
+  it with no session. This has a second payoff: the two `merge_attempt_cap` burns on #22 in this
+  build were both wave-authored brief defects (one omitted the absolute path to `lane.sh`, so the
+  lane could not find its own tooling), which a template cannot reproduce.
+
+An empty queue means the hook does nothing and the normal wave fires, so nothing depends on the
+fast path — the same property chaining already has.
+
+**Expected effect.** Removes one full wave per merged ticket. On build-2's numbers that is
+roughly 2–3½ minutes per merge in the chained case and up to 20 in the unchained one, plus the
+wave's token cost — and the saving grows with queue depth, which is exactly when it hurts.
+
+**What would falsify it.** Merge-to-merge intervals that do not fall to about the merge lane's
+own runtime after the change; or a hook that races the lock release and gets its spawn refused,
+which would mean the ordering is wrong rather than the idea.
+
+**Consumer.** The build loop's wall-clock, and `retro`, which reports the wave slice this moves.
+
+**Shipped 2026-08-12.** Exactly the fix direction above, with the mechanics it left open resolved
+as follows:
+
+- `_worktree_for_branch` (new, beside `_git_main_root`) is how the hook turns the queue head's MR
+  branch into a `--cwd`: `git worktree list --porcelain`, matched on `branch refs/heads/<name>`.
+  Nothing in the codebase previously needed to go from branch to worktree — every existing spawn
+  is handed a `--cwd` a wave already typed — so this is a genuinely new lookup, not a rewire of an
+  old one.
+- `snapshot --merge-queue` still pays stage 1's one `issues-open` call (it is how the build label
+  itself is found, same as every other mode), then narrows: `issue-mrs` and `issue-notes` run only
+  for tickets already labelled `merge-queue`, not the full member fan-out — no links, no
+  non-queue MRs, no non-queue comment threads, no milestones, no closed-member read, no
+  lane-status shellout. `merge_attempts_of`, `merge_hold_of` and `state_of` moved from
+  `snapshot.jq` into `lib.jq` so the new `scripts/merge-queue.jq` and the full snapshot compute
+  the SAME state and the same cap/hold answer from one definition, never two that could drift.
+- The hook itself: `_spawn_build_epilogue` now branches on `merge_lock` — a merge lane's exit
+  backgrounds `tick.sh chain-merge` where every other lane still backgrounds
+  `tick.sh tick --from-lane`, unchanged. `chain-merge` is a fresh process (spawned the same way
+  `render-log`/`event` already are from inside the epilogue), so a `die` anywhere inside it —
+  spawn-lane refusing on a lock race, a stopped loop, a live id collision — ends only that
+  process; it never takes the exiting lane down with it. Every branch that cannot proceed falls
+  back to firing `tick --from-lane`, the exact line that already existed, so the fast path adds a
+  faster success case without removing the slow, always-correct one.
+- The loop-stopped guard needed no new code: `LOOM_LANE_ID`, exported by the ORIGINAL merge lane's
+  own `spawn-lane` call, is inherited down through the epilogue's backgrounded children the same
+  way `render-log` and the exit event already rely on — so `chain-merge`'s own call to
+  `spawn-lane` for the successor is refused by the existing stopped-loop check with no new guard
+  written for it.
+- `references/merge-brief.md` carries the three substitutions (`{{TICKET_IID}}`, `{{WORKTREE}}`,
+  `{{BASE}}`) and restates SKILL.md step 5's instructions verbatim rather than summarizing them —
+  reconcile, the base-red distinction, `lane.sh merge`, never `close`. `_detect_base` (already
+  shared with `sweep`) resolves the base the same way every other caller does.
+
+**Tests.** New section 35 (`35-merge-chain.sh`, 11 assertions, run alone or through the suite):
+the narrow read's ordering and its cap-exclusion (a re-run of the same planted-violation shape
+`07-snapshot.sh` already uses for `merge_attempts`/`merge_hold`, applied to the new mode); an
+end-to-end chain off a REAL git worktree — a merge lane exits, its successor spawns with no wave
+firing, and the rendered brief carries the right ticket, worktree and base; and both fallback
+paths (an empty queue, a branch with no worktree checked out) firing the ordinary wave rather than
+stalling. One test-environment wrinkle surfaced and was fixed in the fixture, not the code: `git
+worktree list` always reports the PHYSICALLY resolved path, while `mktemp -d` on macOS returns the
+LOGICAL one (`/var` symlinks to `/private/var`) — the section's trust fixture now grants both
+spellings, the same "ask both" the trust cascade's own P30 history already established for the
+repo root. Full suite (968 assertions including the new section) green, no regressions.
+
+**Falsified, checked against the numbers above.** Not measured on a real build post-ship — the
+evidence above is a stub-driven test suite, not a rerun of triggers-api build-2. Whether the fast
+path's win holds on a real board (and whether the fallback path fires as rarely as designed) is
+still open to the same `retro` measurement the original proposal named as its consumer.
+
+**Consumer.** The build loop's wall-clock, and `retro`, which reports the wave slice this moves.
 

@@ -22,9 +22,7 @@ include "lib";
         (. // "")
         | (capture("(?ms)^##[ \\t]*" + $name + "[ \\t]*$(?<b>.*?)(?=^##[ \\t]|\\z)") // {b: ""})
         | .b;
-    def state_of($labels):
-        (["blocked", "merge-queue", "review", "in-progress", "ready-for-agent"]
-         | map(select(. as $s | $labels | index($s))) | first) // null;
+    # `state_of` is in lib.jq now (P93: shared with merge-queue.jq).
     # `epic_norm` is in lib.jq, and lane.sh's milestone close normalizes
     # through the same def — byte-identical by construction now, where it used
     # to be a comment asking two languages to stay in step.
@@ -183,36 +181,8 @@ include "lib";
                  else .stop = true end)) as $tail
       | { total: ($vs | map(select(.verdict == "FAIL")) | length),
           last_class: $tail.cls, same_class_tail: $tail.run };
-    # P32: how many merge lanes have already failed on this ticket, from the
-    # `orch-merge-attempt` trailers `lane.sh merge-failed` writes. Consumer:
-    # the harvest step in the wave — the merge queue always takes the OLDEST
-    # merge-queue ticket, so one poisoned ticket is re-picked by every lane
-    # behind it until something counts the attempts and blocks it. (build-3
-    # 2026-08-03: three lanes in a row wedged on #50 while #52 and #53 waited.)
-    # P62: an attempt recorded with `base-red=` failed on a check that is red
-    # on clean origin/<base> — a base defect, not this ticket, so it never
-    # counts toward merge_attempt_cap (#26 and #15 burned full caps on
-    # main-is-red, and the spent caps had no reset when the fix merged).
-    def merge_attempts_of($notes):
-        [$notes[] | select((.body // "")
-          | test("orch-merge-attempt") and (test("orch-merge-attempt [0-9]+ base-red=") | not))]
-        | length;
-    # P62 release side: the park and its automatic release, derived rather
-    # than written. A ticket whose base-red attempts link a fix issue that is
-    # still OPEN is held out of the merge queue (the wave skips tickets with a
-    # merge_hold); the moment the fix merges — its issue closes, so it leaves
-    # the open set — the hold computes to null and the ticket re-enters on its
-    # own, with no requeue write and nothing for a wave to remember. Open-set
-    # inference is valid here because fix tickets are filed in this project
-    # (lane.sh fix-ticket).
-    def merge_hold_of($notes; $open_iids):
-        ([$notes[] | (.body // "")
-          | scan("orch-merge-attempt\\s+[0-9]+\\s+base-red=([A-Za-z0-9._:/#-]+)\\s+fix=([0-9]+)")
-          | {check: .[0], fix: (.[1] | tonumber)}]
-         | map(select(.fix as $f | ($open_iids | index($f)) != null))) as $held
-      | if ($held | length) == 0 then null
-        else {checks: ($held | map(.check) | unique),
-              fixes: ($held | map(.fix) | unique)} end;
+    # `merge_attempts_of` and `merge_hold_of` are in lib.jq now (P93: shared
+    # with merge-queue.jq).
     # P78: the blocked report `lane.sh blocked-report` wrote — the one comment
     # that says why a human is being asked for a decision. Located by its
     # `orch-blocked` trailer, like every other fact mined out of this thread;

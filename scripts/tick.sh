@@ -601,6 +601,20 @@ _git_main_root() { # <dir> → prints the main worktree root; empty if not a rep
     git -C "$1" worktree list --porcelain 2>/dev/null | sed -n '1s|^worktree ||p'
 }
 
+# P93: chain-merge's own lookup — the next merge-queue ticket names its
+# branch, not its worktree, so the fast path resolves the worktree the same
+# way `git` itself tracks the pairing, never by guessing a `<repo>-wt-<n>`
+# name. Empty means no worktree is checked out on that branch (swept,
+# never created, or a plain-tracker auto-merge raced it) — chain-merge reads
+# that as "cannot chain" and falls back to firing a wave, same as an empty
+# queue.
+_worktree_for_branch() { # <repo-dir> <branch> → prints the worktree path, or nothing
+    git -C "$1" worktree list --porcelain 2>/dev/null | awk -v b="refs/heads/$2" '
+        /^worktree / { w = substr($0, 10) }
+        $0 == "branch " b { print w; exit }
+    '
+}
+
 # The question the walk above asks is the FILESYSTEM one, and Claude Code answers
 # a different one (P30). SKILL.md step 4 mandates lane worktrees be SIBLINGS of
 # the repo, so `…/Projects/<repo>-wt-5` has parent `…/Projects` and the walk
@@ -1479,7 +1493,19 @@ _spawn_build_epilogue() {
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
-    [ "$on_done" -eq 1 ] && epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+    # P93: a merge lane's own exit tries to spawn its successor directly
+    # (chain-merge), released lock and all, INSTEAD of firing a whole wave to
+    # rediscover a decision that is already deterministic. Every other lane
+    # kind keeps firing the wave exactly as before — chain-merge's own
+    # fallback is that same "tick --from-lane" line, for every way the fast
+    # path can decline (empty queue, no worktree, a refused spawn).
+    if [ "$on_done" -eq 1 ]; then
+        if [ "$merge_lock" -eq 1 ]; then
+            epi="$epi( '$SELF_PATH' chain-merge >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+        else
+            epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+        fi
+    fi
     # The exit code is recorded FIRST, before the tick fires, or the wave this
     # lane wakes would race the file it needs to read. It is how a wave tells a
     # mechanical gate failure (7) from a crashed session (anything else), which
@@ -1862,6 +1888,60 @@ _render_stream() { # _render_stream <jsonl> <log>
     return 0
 }
 
+# P93: the merge lane's post-exit hook calls this INSTEAD of firing a wave,
+# so a queue of merge-ready tickets drains at the speed of the merge lane
+# itself rather than one ticket per wave. Runs as its own fresh process
+# (spawned from the exiting lane's epilogue, after the lock it held is
+# already released — see _spawn_build_epilogue) so a `die` anywhere below
+# only ends this process, never the lane it is chaining from.
+#
+# Every step that can fail falls back to firing the ordinary wave
+# (`tick --from-lane`) rather than leaving the build stalled: an empty
+# queue, a queue head with no open MR, a branch with no worktree
+# (swept, never created, or raced by a plain-tracker auto-merge), or
+# spawn-lane itself refusing (lock race, loop stopped, a live lane already
+# holding this id). Nothing here depends on the fast path succeeding — the
+# numbered steps in SKILL.md do the same merge, next wave, regardless.
+cmd_chain_merge() {
+    local fallback="( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & )"
+    # Cheap and early: a stopped loop is refused by spawn-lane too (P30's
+    # LOOM_LANE_ID guard, inherited into this process the same way it is
+    # inherited by every other epilogue child), but there is no reason to
+    # spend the queue read and the API calls behind it just to be told so.
+    if _loop_stopped; then eval "$fallback"; return 0; fi
+    command -v jq >/dev/null 2>&1 || { eval "$fallback"; return 0; }
+    local queue_json head_id head_branch
+    queue_json="$(cmd_snapshot --merge-queue 2>>"$LOGS_DIR/self-trigger.log")" || queue_json="[]"
+    head_id="$(printf '%s' "$queue_json" | jq -r '.[0].id // empty' 2>/dev/null)"
+    head_branch="$(printf '%s' "$queue_json" | jq -r '.[0].branch // empty' 2>/dev/null)"
+    if [ -z "$head_id" ] || [ -z "$head_branch" ]; then eval "$fallback"; return 0; fi
+    local wt; wt="$(_worktree_for_branch "$REPO_ROOT" "$head_branch")"
+    if [ -z "$wt" ] || [ ! -d "$wt" ]; then eval "$fallback"; return 0; fi
+    local base; base="$(_detect_base "$REPO_ROOT")"
+    local scratch; scratch="$(_new_scratch "merge-chain-$head_id")"
+    local briefpath="$scratch/brief.md"
+    local briefsrc; briefsrc="$(dirname "$SELF_PATH")/../references/merge-brief.md"
+    [ -f "$briefsrc" ] || { eval "$fallback"; return 0; }
+    sed -e "s/{{TICKET_IID}}/$head_id/g" -e "s#{{WORKTREE}}#$wt#g" -e "s/{{BASE}}/$base/g" \
+        "$briefsrc" > "$briefpath"
+    # Same config the wave reads for a merge action (SKILL.md's "Headless
+    # permissions"): the wave's own model, resolved into `.model.effective`,
+    # is for rework escalation on IMPLEMENTATION lanes — a merge is not a
+    # rework round, so plan.jq's own merge action already spawns on
+    # `lane_model` directly, matched here.
+    local perm_mode; perm_mode="$(cfg permission_mode dontAsk)"
+    local model; model="$(cfg lane_model "")"
+    if [ -n "$model" ]; then
+        "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" -- \
+            claude -p @brief --permission-mode "$perm_mode" --model "$model" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1
+    else
+        "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" -- \
+            claude -p @brief --permission-mode "$perm_mode" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1
+    fi || eval "$fallback"
+}
+
 # Render new events to STDOUT as they arrive, and stop when the lane is gone.
 # Read-only by construction, which is what makes it safe to run several at once
 # against one lane: it never touches lane-<id>.log (the exit epilogue owns that
@@ -2212,8 +2292,16 @@ cmd_snapshot() {
     # THIS turn (see is_actionable in snapshot.jq); the rest collapse to a
     # bare iid in `.other_iids`. `snapshot` plain stays full — watch, graph
     # and humans read it, and only the wave's own step-1 read asks for less.
-    local brief=false
-    case "${1:-}" in --brief) brief=true; shift ;; esac
+    # P93: --merge-queue is a third, narrower shape again — not a smaller
+    # version of the document brief/plain read, but a different question
+    # (which ticket merges next, and on what branch) answered from a
+    # fraction of the fan-out. It dispatches to its own function below,
+    # once the checks both modes share have passed.
+    local brief=false mq=false
+    case "${1:-}" in
+        --brief)       brief=true; shift ;;
+        --merge-queue) mq=true; shift ;;
+    esac
     command -v jq >/dev/null 2>&1 || die "snapshot: jq required"
     # The document builder lives in snapshot.jq beside this script. Say so
     # here: without the check jq fails deep in stage 3 with its own message
@@ -2239,6 +2327,10 @@ cmd_snapshot() {
     # glab api's projects/:id shorthand resolves from the cwd's git remote,
     # and a wave may invoke this from a lane worktree — never assume cwd.
     cd "$REPO_ROOT" || die "snapshot: cannot cd to $REPO_ROOT"
+    if $mq; then
+        cmd_snapshot_merge_queue
+        return
+    fi
     SNAP_TMP=$(mktemp -d)
     # Safe only because cmd_tick never calls cmd_snapshot: an EXIT trap here
     # would clobber the lock's. The wave invokes `tick.sh snapshot` itself.
@@ -2478,6 +2570,66 @@ cmd_snapshot() {
     fi
 
     cat "$SNAP_TMP/snapshot.json"
+}
+
+# P93: the narrow read `chain-merge` uses to pick the next merge with none
+# of a full snapshot's fan-out. Stage 1 (`issues-open`) still runs whole —
+# it is one call, and it is how the build label itself is found — but the
+# stage 1b/2 fan-out below it runs ONLY for tickets already in
+# `merge-queue`, never for every member: no links, no non-queue MRs, no
+# non-queue comment threads, no milestones, no closed-member read, no
+# lane-status shellout. `merge_attempts_of`/`merge_hold_of` need nothing
+# else — both are pure functions of a ticket's own comment thread plus the
+# open-iid set, and `$members` (every open issue carrying the build label)
+# already covers that set exactly the way snapshot.jq's fix-ticket
+# labelling guarantees (`lane.sh fix-ticket` always adds the build label).
+#
+# Safe only because `chain-merge` is the only caller, and it always runs as
+# a fresh process (never inside `cmd_tick`'s lock): an EXIT trap here would
+# clobber the lock's, same invariant as plain `snapshot` above.
+#
+# Reads SNAP_JQD from the caller (cmd_snapshot sets it before dispatching
+# here). Output: merge-queue.jq's array, printed as-is — chain-merge reads
+# its first element and nothing else parses this shape.
+cmd_snapshot_merge_queue() {
+    SNAP_QTMP=$(mktemp -d)
+    [ -n "${LOOM_SNAP_KEEP:-}" ] || trap 'rm -rf "$SNAP_QTMP"' EXIT
+    "$TRACKER_SH" issues-open > "$SNAP_QTMP/open.json" 2>"$SNAP_QTMP/raw.err" \
+        || die "snapshot: open-issue list failed or was not JSON — $(head -2 "$SNAP_QTMP/raw.err" | tr '\n' ' ')"
+    local label=""
+    if jq -e '[.[] | select((.title // "") | test("^Build [0-9]+$"))] | length >= 1' \
+            "$SNAP_QTMP/open.json" >/dev/null 2>&1; then
+        label="build-$(jq -r '[.[] | select((.title // "") | test("^Build [0-9]+$"))]
+                              | sort_by(.id) | last | .title | capture("(?<n>[0-9]+)$").n' "$SNAP_QTMP/open.json")"
+    fi
+    printf '{}\n' > "$SNAP_QTMP/mrs.json"; printf '{}\n' > "$SNAP_QTMP/notes.json"
+    if [ -n "$label" ]; then
+        local qiids iid
+        qiids=$(jq -r --arg l "$label" \
+            '[.[] | select((.labels // []) | index($l) and index("merge-queue"))] | .[].id' \
+            "$SNAP_QTMP/open.json")
+        SNAP_JOBS=0
+        for iid in $qiids; do
+            ( _snap_api "$SNAP_QTMP/mrs-$iid.json" "issue #$iid merge requests" \
+                --forge -- issue-mrs "$iid" ) &
+            _snap_batch_gate
+            ( _snap_api "$SNAP_QTMP/notes-$iid.json" "issue #$iid comments" \
+                -- issue-notes "$iid" --limit 30 ) &
+            _snap_batch_gate
+        done
+        wait || true
+        for iid in $qiids; do
+            jq -c --arg k "$iid" '{key: $k, value: .}' "$SNAP_QTMP/mrs-$iid.json"
+        done | jq -s 'from_entries' > "$SNAP_QTMP/mrs.json"
+        for iid in $qiids; do
+            jq -c --arg k "$iid" '{key: $k, value: .}' "$SNAP_QTMP/notes-$iid.json"
+        done | jq -s 'from_entries' > "$SNAP_QTMP/notes.json"
+    fi
+    jq -L "$SNAP_JQD" -n \
+        --slurpfile open "$SNAP_QTMP/open.json" --slurpfile mrs "$SNAP_QTMP/mrs.json" \
+        --slurpfile notes "$SNAP_QTMP/notes.json" --arg label "$label" \
+        --argjson merge_cap "$(jq -n --arg c "$(cfg merge_attempt_cap 2)" '$c | tonumber? // 2')" \
+        -f "$SNAP_JQD/merge-queue.jq"
 }
 
 # --- plan (P81): the schedule, derived rather than reasoned about ---------
@@ -3456,5 +3608,6 @@ case "${1:-}" in
     agent-status) shift; cmd_agent_status "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
-    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status" ;;
+    chain-merge) shift; cmd_chain_merge "$@" ;;
+    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status | chain-merge" ;;
 esac

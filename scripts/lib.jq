@@ -53,6 +53,52 @@ def pct($n; $d): if ($d // 0) == 0 then "  -  "
                  else "\(($n * 1000 / $d | round) / 10)%" end;
 def usd($n): "$\(($n * 100 | round) / 100)";
 
+# A ticket's state, as the first of these labels it carries — mirrors the
+# priority a lane's own state transitions enforce. P93: moved here (from
+# snapshot.jq) so merge-queue.jq's narrow read computes the SAME state a full
+# snapshot would, rather than a second, driftable guess (e.g. testing for the
+# `merge-queue` label alone, which a ticket can carry stale alongside
+# `blocked`). Consumers: snapshot.jq (every ticket row) and merge-queue.jq
+# (the queue filter).
+def state_of($labels):
+    (["blocked", "merge-queue", "review", "in-progress", "ready-for-agent"]
+     | map(select(. as $s | $labels | index($s))) | first) // null;
+
+# P32: how many merge lanes have already failed on this ticket, from the
+# `orch-merge-attempt` trailers `lane.sh merge-failed` writes. Consumer:
+# the harvest step in the wave — the merge queue always takes the OLDEST
+# merge-queue ticket, so one poisoned ticket is re-picked by every lane
+# behind it until something counts the attempts and blocks it. (build-3
+# 2026-08-03: three lanes in a row wedged on #50 while #52 and #53 waited.)
+# P62: an attempt recorded with `base-red=` failed on a check that is red
+# on clean origin/<base> — a base defect, not this ticket, so it never
+# counts toward merge_attempt_cap (#26 and #15 burned full caps on
+# main-is-red, and the spent caps had no reset when the fix merged).
+# P93: moved here so merge-queue.jq's narrow read counts attempts the same
+# way a full snapshot does. Consumers: snapshot.jq and merge-queue.jq.
+def merge_attempts_of($notes):
+    [$notes[] | select((.body // "")
+      | test("orch-merge-attempt") and (test("orch-merge-attempt [0-9]+ base-red=") | not))]
+    | length;
+
+# P62 release side: the park and its automatic release, derived rather
+# than written. A ticket whose base-red attempts link a fix issue that is
+# still OPEN is held out of the merge queue (the wave skips tickets with a
+# merge_hold); the moment the fix merges — its issue closes, so it leaves
+# the open set — the hold computes to null and the ticket re-enters on its
+# own, with no requeue write and nothing for a wave to remember. Open-set
+# inference is valid here because fix tickets are filed in this project
+# (lane.sh fix-ticket). P93: moved here for merge-queue.jq. Consumers:
+# snapshot.jq and merge-queue.jq.
+def merge_hold_of($notes; $open_iids):
+    ([$notes[] | (.body // "")
+      | scan("orch-merge-attempt\\s+[0-9]+\\s+base-red=([A-Za-z0-9._:/#-]+)\\s+fix=([0-9]+)")
+      | {check: .[0], fix: (.[1] | tonumber)}]
+     | map(select(.fix as $f | ($open_iids | index($f)) != null))) as $held
+  | if ($held | length) == 0 then null
+    else {checks: ($held | map(.check) | unique),
+          fixes: ($held | map(.fix) | unique)} end;
+
 # The lane id split, jq side: which ticket a lane belongs to and what it was
 # doing. Its bash mirror is `_lane_type` in lib.sh (a hot-path string split,
 # which is why it stays bash); each names the other, so a new lane kind added
