@@ -2242,7 +2242,11 @@ cmd_snapshot() {
     SNAP_TMP=$(mktemp -d)
     # Safe only because cmd_tick never calls cmd_snapshot: an EXIT trap here
     # would clobber the lock's. The wave invokes `tick.sh snapshot` itself.
-    trap 'rm -rf "$SNAP_TMP"' EXIT
+    # LOOM_SNAP_KEEP is a debugging seam: it keeps the intermediate per-ticket
+    # files a snapshot builds from, which is the only way to see what the
+    # batched and fanned-out paths each actually wrote.
+    [ -n "${LOOM_SNAP_KEEP:-}" ] || trap 'rm -rf "$SNAP_TMP"' EXIT
+    [ -z "${LOOM_SNAP_KEEP:-}" ] || echo "snapshot: keeping $SNAP_TMP" >&2
     : > "$SNAP_TMP/warn.txt"; : > "$SNAP_TMP/lanes.txt"; printf '[]\n' > "$SNAP_TMP/notes.json"
     SNAP_JOBS=0
 
@@ -2322,8 +2326,43 @@ cmd_snapshot() {
         printf '[]\n' > "$SNAP_TMP/tnotes-$iid.json"
     done
 
+    # -- Stage 1b: the BATCHED read, when the driver has one.
+    #
+    # A tracker that can return the whole build — every member's blocking edges
+    # and comment thread nested inside one list query — makes the entire
+    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot,
+    # and answers non-zero, which is exactly the capability probe. So this is a
+    # fast path with the OLD path as its fallback, not a replacement: anything
+    # that goes wrong here costs one wasted call and the fan-out still runs.
+    #
+    # Why it matters more than wall clock: Linear meters 2,500 requests an hour
+    # against 3,000,000 complexity points, so the fan-out spends the scarce
+    # budget to save the abundant one. Measured on a 63-ticket build: 252
+    # requests before, 4 after, identical output. *(paid: an hour's quota gone
+    # to 26 snapshots of a board that had barely moved, which then blocked an
+    # unrelated publish for an hour.)*
+    local batched=false
+    if [ -n "$label" ] && [ -n "$member_iids" ]; then
+        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err" \
+           && jq -e 'type == "array" and length > 0' "$SNAP_TMP/board.json" >/dev/null 2>&1; then
+            batched=true
+            for iid in $member_iids; do
+                jq -c --argjson i "$iid" \
+                    '[ .[] | select(.id == $i) ][0].links // []' "$SNAP_TMP/board.json" \
+                    > "$SNAP_TMP/links-$iid.json" || printf '[]\n' > "$SNAP_TMP/links-$iid.json"
+            done
+            for iid in $review_iids; do
+                jq -c --argjson i "$iid" \
+                    '[ .[] | select(.id == $i) ][0].notes // []' "$SNAP_TMP/board.json" \
+                    > "$SNAP_TMP/tnotes-$iid.json" || printf '[]\n' > "$SNAP_TMP/tnotes-$iid.json"
+            done
+        fi
+        rm -f "$SNAP_TMP/board.err"
+    fi
+
     # -- Stage 2: concurrent fan-out. Wall clock is the slowest single call.
-    for iid in $member_iids; do
+    # Skipped for links and comments when stage 1b already has them.
+    $batched || for iid in $member_iids; do
         ( _snap_api "$SNAP_TMP/links-$iid.json" "issue #$iid links" \
             -- issue-links "$iid" ) &
         _snap_batch_gate
@@ -2333,7 +2372,7 @@ cmd_snapshot() {
             --forge -- issue-mrs "$iid" ) &
         _snap_batch_gate
     done
-    for iid in $review_iids; do
+    $batched || for iid in $review_iids; do
         ( _snap_api "$SNAP_TMP/tnotes-$iid.json" "issue #$iid comments" \
             -- issue-notes "$iid" --limit 30 ) &
         _snap_batch_gate

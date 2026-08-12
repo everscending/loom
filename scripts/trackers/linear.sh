@@ -21,9 +21,10 @@
 #      list, `plan.jq` parses a lane name back to a ticket number — and an
 #      opaque string id would be a rewrite of all of it. `Issue.number` is an
 #      integer, sequential within a team, which is structurally the same thing
-#      GitLab's `iid` is within a project. So the contract needs no change and
-#      this file holds the UUID privately, resolving number → UUID for the
-#      writes Linear's mutations require.
+#      GitLab's `iid` is within a project. So the contract needs no change, and
+#      the identifier is rebuilt from the number where a call needs one —
+#      Linear resolves `JOR-12` anywhere it takes an id, so the UUID never has
+#      to be fetched at all (see `_issue_ref`).
 #
 #   3. STATES, NOT OPEN AND CLOSED. A Linear issue is in a workflow state whose
 #      TYPE is one of backlog, unstarted, started, completed, canceled,
@@ -64,12 +65,25 @@
 # rather than trying to complete a project that isn't the epic. No `Project:`
 # line keeps every one of those exactly as it was.
 #
-# RATE LIMITS. A personal API key is capped per hour, which turns P77's snapshot
-# fan-out from a wall-clock problem into a hard stop on a board of any size:
-# roughly 250 calls per snapshot at 100 tickets, twice a wave. `issues-open`
-# below fetches labels, project and body in the SAME query rather than per
-# ticket, which is as far as the per-verb contract lets this file go. The rest
-# is P77's to fix.
+# RATE LIMITS, AND WHY THIS FILE BATCHES. Linear meters two things per hour and
+# they are nothing like each other: 2,500 REQUESTS and 3,000,000 COMPLEXITY
+# points, with any single query capped at 10,000 points. So requests are the
+# scarce resource by three orders of magnitude, and the driver's job is to
+# spend complexity to save them. Two places do that, and both replaced code
+# that did the opposite:
+#
+#   - `_issue_ref` builds the identifier instead of fetching the UUID, which
+#     halves every per-ticket read and every mutation.
+#   - `board` fetches the whole build's edges and comment threads nested inside
+#     the list query, where the snapshot used to make two calls per ticket
+#     (P77). A 76-ticket board: ~157 requests before, 2 after.
+#
+# *(paid: publishing a 76-ticket set exhausted the hourly quota while a build
+# ran alongside it; that build's 26 snapshots in the same hour were most of the
+# spend, and every one of them was re-reading a board that had barely moved.)*
+#
+# The lesson generalises: any new per-ticket verb here is a request multiplied
+# by board size. Nest it into an existing read before adding one.
 set -euo pipefail
 
 LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib.sh"
@@ -396,20 +410,42 @@ _issue_node() { # <number> → the raw issue node, or fails
 
 v_issue() { _resolve_team; _resolve_project; need_id "${1:-}" issue; _issue_node "$1" | _shape_one "$_MAP_ISSUE"; }
 
-_issue_uuid() { # <number> → the UUID Linear's mutations take
-    _issue_node "$1" | jq -r '.id // empty'
+# The reference Linear resolves an issue by. It is the HUMAN IDENTIFIER —
+# `JOR-12` — and building it costs nothing, because loom already carries the
+# number and the team key.
+#
+# This used to be `_issue_uuid`, which spent a whole REQUEST on `issues(filter:
+# {number})` to translate the number into a UUID before every read and every
+# mutation. Linear accepts the identifier in all three places that lookup
+# existed to serve — the `issue(id:)` query, `issueUpdate(id:)`, and `issueId`
+# inside a comment's create input (verified against the live API, 2026-08-12) —
+# so the translation was pure waste, and it DOUBLED the cost of every
+# per-ticket call loom makes. That matters because Linear's binding limit is
+# requests, not data: the same hour that allows 2,500 requests allows 3,000,000
+# complexity points, and a snapshot of a 76-ticket board was spending 4 requests
+# per ticket where 2 would do. *(paid: publishing a 76-ticket set exhausted the
+# hourly request quota while a build was running, and the build's own snapshots
+# — 26 of them in that hour — were most of the spend.)*
+#
+# An id that does not exist is no longer caught here. It does not need to be:
+# the call that follows fails with Linear's own `Entity not found`, which
+# `_graphql` reports by name and every caller already propagates.
+_issue_ref() { # <number> → the identifier Linear resolves, e.g. JOR-12
+    printf '%s-%s\n' "$TEAM_KEY" "$1"
 }
 
 v_issue_notes() { # <id> [--limit N] — newest first, capped
-    local id="${1:-}" limit=30 uuid out
+    local id="${1:-}" limit=30 ref out
     _resolve_team
     need_id "$id" issue-notes
     case "${2:-}" in --limit) limit="${3:-30}" ;; esac
-    uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || return 1
+    ref=$(_issue_ref "$id")
     out=$(_graphql 'query($id: String!, $n: Int!) {
   issue(id: $id) { comments(first: $n, orderBy: createdAt) {
     nodes { body createdAt user { name displayName } } } }
-}' "$(jq -nc --arg i "$uuid" --argjson n "$limit" '{id: $i, n: $n}')") || return 1
+}' "$(jq -nc --arg i "$ref" --argjson n "$limit" '{id: $i, n: $n}')") || return 1
+    printf '%s' "$out" | jq -e '.issue != null' >/dev/null 2>&1 \
+        || { echo "linear.sh: no issue $ref" >&2; return 1; }
     # Newest first, matching every other driver: the readers that matter take
     # `last` of a sorted list, but the cap has to keep the NEWEST comments and
     # Linear's `orderBy` only sorts, it does not reverse.
@@ -421,29 +457,104 @@ v_issue_notes() { # <id> [--limit N] — newest first, capped
 # is the edge the scheduler will not start a ticket over.
 # The related issue's state is carried through honestly: it is a real state, so
 # unlike GitLab's stateless cross-project link it is never null here.
+# The edge shape, as a filter over ONE issue node carrying `relations` and
+# `inverseRelations`. Named rather than inline because `board` (below) applies
+# the identical filter to every node of a batched read, and two copies of this
+# would be two answers to "what is a blocking edge".
+_MAP_LINKS='
+  def st: if . == "completed" or . == "canceled" or . == "duplicate" then "closed" else "open" end;
+  def row($n; $s; $t): { id: $n, state: ($s | st), project: $team, type: $t };
+  [ (.inverseRelations.nodes // [])[]
+    | select(.issue != null)
+    | if .type == "blocks" then row(.issue.number; .issue.state.type; "is_blocked_by")
+      elif .type == "related" then row(.issue.number; .issue.state.type; "relates_to")
+      else empty end ]
+  + [ (.relations.nodes // [])[]
+    | select(.relatedIssue != null)
+    | if .type == "related" then row(.relatedIssue.number; .relatedIssue.state.type; "relates_to")
+      else empty end ]'
+
 v_issue_links() { # <id>
-    local id="${1:-}" uuid out
+    local id="${1:-}" ref out
     _resolve_team
     need_id "$id" issue-links
-    uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || return 1
+    ref=$(_issue_ref "$id")
     out=$(_graphql 'query($id: String!) {
   issue(id: $id) {
     relations(first: 100)        { nodes { type relatedIssue { number state { type } } } }
     inverseRelations(first: 100) { nodes { type issue        { number state { type } } } }
   }
-}' "$(jq -nc --arg i "$uuid" '{id: $i}')") || return 1
-    printf '%s' "$out" | jq --arg team "$TEAM_KEY" '
-      def st: if . == "completed" or . == "canceled" or . == "duplicate" then "closed" else "open" end;
-      def row($n; $s; $t): { id: $n, state: ($s | st), project: $team, type: $t };
-      [ (.issue.inverseRelations.nodes // [])[]
-        | select(.issue != null)
-        | if .type == "blocks" then row(.issue.number; .issue.state.type; "is_blocked_by")
-          elif .type == "related" then row(.issue.number; .issue.state.type; "relates_to")
-          else empty end ]
-      + [ (.issue.relations.nodes // [])[]
-        | select(.relatedIssue != null)
-        | if .type == "related" then row(.relatedIssue.number; .relatedIssue.state.type; "relates_to")
-          else empty end ]'
+}' "$(jq -nc --arg i "$ref" '{id: $i}')") || return 1
+    printf '%s' "$out" | jq -e '.issue != null' >/dev/null 2>&1 \
+        || { echo "linear.sh: no issue $ref" >&2; return 1; }
+    printf '%s' "$out" | jq --arg team "$TEAM_KEY" ".issue | $_MAP_LINKS"
+}
+
+# --- the batched board read (the answer to P77) ----------------------------
+#
+# One request per PAGE for the whole board — every open issue with its blocking
+# edges and its comment thread already attached — where the snapshot used to
+# make two calls per ticket and get the same answer.
+#
+# This exists because Linear's two hourly budgets are wildly unequal: 2,500
+# REQUESTS against 3,000,000 COMPLEXITY points. A snapshot of a 76-ticket board
+# spent ~157 requests and about 300 complexity points, which is to say it
+# exhausted the scarce budget to protect the abundant one. Nesting the two
+# per-ticket connections into the list query inverts that trade: the same
+# snapshot costs 2 or 3 requests and a few thousand points, both comfortably
+# inside their limits. *(paid: a 76-ticket publish and one concurrent build's
+# 26 snapshots between them spent an entire hour's request quota; the build was
+# reading nothing but the same board over and over.)*
+#
+# WHY THE PAGE IS 50 AND NOT 250. Linear caps a SINGLE query at 10,000
+# complexity points, and a connection multiplies its children by its own page
+# argument — so the nested reads here cost roughly 100 points per issue, and
+# `first: 250` (what the flat `_issues_all` uses) would be refused outright.
+# The nested `first:`/`last:` values below are part of that arithmetic, not
+# free choices: raising one lowers the number of issues a page can carry.
+#
+# The caller passes the build label, so this reads the build's own members
+# rather than the whole team's backlog — the exact set the fan-out covered.
+_BOARD_FIELDS='id number title description url updatedAt
+               state { type name } labels { nodes { name } }
+               assignee { name displayName } project { name }
+               projectMilestone { id name }
+               relations(first: 50)        { nodes { type relatedIssue { number state { type } } } }
+               inverseRelations(first: 50) { nodes { type issue        { number state { type } } } }
+               comments(last: 30)          { nodes { body createdAt user { name displayName } } }'
+
+v_board() { # [--label L] → open issues, each with `links` and `notes` embedded
+    local label="" q after=null page acc='[]' filter=''
+    case "${1:-}" in --label) label="${2:-}" ;; esac
+    _resolve_team
+    _resolve_project
+    # A loom ticket state is a Status here, not a label (P90), so it can never
+    # be the build label — and filtering by one server-side would silently
+    # return nothing. The build label is a real label; anything else is a
+    # caller error worth refusing rather than answering emptily.
+    case " $_STATE_NAMES " in
+        *" $label "*) die "board: '$label' is a ticket state, not a label — board takes the build label" ;;
+    esac
+    [ -z "$label" ] || filter=", labels: { name: { eq: \$label } }"
+    q=$(printf 'query($team: String!, $after: String%s) {
+  issues(first: 50, after: $after,
+         filter: { team: { key: { eq: $team } },
+                   state: { type: { nin: ["completed", "canceled", "duplicate"] } }%s }) {
+    pageInfo { hasNextPage endCursor }
+    nodes { %s }
+  }
+}' "$([ -n "$label" ] && printf ', $label: String!')" "$filter" "$_BOARD_FIELDS")
+    while :; do
+        page=$(_graphql "$q" "$(jq -nc --arg t "$TEAM_KEY" --argjson a "$after" --arg l "$label" \
+                   'if $l == "" then {team: $t, after: $a} else {team: $t, after: $a, label: $l} end')") \
+            || return 1
+        acc=$(jq -nc --argjson acc "$acc" --argjson p "$page" '$acc + $p.issues.nodes')
+        printf '%s' "$page" | jq -e '.issues.pageInfo.hasNextPage' >/dev/null 2>&1 || break
+        after=$(printf '%s' "$page" | jq -c '.issues.pageInfo.endCursor')
+    done
+    printf '%s' "$acc" | _shape \
+        "($_MAP_ISSUE) + { links: ($_MAP_LINKS),
+                           notes: ([ (.comments.nodes // [])[] | $_MAP_NOTE ] | reverse) }"
 }
 
 # A repo with a declared `Project:` (P92) keeps its epics as ProjectMilestones
@@ -510,16 +621,16 @@ _label_ids() { # <csv of names> → JSON array of ids, refusing an unknown name
 }
 
 v_note_add() { # <id> <body-file>
-    local id="${1:-}" f="${2:-}" uuid
+    local id="${1:-}" f="${2:-}" ref
     _resolve_team
     need_id "$id" note-add
     [ -f "$f" ] || die "note-add: no such body file: '$f'"
-    uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || die "note-add: no issue $id"
+    ref=$(_issue_ref "$id")
     # The body travels as a jq-built JSON variable, never on a command line: a
     # lane's notes run to thousands of characters and carry newlines.
     _graphql 'mutation($id: String!, $body: String!) {
   commentCreate(input: { issueId: $id, body: $body }) { success }
-}' "$(jq -n --rawfile b "$f" --arg i "$uuid" '{id: $i, body: $b}')" >/dev/null
+}' "$(jq -n --rawfile b "$f" --arg i "$ref" '{id: $i, body: $b}')" >/dev/null
 }
 
 # Linear has no add/remove: an issue's labels are set whole. So the current set
@@ -535,7 +646,7 @@ v_note_add() { # <id> <body-file>
 # answered "what happens to it". Two state names in one `--add` cannot come out
 # of `_set_state`, so it is an error here rather than a coin flip.
 v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassign]
-    local id="${1:-}" add="" rm="" assignee="" unassign=false uuid cur want input
+    local id="${1:-}" add="" rm="" assignee="" unassign=false ref cur want input
     local state_add="" label_add="" label_rm="" tok
     _resolve_team
     need_id "$id" issue-relabel
@@ -564,11 +675,11 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
             *) label_rm="${label_rm:+$label_rm,}$tok" ;;
         esac
     done < <(printf '%s\n' "$rm" | tr ',' '\n')
-    uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || die "issue-relabel: no issue $id"
+    ref=$(_issue_ref "$id")
     input='{}'
     if [ -n "$label_add" ] || [ -n "$label_rm" ]; then
         cur=$(_graphql 'query($id: String!) { issue(id: $id) { labels { nodes { id name } } } }' \
-                "$(jq -nc --arg i "$uuid" '{id: $i}')") || return 1
+                "$(jq -nc --arg i "$ref" '{id: $i}')") || return 1
         want=$(printf '%s' "$cur" | jq -c --arg a "$label_add" --arg r "$label_rm" '
             [.issue.labels.nodes[].name]
             + ($a | split(",") | map(select(length > 0)))
@@ -587,7 +698,7 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
     fi
     _graphql 'mutation($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
-}' "$(jq -nc --arg i "$uuid" --argjson in "$input" '{id: $i, input: $in}')" >/dev/null
+}' "$(jq -nc --arg i "$ref" --argjson in "$input" '{id: $i, input: $in}')" >/dev/null
 }
 
 # Closing means moving to a workflow state of type `completed` — Linear has no
@@ -595,18 +706,18 @@ v_issue_relabel() { # <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassig
 # repo's `Status closed:` override) rather than a name this file invents,
 # because teams rename `Done`.
 v_issue_close() { # <id> [--remove CSV]
-    local id="${1:-}" rm="" uuid sid input
+    local id="${1:-}" rm="" ref sid input
     _resolve_team
     need_id "$id" issue-close
     shift
     case "${1:-}" in --remove) rm="${2:-}" ;; esac
     [ -z "$rm" ] || v_issue_relabel "$id" --remove "$rm"
-    uuid=$(_issue_uuid "$id") && [ -n "$uuid" ] || die "issue-close: no issue $id"
+    ref=$(_issue_ref "$id")
     sid=$(_close_state_id) || return 1
     input=$(jq -nc --arg s "$sid" '{stateId: $s}')
     _graphql 'mutation($id: String!, $input: IssueUpdateInput!) {
   issueUpdate(id: $id, input: $input) { success }
-}' "$(jq -nc --arg i "$uuid" --argjson in "$input" '{id: $i, input: $in}')" >/dev/null
+}' "$(jq -nc --arg i "$ref" --argjson in "$input" '{id: $i, input: $in}')" >/dev/null
 }
 
 v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] → the new id
@@ -746,6 +857,8 @@ _usage() {
     die "usage: linear.sh <verb> [args]
   board reads : issues-open | issues-by-label <label> <opened|closed> | issue <id> |
                 issue-notes <id> [--limit N] | issue-links <id> |
+                board [--label L]  (open issues with links + notes nested: one
+                                    request per 50, not two per ticket) |
                 milestones [--state <state>] | labels | whoami
   board writes: issue-create --title T --body-file F --labels CSV [--milestone-id ID] |
                 issue-relabel <id> [--add CSV] [--remove CSV] [--assignee ID] [--unassign] |
@@ -769,6 +882,7 @@ case "${1:-}" in
     issue)            shift; v_issue "$@" ;;
     issue-notes)      shift; v_issue_notes "$@" ;;
     issue-links)      shift; v_issue_links "$@" ;;
+    board)            shift; v_board "$@" ;;
     milestones)       shift; v_milestones "$@" ;;
     labels)           shift; v_labels "$@" ;;
     whoami)           shift; v_whoami "$@" ;;
