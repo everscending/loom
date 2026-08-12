@@ -58,6 +58,7 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
+| P93 | The merge queue drains itself | open — proposed 2026-08-12; triggers-api build-2: merge lanes run a median 67s, but 1m45–3m24 of wave separates each one from the next, and one gap ran 21m when nothing chained. The queue drains one ticket per wave |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
@@ -338,3 +339,73 @@ re-read after writes then costs one field, not one document. The existing `jq` a
 covers it and the guarded paths in SKILL.md's optimize list are already jq paths. Largely
 subsumes itself into P51: with `--brief` the second read is much cheaper anyway, so
 implement P51 first and re-measure before doing this one.
+
+## P93 · The merge queue drains itself
+
+**Problem.** A merge costs one wave, so a queue of N tickets costs N waves. The merge work
+itself is not what takes the time.
+
+Measured on triggers-api build-2, 2026-08-11/12 (`~/.loom/triggers-api-1488592972/events.jsonl`).
+Seven merge lanes ran; their runtimes were 33s, 58s, 65s, 67s, 108s, 250s and 304s — median
+**67s**, and that includes `lane.sh reconcile` plus a full `api`-tier gate re-run with Docker
+integration tests. What separates them is not work:
+
+| merge lane exits | next merge lane spawns | dead time |
+|---|---|---|
+| `merge-19` 02:28:27 | `merge-26` 02:35:59 | 7m32 |
+| `merge-21` 04:19:48 | `merge-24` 04:40:50 | 21m02 |
+| `merge-24` 04:41:55 | `merge-28` 04:45:19 | 3m24 |
+| `merge-28` 04:46:26 | `merge-22` 04:48:11 | 1m45 |
+| `merge-22` 04:53:15 | `merge-44` 04:56:18 | 3m03 |
+
+So #24 merged at 04:41:49 and #28 at 04:46:20 — 4m31 apart, of which 67s was the merge and
+3m24 was nothing. The dead time is consistently as large as the work or larger.
+
+Three causes, in order of size:
+
+1. **Merge-to-merge is not chained.** The chain SKILL.md describes is implement → gate → merge;
+   merge is its terminus. A merge lane's exit fires a wave, and that wave — a full model session,
+   recently 24s, 130s, 186s, 325s, 383s — boots, snapshots the whole board, runs `plan.jq` and
+   composes a brief, in order to reach a decision that is already deterministic: merge the oldest
+   `merge-queue` ticket with no hold.
+2. **One merge per wave.** `plan.jq:316` takes `first` of the queue by design, correctly — the
+   merge lock permits only one at a time. But it means the queue can only shorten once per wave
+   however fast the merges are. build-2 sat six deep.
+3. **When nothing chains, `min_wave_gap_minutes` is the floor.** The 21m02 gap above is that
+   fallback (the repo runs a 20-minute gap): `merge-21` exited, no handoff reached the next merge,
+   and the queue waited for the timer. The 60s heartbeat fires throughout and writes
+   `tick_skipped wave_gap` each time.
+
+**Why the obvious fix does not work.** A merge lane cannot spawn its own successor the way an
+impl lane spawns its gate. `spawn-lane --merge-lock` holds the lock for the whole lane and
+releases it in the post-exit hook, *after* the command exits — so a `--merge-lock` child spawned
+as the parent's last act is refused by the lock the parent still holds. Naive chaining deadlocks.
+
+**Fix direction.** Put the handoff in the post-exit hook, where the release already happens, and
+make it a script decision rather than a model one. In `tick.sh`, the merge lane's post-exit
+sequence becomes: release the lock → **spawn the next merge directly** → only then fall back to
+firing a wave. That needs two pieces:
+
+- **A queue read cheaper than a snapshot.** `snapshot` already computes `merge_attempts` and
+  `merge_hold` per ticket; expose the same derivation as a narrow mode (`snapshot --merge-queue`)
+  returning just the ordered eligible queue — oldest first, cap-exhausted and held tickets
+  excluded. That is the entire input the choice needs.
+- **A templated merge brief.** The merge brief is already the same document every time except the
+  ticket iid, its worktree and the integration base — it is step 5 of SKILL.md rendered. Move it
+  to `references/merge-brief.md` with those three substitutions, so the hook can render and spawn
+  it with no session. This has a second payoff: the two `merge_attempt_cap` burns on #22 in this
+  build were both wave-authored brief defects (one omitted the absolute path to `lane.sh`, so the
+  lane could not find its own tooling), which a template cannot reproduce.
+
+An empty queue means the hook does nothing and the normal wave fires, so nothing depends on the
+fast path — the same property chaining already has.
+
+**Expected effect.** Removes one full wave per merged ticket. On build-2's numbers that is
+roughly 2–3½ minutes per merge in the chained case and up to 20 in the unchained one, plus the
+wave's token cost — and the saving grows with queue depth, which is exactly when it hurts.
+
+**What would falsify it.** Merge-to-merge intervals that do not fall to about the merge lane's
+own runtime after the change; or a hook that races the lock release and gets its spawn refused,
+which would mean the ordering is wrong rather than the idea.
+
+**Consumer.** The build loop's wall-clock, and `retro`, which reports the wave slice this moves.
