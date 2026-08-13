@@ -4,3 +4,5 @@ logs/
 lanes/
 *.pid
 *.progress
+
+.DS_Store
