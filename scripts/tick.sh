@@ -1567,7 +1567,13 @@ ui"
         # applying it to an implementer would reject the work before it starts.
         # The paths travel by ENVIRONMENT like the tier and the runner; nothing
         # here is spliced into the lane's shell program.
-        local adv_iid="" adv_paths=""
+        # D-SKILL-16: the scope half, on the same terms and in the same place —
+        # a branch that wrote outside its tier's tree does not deserve a paid
+        # review any more than one missing its adversarial test does, and after
+        # the gate the only place left to catch it is a merge lane. The
+        # adversarial check keeps its precedence: it is the older contract, and
+        # a repo that declares no `trees:` must see byte-identical behaviour.
+        local adv_iid="" adv_paths="" scope_hit=""
         if [ "$(_lane_type "$id")" = gate ]; then
             adv_iid="${id#gate-}"; adv_iid="${adv_iid%%-*}"
             case "$adv_iid" in ''|*[!0-9]*) adv_iid="" ;; esac
@@ -1575,6 +1581,9 @@ ui"
         if [ -n "$adv_iid" ] && adv_paths=$(_adv_pregate_reject "$adv_iid" "$pregate" "$abs"); then
             export LOOM_PREGATE_ADV="$adv_paths"
             pre='echo "--- pregate: this ticket names mandatory adversarial tests and the branch changes no file under what tier $LOOM_PREGATE_TIER runs ($LOOM_PREGATE_ADV) — rejecting with no review session (P31) ---"; _rc=7; '
+        elif [ -n "$adv_iid" ] && scope_hit=$(_scope_pregate_reject "$adv_iid" "$pregate" "$abs"); then
+            export LOOM_PREGATE_SCOPE="${scope_hit%%	*}" LOOM_PREGATE_TREES="${scope_hit#*	}"
+            pre='echo "--- pregate: this branch changes files outside the tree tier $LOOM_PREGATE_TIER owns ($LOOM_PREGATE_TREES) and the ticket names none of them ($LOOM_PREGATE_SCOPE) — rejecting with no review session (D-SKILL-16) ---"; _rc=7; '
         else
             pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
             pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
@@ -2998,6 +3007,48 @@ _repo_gates_tsv() { # [<config-file>] — defaults to the repo's own .loom.yml
       }' "$cfg"
 }
 
+# D-SKILL-16: which part of the tree a tier OWNS, the mechanical half of the
+# scope question. `gates:` says what a tier runs; `trees:` says where its
+# tickets are allowed to write, so "a `ui` ticket wrote `apps/api/src/**`" is
+# decidable in shell rather than being noticed a merge lane too late.
+# Absence is a complete configuration, wholly or per tier: a repo with no
+# `trees:` block, or one that declares `api` and `ui` but not `docs`, gets no
+# mechanical scope check for whatever it did not declare. Nothing derives a
+# default layout — a guessed tree would reject correct branches in every repo
+# that never opted in, which is the one failure this must not have.
+# Both YAML list spellings are read — the block sequence `.loom.yml` files
+# actually use, and the flow list `references/loom-config.md` documents — so a
+# repo copying either out of the docs gets the block it wrote.
+_repo_trees_tsv() { # [<config-file>] — tier <TAB> glob, one line per glob
+    local cfg="${1:-$CONFIG}"
+    [ -f "$cfg" ] || return 0
+    awk '
+      { sub(/[[:space:]]*#.*$/, "") }
+      /^trees:[[:space:]]*$/ { f=1; next }
+      f && /^[^[:space:]]/   { f=0 }
+      f && /^[[:space:]]+[a-z_]+:[[:space:]]*$/ { t=$0; gsub(/[[:space:]:]/,"",t); tier=t; next }
+      f && /^[[:space:]]+[a-z_]+:[[:space:]]*\[/ {
+          line=$0
+          t=line; sub(/:.*$/, "", t); gsub(/[[:space:]]/, "", t); tier=t
+          sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line)
+          n=split(line, item, ",")
+          for (i = 1; i <= n; i++) {
+              g=item[i]
+              sub(/^[[:space:]]+/, "", g); sub(/[[:space:]]+$/, "", g)
+              gsub(/^"|"$/, "", g)
+              if (tier != "" && g != "") print tier "\t" g
+          }
+          next
+      }
+      f && /^[[:space:]]*-[[:space:]]*/ {
+          line=$0
+          sub(/^[[:space:]]*-[[:space:]]*/, "", line)
+          sub(/[[:space:]]+$/, "", line)
+          gsub(/^"|"$/, "", line)
+          if (tier != "" && line != "") print tier "\t" line
+      }' "$cfg"
+}
+
 # The ref a branch is measured against lives in lib.sh now, shared with
 # lane.sh. Every call from this script passes $CONFIG explicitly: the git
 # question may be asked of a lane worktree, but the REPO's declared base is
@@ -3096,6 +3147,69 @@ EOF
     # for the inputs that must be rejected — counts as a demand.
     printf '%s\n' "$sect" | grep -Eq '^[[:space:]]*[-*][[:space:]]' || return 1
     printf '%s' "$paths"
+    return 0
+}
+
+# D-SKILL-16: the gate asks what a diff DOES — `/code-review` plus the
+# PRD-faithfulness check — and never what it TOUCHES. triggers-api build-2:
+# JOR-72 (`tier::ui`) satisfied all nine of its acceptance criteria and also
+# shipped ~105 lines of new API routes, passed a clean gate on that basis,
+# merged at 20:45, and made JOR-49 unmergeable. The gate is the last cheap
+# place to catch it: past it the collision surfaces in a merge lane, where the
+# skill forbids fixing anything.
+# Same one-directional contract as `_adv_pregate_reject` above, for the same
+# reason — a false rc 7 costs more than the round it saves. It rejects ONLY a
+# branch whose diff leaves the tree its tier declares, and every unknown skips:
+# no `trees:` entry for this tier, no base ref, an empty or unreadable diff, an
+# unreadable or empty ticket body. It says nothing about whether work INSIDE
+# the tree belongs to this ticket; that stays a review job.
+# The escape valve is the ticket itself: a ticket whose body names a path is a
+# ticket that was scoped to touch it, whatever tree it sits in. Cross-tree work
+# stays possible, it just has to be written down first.
+# The trees are read from the BRANCH's `.loom.yml` and the tracker LAST, both
+# for the reasons written above `_adv_tier_paths` — the branch's own layout is
+# the one its diff is about, and a branch that stays home never pays for a
+# tracker round trip.
+_scope_pregate_reject() { # <iid> <tier> <worktree> → "<offending paths>\t<tier's globs>", 0 = reject
+    local iid="$1" tier="$2" dir="$3" cfg="$CONFIG" globs="" outside="" t g ref changed f body
+    [ -f "$dir/.loom.yml" ] && cfg="$dir/.loom.yml"
+    while IFS="$(printf '\t')" read -r t g; do
+        [ "$t" = "$tier" ] || continue
+        [ -n "$g" ] || continue
+        globs="$globs$g "
+    done < <(_repo_trees_tsv "$cfg")
+    [ -n "$globs" ] || return 1
+    ref=$(_base_ref "$dir" "$CONFIG"); [ "$ref" != HEAD ] || return 1
+    changed=$(git -C "$dir" diff --name-only "$ref...HEAD" 2>/dev/null) || return 1
+    [ -n "$changed" ] || return 1
+    set -f  # a glob must be matched as a pattern, never expanded against a cwd
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        for g in $globs; do
+            # `case` matches these as patterns with -f still in force, and its
+            # `*` crosses `/` — so `apps/api/**` covers the whole subtree. The
+            # bare-prefix form is honoured too, the same way `_adv_pregate_reject`
+            # accepts a directory as well as a file.
+            case "$f" in $g|$g/*) continue 2 ;; esac
+        done
+        outside="$outside$f "
+    done <<EOF
+$changed
+EOF
+    set +f
+    [ -n "$outside" ] || return 1
+    body=$("$TRACKER_SH" issue "$iid" 2>/dev/null \
+           | jq -r '.body // empty' 2>/dev/null) || return 1
+    [ -n "$body" ] || return 1
+    local still=""
+    set -f
+    for f in $outside; do
+        case "$body" in *"$f"*) continue ;; esac
+        still="$still$f "
+    done
+    set +f
+    [ -n "$still" ] || return 1
+    printf '%s\t%s' "${still% }" "${globs% }"
     return 0
 }
 

@@ -607,28 +607,6 @@ only against a *verdict* trailer leaking in — no fixture carries a note that m
 merge-attempt marker.
 **Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
 
-### D-SKILL-16 · the gate checks behaviour but never scope, so a ticket may ship another ticket's work
-SKILL.md's gate step (step 3) specifies the pregate, then "the ticket's **single** independent
-`/code-review` + PRD-faithfulness check against its `PRD requirement`". Both halves ask what the
-diff *does*; neither asks what the diff *touches*. A branch that satisfies every acceptance
-criterion and also implements a neighbouring ticket's module passes cleanly, and the gate is the
-last cheap place that could have been caught — after it, the collision surfaces in a merge lane
-where the skill forbids fixing anything.
-**Failure:** triggers-api build-2, 2026-08-12. `briefs/gate-72.md` lists nine behaviours to verify
-against SP-6/EL-4/BP-2 and contains zero words about which files JOR-72 may touch (grep for
-`apps/api`, `file surface`, `out of scope`: 0 hits). It even instructs the reviewer to confirm
-"Replay/Discard call the pinned endpoints" — the exact phrase that should have prompted "so who
-pinned them, and did this branch pin them itself?" — and it never becomes a check. gate-72 ran
-`gate.sh ui`, reviewed a diff carrying ~105 lines of new API routes plus SSE frame builders, and
-posted PASS. It merged at 20:45 and made JOR-49 unmergeable.
-**Fix shape:** two layers. Prose — the gate brief names the ticket's expected file surface and a
-diff reaching outside it is a FAIL unless the ticket body names those files. Mechanical, and the
-stronger half — `snapshot` already computes `file_surface` per ticket, so a tier-to-tree map
-(`tier::ui` → `apps/console/**`, `tier::api` → `apps/api/**`) makes "a `ui` ticket wrote
-`apps/api/src/**`" a refusal a script can raise in the pregate, needing no judgement at all.
-**Test:** none. Nothing in the suite asserts anything about a diff's file paths against its
-ticket's tier.
-
 ---
 
 ## `references/*.md`
@@ -1160,3 +1138,26 @@ scope posed as an explicit question — "these files are outside this ticket's s
 they belong here before continuing" — rather than folded into the work list. No fixture exercises
 brief content, so no suite test applies; `tick-test.sh` run clean, 982 passed / 0 failed, confirming
 no regression.
+
+### D-SKILL-16 · the gate checks behaviour but never scope, so a ticket may ship another ticket's work
+*Closed 2026-08-12.*
+
+The gate step asked what a diff *does* — `/code-review` plus PRD-faithfulness — and never what it
+*touches*. In triggers-api build-2, a `ui` ticket satisfied all nine of its acceptance criteria and
+also shipped ~105 lines of a neighbouring ticket's API routes; the gate brief had zero words about
+file scope, passed it clean, and the collision surfaced in a merge lane, where the skill forbids
+fixing anything.
+
+**Shipped:** two layers. Prose — step 3's `/code-review` sentence now also states scope: the brief
+names the ticket's expected file surface, and a diff reaching outside it is a FAIL unless the
+ticket body names those files. Mechanical — a new optional `trees:` repo config key (`references/
+loom-config.md`, mirroring `gates:`) maps each tier to the glob(s) of tree it owns; a new
+`_scope_pregate_reject` (mirroring the existing `_adv_pregate_reject`) diffs a gate lane's branch
+against base and rejects at rc 7, no review session, when a changed path falls outside every glob
+its tier declares and the ticket body doesn't name it. One-directional like its sibling check:
+absence of `trees:`, wholly or per tier, causes zero behaviour change in any repo that hasn't opted
+in — no default tree is ever guessed. New section 36 (`scripts/tests/36-scope-pregate.sh`, 12
+assertions: in-tree pass, out-of-tree reject with both paths logged, the escape-valve case, per-tier
+absence, whole-repo absence, impl lanes never checked, and two planted violations) — reverting either
+the wiring or the escape valve turns it red. `bash scripts/tick-test.sh` run 4 consecutive times:
+994 passed, 0 failed, identical every time.

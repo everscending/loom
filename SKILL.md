@@ -273,7 +273,9 @@ refuses outside herdr anyway.
    mechanically red branch exits 7 in seconds having spent no model time.
    Never reimplement gate-running in the skill; CI runs the same runner. Past
    it, the session does the ticket's **single** independent `/code-review` +
-   PRD-faithfulness check against its `PRD requirement`.
+   PRD-faithfulness check against its `PRD requirement`, plus **scope**: the
+   brief names the ticket's expected file surface, and a diff reaching outside
+   it is a FAIL unless the ticket body names those files.
 
    Verdict is a label change: pass → `merge-queue`; fail → `in-progress` with
    a rejection comment. End every verdict comment with
