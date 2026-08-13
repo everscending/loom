@@ -50,7 +50,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-TEST-01 | Critical | the `rm -rf` guard's test never invokes `tick.sh` |
 | D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
@@ -483,12 +482,6 @@ concedes Ctrl-C is not deliverable there, as do SKILL.md:214 and :502.
 
 The suite is 4,435 lines and 430 green tests. These are tests that cannot fail, or prove something
 other than what they name. All are covered by **P45**.
-
-### D-TEST-01 · the `rm -rf` guard's test never invokes `tick.sh`
-`tick-test.sh:394-397` — writes its own `case` statement inside a `bash -c` string and asserts on
-that; it is testing the bash `case` builtin.
-**Misses:** delete `tick.sh:124` (`case "$SCRATCH_ROOT" in ""|"/"|"$HOME") return 0 ;; esac`), the
-line guarding the `find … -exec rm -rf {} +` two lines below it. Demonstrated: test still PASSes.
 
 ### D-TEST-02 · the event-log invariant test cannot see `tail`/`grep` readers
 `tick-test.sh:2902-2906` — detector regex `(<|read|cat|jq[^|]*)[^|]*\$EVENTS`.
@@ -1321,3 +1314,22 @@ catches a duplicate read. Four new cases in `scripts/tests/19-stale-snapshot.sh`
 Full suite: 1000 passed, 1 failed, and separately 998 passed, 3 failed on a second run — all failures
 in `watch-panes`, the same pre-existing flake as D-SNAP-01's closure, not this change; the
 `stale-snapshot` and `one-helper-one-read` sections alone are clean every run (17/0, 10/0).
+
+### D-TEST-01 · the `rm -rf` guard's test never invokes `tick.sh`
+*Closed 2026-08-13.*
+
+The test for `tick.sh`'s scratch-root prune guard (`_prune_scratch`) wrote its own inline
+`case "$SCRATCH_ROOT" in ""|"/"|"$HOME") ... esac` inside a `bash -c` string and asserted on that
+string's own output — it never called `tick.sh` or `_prune_scratch` at all, so deleting the real
+guard line left the test green.
+
+**Shipped:** `scripts/tests/01-lock-and-spawn-lane.sh` section `4i5` now sources `tick.sh` and calls
+the real `_prune_scratch`, with a stand-in `find` on `PATH` that records invocation instead of
+touching the filesystem (running a real destructive sweep against `/` or `$HOME`, even in a test, is
+not acceptable). Asserts the guard blocks `SCRATCH_ROOT` = `""`, `"/"`, `"$HOME"` (stub `find` never
+reached) and a positive control confirms an ordinary scratch root does reach it. Verified to bite:
+deleting the real guard line in `tick.sh` makes the new test fail with `FAIL: scratch: prune guard
+let a dangerous root through`; restoring it passes again. Section `01-lock-and-spawn-lane` alone: 70
+passed, 0 failed, stable across 4 repeated runs. Full-suite runs carry the pre-existing `watch-panes`
+flake and, once, an unrelated one-off timing flake in the same file's wave-replay test under system
+load (did not recur across two more full runs) — neither touches the guard this entry is about.
