@@ -49,8 +49,13 @@ else
 fi
 
 # p74b. Planted violation: the shared body removed, so every question fetches
-#       for itself again — exactly today's code before this proposal, and two
-#       GETs for one label move.
+#       for itself again — exactly today's code before this proposal, and more
+#       than one GET for a single label move. The count is asserted as "more
+#       than one", not as an exact number: how many questions `transition` asks
+#       of the issue is a detail that moves (D-SNAP-17 added the release check
+#       to the hold and closed questions already there), while "each question
+#       pays its own round trip once the sharing is gone" is the invariant.
+#       p74a above is what pins the real path to exactly one.
 mkdir -p "$P74/twice"
 ln -sf "$LIBSH" "$P74/twice/lib.sh"; ln -sf "$TICK" "$P74/twice/tick.sh"
 link_trackers "$P74/twice"
@@ -59,9 +64,9 @@ chmod +x "$P74/twice/lane.sh"
 : > "$P74/gets"
 GLAB_CMD="$P74/glab.sh" GETS="$P74/gets" "$P74/twice/lane.sh" transition 81 review >/dev/null 2>&1
 p74_n=$(wc -l < "$P74/gets" | tr -d ' ')
-[ "$p74_n" = 2 ] \
-    && ok "one read: with the shared body removed transition fetches the same issue twice" \
-    || bad "one read: the doubled read did not reproduce ($p74_n GETs, expected 2)"
+[ "$p74_n" -gt 1 ] 2>/dev/null \
+    && ok "one read: with the shared body removed transition fetches the same issue again per question" \
+    || bad "one read: the doubled read did not reproduce ($p74_n GETs, expected more than 1)"
 
 # p74c. `submit` had the same doubled read — the hold guard, then its own
 #       closed/label/title read of the very same issue. What it keeps is the

@@ -816,6 +816,54 @@ printf 'Round two decision.\n' | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh
 grep -q "Round two decision" "$NCAP" \
     && ok "transition --note: a second block gets its own decision note" \
     || bad "transition --note: round one'"'"'s trailer swallowed round two'"'"'s decision"
+# D-SNAP-17: the trailer is MACHINERY and `--note` is a human courtesy, so the
+# stamp cannot hang off the flag. Moving a `blocked` ticket anywhere else IS the
+# release, and without the trailer the thread still reads as an open block
+# forever — build-2 #83 was released, verified and moved to review, and a wave
+# put `blocked` back on it 3h43m later off exactly that reading. Same fixture,
+# no --note.
+cat > "$T/thread-blocked-only.json" <<'STUB'
+[{"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-08-08T10:00:00Z -->\n",
+  "created_at":"2026-08-08T10:00:00Z"}]
+STUB
+: > "$NCAP"; : > "$NARGV"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    NTHREAD="$T/thread-blocked-only.json" \
+    "$LANE" transition 60 review --release-hold >/dev/null 2>&1
+grep -qE "orch-unblock [0-9]{4}-[0-9]{2}-[0-9]{2}T" "$NCAP" \
+    && ok "transition: a release with no --note still stamps the unblock trailer" \
+    || bad "transition: the released hold left no trailer on the thread ($(tail -3 "$NCAP" 2>/dev/null))"
+grep -q "add_labels=review" "$NARGV" \
+    && ok "transition: the stamp does not cost the label half" \
+    || bad "transition: the relabel did not run ($(tail -1 "$NARGV"))"
+# Re-run safety holds on this path too: the trailer already answers the newest
+# block, so a second run completes the label half and posts nothing.
+: > "$NCAP"; : > "$NARGV"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-note-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    NTHREAD="$T/thread-noted.json" \
+    "$LANE" transition 60 review --release-hold >/dev/null 2>&1
+[ -s "$NCAP" ] \
+    && bad "transition: a re-run stamped a second unblock trailer ($(tail -3 "$NCAP"))" \
+    || ok "transition: a re-run of a stamped release does not double the trailer"
+# A transition that is not a release writes no trailer: nothing to release, and
+# a stray `orch-unblock` would answer a block that never happened.
+cat > "$T/glab-unheld-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${NCAP:?}" ;; esac; done
+echo "$*" >> "${NARGV:?}"
+case "$*" in
+    *"issues/61/notes"*) echo '[]' ;;
+    *"issues/61"*) echo '{"iid":61,"state":"opened","labels":["build-3","in-progress"]}' ;;
+    *) echo '{}' ;;
+esac
+STUB
+chmod +x "$T/glab-unheld-stub.sh"
+: > "$NCAP"; : > "$NARGV"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-unheld-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+    "$LANE" transition 61 review >/dev/null 2>&1
+[ -s "$NCAP" ] \
+    && bad "transition: stamped a release on a ticket that was never held ($(tail -3 "$NCAP"))" \
+    || ok "transition: a transition that releases nothing writes no trailer"
 # --note does not buy a way past the hold guard: releasing still needs
 # --release-hold, and an automated caller still cannot say it.
 : > "$NARGV"

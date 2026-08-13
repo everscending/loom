@@ -168,6 +168,15 @@ case "$(br .body)" in *orch-blocked*) \
 [ "$(br .released)" = "false" ] \
     && ok "snapshot: a block with no release note reads as not yet decided" \
     || bad "snapshot: released was $(br .released) with no orch-unblock in the thread"
+# D-SNAP-17: `released: false` alone cannot tell "nobody has answered this
+# hold" from "answered, and the trailer was never stamped" — a hold released by
+# hand in the tracker leaves exactly this thread. #12 is labelled `review`, so
+# this report is history, and a wave that read it as a stranded write put
+# `blocked` back on finished work (build-2 #83). The current state travels with
+# the report so the difference is readable without inferring it.
+[ "$(br .ticket_state)" = "review" ] \
+    && ok "snapshot: the blocked report carries the ticket's current state, so released:false is readable" \
+    || bad "snapshot: no ticket_state on the report ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedrep.json"))"
 # The half-applied batch: the decision note landed and the relabel did not, so
 # the ticket is still `blocked` but the decision already exists. `triage` must
 # show that as work to finish, never ask the human to decide it twice.

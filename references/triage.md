@@ -32,7 +32,14 @@ Per blocked ticket, from the snapshot row:
 - `blocked_report` — `body` is what the lane wrote, `category` its slug, `at`
   when. `released: true` means a decision note is already posted and only the
   relabel is missing: show it as a half-applied batch to finish, not a decision
-  to make again.
+  to make again. `released: false` means only that no `orch-unblock` trailer is
+  on the thread, which is NOT the same as unanswered — read it with
+  `ticket_state`, the ticket's current state label. `ticket_state: "blocked"`
+  with `released: false` is the real thing, a hold nobody has answered. Any
+  other `ticket_state` is a report on a hold that is already over (released by
+  hand, or before the trailer was stamped on every transition): the ticket has
+  moved on, so it is history — never a stranded write, and never a reason to
+  put `blocked` back on.
 - `rejections` (total, `last_class`, `same_class_tail`), `merge_attempts`,
   `merge_hold`, `model`, `gate`, `related_merge_requests`, `blocked_by`.
 
