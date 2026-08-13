@@ -226,6 +226,12 @@ gates:                          # tier keys are FIXED: docs | logic | api | ui (
   logic: ["<lint>", "<unit>"]   #   NOT abstract tokens. A token like `unit` needs a resolver that does not
   api:   ["<lint>", "<unit>", "<integration>"]   #   exist; a literal command is self-contained and runs as-is.
   ui:    ["<lint>", "<unit>", "<integration>", "<e2e>"]
+
+trees:                          # OPTIONAL. Which part of the tree each tier OWNS — the scope
+  docs:  ["docs/**"]            #   half of the gate, where `gates:` is the behaviour half.
+  logic: ["packages/core/**"]   #   Paths are repo-specific, so nothing is ever derived.
+  api:   ["apps/api/**"]
+  ui:    ["apps/console/**"]
 ```
 
 Example `gates` values for a Python/uv repo (crucible):
@@ -248,3 +254,40 @@ skill-resident, run only by the loom driver. Values are literal commands
 by design (decided 2026-07-21, crucible): the abstract-token form the first
 openemr config used (`[unit, phpstan]`) needs a token→command map that was
 never built, so literal commands are canonical.
+
+## `trees` — the tier's file surface
+
+`gates` says what a tier **runs**; `trees` says where its tickets are allowed
+to **write**. A `gate` lane's pregate diffs the branch against the base and
+refuses it — rc 7, no review session — when a changed path falls outside every
+glob its tier declares. Without it the gate only ever asks what a diff *does*,
+never what it *touches*: triggers-api build-2 passed a `ui` ticket that met all
+nine of its acceptance criteria and also shipped ~105 lines of a neighbouring
+ticket's API routes, and the collision surfaced in a merge lane, which is the
+one place the skill forbids fixing anything.
+
+```yaml
+trees:
+  docs:  ["docs/**"]
+  api:   ["apps/api/**"]
+  ui:    ["apps/console/**", "packages/ui/**"]
+```
+
+Both list spellings are read — the flow form above and the block form
+(`ui:` on its own line, then `- "apps/console/**"` items). Globs are matched as
+shell `case` patterns, where `*` crosses `/`, so `apps/api/**` covers the whole
+subtree; a bare directory (`apps/api`) matches that directory and everything
+under it.
+
+**Absence is a valid, complete configuration**, wholly and per tier. A repo
+with no `trees` block gets no mechanical scope check at all; a repo declaring
+`api` and `ui` but not `docs` gets none for `docs`. Nothing is derived from the
+folder layout — a guessed tree would reject correct branches in every repo that
+never opted in, and a false rc 7 costs more than the round it saves. The check
+skips on every other unknown too: no base ref, an empty diff, an unreadable
+ticket. Its escape valve is the ticket itself — a changed path the **ticket
+body names** is a path the ticket was scoped to touch, whatever tree it sits
+in, so cross-tree work stays possible once it is written down. Unlike `gates`,
+`tick.sh` reads this key itself (`_repo_trees_tsv`), from the branch's own
+`.loom.yml` where the worktree has one: the layout the diff is about is the
+branch's, not the caller's.
