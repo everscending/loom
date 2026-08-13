@@ -376,6 +376,23 @@ grep -q "^$LOOM_REPO$" "$LOOM_HOME/logs/lane-gate-22.log" \
     && ok "spawn-lane-violation: without --cwd the lane is in the repo root" \
     || bad "spawn-lane: default cwd is not the repo root"
 
+# 4f2. D-TICK-19: the scripts dir (home of lane.sh/tick.sh) must be on PATH
+#      inside a lane, so a handoff can say `lane.sh reconcile` by bare name
+#      instead of retyping the absolute path. Assert both the PATH entry and
+#      that `command -v lane.sh` actually resolves from inside the lane.
+SCRIPTS_DIR="$(dirname "$TICK")"
+"$TICK" spawn-lane gate-22b -- sh -c 'echo "$PATH"' >/dev/null; sleep 0.5
+case "$(cat "$LOOM_HOME/logs/lane-gate-22b.log" 2>/dev/null)" in
+    "$SCRIPTS_DIR":*) ok "spawn-lane: PATH inside a lane leads with the scripts dir" ;;
+    *) bad "spawn-lane: PATH inside a lane has no scripts dir (D-TICK-19) ($(cat "$LOOM_HOME/logs/lane-gate-22b.log" 2>/dev/null))" ;;
+esac
+"$TICK" spawn-lane gate-22c -- sh -c 'command -v lane.sh' >/dev/null; sleep 0.5
+if grep -q "^$SCRIPTS_DIR/lane.sh$" "$LOOM_HOME/logs/lane-gate-22c.log" 2>/dev/null; then
+    ok "spawn-lane: lane.sh resolves by bare name from inside a lane"
+else
+    bad "spawn-lane: lane.sh does NOT resolve by bare name inside a lane (D-TICK-19) (log: $(cat "$LOOM_HOME/logs/lane-gate-22c.log" 2>/dev/null))"
+fi
+
 # 4g. Flag order-tolerance extends to --cwd, and it composes with self-trigger.
 rm -rf "$LOOM_HOME/tick.lock.d"
 MARK3="$T/self-trigger-fired-3"

@@ -114,46 +114,6 @@ input line and exits 0, so the ticker loses the line rather than failing loudly.
 line (`:2167`) report too small a number, which can invert the conclusion printed at `:2168-2169`
 on a build that really was graph-bound.
 
-### D-TICK-19 · a lane inherits no `PATH` to `lane.sh`, so every handoff must spell the absolute path and nothing checks that it did
-`cmd_spawn_lane` (`tick.sh:1599`) exports `LOOM_LANE_ID` (`:1662`), `LOOM_REPO`/`LOOM_HOME`
-(`:1757`) and `LOOM_SCRATCH` (`:1758`) into the lane's environment, and never `PATH`. The scripts
-directory that holds `lane.sh` and `tick.sh` is therefore unreachable by name inside a lane: the
-only form that works is the full absolute path, which a *model* has to type correctly into every
-handoff line it composes. `spawn-lane` validates the lane id, the cwd's trust, a live id
-collision, the `--brief`/`@brief` pair, the 1000-char inline cap and the pregate tier — it never
-asks whether the command it was handed can resolve. A handoff naming a script that does not exist
-in the child's environment spawns exactly like a correct one.
-
-This is the same hazard class as D-TICK-18, one layer out: that one caught a placeholder with no
-file behind it, this one is a *command* with no binary behind it. `SKILL.md`'s handoff paragraph
-says briefs travel as files but never says the commands inside one must be absolute, so nothing —
-prose or code — states the requirement the machinery silently imposes. It also sits against the
-file's own doctrine ("models judge, scripts plumb"; "the durable fix for a denial is never a
-longer allowlist"): a 60-character path retyped by a model on every chained spawn is plumbing
-pushed onto judgement.
-
-**Failure:** triggers-api build-2, 2026-08-12. `gate-49` passed its ticket and chained
-`merge-49` at 20:59:14 with a bare `lane.sh reconcile` and no `--brief`, then exited 8s later. The
-lane's first tool call returned `Exit code 1 / lane.sh not found`. Recovery made it worse: its
-`find / -maxdepth 6` misses `/Users/<u>/.claude/skills/loom/scripts/lane.sh` by exactly one level
-(the path is depth 7), and `find $HOME -maxdepth 4` misses it for the same reason, so the lane
-concluded the script "does not exist anywhere — not in repo, not in `$PATH`, not in home dir". It
-then ran `ps aux | grep "find /"`, saw its own orphaned searches still running, and reported them
-as "two other background shell processes on this machine also searching for `lane.sh`". It ended
-by asking which host the script lives on — a dead lane, into a headless void. 322 seconds, rc 0,
-nothing done. It survived only by luck: the next spawn happened to use `--brief`, and the staged
-brief carries the absolute path twice.
-
-Cost is bounded but the failure is silent to the machine — the lane exits rc 0, so no harvest
-residue names it, `crash_cap` never counts it, and the ticker shows an ordinary lane exit. Under
-`permission_mode: dontAsk` the same class is worse than a not-found: a repo allowlist can only
-prefix-match what it was written for, and triggers-api's `.claude/settings.json` allows
-`Bash(scripts/gate.sh*)` with no `lane.sh` entry in any form.
-
-**Test:** nothing in the suite spawns a lane and asserts it can reach `lane.sh` at all. Section 23
-covers the brief plumbing (D-TICK-18's guard) but only whether a lane *spawns*, never whether the
-command it carries resolves once it does.
-
 ---
 
 ## `scripts/snapshot.jq`
@@ -647,6 +607,74 @@ only against a *verdict* trailer leaking in — no fixture carries a note that m
 merge-attempt marker.
 **Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
 
+### D-SKILL-14 · nothing tells an implementation lane that a missing dependency is a block, not a build
+SKILL.md's fill step (step 4) hands a lane "the ticket body + lessons thread" and the failure
+policy lists `blocked` = "an external dependency", but no line anywhere tells a lane what to do
+when something its ticket *consumes* does not exist yet. Both answers look defensible from inside
+the lane: block and wait, or build the missing piece and carry on. The file is silent, so the
+choice falls to whichever way the session leans.
+**Failure:** triggers-api build-2, 2026-08-12. Two lanes hit the identical situation and split.
+JOR-31's lane found bearer auth / rate limiter / OpenAPI absent from `origin/main` and blocked
+with category `unmerged-dependency` — correct. JOR-72's lane (a `ui` ticket whose body says
+"replay/discard call **the pinned endpoints**") found those endpoints absent and *wrote them*,
+105 lines of `apps/api/src/http/routes/deliveries.ts` plus the SSE frames. JOR-49 (E8.2 · Replay
+and discard routes) owned exactly that scope and was `blocked` at the time, from 11:24 to 20:27,
+spanning JOR-72's whole run. JOR-72 merged at 20:45. When JOR-49 was requeued and reached the
+merge queue, its branch and `origin/main` carried two incompatible implementations of the same
+two endpoints — a genuine feature clash across 3 files, unresolvable by the merge lane, both
+merge attempts burned, and the ticket's entire body of work rendered redundant.
+**Fix shape:** one line in the fill step and in the brief template — if a contract your ticket
+consumes is not on the base, block with `unmerged-dependency`; never build it, because another
+ticket owns it and building it twice produces a conflict no merge lane can resolve. The rule is
+cheap because the correct behaviour already exists in the wild (JOR-31); it just isn't written
+down. Root cause of the collision is D-REF-16; this entry is the last line of defence inside the
+lane.
+**Test:** none possible at the suite level — this is brief prose, not machinery. The mechanical
+half is D-SKILL-16's file-surface check.
+
+### D-SKILL-15 · a resume brief inventories inherited work instead of questioning it
+SKILL.md's fill step describes a rework respawn as reusing the surviving worktree and injecting
+the latest rejection comment. Nothing says the wave must *judge* what is already in that
+worktree. In practice the brief lists the dirty files and tells the lane to finish them, which
+turns a previous lane's unreviewed decision into the next lane's instruction — the one thing a
+resume should never do, because the work in a surviving worktree has by definition passed no gate.
+**Failure:** triggers-api build-2, 2026-08-12, `briefs/impl-72.md`. JOR-72 is `tier::ui`. Its
+resume brief opens with the worktree's modified files as neutral inventory — including
+`apps/api/src/http/routes/deliveries.ts`, `apps/api/src/http/routes/deliveries.integration.test.ts`
+and `apps/api/src/http/sse.ts` — then instructs: "Read what's there first … finish what's already
+started rather than re-deriving it from scratch". A UI ticket editing API route modules was
+reported as a to-do list, never as a question. The same brief then affirmed "**Blocked by:** E10.2,
+E10.5 (both closed — this ticket is unblocked)", restating the incomplete edge set of D-REF-16 as
+a clearance. That inherited scope is what collided with JOR-49 (see D-SKILL-14).
+**Fix shape:** the fill step should require a resume brief to compare the surviving worktree's
+file surface against the ticket's tier and stated scope, and surface anything outside it as a
+judgement call — "these files are outside this ticket's scope; decide whether they belong here
+before continuing" — rather than folding them into the work list.
+**Test:** none. No fixture exercises brief *content*; the suite only asserts that briefs are
+staged, copied and paired with their placeholder (section 23).
+
+### D-SKILL-16 · the gate checks behaviour but never scope, so a ticket may ship another ticket's work
+SKILL.md's gate step (step 3) specifies the pregate, then "the ticket's **single** independent
+`/code-review` + PRD-faithfulness check against its `PRD requirement`". Both halves ask what the
+diff *does*; neither asks what the diff *touches*. A branch that satisfies every acceptance
+criterion and also implements a neighbouring ticket's module passes cleanly, and the gate is the
+last cheap place that could have been caught — after it, the collision surfaces in a merge lane
+where the skill forbids fixing anything.
+**Failure:** triggers-api build-2, 2026-08-12. `briefs/gate-72.md` lists nine behaviours to verify
+against SP-6/EL-4/BP-2 and contains zero words about which files JOR-72 may touch (grep for
+`apps/api`, `file surface`, `out of scope`: 0 hits). It even instructs the reviewer to confirm
+"Replay/Discard call the pinned endpoints" — the exact phrase that should have prompted "so who
+pinned them, and did this branch pin them itself?" — and it never becomes a check. gate-72 ran
+`gate.sh ui`, reviewed a diff carrying ~105 lines of new API routes plus SSE frame builders, and
+posted PASS. It merged at 20:45 and made JOR-49 unmergeable.
+**Fix shape:** two layers. Prose — the gate brief names the ticket's expected file surface and a
+diff reaching outside it is a FAIL unless the ticket body names those files. Mechanical, and the
+stronger half — `snapshot` already computes `file_surface` per ticket, so a tier-to-tree map
+(`tier::ui` → `apps/console/**`, `tier::api` → `apps/api/**`) makes "a `ui` ticket wrote
+`apps/api/src/**`" a refusal a script can raise in the pregate, needing no judgement at all.
+**Test:** none. Nothing in the suite asserts anything about a diff's file paths against its
+ticket's tier.
+
 ---
 
 ## `references/*.md`
@@ -761,6 +789,36 @@ worktrees, while a human trusting the documented bound assumes the loop would re
 `model::fable` label as a first-class per-ticket tier. Lowest rank: the docs also say "or full id"
 and the value passes straight to `claude --model`, so nothing breaks.
 **Covered by:** P50.
+
+### D-REF-16 · phase 4 grades the edge set on width and never on the contracts a ticket consumes
+`phases-1-5.md:181-195` — the pre-publish check list scores a draft on **Width** ("how many
+tickets can start at once … a graph that opens one ticket wide idles every lane") and **Size**,
+with `graph` as a phase-5 backstop. Nothing in the list asks whether the edges are *complete*: a
+ticket whose "what to build" names an endpoint, schema or wire contract it does not itself build
+has a real dependency on the ticket that does, and no criterion here catches its absence.
+The incentive runs the wrong way. A missing edge makes a draft score *better* on width — the one
+dimension the list actually measures — so the check that exists rewards the omission. The right
+tool is already on the page: **Pinned interfaces** (`:191-195`), the `interface + stub` ticket
+that merges fast with the implementation behind it, is exactly the shape a consumed contract
+needs. It is framed only as a width remedy for a heavy blocker, never as the way a consumer is
+tied to its producer.
+**Failure:** triggers-api build-2, 2026-08-12, and it is systemic rather than a one-off. Every
+E12 console ticket carries the same blockers — `Blocked by: E10.2, E10.5`, the console chassis —
+and not one is linked to the API ticket whose endpoint it calls. JOR-70 (Events tab, consumes
+`GET /api/events`) survived on luck: its endpoint was already merged when it ran. JOR-72 (Dead
+letter tab, consumes the replay/discard endpoints) did not — those endpoints belonged to JOR-49,
+which was `blocked` for the whole of JOR-72's run. With no edge to stop it and no rule to send it
+elsewhere (D-SKILL-14), JOR-72's lane built them, its gate passed them (D-SKILL-16), and JOR-49's
+own branch became unmergeable: a genuine feature clash across 3 files, both merge attempts spent,
+one ticket's entire body of work wasted. Nothing detected the overlap for nine hours, until two
+branches collided in a merge lane.
+**Fix shape:** a third criterion beside Width and Size — *Completeness*: every contract a ticket
+consumes but does not build gets a blocking edge to the ticket that builds it, or a pinned
+`interface + stub` ticket both depend on. Stated as a rule it also resolves the incentive, since
+width is then measured over an edge set that is required to be complete first.
+**Test:** none, and none possible in `tick-test.sh` — this is authoring guidance for phase 4. The
+enforceable residue is D-SKILL-16's tier-to-tree check, which catches the same collision one stage
+later, at the gate.
 
 ---
 
@@ -1074,3 +1132,22 @@ prompt, which must still spawn. Reverting the fix turns the first red.
 
 **Not shipped:** the orphan briefs that gave gate-98-r3 six files to be confused by are
 D-TICK-08's subject and stay open there.
+
+### D-TICK-19 · a lane inherits no `PATH` to `lane.sh`, so every handoff must spell the absolute path and nothing checks that it did
+*Closed 2026-08-12.*
+
+`cmd_spawn_lane` exported `LOOM_LANE_ID`, `LOOM_REPO`/`LOOM_HOME` and `LOOM_SCRATCH` into a lane's
+environment but never `PATH`, so `lane.sh` and `tick.sh` were reachable only by full absolute path
+— a string a model had to retype correctly into every chained handoff line. A handoff that got it
+wrong (or omitted `--brief` and improvised one) spawned a lane that could never resolve its own
+command, and the failure was silent to the machine: the lane exits rc 0, so no harvest residue
+names it and `crash_cap` never counts it. Confirmed live, triggers-api build-2, 2026-08-12:
+`gate-49` chained `merge-49` with a bare `lane.sh reconcile`, the lane's first tool call returned
+`lane.sh not found`, and 322 seconds of confused recovery (mis-scoped `find`, misreading its own
+orphaned searches as other processes) produced nothing.
+
+**Shipped:** `cmd_spawn_lane` now exports `PATH="$(dirname "$SELF_PATH"):$PATH"` alongside the
+existing `LOOM_REPO`/`LOOM_HOME`/`LOOM_SCRATCH` exports, so the scripts directory is on every
+lane's `PATH` and a handoff can say `lane.sh reconcile` by bare name. Section 1 (spawn-lane) gains
+a case asserting `PATH` inside a spawned lane leads with the scripts dir and that `command -v
+lane.sh` resolves there; reverting the fix turns it red.

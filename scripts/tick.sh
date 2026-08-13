@@ -1756,6 +1756,13 @@ cmd_spawn_lane() {
     # even though the lane runs in a worktree cwd.
     export LOOM_REPO="$REPO_ROOT" LOOM_HOME="$LOOM_HOME"
     LOOM_SCRATCH=$(_new_scratch "lane-$id"); export LOOM_SCRATCH
+    # D-TICK-19: put the scripts directory (home of lane.sh and tick.sh) on
+    # PATH before spawning, so a handoff a lane composes can say `lane.sh
+    # reconcile` by bare name instead of retyping the absolute path. Without
+    # this a bare name resolves nowhere inside the lane's environment, and
+    # nothing checks that a handoff command can be found before the lane
+    # spawns on it.
+    export PATH="$(dirname "$SELF_PATH"):$PATH"
     # Reserve the merge lock BEFORE spawning: a refusal must leave no lane and
     # no pid file behind, exactly like the other spawn guards.
     if [ "$merge_lock" -eq 1 ]; then
