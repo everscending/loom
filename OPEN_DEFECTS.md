@@ -607,31 +607,6 @@ only against a *verdict* trailer leaking in — no fixture carries a note that m
 merge-attempt marker.
 **Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
 
-### D-SKILL-14 · nothing tells an implementation lane that a missing dependency is a block, not a build
-SKILL.md's fill step (step 4) hands a lane "the ticket body + lessons thread" and the failure
-policy lists `blocked` = "an external dependency", but no line anywhere tells a lane what to do
-when something its ticket *consumes* does not exist yet. Both answers look defensible from inside
-the lane: block and wait, or build the missing piece and carry on. The file is silent, so the
-choice falls to whichever way the session leans.
-**Failure:** triggers-api build-2, 2026-08-12. Two lanes hit the identical situation and split.
-JOR-31's lane found bearer auth / rate limiter / OpenAPI absent from `origin/main` and blocked
-with category `unmerged-dependency` — correct. JOR-72's lane (a `ui` ticket whose body says
-"replay/discard call **the pinned endpoints**") found those endpoints absent and *wrote them*,
-105 lines of `apps/api/src/http/routes/deliveries.ts` plus the SSE frames. JOR-49 (E8.2 · Replay
-and discard routes) owned exactly that scope and was `blocked` at the time, from 11:24 to 20:27,
-spanning JOR-72's whole run. JOR-72 merged at 20:45. When JOR-49 was requeued and reached the
-merge queue, its branch and `origin/main` carried two incompatible implementations of the same
-two endpoints — a genuine feature clash across 3 files, unresolvable by the merge lane, both
-merge attempts burned, and the ticket's entire body of work rendered redundant.
-**Fix shape:** one line in the fill step and in the brief template — if a contract your ticket
-consumes is not on the base, block with `unmerged-dependency`; never build it, because another
-ticket owns it and building it twice produces a conflict no merge lane can resolve. The rule is
-cheap because the correct behaviour already exists in the wild (JOR-31); it just isn't written
-down. Root cause of the collision is D-REF-16; this entry is the last line of defence inside the
-lane.
-**Test:** none possible at the suite level — this is brief prose, not machinery. The mechanical
-half is D-SKILL-16's file-surface check.
-
 ### D-SKILL-15 · a resume brief inventories inherited work instead of questioning it
 SKILL.md's fill step describes a rework respawn as reusing the surviving worktree and injecting
 the latest rejection comment. Nothing says the wave must *judge* what is already in that
@@ -1171,3 +1146,21 @@ missing edge can no longer buy a better width score once completeness is a preco
 it, not an optional extra. Doc-only change, no test possible at the suite level (`tick-test.sh` run
 clean, 982 passed / 0 failed, across repeat runs) — the enforceable residue is D-SKILL-16's
 tier-to-tree gate check.
+
+### D-SKILL-14 · nothing tells an implementation lane that a missing dependency is a block, not a build
+*Closed 2026-08-12.*
+
+SKILL.md's fill step handed a lane "the ticket body + lessons thread" with no line telling it what
+to do when something its ticket *consumes* does not exist yet on the base — block and wait, or build
+the missing piece, both looked equally defensible from inside the lane. In triggers-api build-2, one
+lane (JOR-31) blocked correctly; another (JOR-72) built the endpoints a blocked sibling ticket
+(JOR-49) owned, and when JOR-49 reached the merge queue its branch and `origin/main` carried two
+incompatible implementations — a genuine feature clash, both merge attempts burned, JOR-49's work
+wasted.
+
+**Shipped:** one line added to the Fill lanes step's brief-template bullet — the text a headless
+implementation lane actually reads inlined into its spawn brief — stating that if the ticket body
+names a contract it consumes and the freshly-fetched base lacks it, the lane blocks with
+`--category unmerged-dependency` rather than building it, since another ticket owns it and building
+it twice is an unresolvable merge conflict. No test possible at the suite level (`tick-test.sh`
+982 passed / 0 failed, unaffected) — the enforceable half is D-SKILL-16's tier-to-tree gate check.
