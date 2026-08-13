@@ -50,7 +50,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -490,13 +489,6 @@ other than what they name. All are covered by **P45**.
 (`grep '"ev":"wave_start"' "$EVENTS"` in `_wave_gap_ok` → whether a wave runs). The invariant the
 test names — constitution rule 1 — is already false in the code and the test is green.
 Demonstrated against the shipping `tick.sh`.
-
-### D-TEST-03 · "snapshot made no mutating call" denylists a form nothing uses
-`tick-test.sh:2019-2023` — denylist is `issue (update|close|create|note)|mr (merge|create|update)|
-label (create|delete)|-X *(POST|PUT|DELETE|PATCH)`, but every tracker mutation in this codebase is
-`glab api --method` (`lane.sh:102, 152, 308, 352, 501, 534`).
-**Misses:** `glab api --method PUT projects/:fullpath/issues/10 -f add_labels=blocked` in any
-snapshot path. Demonstrated: no match, test PASSes.
 
 ### D-TEST-04 · `ok` called in both branches
 `tick-test.sh:2361-2363` — `… && ok "P4-violation: bare Bash(uv *) is absent…" || ok "P4: bare rule
@@ -1333,3 +1325,25 @@ let a dangerous root through`; restoring it passes again. Section `01-lock-and-s
 passed, 0 failed, stable across 4 repeated runs. Full-suite runs carry the pre-existing `watch-panes`
 flake and, once, an unrelated one-off timing flake in the same file's wave-replay test under system
 load (did not recur across two more full runs) — neither touches the guard this entry is about.
+
+### D-TEST-03 · "snapshot made no mutating call" denylists a form nothing uses
+*Closed 2026-08-13.*
+
+The `snapshot: every call was a read` guardrail test's denylist regex matched `issue update` /
+`mr merge` / bare `-X POST`-style forms, but every real tracker mutation in this codebase is shaped
+`glab api --method POST|PUT|DELETE|PATCH ...`. A snapshot path issuing
+`glab api --method PUT projects/:fullpath/issues/10 -f add_labels=blocked` matched nothing, so the
+guardrail would have stayed green over a real mutation slipping into the read-only path.
+
+**Shipped:** `scripts/tests/07-snapshot.sh`'s denylist gained one alternative,
+`api --method (POST|PUT|DELETE|PATCH)`, alongside the originals. Checked against every real call
+site (`scripts/trackers/gitlab.sh`, `scripts/forges/github.sh`, `scripts/forges/gitlab.sh`): every
+mutation there is space-separated `--method <VERB>` (no `--method=<VERB>` form exists), and every
+read omits `--method` entirely (defaults to GET) — confirmed the new pattern doesn't over-match reads
+(`api --method GET ...`, plain `api .../notes`, `.../links`, `.../related_merge_requests`,
+`.../milestones` all checked, none match). Verified the entry's own example: the old regex missed
+`api --method PUT projects/foo/issues/10 -f add_labels=blocked`; the new one catches it. `07-snapshot`
+section alone: 115 passed, 0 failed. Full suite: 1001 passed, 1 failed on one run (an unrelated
+one-off timing flake in a different file, `01-lock-and-spawn-lane.sh`'s wave-replay test, same class
+noted in D-TEST-01's closure) and the usual pre-existing `watch-panes` flake on another — neither in
+`07-snapshot`, and the snapshot path itself was confirmed to issue no mutating calls at all.
