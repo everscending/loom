@@ -48,7 +48,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-SNAP-01 | Critical | epic→milestone matching is looser than the rule that closes the milestone |
 | D-LANE-01 | Critical | the closed-ticket guard is in `cmd_transition`, not in `_set_state` |
 | D-TEST-01 | Critical | the `rm -rf` guard's test never invokes `tick.sh` |
 | D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
@@ -190,19 +189,6 @@ on a build that really was graph-bound.
 ---
 
 ## `scripts/snapshot.jq`
-
-### D-SNAP-01 · epic→milestone matching is looser than the rule that closes the milestone
-`snapshot.jq:256-257` — bare `startswith` in both directions with no boundary, while `lane.sh:351`
-matches `"$slug"|"$slug"-*` (exact, or prefix followed by a dash). `| first` at `:258` also makes
-the winner depend on API payload order.
-**Failure:** epic `E1` (all members closed); milestones `E11 Reporting` (active, first in payload)
-and `E1` (active). The snapshot emits for `E1`: `milestone: "E11 Reporting"`, `accepted: false`,
-`acceptance:` E11's criteria, `needs_probe: true`, and a warning to spawn `probe-e11-reporting`.
-`lane.sh` then closes `E11 Reporting` and skips `E1`. Net: E1's milestone never closes (permanent
-`needs_probe`, build can never complete), E11 is marked accepted with no probe ever run, and the
-probe brief is written against the wrong epic's criteria.
-**Test:** `tick-test.sh:1810-1838` uses two names with no prefix relationship, so only the
-exact-match path is exercised.
 
 ### D-SNAP-03 · the gate's MR can be one that merely mentions the ticket
 `snapshot.jq:44` — `$M` is filled from `related_merge_requests` (`tick.sh:1860`), which
@@ -1278,3 +1264,20 @@ epic→milestone `startswith` matching (D-SNAP-01) is untouched. New case `7f1` 
 `scripts/tests/07-snapshot.sh`: a finished epic (`E1`) whose name is a substring of an open epic's
 name (`E10 Payments`) now stays visible and complete rather than being swallowed. Full suite: 995
 passed, 0 failed (994 on `main` plus this one new case), stable across repeated runs.
+
+### D-SNAP-01 · epic→milestone matching is looser than the rule that closes the milestone
+*Closed 2026-08-13.*
+
+The epic→milestone matcher used a bare bidirectional `startswith` with no boundary, then `| first`
+over the matches. An epic `E1` (all members closed) next to milestones `E11 Reporting` and `E1`
+could match `E1` to `E11 Reporting` instead — `needs_probe` stuck permanently true, the wrong
+milestone accepted with no probe run, and the probe brief written from the wrong epic's criteria.
+
+**Shipped:** the match now goes through `epic_same()` (the boundary-aware def D-SNAP-02 added:
+exact match, or one name a `-`-terminated prefix of the other) instead of the bare `startswith`
+pair. This also resolves the `| first` order-dependence as a consequence, not by added machinery —
+with boundary-safe matching an epic name cannot ambiguously match two distinct milestones, so at
+most one candidate ever reaches the filter. New case `7f1b` in `scripts/tests/07-snapshot.sh`,
+covering both payload orderings of the `E1`/`E11 Reporting` scenario. Snapshot section alone: 128
+passed, 0 failed, stable across repeated runs; full suite carries a pre-existing, unrelated
+watch-panes flake (reproduces identically on unmodified `main`, not touched by this fix).

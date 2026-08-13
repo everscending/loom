@@ -397,11 +397,23 @@ include "lib";
     # closes a milestone and what reads it back can never disagree about which
     # milestone belongs to which epic. `accepted: null` = no milestone found,
     # which asserts nothing and never manufactures a probe.
+    # D-SNAP-01: matching used a bare mutual `startswith`, no boundary — epic
+    # "E1" read as a substring of milestone "E11 Reporting" ("e11-reporting"
+    # startswith "e1"), so `| first` picked whichever of the two happened to
+    # sort first in the milestones payload. `epic_same` (D-SNAP-02, above) is
+    # the exact boundary-aware convention this needs: exact match, or one
+    # name a `-`-terminated prefix of the other — same rule `lane.sh`'s
+    # `_close_epic_milestone` applies via `"$slug"|"$slug"-*`, just phrased
+    # two-way here since a milestone title isn't privileged as "the slug"
+    # any more than the epic name is. Reused rather than re-derived: same
+    # normalization (`epic_norm`), same boundary rule, one definition.
+    # Once matching is boundary-safe an epic name cannot boundary-match two
+    # distinct real milestones, so `| first` stops being order-dependent —
+    # there is at most one candidate left to pick.
     | (($epics_open + $epics_closed + $epics_done)
        | map(. as $e
              | ($milestones[0] // []
-                | map(select((.title | epic_norm) as $mt | ($e.name | epic_norm) as $en
-                             | $mt == $en or ($mt | startswith($en)) or ($en | startswith($mt))))
+                | map(select(epic_same($e.name; .title)))
                 | first) as $ms
              | . + { milestone: ($ms.title // null),
                      accepted: (if $ms == null then null else ($ms.state == "closed") end),

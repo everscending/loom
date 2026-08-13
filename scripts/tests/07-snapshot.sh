@@ -622,6 +622,42 @@ else
     bad "snapshot: substring collision dropped the finished epic ($(jq -c '.epics' "$T/snap-substr.json"))"
 fi
 
+# 7f1b. D-SNAP-01: the epic-to-MILESTONE match (a different site from 7f1's
+#       epic-to-epic rollup above) had the same unguarded, bidirectional
+#       `startswith`, and its own `| first` made the winner depend on API
+#       payload order. Epic "E1" (all members closed, so it's due a probe)
+#       sits alongside an unrelated active milestone "E11 Reporting" — "e1" is
+#       a prefix of "e11-reporting" with no boundary check, so the match could
+#       land on the wrong milestone entirely: E1 would report `milestone:
+#       "E11 Reporting"`, `needs_probe: true` forever (nothing ever closes
+#       ITS milestone), and E11 Reporting would read as though E1's probe had
+#       already accepted it. Tested both payload orderings, since that is
+#       exactly what made the bug's presence order-dependent.
+cat > "$FX/open-e1ms.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- E1 (#50)\n"}
+]
+EOF
+printf '%s\n' '[{"title":"E11 Reporting","state":"active"},{"title":"E1","state":"active"}]' \
+    > "$FX/milestones-e1-fwd.json"
+printf '%s\n' '[{"title":"E1","state":"active"},{"title":"E11 Reporting","state":"active"}]' \
+    > "$FX/milestones-e1-rev.json"
+for order in fwd rev; do
+    GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-e1ms.json" \
+        STUB_MILESTONES="$FX/milestones-e1-$order.json" STUB_LOG="$T/calls-e1-$order" \
+        "$TICK" snapshot > "$T/snap-e1-$order.json" 2>/dev/null
+    if [ "$(jq -r '.epics|length' "$T/snap-e1-$order.json")" = "1" ] \
+       && [ "$(jq -r '.epics[0].name' "$T/snap-e1-$order.json")" = "E1" ] \
+       && [ "$(jq -r '.epics[0].milestone' "$T/snap-e1-$order.json")" = "E1" ] \
+       && [ "$(jq -r '.epics[0].needs_probe' "$T/snap-e1-$order.json")" = "true" ] \
+       && [ "$(jq -r '.epics[0].accepted' "$T/snap-e1-$order.json")" = "false" ]; then
+        ok "snapshot: epic E1 matches milestone E1, not E11 Reporting ($order payload order)"
+    else
+        bad "snapshot: epic-milestone match wrong, $order order ($(jq -c '.epics' "$T/snap-e1-$order.json"))"
+    fi
+done
+
 # 7a2. Epic ACCEPTANCE is read back from the milestone the probe closes.
 #      `lane.sh probe-result <epic> pass` closes that milestone and its own
 #      source said "completeness stays DERIVED (nothing reads milestone
