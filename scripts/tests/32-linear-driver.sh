@@ -40,11 +40,23 @@ case "$q" in
       # driver that never sent one.
       case "$q" in
         *'nin: ["completed", "canceled", "duplicate"]'*)
-            jq -c '.data.issues.nodes |= map(select(.state.type != "completed" and .state.type != "canceled" and .state.type != "duplicate"))' "${ISSUES_JSON:?}" > "$out" ;;
+            filtered=$(jq -c '.data.issues.nodes |= map(select(.state.type != "completed" and .state.type != "canceled" and .state.type != "duplicate"))' "${ISSUES_JSON:?}") ;;
         *'in: ["completed", "canceled", "duplicate"]'*)
-            jq -c '.data.issues.nodes |= map(select(.state.type == "completed" or .state.type == "canceled" or .state.type == "duplicate"))' "${ISSUES_JSON:?}" > "$out" ;;
-        *)  cat "${ISSUES_JSON:?}" > "$out" ;;
+            filtered=$(jq -c '.data.issues.nodes |= map(select(.state.type == "completed" or .state.type == "canceled" or .state.type == "duplicate"))' "${ISSUES_JSON:?}") ;;
+        *)  filtered=$(cat "${ISSUES_JSON:?}") ;;
       esac
+      # D-LIN-01: same honesty about the project filter. The stub only applies
+      # it when the query text actually asked for it AND a $project variable
+      # rode along — a driver that dropped either half would leak every
+      # product on the team straight back through, which is the bug this
+      # fixture exists to catch.
+      case "$q" in
+        *'project: { id: { eq: $project } }'*)
+            proj=$(jq -r '.variables.project // ""' "$data" 2>/dev/null)
+            [ -n "$proj" ] && filtered=$(printf '%s' "$filtered" \
+                | jq -c --arg p "$proj" '.data.issues.nodes |= map(select((.project.id // "") == $p))') ;;
+      esac
+      printf '%s' "$filtered" > "$out"
       echo 200 ;;
   *"issues(first: 1,"*)
       n=$(jq -r '.variables.n' "$data")
@@ -532,6 +544,88 @@ printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: **Triggers API** (the one
 [ "$(PROJECTS_JSON="$TD/p92-teamprojects.json" ISSUES_JSON="$TD/p92-issues.json" L issue 201 | jq -r '.epic')" = "E1 Bootstrap" ] \
     && ok "p92: the same bold-and-parenthetical parsing applies to 'Project:'" \
     || bad "p92: a bold Project: value was not resolved"
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+
+# --- D-LIN-01. Two products on one team do not share a build ---------------
+# The failure this reproduces: Linear team JOR carries two products, Triggers
+# API and Demand Letter Generator, each with its own declared Project. Before
+# this fix `_issues_page_query` (`issues-open`'s query) and `v_board` filtered
+# on `team: { key: { eq: $team } }` alone — `_resolve_project` ran and set
+# `_PROJECT_MODE`/`PROJECT_ID`, but neither read used them — so a repo that
+# declared a Project still read the WHOLE team, including the other product's
+# `Build N` issue and every one of its tickets. The fixture below puts two
+# products' issues, each behind its own `Build N`, on one team, and asserts
+# that reading one product's board never surfaces the other's.
+printf '%s' '{"data":{"team":{"projects":{"nodes":[
+ {"id":"proj-tapi","name":"Triggers API"},
+ {"id":"proj-dlg","name":"Demand Letter Generator"}
+]}}}}' > "$TD/dlin1-projects.json"
+cat > "$TD/dlin1-issues.json" <<'JSON'
+{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+ {"id":"t1","number":301,"title":"Build 2","description":"","url":null,"updatedAt":null,
+  "state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[]},"assignee":null,
+  "project":{"id":"proj-tapi","name":"Triggers API"}},
+ {"id":"t2","number":302,"title":"Fix the trigger","description":"","url":null,"updatedAt":null,
+  "state":{"type":"started","name":"In Progress"},"labels":{"nodes":[{"name":"build-2"}]},
+  "assignee":null,"project":{"id":"proj-tapi","name":"Triggers API"}},
+ {"id":"t3","number":401,"title":"Build 3","description":"","url":null,"updatedAt":null,
+  "state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[]},"assignee":null,
+  "project":{"id":"proj-dlg","name":"Demand Letter Generator"}},
+ {"id":"t4","number":402,"title":"Draft the letter template","description":"","url":null,"updatedAt":null,
+  "state":{"type":"started","name":"In Progress"},"labels":{"nodes":[{"name":"build-3"}]},
+  "assignee":null,"project":{"id":"proj-dlg","name":"Demand Letter Generator"}}
+]}}}
+JSON
+
+# p-dlin01-1: with `Project: Triggers API` declared, issues-open sees only
+# Triggers API's own two issues (301, 302) — never Demand Letter Generator's
+# Build 3 or its member ticket. This is the exact leak the Failure section
+# describes: reading 401 here would be resolving another product's Build as
+# this repo's own.
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: Triggers API\n' > "$TD/repo/docs/agents/issue-tracker.md"
+tapi_open=$(PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin1-issues.json" L issues-open)
+if [ "$(printf '%s' "$tapi_open" | jq -r '[.[].id] | sort | join(",")')" = "301,302" ]; then
+    ok "D-LIN-01: a declared Project scopes issues-open to that product's own two issues, not the team's four"
+else
+    bad "D-LIN-01: issues-open leaked across products ($(printf '%s' "$tapi_open" | jq -c '[.[].id]'))"
+fi
+printf '%s' "$tapi_open" | jq -e '[.[].id] | index(401) == null and index(402) == null' >/dev/null 2>&1 \
+    && ok "D-LIN-01: Demand Letter Generator's Build 3 (401) and its ticket (402) are absent — the cross-product build was not resolved" \
+    || bad "D-LIN-01: the other product's Build issue or its ticket leaked into issues-open"
+# The second consequence: `project` used to be the constant team key ($team),
+# which made every issue's project equal every other's — snapshot.jq's
+# cross-project blocker guard (`$proj != $home`) could never fire on Linear.
+# It has to be the real, distinguishing project id now.
+[ "$(printf '%s' "$tapi_open" | jq -r '[.[] | select(.id == 302)][0].project')" = "proj-tapi" ] \
+    && ok "D-LIN-01: a mapped issue's project is the real Linear project id, not the constant team key — the cross-project guard can tell products apart" \
+    || bad "D-LIN-01: project field was not the real project id ($(printf '%s' "$tapi_open" | jq -r '[.[] | select(.id == 302)][0].project'))"
+
+# p-dlin01-2: the collision runs both ways — Demand Letter Generator's own
+# read must likewise exclude Triggers API's Build 2 and its ticket. Testing
+# only one direction would leave the "whichever was created last wins" half of
+# the failure unverified.
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: Demand Letter Generator\n' > "$TD/repo/docs/agents/issue-tracker.md"
+dlg_open=$(PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin1-issues.json" L issues-open)
+if [ "$(printf '%s' "$dlg_open" | jq -r '[.[].id] | sort | join(",")')" = "401,402" ]; then
+    ok "D-LIN-01: Demand Letter Generator's own read is likewise scoped — Triggers API's Build 2 does not leak the other way"
+else
+    bad "D-LIN-01: the reverse direction leaked too ($(printf '%s' "$dlg_open" | jq -c '[.[].id]'))"
+fi
+
+# p-dlin01-3: back-compat — a repo with NO `Project:` line stays exactly
+# team-wide, the one shape D-LIN-01's own suite note says the old tests could
+# never have caught the bug in. This is that shape, proven directly: all four
+# issues, both products, unfiltered.
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+team_open=$(PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin1-issues.json" L issues-open)
+[ "$(printf '%s' "$team_open" | jq -r '[.[].id] | sort | join(",")')" = "301,302,401,402" ] \
+    && ok "D-LIN-01: back-compat — no Project: line still reads the whole team, all four issues across both products" \
+    || bad "D-LIN-01: the undeclared-Project back-compat path is no longer team-wide ($(printf '%s' "$team_open" | jq -c '[.[].id]'))"
+# And in that shape `project` is still the team key, exactly as before this
+# fix — there is no per-product id to carry when there is no declared product.
+[ "$(printf '%s' "$team_open" | jq -r '[.[] | select(.id == 302)][0].project')" = ENG ] \
+    && ok "D-LIN-01: back-compat — with project mode off, the project field is still the team key" \
+    || bad "D-LIN-01: the back-compat project field changed with no Project: line"
 printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
 
 # --- p87-l7. The proof: a whole snapshot, then a plan ----------------------
