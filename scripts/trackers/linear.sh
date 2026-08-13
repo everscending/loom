@@ -349,10 +349,19 @@ _ISSUE_FIELDS='id number title description url updatedAt
 # the query text, matching how `$team` itself is threaded. With no `Project:`
 # line `_PROJECT_MODE` stays false and the query is byte-for-byte what it was
 # before this fix — the back-compat rule this driver holds everywhere else.
+#
+# D-LIN-02: the variable is `ID!`, not `String!`. `project: { id: { eq: ... } }`
+# is an `IDComparator`, whose `eq` field is typed `ID`, and GraphQL does not
+# coerce a String variable into an ID position — Linear validates the document
+# against its schema BEFORE executing it and refuses the whole query with
+# `Variable "$project" of type "String!" used in position expecting type "ID"`.
+# Nothing partial about it: every project-mode read returned zero rows.
+# `$team` next to it stays `String!` because `key: { eq: }` really is a
+# `StringComparator` — the declared type follows the comparator, per field.
 _issues_page_query() { # <extra filter clauses>
     local pvar='' pfilter=''
     if $_PROJECT_MODE; then
-        pvar=', $project: String!'
+        pvar=', $project: ID!'
         pfilter=', project: { id: { eq: $project } }'
     fi
     printf 'query($team: String!, $after: String%s) {
@@ -562,6 +571,9 @@ v_board() { # [--label L] → open issues, each with `links` and `notes` embedde
     # D-LIN-01: additive project filter, same shape and same variable-not-
     # string-interpolation rule as `_issues_page_query` above. Off with no
     # `Project:` line, exactly as before this fix.
+    # D-LIN-02: and `ID!` for the same reason it is `ID!` there — the `id`
+    # comparator's `eq` is typed `ID`, and a `String!` variable in that
+    # position fails schema validation before the query ever runs.
     $_PROJECT_MODE && filter="$filter, project: { id: { eq: \$project } }"
     q=$(printf 'query($team: String!, $after: String%s%s) {
   issues(first: 50, after: $after,
@@ -571,7 +583,7 @@ v_board() { # [--label L] → open issues, each with `links` and `notes` embedde
     nodes { %s }
   }
 }' "$([ -n "$label" ] && printf ', $label: String!')" \
-   "$($_PROJECT_MODE && printf ', $project: String!')" "$filter" "$_BOARD_FIELDS")
+   "$($_PROJECT_MODE && printf ', $project: ID!')" "$filter" "$_BOARD_FIELDS")
     while :; do
         page=$(_graphql "$q" "$(jq -nc --arg t "$TEAM_KEY" --argjson a "$after" --arg l "$label" \
                    --arg p "$PROJECT_ID" --argjson pm "$_PROJECT_MODE" \
