@@ -494,26 +494,6 @@ Sections at `:1057`, `:1111`, `:1128`, `:1167` depend on the prefix form working
 invites a future "fix" that would rewrite working tests. Not a test defect; a trap for the next
 maintainer.
 
-### D-TEST-15 · repeat runs on unchanged code disagree on which assertions fail
-Three consecutive full-suite runs against the same unchanged tree named different failing
-assertions, while the total assertion count held at 980 every time: run 1 (serial, the suite as it
-stood before the parallel driver landed) — 976 passed, 4 failed; run 2 (`LOOM_TEST_JOBS=1`, serial,
-through the new parallel-capable driver) — 979 passed, 1 failed, naming `ticker: suppressed
-notification left no local trace`; run 3 (parallel, default job count) — 976 passed, 4 failed,
-naming `scratch: two waves shared a scratch directory` (`tests/01-lock-and-spawn-lane.sh`),
-`D-TICK-18: false positive — a plain prompt was refused`, and twice `document: the loom-only driver
-could not drive a snapshot (rc=3, jq: error: module not found: lib)` / `document: plan could not
-read a snapshot built from the loom-only driver` (`tests/29-tracker-driver.sh`,
-`tests/32-linear-driver.sh`).
-**Failure:** none of these assertions or the files they live in changed between runs. Run 2 was
-strictly serial and still disagreed with run 1, so the nondeterminism is not concurrency-induced —
-it predates the parallel driver and would have been invisible under the old one-shot serial suite,
-which nobody had reason to run back-to-back and diff.
-**Note:** not root-caused. Recorded as observed nondeterminism across five distinct assertions in
-four files, not as a pinned defect — isolating each one (rerun standalone, repeatedly, per the `fix`
-verb's own "two runs that disagree mean a flaky test, not a fixed one" rule) is separate work from
-what surfaced it.
-
 ---
 
 ## `SKILL.md`
@@ -1171,3 +1151,31 @@ existing `LOOM_REPO`/`LOOM_HOME`/`LOOM_SCRATCH` exports, so the scripts director
 lane's `PATH` and a handoff can say `lane.sh reconcile` by bare name. Section 1 (spawn-lane) gains
 a case asserting `PATH` inside a spawned lane leads with the scripts dir and that `command -v
 lane.sh` resolves there; reverting the fix turns it red.
+
+### D-TEST-15 · repeat runs on unchanged code disagree on which assertions fail
+*Closed 2026-08-12.*
+
+Three consecutive full-suite runs against the same unchanged tree named different failing
+assertions, while the total assertion count held steady: 980 every time before this fix, naming a
+different set of failures each run. Root cause was two unrelated bugs. First, three sections
+(`07-snapshot.sh`, `25-lib-sh.sh`, `28-plan.sh`) planted a "shipped file is missing" violation by
+moving the *real* script/jq file in `scripts/` aside and back — fine serially, but `scripts/` is the
+one directory every section shares, so under the parallel driver any concurrently running section
+saw the file gone for that window and failed on something unrelated to what it tests (explains
+`document: the loom-only driver could not drive a snapshot`, `document: plan could not read a
+snapshot built from the loom-only driver`, and, though not reproduced standalone, matches the
+mechanism for `ticker: suppressed notification left no local trace` and `D-TICK-18: false positive
+— a plain prompt was refused`, both of which need files those sections were removing). Second, and
+unrelated, `01-lock-and-spawn-lane.sh`'s own fixture raced: two probe lanes self-trigger `tick
+--from-lane` asynchronously, and when a background tick landed while the lock was held, only one
+wave ran and the fixture misread that as the two waves sharing a scratch directory (`scratch: two
+waves shared a scratch directory`).
+
+**Shipped:** the three file-hiding sections now hide files in a private mirror of `scripts/`
+(new `mirror_scripts` helper in `scripts/test-lib.sh`) instead of moving the real, shared copy;
+`01-lock-and-spawn-lane.sh` reads the ticks' own "declined to spend" output instead of guessing at
+timing. `27-suite-harness.sh` gains a guard that scans every section for an `mv` whose source is the
+shared scripts directory, so a future section can't reintroduce the same class of bug, plus a
+fixture proving the guard both catches the violation and passes a mirror-shaped section. `bash
+scripts/tick-test.sh` run 4 consecutive times, parallel and serial (`LOOM_TEST_JOBS=1`): 982 passed,
+0 failed, identical every time (982 rather than 980 — two new assertions in section 27).

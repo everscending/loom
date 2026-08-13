@@ -56,11 +56,18 @@ case "$lb_t0$lb_l0$lb_b0" in
     *lib.sh*) bad "lib.sh: a present lib is still being reported as missing" ;;
     *) ok "lib.sh: with the lib in place no script mentions it — the guard is quiet" ;;
 esac
-mv "$LIBSH" "$LB/lib.sh.hidden"
-lb_t=$("$TICK" lane-status 2>&1); lb_trc=$?
-lb_l=$(GLAB_CMD=/usr/bin/true "$LANE" nosuchverb 2>&1); lb_lrc=$?
-lb_b=$("$BOOTSH" nosuchverb 2>&1); lb_brc=$?
-mv "$LB/lib.sh.hidden" "$LIBSH"
+# D-TEST-15: hidden in a PRIVATE mirror, never in the shipped directory. lib.sh
+# is sourced by the first line of all three scripts, so for the length of this
+# check the shipped copy being gone meant EVERY concurrent section's tick.sh,
+# lane.sh and bootstrap.sh died on it — section 24 reported a gate-deps refusal
+# that was really this. Each script resolves its lib off its own path, so the
+# mirror proves the same guard.
+LBM="$(mirror_scripts "$LB/mirror")"
+mv "$LBM/lib.sh" "$LB/lib.sh.hidden"
+lb_t=$("$LBM/tick.sh" lane-status 2>&1); lb_trc=$?
+lb_l=$(GLAB_CMD=/usr/bin/true "$LBM/lane.sh" nosuchverb 2>&1); lb_lrc=$?
+lb_b=$("$LBM/bootstrap.sh" nosuchverb 2>&1); lb_brc=$?
+mv "$LB/lib.sh.hidden" "$LBM/lib.sh"
 if [ "$lb_trc" = 1 ] && printf '%s' "$lb_t" | grep -q 'lib.sh is missing'; then
     ok "lib.sh: tick.sh names the missing lib and exits 1"
 else

@@ -46,6 +46,27 @@ link_trackers() { # <mirror dir>
     ln -sfn "$(dirname "$TICK")/trackers" "$1/trackers" 2>/dev/null || true
     ln -sfn "$(dirname "$TICK")/forges"   "$1/forges"   2>/dev/null || true
 }
+# D-TEST-15: the whole mirror, in one call, for the sections that plant a
+# MISSING FILE rather than a mutated one. Hiding the shipped file itself — `mv
+# scripts/lib.jq aside; run; mv it back` — is the obvious way to prove "a
+# missing prelude is named", and it was wrong the moment sections stopped
+# running one at a time: scripts/ is the ONE directory every section shares, so
+# for the length of that window every other section's tick.sh saw the file gone
+# too. It cost five unrelated assertions across four files, none of them the one
+# under test — `module not found: lib` out of a tracker-driver snapshot, `lib.sh
+# is missing` out of a gate-deps refusal — and it cost them at random, because
+# which section happened to be mid-verb in that window is timing. A mirror is
+# private to the section, so deleting a file from it is invisible to every other
+# one, and the guard under test is the same guard: tick.sh resolves its siblings
+# off its own path.
+mirror_scripts() { # <dir> → a private copy of the scripts directory, printed
+    local d="$1" src; src="$(dirname "$TICK")"
+    mkdir -p "$d"
+    cp "$src"/*.sh "$src"/*.jq "$d/" 2>/dev/null || true
+    chmod +x "$d"/*.sh 2>/dev/null || true
+    link_trackers "$d"
+    printf '%s\n' "$d"
+}
 # Workspace-trust fixture (P16). Trusting $T alone proves the cascade: every
 # lane below it spawns without an entry of its own, exactly as a real worktree
 # relies on its parent directory.
