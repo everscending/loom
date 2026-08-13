@@ -790,36 +790,6 @@ worktrees, while a human trusting the documented bound assumes the loop would re
 and the value passes straight to `claude --model`, so nothing breaks.
 **Covered by:** P50.
 
-### D-REF-16 · phase 4 grades the edge set on width and never on the contracts a ticket consumes
-`phases-1-5.md:181-195` — the pre-publish check list scores a draft on **Width** ("how many
-tickets can start at once … a graph that opens one ticket wide idles every lane") and **Size**,
-with `graph` as a phase-5 backstop. Nothing in the list asks whether the edges are *complete*: a
-ticket whose "what to build" names an endpoint, schema or wire contract it does not itself build
-has a real dependency on the ticket that does, and no criterion here catches its absence.
-The incentive runs the wrong way. A missing edge makes a draft score *better* on width — the one
-dimension the list actually measures — so the check that exists rewards the omission. The right
-tool is already on the page: **Pinned interfaces** (`:191-195`), the `interface + stub` ticket
-that merges fast with the implementation behind it, is exactly the shape a consumed contract
-needs. It is framed only as a width remedy for a heavy blocker, never as the way a consumer is
-tied to its producer.
-**Failure:** triggers-api build-2, 2026-08-12, and it is systemic rather than a one-off. Every
-E12 console ticket carries the same blockers — `Blocked by: E10.2, E10.5`, the console chassis —
-and not one is linked to the API ticket whose endpoint it calls. JOR-70 (Events tab, consumes
-`GET /api/events`) survived on luck: its endpoint was already merged when it ran. JOR-72 (Dead
-letter tab, consumes the replay/discard endpoints) did not — those endpoints belonged to JOR-49,
-which was `blocked` for the whole of JOR-72's run. With no edge to stop it and no rule to send it
-elsewhere (D-SKILL-14), JOR-72's lane built them, its gate passed them (D-SKILL-16), and JOR-49's
-own branch became unmergeable: a genuine feature clash across 3 files, both merge attempts spent,
-one ticket's entire body of work wasted. Nothing detected the overlap for nine hours, until two
-branches collided in a merge lane.
-**Fix shape:** a third criterion beside Width and Size — *Completeness*: every contract a ticket
-consumes but does not build gets a blocking edge to the ticket that builds it, or a pinned
-`interface + stub` ticket both depend on. Stated as a rule it also resolves the incentive, since
-width is then measured over an edge set that is required to be complete first.
-**Test:** none, and none possible in `tick-test.sh` — this is authoring guidance for phase 4. The
-enforceable residue is D-SKILL-16's tier-to-tree check, which catches the same collision one stage
-later, at the gate.
-
 ---
 
 ## Closed
@@ -1179,3 +1149,25 @@ shared scripts directory, so a future section can't reintroduce the same class o
 fixture proving the guard both catches the violation and passes a mirror-shaped section. `bash
 scripts/tick-test.sh` run 4 consecutive times, parallel and serial (`LOOM_TEST_JOBS=1`): 982 passed,
 0 failed, identical every time (982 rather than 980 — two new assertions in section 27).
+
+### D-REF-16 · phase 4 grades the edge set on width and never on the contracts a ticket consumes
+*Closed 2026-08-12.*
+
+The pre-publish check list in `phases-1-5.md` scored a draft on Width and Size only, with `graph` as
+a phase-5 backstop. Nothing asked whether the edge set was *complete* — a ticket consuming a
+contract it doesn't itself build had no required edge to the ticket that does, and the incentive ran
+backwards: a missing edge scored a draft *better* on width, the one dimension actually measured.
+Systemic in triggers-api build-2: no E12 console ticket was linked to the API ticket whose endpoint
+it called; JOR-72 built JOR-49's replay/discard routes while JOR-49 sat blocked on them, and JOR-49's
+merged-out work was lost.
+
+**Shipped:** a new *Ownership* subsection in `phases-1-5.md`, placed ahead of the *Shape* (Width/
+Size) section it must gate. **Consumed, not built** requires a blocking edge from a ticket to
+whatever ticket builds a contract it only consumes, or both depending on a pinned `interface + stub`
+ticket — reusing the existing Pinned interfaces mechanism rather than a new one. The map is built
+from a new **Files touched** line each ticket now states. The section states plainly that both
+ownership cases settle "before width is measured at all," which is what closes the incentive: a
+missing edge can no longer buy a better width score once completeness is a precondition to scoring
+it, not an optional extra. Doc-only change, no test possible at the suite level (`tick-test.sh` run
+clean, 982 passed / 0 failed, across repeat runs) — the enforceable residue is D-SKILL-16's
+tier-to-tree gate check.

@@ -36,7 +36,11 @@ hand-coding under a deadline.)*
    response), a module map for **every** deliverable (ownership, layering,
    forbidden imports) — not just the one an audit named — a vocabulary file
    with a words-we-avoid table, every environment variable with default and
-   reader, the URL map, test-hook names. One unpinned word between a writer
+   reader, the URL map, test-hook names, and **the exported signature of any
+   in-repo module more than one ticket will touch** — a component's props, a
+   hook's arguments, a store's actions. A prop contract is a seam exactly as
+   much as a wire shape is; it simply never leaves the process, so a pin list
+   built from process boundaries misses it. One unpinned word between a writer
    and a reader is a system that looks correct and silently fails.
 6. **Execute code-shaped artifacts against the real substrate.** SQL, state
    machines and schemas in a spec read as verified and are not; careful
@@ -105,7 +109,15 @@ mechanics) **plus** the additions in
   verbatim into *every* affected ticket — fields, values and shapes, never a
   bare endpoint path, type name or file path. A shape named in no document
   of record must be specified here, not invented later by whichever ticket
-  starts first.
+  starts first. A seam is anything two tickets both touch, and an in-repo
+  module's signature counts: when several tickets extend one component, the
+  pinned shape is the **union contract** — the props the module carries after
+  the last of them lands — quoted in all of their bodies, each adding its own
+  part and restructuring nothing.
+- **Files touched**: the modules the ticket creates or changes. Two readers
+  need it — the ownership check below, which cannot see a collision the
+  bodies do not name, and the gate, which reads it as the diff's expected
+  surface.
 - **Mandatory adversarial tests**: inputs that must be *rejected*, with the
   sentence "fix the rule, not my examples."
 - **Repo-wide guards**: a test asserting over the whole tree is a contract
@@ -178,6 +190,42 @@ the build or the demo.)* So the phase drafts the whole set first:
 **The check list** — one gate, one list, before anything is published. Phase 5
 keeps its `graph` verdict as a backstop on the published build; it stops being
 the first time anyone finds out.
+
+*Ownership* — does every module have exactly one builder?
+
+Width and size are scored on the feature axis, and the edge set gets drawn
+there too. The file axis is where builds actually die: two tickets writing one
+module is invisible in a dependency graph, scores *better* on width than the
+edges that would prevent it, and surfaces only in a merge lane, which is
+forbidden to resolve it. Build the map from the draft's own **Files touched**
+lines — module → the tickets naming it — and settle both cases before width is
+measured at all:
+
+- **Consumed, not built**: a ticket whose criteria name a contract it does not
+  itself build gets a blocking edge to the ticket that builds it, or both
+  depend on a pinned `interface + stub` ticket. Absent the edge, a lane that
+  finds the contract missing has no correct move: waiting and building are
+  equally defensible from inside the lane, and building wins often enough to
+  cost the other ticket its whole branch *(paid: triggers-api build-2 — no E12
+  console ticket was linked to the API ticket whose endpoint it called; JOR-72
+  built JOR-49's replay/discard routes while JOR-49 sat blocked, and JOR-49's
+  merged-out work was lost)*.
+- **Co-edited**: a module named by two or more tickets with no blocking path
+  between them is either **serialized** — an edge, so the later ticket extends
+  a file already on the base — or **pinned**, by the union contract above. One
+  or the other, never neither. The stacked epic is the usual shape: one ticket
+  builds a component, three more extend it, all as siblings off it. They read
+  as independent and are not *(paid: triggers-api build-2 E11 — E11.1 built
+  Segment/Track/Timeline/PendingSegment; E11.3, E11.4 and E11.6 each rewrote
+  the same four files with no edge between them. E11.4's click-to-select props
+  and E11.6's roving-tabindex props were two designs for one interaction, and
+  E11.3 had rebuilt Track underneath both. E11.6 passed its gate clean, then
+  spent both merge attempts on a conflict no merge lane may resolve and
+  blocked for a human — a design decision phase 4 should have made once, paid
+  for at the most expensive moment instead.)*
+
+Serialization narrows the graph on purpose. That is the trade: a narrower
+frontier that merges, over a wider one that collides.
 
 *Shape* — is this set buildable at speed?
 
