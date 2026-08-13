@@ -28,6 +28,101 @@ A `tick-test.sh:<line>` citation below predates P76, which split the suite into
 `scripts/tests/NN-<topic>.sh` over `scripts/test-lib.sh`. Those line numbers no longer resolve —
 find the test by the string it asserts, which is what the citation was really pointing at.
 
+## Index of open defects
+
+74 open, verified against the shipping code on **2026-08-12** (a full re-check, not just a new
+filing — 6 entries closed as part of the same pass, already fixed by earlier proposals but never
+marked). Severity is a same-pass judgment call, not part of the original review:
+
+- **Critical** — silently corrupts build/scheduling state, reports a build done/complete
+  incorrectly, produces a permanent stuck state or mass duplicate work.
+- **High** — reliably reproducible, a clear failure path that misleads scheduling/gating/state or
+  wastes lane/session spend, blast radius bounded to one ticket/lane.
+- **Medium** — real, but a narrow trigger window (race, rare input shape) or bounded/recoverable
+  impact.
+- **Low** — cosmetic, or the entry itself says the trigger was inferred rather than reproduced.
+
+**Curate this list.** When a `fix` (or a proposal) closes an entry, delete its row here in the same
+edit that moves the entry to `## Closed` — this index is a live dashboard, not a second archive.
+Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
+
+| Key | Severity | Defect |
+|---|---|---|
+| D-SNAP-01 | Critical | epic→milestone matching is looser than the rule that closes the milestone |
+| D-SNAP-02 | Critical | an epic whose name is a substring of another is silently deleted |
+| D-LANE-01 | Critical | the closed-ticket guard is in `cmd_transition`, not in `_set_state` |
+| D-TEST-01 | Critical | the `rm -rf` guard's test never invokes `tick.sh` |
+| D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
+| D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
+| D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
+| D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
+| D-SNAP-08 | High | the config-line filter deletes real epic names |
+| D-SNAP-10 | High | `merge_attempts` ignores the scope-reset marker |
+| D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
+| D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
+| D-BOOT-03 | High | `cmd_settings \|\| true` turns a settings refusal into "bootstrap: done" |
+| D-BOOT-04 | High | unknown flags are accepted and ignored |
+| D-TEST-02 | High | the event-log invariant test cannot see `tail`/`grep` readers |
+| D-TEST-05 | High | three watch-panes planted violations pass against a dead copy |
+| D-TEST-08 | High | the orphan-pipeline test is coupled to exact flag order |
+| D-SKILL-05 | High | `fix-ticket` is shown without its required body |
+| D-SKILL-06 | High | `tick.sh notify` is shown with only an event name |
+| D-REF-01 | High | `loom-config.md:35` claims the generated allowlist includes `cd` |
+| D-REF-02 | High | `loom-config.md:116` says "`tick.sh` reads no gate key" |
+| D-REF-03 | High | `retro.md:81` states an invariant the code already breaks |
+| D-REF-06 | High | `ticket-template.md` omits `## Blocked by` |
+| D-TICK-03 | Medium | both locks stamp the owner pid after claiming the lock |
+| D-TICK-05 | Medium | sweep runs above the quiescence gate |
+| D-TICK-09 | Medium | `runner` and `base` bypass the global config layer |
+| D-TICK-12 | Medium | retro's depth fixpoint is capped at 12 |
+| D-SNAP-05 | Medium | sha comparison is case-sensitive |
+| D-SNAP-07 | Medium | the trailer strip truncates any epic name containing " - " |
+| D-SNAP-09 | Medium | the Risk tier is the first tier word anywhere in the prose |
+| D-SNAP-11 | Medium | `impl_slots_free` can go negative |
+| D-SNAP-12 | Medium | `merge_in_flight` is the one summary field not derived from the document |
+| D-SNAP-15 | Medium | cross-project blockers fall back to the home open-set |
+| D-LANE-05 | Medium | `verdict` posts its note before the blocked guard runs |
+| D-LANE-06 | Medium | a dirty worktree is reported as a merge conflict |
+| D-PANE-01 | Medium | the EXIT trap closes no panes, then releases the singleton |
+| D-PANE-02 | Medium | `ensure_ticker` splits off raw `$ANCHOR`, so a dead anchor is never re-resolved |
+| D-PANE-04 | Medium | a partial `lane-status` read is discarded entirely |
+| D-PANE-05 | Medium | the pidfile is claimed before the environment guards |
+| D-PANE-07 | Medium | MAP order stops matching screen order after the first pane reuse |
+| D-PANE-08 | Medium | the pane cap counts panes a human already closed |
+| D-TEST-04 | Medium | `ok` called in both branches |
+| D-TEST-06 | Medium | the `--no-tick` test never checks the lane ran |
+| D-TEST-07 | Medium | the ticker-marker tests assert on source text, not behaviour |
+| D-TEST-09 | Medium | the lane-id test's condition is always true |
+| D-TEST-10 | Medium | the allowlist-drift test passes vacuously on an empty gate set |
+| D-TEST-11 | Medium | the "arming wrote no plist" test asserts on an empty directory |
+| D-SKILL-03 | Medium | the quiet-state allowlist names the wrong state and the wrong set |
+| D-SKILL-04 | Medium | `spawn-lane --model` is not a flag |
+| D-SKILL-09 | Medium | "the ticker can say why nothing ran" holds for one reason in six |
+| D-SKILL-12 | Medium | `references/optimize.md:107` still carries the four-item fix-ticket list |
+| D-SKILL-13 | Medium | the blocked report the cap mandates inflates the counter it reports on |
+| D-REF-04 | Medium | three read keys are missing from the canonical schema |
+| D-REF-07 | Medium | `loom-config.md:95` lists push events nothing emits |
+| D-REF-08 | Medium | `loom-config.md:86` skips the middle ntfy layer |
+| D-REF-09 | Medium | `runner` is presented as derived-only but is a settable repo key |
+| D-REF-10 | Medium | `resolve-config` is sold as "the effective config" and omits ntfy entirely |
+| D-REF-11 | Medium | `## PRD requirement` is mandated and parsed by nothing |
+| D-REF-12 | Medium | `setup.md` contradicts itself on who creates the labels |
+| D-REF-13 | Medium | `prop.md` omits `snapshot.jq` from the scripts layer and the test rule |
+| D-REF-14 | Medium | `max_lanes: 4 # 1-6` documents a range nothing enforces |
+| D-TICK-08 | Low | `--brief` copies the file into the worktree before the guard that refuses |
+| D-TICK-11 | Low | `render-events` drops any event with no `state` |
+| D-SNAP-13 | Low | inconsistent null guarding on the slurpfiles |
+| D-SNAP-14 | Low | the state check shadows the stale-gate reason |
+| D-LANE-07 | Low | a valueless trailing `--tier`/`--milestone` dies with no message |
+| D-LANE-08 | Low | staged body temp files are never removed |
+| D-PANE-06 | Low | the singleton is a bare pid with no identity check and no way to clear it |
+| D-PANE-09 | Low | the banner promises a gesture that cannot be delivered |
+| D-TEST-13 | Low | a false rule recorded in the suite |
+| D-SKILL-08 | Low | the timer interval is stated two ways |
+| D-SKILL-10 | Low | three read config keys are undocumented |
+| D-SKILL-11 | Low | `references/loom-config.md:60` says the merge queue rebases |
+| D-REF-15 | Low | the model-alias lists omit `fable` |
+
 ---
 
 ## `scripts/tick.sh`
@@ -46,19 +141,6 @@ Related: the comment at `:1322-1324` claims the reserve→lane-stamp window is c
 tick.sh stays alive throughout, but `cmd_spawn_lane` returns at `:1328` and may exit before the
 lane's stamp at `:1314` lands.
 **Test:** `tick-test.sh:97-100` covers only a lock whose pid file *exists* holding a dead pid.
-
-### D-TICK-04 · spawn-lane's destructive work sits above the pregate validation
-`tick.sh:1198`, `:1200`, `:1204`, `:1210` — log rotation, log truncation and `rm -f <id>.rc` all
-run before the `--pregate` tier check that can still `die` at `:1290-1292`. This is the invariant
-the block comment at `:1187-1191` asserts in capitals, with the pregate `die` as its counterexample.
-It is also the class of defect a 2026-08-01 repair introduced.
-**Failure:** `spawn-lane gate-42 --merge-lock --pregate integration -- claude …` against a
-`.loom.yml` declaring only `docs/logic/api/ui`: merge lock reserved → logs rotated and truncated →
-`lanes/gate-42.rc` deleted → tier rejected, `die`. No lane spawns, the previous round's exit code
-is gone (so the harvesting wave cannot tell rc 7 from a crash), and the merge lock is left
-reserved holding the pid of a process that just exited.
-**Test:** `tick-test.sh:857-861`, `:884-890` assert only that a bad tier is refused. Nothing
-asserts the prior `.rc`/transcript survive, or that the merge lock is not left held.
 
 ### D-TICK-05 · sweep runs above the quiescence gate
 `tick.sh:807` — `cmd_sweep`, the only `rm -rf` path in the program, runs at `:806-807`, before the
@@ -91,14 +173,6 @@ P12 exists to avoid — with no error printed anywhere. For `base`: the snapshot
 disagree about which branch "merged into" means at `:190`.
 **Test:** the layered-config section (`tick-test.sh:2252+`) never tests `runner` or `base` for
 global-layer resolution.
-
-### D-TICK-10 · bare `glab` instead of `"$GLAB_CMD"`
-`tick.sh:246`, `:247`, `:306` — breaks the seam documented at `:36`. `tick-test.sh:1037`
-acknowledges it and works around it via `PATH`.
-**Failure:** a machine pointing `GLAB_CMD` at an auth or proxy wrapper gets its snapshot from the
-wrapper (`:1734`, `:1775`) and its quiescence classification from bare `glab`, so the gate can
-answer `unreadable` on a board the wave reads fine — and on `--auto` that silently suppresses
-every wave (`:840-844`).
 
 ### D-TICK-11 · `render-events` drops any event with no `state`
 `tick.sh:1508` — `({…} | .[$e.state])` errors with `Cannot index object with null`, jq skips that
@@ -498,25 +572,6 @@ maintainer.
 
 ## `SKILL.md`
 
-### D-SKILL-01 · the injected wave prompt overrides the per-ticket model rule
-`tick.sh:889` vs SKILL.md:159-166, :302-304 — the prompt says `- Spawn every lane with:
---permission-mode $perm_mode$lane_model_line`, where `lane_model_line` is `--model $(cfg
-lane_model)` (`tick.sh:875`), while SKILL.md says an implementation lane spawns on
-`.model.effective`, which resolves to `rework_model` on round 2+. The prompt is prefaced "trust it
-over rediscovery" (`tick.sh:884`) and arrives inside the wave, so in practice it wins.
-**Failure:** on a repo with `lane_model: sonnet`, `rework_model: opus`, every rework respawn goes
-out on sonnet — the failure SKILL.md:303-305 exists to prevent, silently.
-**Covered by:** P48.
-
-### D-SKILL-02 · the injected prompt tells merge lanes to finish with `lane.sh close`
-`tick.sh:890` vs SKILL.md:378-384 and `lane.sh:530-533` — injected text: "Merge lanes close tickets
-with 'lane.sh close <iid>' — it strips the state labels too." `cmd_close` dies with `issue N still
-has unmerged MR !M`. The same line's verb roster ("claim, transition, note, mr-note, verdict,
-close, scratch") omits `merge`, `merge-failed`, `fix-ticket`, `reconcile` and `probe-result`.
-**Failure:** a merge lane trusting the injected list has no verb that merges; it ends by calling
-`close` and hard-errors — the build-1 merge-1 shape.
-**Covered by:** P48.
-
 ### D-SKILL-03 · the quiet-state allowlist names the wrong state and the wrong set
 SKILL.md:116-118 — prose: "`unknown` — the board could not be read at all — skips on the timer, and
 only `active` and `complete` buy a wave." `_quiet_check` (`tick.sh:296`) emits
@@ -546,13 +601,6 @@ SKILL.md:468 — `cmd_notify` is `local event="$1" title="$2" body="$3"` (`tick.
 `set -euo pipefail` (`:41`).
 **Failure:** `tick.sh notify build_complete` dies on an unbound variable — no push, no ticker line,
 completion invisible. The correct form appears only in the usage string at `tick.sh:2848`.
-
-### D-SKILL-07 · `transition <n> blocked` "with a report" has no body channel
-SKILL.md:250 — `cmd_transition` accepts only `--release-hold` and dies on anything else
-(`lane.sh:456`).
-**Failure:** `transition 50 blocked --file report.md` aborts, the ticket is never blocked, and the
-merge queue keeps feeding lanes into the same wall — the failure SKILL.md:251-252 cites. A separate
-`lane.sh note` is required first; the prose says so at :587-588 but not here.
 
 ### D-SKILL-08 · the timer interval is stated two ways
 SKILL.md:90 ("a slow heartbeat (~15 min)") vs SKILL.md:99 ("every **60s**") vs `cmd_install`
@@ -642,12 +690,6 @@ every tick start a wave (the gap check returns 0 on a missing file).
 **Failure:** no documented knob for aux-lane concurrency, merge retry cap, or wave pacing.
 `min_wave_gap_minutes` is the primary spend control (`tick.sh:786`) and appears only as prose in
 `phases-1-5.md:113`, so someone tuning cost edits `max_lanes` instead — not the binding constraint.
-**Covered by:** P50.
-
-### D-REF-05 · `loom-config.md:62` states a 900s heartbeat
-It is 60s: `tick.sh:2652`, `local interval="${1:-60}"`, whose comment names 900s as "the old
-split". Also contradicts `phases-1-5.md:112` inside the same skill, so whichever file is read first
-wins. See D-SKILL-08.
 **Covered by:** P50.
 
 ### D-REF-06 · `ticket-template.md` omits `## Blocked by`
@@ -1161,3 +1203,71 @@ assertions: in-tree pass, out-of-tree reject with both paths logged, the escape-
 absence, whole-repo absence, impl lanes never checked, and two planted violations) — reverting either
 the wiring or the escape valve turns it red. `bash scripts/tick-test.sh` run 4 consecutive times:
 994 passed, 0 failed, identical every time.
+
+### D-TICK-04 · spawn-lane's destructive work sits above the pregate validation
+*Closed 2026-08-12 (found already resolved during a full-file validity audit; the underlying fix
+shipped 2026-08-07).*
+
+Log rotation, log truncation and `rm -f <id>.rc` used to run before the `--pregate` tier check that
+could still `die` — a refused spawn destroyed the previous run's transcript and exit code, and could
+leave a reserved merge lock holding a pid that had already exited.
+
+**Shipped:** P75 decomposed `cmd_spawn_lane` into named stages and moved every guard that can refuse
+(`_spawn_build_epilogue`, `_spawn_build_pregate`) above the destructive tail — "EVERYTHING
+DESTRUCTIVE HAPPENS BELOW THIS LINE" is now a function boundary, not just a comment. A pregate `die`
+now refuses first, before anything destructive runs.
+
+### D-TICK-10 · bare `glab` instead of `"$GLAB_CMD"`
+*Closed 2026-08-12 (found already resolved during a full-file validity audit; the underlying fix
+shipped 2026-08-10).*
+
+`tick.sh` used to call `glab` directly in two places, breaking the `GLAB_CMD` seam every other
+tracker read respected — a machine pointing `GLAB_CMD` at an auth or proxy wrapper could get its
+quiescence classification from the wrong place and silently suppress every wave.
+
+**Shipped:** P86 routed every tracker call — including quiescence classification — through one
+driver (`scripts/trackers/gitlab.sh` / `gitlab-common.sh`), which resolves
+`GLAB="${GLAB_CMD:-glab}"`. `tick.sh` no longer calls `glab` directly anywhere.
+
+### D-SKILL-01 · the injected wave prompt overrides the per-ticket model rule
+*Closed 2026-08-12 (found already resolved during a full-file validity audit; the underlying fix
+shipped 2026-08-07).*
+
+The wave's injected spawn line used to hand every lane a flat `--model $(cfg lane_model)`,
+overriding SKILL.md's per-ticket `.model.effective` rule (which resolves to `rework_model` on a
+rejection round) — every rework respawn silently went out on the wrong model.
+
+**Shipped:** P48 made the wave prompt generated, not hand-maintained. The injected spawn line now
+passes `--model` from the ticket's own `.model.effective`, omitting the flag when it's null.
+
+### D-SKILL-02 · the injected prompt tells merge lanes to finish with `lane.sh close`
+*Closed 2026-08-12 (found already resolved during a full-file validity audit; the underlying fix
+shipped 2026-08-07, same change as D-SKILL-01).*
+
+The injected prompt used to tell merge lanes to finish with `lane.sh close`, which dies on an
+unmerged MR, and its verb roster omitted `merge` entirely — a merge lane trusting the injected text
+had no verb that actually merges.
+
+**Shipped:** P48 — the injected verb roster is now generated dynamically from `lane.sh`'s own usage
+line, and the "finish with `lane.sh close`" sentence is gone.
+
+### D-SKILL-07 · `transition <n> blocked` "with a report" has no body channel
+*Closed 2026-08-12 (found already resolved during a full-file validity audit; the underlying fix
+shipped 2026-08-08).*
+
+SKILL.md used to tell a wave to `transition <n> blocked` "with a report", but `cmd_transition`
+accepted no body-carrying flag and died on anything but `--release-hold` — the ticket was never
+actually blocked.
+
+**Shipped:** P78 added `lane.sh blocked-report <iid> --category <slug>` (body on stdin) as the
+report channel. SKILL.md's current text describes the correct two-step flow — `blocked-report`
+first, then a bare `transition <n> blocked` — which succeeds against the current code.
+
+### D-REF-05 · `loom-config.md:62` states a 900s heartbeat
+*Closed 2026-08-12 (found already resolved during a full-file validity audit).*
+
+`references/loom-config.md` used to document a 900s heartbeat backstop, contradicting the real 60s
+default (`tick.sh`'s `HEARTBEAT_INTERVAL`) and SKILL.md's own "every 60s" line.
+
+**Shipped:** corrected in the same pass that filed D-TICK-19 (commit `6c3e504`) — the heartbeat
+section now consistently states 60s, matching `tick.sh` and `phases-1-5.md`.
