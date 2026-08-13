@@ -293,7 +293,16 @@ _MAP_ISSUE='
                   else [ ($i.assignee.displayName // $i.assignee.name) ] end),
       epic: (if $pm then ($i.projectMilestone.name // null) else ($i.project.name // null) end),
       url: ($i.url // null),
-      project: $team,
+      # D-LIN-01: `project` used to be the constant $team for every issue,
+      # which left snapshot.jq cross-project blocker guard (`$proj != $home`)
+      # structurally dead on Linear — the team key always equals itself. In
+      # project mode this is now the real Linear project id (matching how
+      # gitlab.sh emits project_id), so a native blocking link to another
+      # products issue is no longer resolved as if it were local. With no
+      # Project: line (project mode off) every issue this repo reads is
+      # already scoped to the whole team, so $team remains a faithful "home"
+      # value and back-compat holds.
+      project: (if $pm then ($i.project.id // $team) else $team end),
       body: ($i.description // ""), updated_at: ($i.updatedAt // null) }'
 _MAP_NOTE='
   { body: (.body // ""), created_at: (.createdAt // null),
@@ -326,28 +335,42 @@ _shape_one() { jq --arg team "$TEAM_KEY" --argjson states "$(_state_map_json)" -
 # `_MAP_ISSUE` above only reads it when `$pm` says this repo actually uses it.
 _ISSUE_FIELDS='id number title description url updatedAt
                state { type name } labels { nodes { name } }
-               assignee { name displayName } project { name }
+               assignee { name displayName } project { id name }
                projectMilestone { id name }'
 
 # Linear pages at 250 and answers with a cursor. Folded here for the same reason
 # GitLab's `--paginate` is folded in its driver: a caller that saw one page
 # would read a truncated board as a complete one.
+#
+# D-LIN-01: a team-only filter reads every product on the team, not just this
+# repo's. When `_resolve_project` has put this process in project mode, the
+# query gains a SECOND, additive filter clause — `project: { id: { eq:
+# $project } }` — as its own GraphQL variable, never string-interpolated into
+# the query text, matching how `$team` itself is threaded. With no `Project:`
+# line `_PROJECT_MODE` stays false and the query is byte-for-byte what it was
+# before this fix — the back-compat rule this driver holds everywhere else.
 _issues_page_query() { # <extra filter clauses>
-    printf 'query($team: String!, $after: String) {
+    local pvar='' pfilter=''
+    if $_PROJECT_MODE; then
+        pvar=', $project: String!'
+        pfilter=', project: { id: { eq: $project } }'
+    fi
+    printf 'query($team: String!, $after: String%s) {
   issues(first: 250, after: $after,
-         filter: { team: { key: { eq: $team } }%s }) {
+         filter: { team: { key: { eq: $team } }%s%s }) {
     pageInfo { hasNextPage endCursor }
     nodes { %s }
   }
-}' "$1" "$_ISSUE_FIELDS"
+}' "$pvar" "$pfilter" "$1" "$_ISSUE_FIELDS"
 }
 
 _issues_all() { # <extra filter clauses> → one JSON array of raw issue nodes
-    local q after=null page acc='[]'
+    local q after=null page acc='[]' vars
     q=$(_issues_page_query "$1")
     while :; do
-        page=$(_graphql "$q" "$(jq -nc --arg t "$TEAM_KEY" --argjson a "$after" '{team: $t, after: $a}')") \
-            || return 1
+        vars=$(jq -nc --arg t "$TEAM_KEY" --argjson a "$after" --arg p "$PROJECT_ID" --argjson pm "$_PROJECT_MODE" \
+            'if $pm then {team: $t, after: $a, project: $p} else {team: $t, after: $a} end')
+        page=$(_graphql "$q" "$vars") || return 1
         acc=$(jq -nc --argjson acc "$acc" --argjson p "$page" '$acc + $p.issues.nodes')
         printf '%s' "$page" | jq -e '.issues.pageInfo.hasNextPage' >/dev/null 2>&1 || break
         after=$(printf '%s' "$page" | jq -c '.issues.pageInfo.endCursor')
@@ -517,7 +540,7 @@ v_issue_links() { # <id>
 # rather than the whole team's backlog — the exact set the fan-out covered.
 _BOARD_FIELDS='id number title description url updatedAt
                state { type name } labels { nodes { name } }
-               assignee { name displayName } project { name }
+               assignee { name displayName } project { id name }
                projectMilestone { id name }
                relations(first: 50)        { nodes { type relatedIssue { number state { type } } } }
                inverseRelations(first: 50) { nodes { type issue        { number state { type } } } }
@@ -536,17 +559,24 @@ v_board() { # [--label L] → open issues, each with `links` and `notes` embedde
         *" $label "*) die "board: '$label' is a ticket state, not a label — board takes the build label" ;;
     esac
     [ -z "$label" ] || filter=", labels: { name: { eq: \$label } }"
-    q=$(printf 'query($team: String!, $after: String%s) {
+    # D-LIN-01: additive project filter, same shape and same variable-not-
+    # string-interpolation rule as `_issues_page_query` above. Off with no
+    # `Project:` line, exactly as before this fix.
+    $_PROJECT_MODE && filter="$filter, project: { id: { eq: \$project } }"
+    q=$(printf 'query($team: String!, $after: String%s%s) {
   issues(first: 50, after: $after,
          filter: { team: { key: { eq: $team } },
                    state: { type: { nin: ["completed", "canceled", "duplicate"] } }%s }) {
     pageInfo { hasNextPage endCursor }
     nodes { %s }
   }
-}' "$([ -n "$label" ] && printf ', $label: String!')" "$filter" "$_BOARD_FIELDS")
+}' "$([ -n "$label" ] && printf ', $label: String!')" \
+   "$($_PROJECT_MODE && printf ', $project: String!')" "$filter" "$_BOARD_FIELDS")
     while :; do
         page=$(_graphql "$q" "$(jq -nc --arg t "$TEAM_KEY" --argjson a "$after" --arg l "$label" \
-                   'if $l == "" then {team: $t, after: $a} else {team: $t, after: $a, label: $l} end')") \
+                   --arg p "$PROJECT_ID" --argjson pm "$_PROJECT_MODE" \
+                   '(if $l == "" then {team: $t, after: $a} else {team: $t, after: $a, label: $l} end)
+                    | if $pm then . + {project: $p} else . end')") \
             || return 1
         acc=$(jq -nc --argjson acc "$acc" --argjson p "$page" '$acc + $p.issues.nodes')
         printf '%s' "$page" | jq -e '.issues.pageInfo.hasNextPage' >/dev/null 2>&1 || break
