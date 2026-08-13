@@ -422,9 +422,14 @@ case "$err" in
     *"syntax error"*|*"unexpected"*|*"module not found"*) bad "plan.jq: does not parse ($(printf '%s' "$err" | head -1))" ;;
     *) ok "plan.jq: parses standalone — checkable without running a plan" ;;
 esac
-mv "$PLANJQ" "$T/plan.jq.hidden"
-out=$("$TICK" plan "$FX/snap.json" 2>&1); rc=$?
-mv "$T/plan.jq.hidden" "$PLANJQ"
+# D-TEST-15: hidden in a PRIVATE mirror of the scripts directory, never in the
+# shipped one. Sections run at once and scripts/ is the only thing they share,
+# so moving the real plan.jq aside for the length of this check took `plan`
+# away from every other section too.
+MSCRIPTS="$(mirror_scripts "$T/plan-mirror")"
+mv "$MSCRIPTS/plan.jq" "$T/plan.jq.hidden"
+out=$("$MSCRIPTS/tick.sh" plan "$FX/snap.json" 2>&1); rc=$?
+mv "$T/plan.jq.hidden" "$MSCRIPTS/plan.jq"
 case "$rc:$out" in
     0:*)      bad "plan: ran with no plan.jq on disk" ;;
     *plan.jq*) ok "plan: a missing plan.jq is named as the missing file" ;;

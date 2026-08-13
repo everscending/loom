@@ -858,10 +858,20 @@ case "$err" in
     *"syntax error"*|*"unexpected"*|*"module not found"*) bad "snapshot.jq: does not parse ($(printf '%s' "$err" | head -1))" ;;
     *) ok "snapshot.jq: parses standalone — checkable without running a snapshot" ;;
 esac
+# D-TEST-15: every planted violation from here to the end of 7j4 takes a file
+# AWAY, and the file it takes away is one tick.sh ships. Taken away from the
+# shipped directory it is taken away from every section running beside this one
+# — scripts/ is the single thing they share — so `snapshot`, `plan`, `report`
+# and lane.sh's verdict scan all failed at random in whichever section happened
+# to be mid-verb. MSCRIPTS is this section's own copy; MTICK resolves its
+# siblings off its own path, so hiding a file there proves the same guard and
+# nothing outside this process can see it.
+MSCRIPTS="$(mirror_scripts "$T/p71-mirror")"
+MTICK="$MSCRIPTS/tick.sh"
 # Planted violation: hide the file and the guard must name it.
-mv "$SNAPJQ" "$T/snapshot.jq.hidden"
-out=$(GLAB_CMD="$FX/glab-stub.sh" "$TICK" snapshot 2>&1); rc=$?
-mv "$T/snapshot.jq.hidden" "$SNAPJQ"
+mv "$MSCRIPTS/snapshot.jq" "$T/snapshot.jq.hidden"
+out=$(GLAB_CMD="$FX/glab-stub.sh" "$MTICK" snapshot 2>&1); rc=$?
+mv "$T/snapshot.jq.hidden" "$MSCRIPTS/snapshot.jq"
 case "$rc:$out" in
     0:*) bad "snapshot: ran with no document builder on disk" ;;
     *snapshot.jq*) ok "snapshot: a missing snapshot.jq is named as the missing file" ;;
@@ -890,9 +900,9 @@ _p71jq() { # _p71jq <basename.jq> <verb-and-args...> — parse check + hide-and-
         *"syntax error"*|*"unexpected"*|*"module not found"*) bad "$jf: does not parse ($(printf '%s' "$err" | head -1))" ;;
         *) ok "$jf: parses standalone — checkable without running $1" ;;
     esac
-    mv "$fpath" "$T/$jf.hidden"
-    local out rc; out=$(PJENV "$TICK" "$@" 2>&1); rc=$?
-    mv "$T/$jf.hidden" "$fpath"
+    mv "$MSCRIPTS/$jf" "$T/$jf.hidden"
+    local out rc; out=$(PJENV "$MTICK" "$@" 2>&1); rc=$?
+    mv "$T/$jf.hidden" "$MSCRIPTS/$jf"
     case "$rc:$out" in
         0:*) bad "$jf: $1 ran with no $jf on disk" ;;
         *"$jf"*) ok "$jf: a missing $jf is named as the missing file" ;;
@@ -931,18 +941,18 @@ done
 # Planted violation: hide the prelude. Every verb that runs a jq program must
 # refuse by name, and the three checked here are the three separate places the
 # `-L` directory is resolved (the wave's read, a report, a lane log).
-mv "$LIBJQ" "$T/lib.jq.hidden"
+mv "$MSCRIPTS/lib.jq" "$T/lib.jq.hidden"
 libmiss=""
 for v in "snapshot" "report" "render-log rj1"; do
     # shellcheck disable=SC2086
-    out=$(PJENV env GLAB_CMD="$FX/glab-stub.sh" "$TICK" $v 2>&1); rc=$?
+    out=$(PJENV env GLAB_CMD="$FX/glab-stub.sh" "$MTICK" $v 2>&1); rc=$?
     case "$rc:$out" in
         0:*)      libmiss="$libmiss [$v ran anyway]" ;;
         *lib.jq*) : ;;
         *)        libmiss="$libmiss [$v: $(printf '%s' "$out" | head -1)]" ;;
     esac
 done
-mv "$T/lib.jq.hidden" "$LIBJQ"
+mv "$T/lib.jq.hidden" "$MSCRIPTS/lib.jq"
 [ -z "$libmiss" ] \
     && ok "lib.jq: a missing prelude is named as the missing file by every verb that includes it" \
     || bad "lib.jq: missing prelude reported unclearly —$libmiss"

@@ -447,14 +447,39 @@ else
 fi
 
 # 4i3. Waves get the same treatment, and two waves never share a directory.
-rm -rf "$LOOM_HOME/tick.lock.d"
-LOOM_WAVE_CMD='sh -c "echo $LOOM_SCRATCH > $LOOM_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
-rm -rf "$LOOM_HOME/tick.lock.d"
-LOOM_WAVE_CMD='sh -c "echo $LOOM_SCRATCH > $LOOM_SCRATCH/wave-marker"' "$TICK" tick >/dev/null 2>&1
+# D-TEST-15: the two ticks below are not the only ticks in flight. Self-trigger
+# is the default, so every probe lane spawned above fires `tick --from-lane`
+# from its own epilogue, asynchronously — and a bare `tick` skips its wave for
+# exactly one reason, which is that something else already holds the lock. When
+# one of those background ticks landed in the window, this ran one wave instead
+# of two, counted one marker and reported that the two waves had SHARED a
+# directory: a race in the fixture, read as the P17 bug it was written to catch.
+# `sleep 0.5` after each spawn was the only thing separating them and it is not
+# a guarantee. Retrying past a held lock is: the tick says so in as many words,
+# the wave itself is unchanged, and two distinct markers are still what the
+# assertion demands.
+# Every gate that declines to spend says so on stdout — that is the signal read
+# here, not a guess about timing. A tick that launched its wave is silent about
+# not launching one.
+_wave_scratch_tick() { # run one tick whose wave stamps its own scratch dir
+    local i=0 out
+    while [ "$i" -lt 60 ]; do
+        rm -rf "$LOOM_HOME/tick.lock.d"
+        out=$(LOOM_WAVE_CMD='sh -c "echo $LOOM_SCRATCH > $LOOM_SCRATCH/wave-marker"' \
+              "$TICK" tick 2>&1)
+        case "$out" in
+            *"wave already running"*|*"no wave"*) i=$((i+1)); sleep 0.25; continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
+_wave_scratch_tick; w1=$?
+_wave_scratch_tick; w2=$?
 rm -rf "$LOOM_HOME/tick.lock.d"
 WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ "$WAVES" -ge 2 ] && ok "scratch: consecutive waves get separate directories" \
-    || bad "scratch: two waves shared a scratch directory"
+    || bad "scratch: two waves shared a scratch directory ($WAVES marker(s); ticks rc $w1/$w2)"
 
 # 4i4. Unique-per-session grows without bound and no session may run `rm`, so
 #      the scheduler prunes. Old goes, current stays.
