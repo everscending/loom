@@ -220,6 +220,15 @@ one. Once merged, `git worktree remove <path>` and delete the branch —
 teardown is this session's job, not something to leave for later, and not
 something the subagent does (it has no merge rights).
 
+**Then push `main`.** Not housekeeping — step 1's worktree is cut from
+`origin/HEAD`, not from local `HEAD`, so an unpushed commit here is a commit
+the *next* `fix`'s subagent will not have. Skip it when the repo has no
+remote; otherwise `git push origin main` is the last act of the verb.
+*(paid: D-SNAP-17's subagent was handed a base 32 commits stale — every one of
+them unpushed — and wrote its fix against a `cmd_transition` that D-LANE-01
+had already rewritten on `main`, which cost a hand-resolved conflict and a
+second full suite run.)*
+
 ## Deliver
 
 Relay the subagent's report — the counts are your own from step 3, the rest
