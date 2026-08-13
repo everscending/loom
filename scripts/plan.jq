@@ -240,7 +240,7 @@ else
 # decision instead of a third same-tier guess. The cap stays for DIFFERENT
 # failures. (paid: a ticket burned round 3 on a class the round-2 verdict had
 # already named.)
-| ([ $stranded[] | select((.rejections.same_class_tail // 0) >= 2) ]) as $same_class
+| ([ $stranded[] | select((.rejections.same_class_tail // 0) >= 2) ]) as $same_class  # mutate:rejection-same-class-cap
 | ([ $same_class[]
      | { step: "fill", kind: "transition", ticket: .id,
          via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
@@ -307,7 +307,7 @@ else
 # lane into the same wall. (paid: three consecutive lanes wedged on one ticket
 # while two gate-passed tickets waited behind it.) Attempts recorded
 # `base-red` never count — `snapshot.jq` already excludes them.
-| ([ $queue[] | select((.merge_attempts // 0) >= $merge_cap)
+| ([ $queue[] | select((.merge_attempts // 0) >= $merge_cap)  # mutate:merge-attempt-cap
      | { step: "merge", kind: "transition", ticket: .id,
          via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
          why: "\(.merge_attempts) merge attempts against a cap of \($merge_cap) — blocking it advances the queue instead of feeding the next lane into the same wall",
