@@ -96,13 +96,24 @@ Per the tracking rules, and in the same commit as the code:
 Implemented only in part? Nothing moves. Update the row in place to say what
 shipped and what is left, and keep the section where it is.
 
-## Step 5 — commit
+## Step 5 — commit, then push
 
 The skill directory is a git repository. Commit everything the change touched
 — scripts, references, `SKILL.md`, both proposal files — as one commit whose
 subject names what shipped rather than the proposal ID (`git log --oneline`
 shows the house style). That commit is the revert path; do not leave `.bak`
-copies behind.
+copies behind. Work done on a branch or in a worktree merges back to `main`
+first, `git merge --no-ff` — never rebase, so what merges is exactly what the
+suite ran green.
+
+**Then push `main`.** Not housekeeping — a `fix` subagent's worktree is cut
+from `origin/HEAD`, not from local `HEAD`, so an unpushed commit here is a
+commit the next `fix` run will be handed a base without. Skip it when the repo
+has no remote; otherwise `git push origin main` is the last act of the verb.
+*(paid: D-SNAP-17's subagent was handed a base 32 commits stale — every one of
+them unpushed — and wrote its fix against a function a merged commit on `main`
+had already rewritten, which cost a hand-resolved conflict and a second full
+suite run.)*
 
 ## Deliver
 
