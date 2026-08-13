@@ -110,7 +110,8 @@ context. Inline into it: the defect entry **verbatim**, the layer order and
 untouchable-contract rules from step 2, the test rule from step 3, *sibling
 skills are off limits*, *never run a real build*, and *do not touch
 `OPEN_DEFECTS.md` and do not commit*. Ask back for: files changed with one
-line each, the `SKILL.md` line delta if any, the new test case name, full
+line each, the `SKILL.md` line delta if any, the new assertion — case name,
+and whether it's a new case or folded into an existing one — full
 `tick-test.sh` counts, and anything in **Failure** that would not reproduce.
 
 If the report says the described behaviour is no longer in the code, stop —
@@ -156,16 +157,31 @@ which governs this file too. Re-scope into this skill's own layer or stop.
 
 ### Tests
 
-*"A fix is not done until a test fails without it"* — the file's own rule.
-The entry's **Test** line names what's missing; add that case to the section
-it belongs to — `scripts/tests/NN-<topic>.sh`, one process each over
-`scripts/test-lib.sh` — in its house style, asserting the guard both holding
-and failing with the fix reverted. While iterating, run that section alone
+*"A fix is not done until a test fails without it"* — the file's own rule,
+and it is about proof, not about volume: what's required is one new
+red-then-green **assertion**, not necessarily one new test process. *(paid:
+`16-ticker-and-lane-verbs.sh:82-93` carries three separate `ok` blocks
+asserting the exact same prefix-stripping invariant against three literal
+string variants — one parametrized case would have proven the same thing.
+Nothing wrong with any one of them alone; nothing in this step ever asked
+whether the assertion belonged inside a case that already existed.)*
+
+The entry's **Test** line names what's missing. Before writing anything,
+check whether a test in that section already exercises the function or
+scenario the defect lives in. If one does, extend it — a new row in a
+table-driven case, a new assertion inside a test that already builds the
+right fixture — rather than standing up a separate `ok` block beside it.
+Write a wholly new case only when nothing existing reaches this code path.
+Either way it lands in the section it belongs to —
+`scripts/tests/NN-<topic>.sh`, one process each over `scripts/test-lib.sh`
+— in its house style, asserting the guard both holding and failing with the
+fix reverted. While iterating, run that section alone
 (`bash scripts/tick-test.sh <name>`, seconds rather than minutes).
 
 Run `scripts/tick-test.sh` in full and report the counts, pass and fail. It
 is the only executable check this skill has. A fix that lands with no new
-red-then-green case in that suite is not finished.
+red-then-green assertion in that suite is not finished — assertion, not
+necessarily test count.
 
 Never run a real build to verify. It costs hours and real money.
 
@@ -211,7 +227,8 @@ is its work and does not need re-deriving:
 
 - what changed, one line per file
 - the `SKILL.md` line delta, and the reason for each line added
-- test counts from `scripts/tick-test.sh`, and which case is new
+- test counts from `scripts/tick-test.sh`, and which assertion is new — a
+  new case, or an addition to one that already existed
 - anything in **Failure** you could not reproduce, or **Covered by** you
   deferred to `prop` — flag it, do not improvise
 
