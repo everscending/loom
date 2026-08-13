@@ -21,20 +21,24 @@ scoped into a larger change decided in `PROPOSALS.md`. Refuse, name the
 proposal, and point at `prop <Pn>` instead — do not implement a partial fix
 that a proposal will later redo.
 
-## Step 1 — hand the implementation to a subagent
+## Step 1 — hand the implementation to a subagent, in its own worktree
 
 Steps 2 and 3 — reproduce, edit, test — are done by **one subagent**, not in
-this session. The work is a bounded read-edit-test loop over two or three
-files; running it inline spends the human's context on file dumps and test
-output that nothing later in this verb needs.
+this session, and not against this directory directly. The work is a bounded
+read-edit-test loop over two or three files; running it inline spends the
+human's context on file dumps and test output that nothing later in this verb
+needs, and running it against the human's own checkout leaves an unproven fix
+sitting in a tree the human may still be reading.
 
-Spawn a single general-purpose subagent. Split of duties, and it is not
-negotiable in either direction:
+Spawn a single general-purpose subagent with `isolation: "worktree"` — the
+harness cuts a fresh worktree off this branch and the subagent's edits land
+there, not here. Split of duties, and it is not negotiable in either
+direction:
 
 | this session | the subagent |
 |---|---|
 | step 0 (resolve, refuse a `Covered by`) | steps 2–3 (reproduce, fix, test) |
-| step 3 (**run the suite**, close, commit) | nothing in `OPEN_DEFECTS.md`, no commit |
+| step 3 (**run the suite**, close) in the worktree; step 4 (merge back, commit, remove the worktree) | nothing in `OPEN_DEFECTS.md`, no commit, no merge |
 
 The subagent reports; it does not close and it does not commit. Closing is a
 judgment about whether the fix is whole (step 3's partial-fix rule), and the
@@ -118,10 +122,12 @@ Never run a real build to verify. It costs hours and real money.
 
 ## Step 3 — run the suite, then close the entry
 
-Back in this session. `bash scripts/tick-test.sh` first, per step 1 — a red
-suite means the fix is not finished, and the failing case is usually the
-subagent's own new one. Send it the failing lines and have it fix them; do
-not repair its test yourself, and do not close over a red run.
+Back in this session, `cd`'d into the worktree path the subagent's `isolation:
+"worktree"` result returned — not this directory, which never saw the edits.
+`bash scripts/tick-test.sh` first, per step 1 — a red suite means the fix is
+not finished, and the failing case is usually the subagent's own new one. Send
+it the failing lines and have it fix them; do not repair its test yourself,
+and do not close over a red run.
 
 Then, per `OPEN_DEFECTS.md`'s own rule — never delete a row, never renumber:
 
@@ -134,12 +140,20 @@ Then, per `OPEN_DEFECTS.md`'s own rule — never delete a row, never renumber:
 - if the fix is partial, nothing moves — leave the entry where it is and
   add a line noting what shipped and what remains.
 
-## Step 4 — commit
+## Step 4 — commit, merge back, clean up
 
-The skill directory is a git repository. Commit everything the change
-touched — scripts, references, `SKILL.md`, `OPEN_DEFECTS.md` — as one commit
-whose subject names what shipped, citing the key (`git log --oneline` shows
-the house style: `"fixes D-LANE-02"` per the file's own convention).
+Still in the worktree. Commit everything the change touched — scripts,
+references, `SKILL.md`, `OPEN_DEFECTS.md` — as one commit whose subject names
+what shipped, citing the key (`git log --oneline` shows the house style:
+`"fixes D-LANE-02"` per the file's own convention).
+
+Then, back in this directory (the main clone): `git merge --no-ff
+<worktree-branch>` into `main` — never rebase, so the worktree's history stays
+exactly what step 3 tested green. Resolve a real conflict as a stop-and-report,
+not a silent pick; a `fix` touching two or three files should rarely produce
+one. Once merged, `git worktree remove <path>` and delete the branch —
+teardown is this session's job, not something to leave for later, and not
+something the subagent does (it has no merge rights).
 
 ## Deliver
 
