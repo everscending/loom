@@ -34,6 +34,28 @@ Check the **Evidence** still holds first. Line numbers drift (`tick.sh:1893`
 was true the day it was written) — locate the function by name, not by line.
 Evidence that no longer reproduces is worth a sentence in your summary.
 
+## Where the work happens
+
+Not in the main clone. Cut a worktree first and make every edit, every suite
+run and the archive edit there:
+
+    git worktree add .claude/worktrees/prop-<Pn> -b prop-<Pn> main
+
+**Branch from local `main` by name, never from `origin/HEAD`.** That is the
+whole reason this step is written down: an agent harness cutting a worktree
+for itself branches from the remote's default head, which lags by however many
+commits this repo has not pushed, and the work then lands on a base that is
+missing its own dependencies. *(paid: D-SNAP-17's worktree came from
+`origin/main`, 32 unpushed commits behind, so the fix was written against a
+function `main` had already rewritten — one hand-resolved conflict and a
+second full suite run.)*
+
+`.claude/worktrees/` is git-ignored, which is what makes a path inside the
+repo safe here. A **sibling** directory is not: this repo lives in the skills
+tree, and a sibling of it carrying a `SKILL.md` registers as a second skill.
+
+Step 5 merges it back and removes it. Nothing is left standing.
+
 ## Step 2 — where the code goes
 
 Layer order. Use a layer only when the one above it genuinely cannot carry the
@@ -96,24 +118,24 @@ Per the tracking rules, and in the same commit as the code:
 Implemented only in part? Nothing moves. Update the row in place to say what
 shipped and what is left, and keep the section where it is.
 
-## Step 5 — commit, then push
+## Step 5 — commit, merge back, push, clean up
 
-The skill directory is a git repository. Commit everything the change touched
-— scripts, references, `SKILL.md`, both proposal files — as one commit whose
-subject names what shipped rather than the proposal ID (`git log --oneline`
-shows the house style). That commit is the revert path; do not leave `.bak`
-copies behind. Work done on a branch or in a worktree merges back to `main`
-first, `git merge --no-ff` — never rebase, so what merges is exactly what the
-suite ran green.
+Still in the worktree. Commit everything the change touched — scripts,
+references, `SKILL.md`, both proposal files — as one commit whose subject names
+what shipped rather than the proposal ID (`git log --oneline` shows the house
+style). That commit is the revert path; do not leave `.bak` copies behind.
 
-**Then push `main`.** Not housekeeping — a `fix` subagent's worktree is cut
-from `origin/HEAD`, not from local `HEAD`, so an unpushed commit here is a
-commit the next `fix` run will be handed a base without. Skip it when the repo
-has no remote; otherwise `git push origin main` is the last act of the verb.
-*(paid: D-SNAP-17's subagent was handed a base 32 commits stale — every one of
-them unpushed — and wrote its fix against a function a merged commit on `main`
-had already rewritten, which cost a hand-resolved conflict and a second full
-suite run.)*
+Then, back in the main clone: `git merge --no-ff prop-<Pn>` into `main` — never
+rebase, so what merges is exactly what the suite ran green. Resolve a real
+conflict as a stop-and-report, not a silent pick. Then
+`git worktree remove .claude/worktrees/prop-<Pn>` and delete the branch;
+teardown is this session's job, not a chore left for the human.
+
+**Then push `main`.** Not housekeeping — a worktree is cut from `origin/HEAD`
+whenever an agent harness cuts it, not from local `HEAD`, so an unpushed commit
+here is a commit the next `prop` or `fix` run will be handed a base without.
+Skip it when the repo has no remote; otherwise `git push origin main` is the
+last act of the verb.
 
 ## Deliver
 

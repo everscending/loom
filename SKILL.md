@@ -571,7 +571,7 @@ machine contracts, and the mechanical check that catches the silent class:
 Implement one proposal from `PROPOSALS.md` — human-run, never invoked by a
 wave. Its Fix section is a decision already made: implement it in the
 machinery, spend `SKILL.md` lines last, test it, then archive the proposal.
-Resolution, layer order, the test bar and the archive step:
+Resolution, layer order, the test bar, the worktree and the archive step:
 [references/prop.md](references/prop.md).
 
 ### `fix <Dn>|<severity>`
