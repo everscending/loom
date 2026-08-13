@@ -497,10 +497,48 @@ fi
 
 # 4i5. Planted violation: a guarded root must delete nothing. With the guard
 #      removed this is the line that would wipe a home directory.
-GUARD=$(SCRATCH_ROOT="" LOOM_HOME="$LOOM_HOME" bash -c '
-    SCRATCH_ROOT=""; case "$SCRATCH_ROOT" in ""|"/"|"$HOME") echo guarded ;; *) echo unguarded ;; esac')
-[ "$GUARD" = "guarded" ] && ok "scratch: empty/root scratch root is refused by the prune guard" \
-    || bad "scratch: prune guard does not cover an empty root"
+# D-TEST-01: the old check here wrote its OWN inline `case` in a bash -c
+# string and asserted on that — it proved bash's `case` builtin works, never
+# called tick.sh at all, and stayed green with the real guard deleted from
+# _prune_scratch. This version sources tick.sh for real (`orch-home` is a
+# side-effect-free subcommand, so sourcing it doesn't launch a wave or lane)
+# and calls the actual _prune_scratch function. "/" and "$HOME" are too
+# dangerous to hand to the real `find … -exec rm -rf {} +`, guard or no guard,
+# so a stand-in `find` goes on PATH that only records whether it was ever
+# invoked instead of touching the filesystem.
+PG="$T/prune-guard"; mkdir -p "$PG/bin" "$PG/home"
+cat > "$PG/bin/find" <<EOF
+#!/bin/sh
+echo "\$@" >> "$PG/find-calls"
+EOF
+chmod +x "$PG/bin/find"
+
+_prune_guard_probe() { # <scratch-root> → "called" (find ran) or "blocked" (guard returned first)
+    rm -f "$PG/find-calls"
+    PATH="$PG/bin:$PATH" LOOM_HOME="$PG/home" bash -c '
+        . "$1" orch-home >/dev/null
+        SCRATCH_ROOT="$2"
+        _prune_scratch
+    ' _ "$TICK" "$1"
+    [ -s "$PG/find-calls" ] && echo called || echo blocked
+}
+
+r_empty=$(_prune_guard_probe "")
+r_root=$(_prune_guard_probe "/")
+r_home=$(_prune_guard_probe "$HOME")
+if [ "$r_empty" = blocked ] && [ "$r_root" = blocked ] && [ "$r_home" = blocked ]; then
+    ok "scratch: the prune guard refuses \"\", \"/\", and \$HOME — no sweep runs"
+else
+    bad "scratch: prune guard let a dangerous root through (empty=$r_empty /=$r_root HOME=$r_home)"
+fi
+
+# Positive control: an ordinary scratch root is NOT blocked, so a passing
+# check above is the guard doing its job, not find silently never running.
+mkdir -p "$PG/home/scratch/wave-old"; touch -t 202001010000 "$PG/home/scratch/wave-old"
+r_ok=$(_prune_guard_probe "$PG/home/scratch")
+[ "$r_ok" = called ] \
+    && ok "scratch-violation: an ordinary scratch root does reach the sweep — the block above is the guard, not a dead code path" \
+    || bad "scratch: an ordinary scratch root was blocked too ($r_ok) — the positive control is broken"
 
 # 4j. Workspace trust (P16). The cascade holds — gate-21 above spawned from a
 #     worktree with no entry of its own, covered by $T. Planted violation: point
