@@ -49,7 +49,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | Key | Severity | Defect |
 |---|---|---|
 | D-SNAP-01 | Critical | epic→milestone matching is looser than the rule that closes the milestone |
-| D-SNAP-02 | Critical | an epic whose name is a substring of another is silently deleted |
 | D-LANE-01 | Critical | the closed-ticket guard is in `cmd_transition`, not in `_set_state` |
 | D-TEST-01 | Critical | the `rm -rf` guard's test never invokes `tick.sh` |
 | D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
@@ -204,14 +203,6 @@ and `E1` (active). The snapshot emits for `E1`: `milestone: "E11 Reporting"`, `a
 probe brief is written against the wrong epic's criteria.
 **Test:** `tick-test.sh:1810-1838` uses two names with no prefix relationship, so only the
 exact-match path is exercised.
-
-### D-SNAP-02 · an epic whose name is a substring of another is silently deleted
-`snapshot.jq:244-246` — mutual `contains` with no boundary.
-**Failure:** `$items = ["E1"]`, `$epics_open = [{name: "E10 Payments"}]` → `$epics_done == []`,
-because `"e10 payments" | contains("e1")`. Completed epic `E1` appears in neither `epics[]` nor
-`epics_awaiting_probe`, no warning fires, and `build_complete` closes the build over an unaccepted
-epic — the build-2 failure recorded at `:233-240`.
-**Test:** same non-colliding-names fixture as D-SNAP-01.
 
 ### D-SNAP-03 · the gate's MR can be one that merely mentions the ticket
 `snapshot.jq:44` — `$M` is filled from `related_merge_requests` (`tick.sh:1860`), which
@@ -1271,3 +1262,19 @@ default (`tick.sh`'s `HEARTBEAT_INTERVAL`) and SKILL.md's own "every 60s" line.
 
 **Shipped:** corrected in the same pass that filed D-TICK-19 (commit `6c3e504`) — the heartbeat
 section now consistently states 60s, matching `tick.sh` and `phases-1-5.md`.
+
+### D-SNAP-02 · an epic whose name is a substring of another is silently deleted
+*Closed 2026-08-13.*
+
+`snapshot.jq`'s epic-done computation matched item names against open epic names with a mutual
+`contains` and no boundary, so `"E10 Payments"` swallowed `"E1"`: a finished epic whose name was a
+substring of an open epic's name vanished from both `epics[]` and `epics_awaiting_probe`, no
+warning fired, and `build_complete` could close the build over that unaccepted epic.
+
+**Shipped:** added a boundary-aware `epic_same($a; $b)` def to `scripts/snapshot.jq` — exact match,
+or one name a `-`-terminated prefix of the other, mirroring `lane.sh`'s own `"$slug"|"$slug"-*`
+convention — and rewired `$epics_done` to use it instead of the bare mutual `contains`. The separate
+epic→milestone `startswith` matching (D-SNAP-01) is untouched. New case `7f1` in
+`scripts/tests/07-snapshot.sh`: a finished epic (`E1`) whose name is a substring of an open epic's
+name (`E10 Payments`) now stays visible and complete rather than being swallowed. Full suite: 995
+passed, 0 failed (994 on `main` plus this one new case), stable across repeated runs.

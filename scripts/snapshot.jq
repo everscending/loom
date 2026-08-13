@@ -265,6 +265,20 @@ include "lib";
         or ($t.state == "in-progress"
             and ((($t.id | tostring) as $i | $working | index($i)) == null))
         or ((($t.id | tostring) as $i | $working | index($i)) != null);
+    # D-SNAP-02: whether a build-issue epic name ($a) names the SAME epic as an
+    # already-known one ($b), boundary-aware. A bare mutual `contains` let
+    # "E10 Payments" swallow "E1" as a floating substring ("e10 payments" |
+    # contains("e1") is true), so the finished epic "E1" read as already
+    # present in `$epics_open` and vanished from `$epics_done` — invisible in
+    # `epics[]` and `epics_awaiting_probe`, letting `build_complete` close the
+    # build over an epic nobody probed. Normalizes with `epic_norm` (the same
+    # def the milestone match uses) and requires either an exact match or a
+    # prefix match that ends at a word boundary — the same "$slug"/"$slug"-*
+    # convention `lane.sh`'s milestone-close match uses, adapted here to a
+    # two-way comparison since neither name is privileged as "the slug".
+    def epic_same($a; $b):
+        ($a | epic_norm) as $ea | ($b | epic_norm) as $eb
+        | $ea == $eb or ($ea | startswith($eb + "-")) or ($eb | startswith($ea + "-"));
 
     ($open[0]) as $issues
     | ($issues | map(.id)) as $open_iids
@@ -374,9 +388,9 @@ include "lib";
     | (($closed[0] // []) | map(.epic // empty) | unique
        | map(select(. as $t | ($epics_open | map(.name) | index($t)) | not))
        | map({name: ., open_tickets: 0, complete: true, source: "closed-members"})) as $epics_closed
-    | ($items | map(select(ascii_downcase as $it
-        | (($epics_open + $epics_closed) | map(.name | ascii_downcase)
-           | any(. as $n | ($it | contains($n)) or ($n | contains($it)))) | not))
+    | ($items | map(select(. as $it
+        | (($epics_open + $epics_closed) | map(.name)
+           | any(. as $n | epic_same($it; $n))) | not))
        | map({name: ., open_tickets: 0, complete: true, source: "build-issue"})) as $epics_done
     # Acceptance, joined from the milestone the probe closes. Matching uses the
     # SAME normalisation `lane.sh _close_epic_milestone` slugs with, so what

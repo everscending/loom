@@ -592,6 +592,36 @@ else
     bad "snapshot: epic rollup wrong ($(jq -c '.epics' "$T/snap.json"))"
 fi
 
+# 7f1. D-SNAP-02: a finished epic whose name is a SUBSTRING of an unrelated
+#      open epic's name must not be swallowed by it. The build-issue list
+#      names both "E10 Payments" (open, one ticket still on it) and "E1"
+#      (finished, zero open tickets — same shape "Reporting surface" has
+#      above). A bare mutual `contains` reads "e10 payments" as containing
+#      "e1" (it does — "e10" starts with "e1") and silently drops the
+#      completed epic out of `$epics_done`, invisible to `epics[]` and
+#      `epics_awaiting_probe`, letting `build_complete` close the build over
+#      an epic nobody probed (the build-2 failure the entry cites).
+cat > "$FX/open-substr.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- E10 Payments (#10)\n- E1 (#11)\n"},
+ {"iid":10,"title":"Wire E10 payment flow","project_id":1,"web_url":"https://x/10",
+  "labels":["build-2","ready-for-agent"],"assignees":[],"updated_at":"2026-07-28T10:00:00Z",
+  "milestone":{"title":"E10 Payments"},"description":"## Risk tier\n\napi\n"}
+]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-substr.json" STUB_LOG="$T/calls-substr" \
+    "$TICK" snapshot > "$T/snap-substr.json" 2>/dev/null
+if [ "$(jq -r '.epics|length' "$T/snap-substr.json")" = "2" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E10 Payments")|.complete' "$T/snap-substr.json")" = "false" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E10 Payments")|.open_tickets' "$T/snap-substr.json")" = "1" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E1")|.complete' "$T/snap-substr.json")" = "true" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E1")|.source' "$T/snap-substr.json")" = "build-issue" ]; then
+    ok "snapshot: a finished epic whose name is a substring of an open epic's name is not swallowed"
+else
+    bad "snapshot: substring collision dropped the finished epic ($(jq -c '.epics' "$T/snap-substr.json"))"
+fi
+
 # 7a2. Epic ACCEPTANCE is read back from the milestone the probe closes.
 #      `lane.sh probe-result <epic> pass` closes that milestone and its own
 #      source said "completeness stays DERIVED (nothing reads milestone
