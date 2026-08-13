@@ -31,10 +31,11 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-75 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
+76 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
 just a new filing — 6 entries closed as part of the same pass, already fixed by earlier proposals
-but never marked); D-SNAP-16 and D-LIN-01 were filed later, on **2026-08-13**, and verified the
-same way against the live board that triggered each. Severity is a same-pass judgment call, not
+but never marked); D-SNAP-16, D-LIN-01 and D-LIN-02 were filed later, on **2026-08-13**, and
+verified the same way against the live board that triggered each — D-LIN-01 has since been fixed
+and closed, and D-LIN-02 is a defect in that fix. Severity is a same-pass judgment call, not
 part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
@@ -51,6 +52,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
+| D-LIN-02 | Critical | `$project` is declared `String!`, so every project-scoped read is rejected |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -748,6 +750,45 @@ and the value passes straight to `claude --model`, so nothing breaks.
 ---
 
 ## `scripts/trackers/linear.sh`
+
+### D-LIN-02 · the project filter declares `$project` as `String!`, a type Linear rejects
+`_issues_page_query` (`:355`) and `v_board` (`:574`) each declare the project-filter variable as
+`, $project: String!`. Linear's `project: { id: { eq: $project } }` is an `IDComparator`, whose
+`eq` field is typed `ID`. GraphQL does not coerce `String` into `ID` in variable position, so the
+server rejects the whole document at validation:
+
+```
+Variable "$project" of type "String!" used in position expecting type "ID".
+```
+
+Probed live against the API on 2026-08-13 with the same query and the same variables, varying only
+the declared type: `String!` → HTTP 400 `GRAPHQL_VALIDATION_FAILED`; `ID!` → OK; `ID` → OK.
+
+The failure is total, not partial, and it is scoped to exactly the repos D-LIN-01's fix was written
+for. Validation happens before execution, so the query returns no rows at all — a repo declaring
+`Project:` cannot run `issues-open` or `board`, which is to say `tick.sh snapshot` cannot read its
+board, which is to say no wave can run. A repo with no `Project:` line keeps `_PROJECT_MODE` false,
+never emits the variable, and is unaffected. D-LIN-01 made a project-mode read return the wrong
+issues; this makes it return nothing.
+
+**Failure:** `linear.sh issues-open`, run from the demand-letter-generator repo (which declares
+`Project: Demand Letter Generator`) immediately after D-LIN-01's fix merged, exited non-zero with
+the validation error above instead of the 76 issues it was meant to scope down to. Found while
+re-verifying that the fix worked before defining that repo's build.
+
+**The suite could not have caught it, and cannot catch this whole class.**
+`scripts/tests/32-linear-driver.sh:48-54` stubs the API by pattern-matching the query *text* for
+`project: { id: { eq: $project } }` and answering from a fixture. It proves the filter clause is
+present and the variable is threaded; nothing anywhere validates the query against a schema, so a
+declared type can be arbitrarily wrong and all nine D-LIN-01 assertions still pass. Every
+GraphQL-shape defect in this driver is invisible the same way — the same class as D-TEST-05, where
+planted violations pass against a copy that cannot fail the way production does.
+
+**Fix:** `$project: ID!` at both sites. The filter clause, the variable threading and the
+`_PROJECT_MODE` back-compat guard are all already correct — the declared type is the only wrong
+token. A test that fails without it needs the stub to reject a variable declaration whose type does
+not match the comparator field it is used in, at least for the handful this driver actually uses;
+short of that, the fix is only provable against the live API.
 
 ---
 
