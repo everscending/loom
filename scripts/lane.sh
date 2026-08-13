@@ -273,9 +273,29 @@ _blocked_guard() { # <iid> [intended-state] — a human hold outranks machine fl
     return 0
 }
 
+# A closed ticket is finished; a state label on it is pure misinformation —
+# see cmd_transition's and cmd_submit's own copies of this same read below.
+# Both carry an early inline check because both have a write BEFORE the label
+# move (a note, an MR) that this guard runs too late to catch if it lived only
+# here. `claim` and `verdict`'s label move had no early check of their own AND
+# `_set_state` ran no closed check either — `verdict 51 pass` posted its note
+# and moved closed #51 to `merge-queue`, `claim 51` assigned and labelled it
+# `in-progress`, both rc 0 (D-LANE-01). Wiring the check into `_set_state`
+# itself, the one path every label-changing verb shares, is what makes it
+# apply to callers — `claim`, and any future verb — that arrive with no write
+# of their own to gate first, the same way `_blocked_guard` already does.
+_closed_guard() { # <iid> <refusal-clause> — a closed ticket is finished; every write bounces
+    local iid="$1" refusal="$2"
+    _read_issue "$iid" "refusing to guess whether it's closed."
+    local istate; istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
+    [ "$istate" != closed ] \
+        || die "issue $iid is CLOSED — $refusal Re-read the ticket: your snapshot is stale."
+}
+
 _set_state() { # <iid> <state> [extra -f args...]
     local iid="$1" state="$2"; shift 2
     _blocked_guard "$iid" "$state"
+    _closed_guard "$iid" "refusing to set '$state' on finished work."
     local remove="" s
     for s in $STATES; do [ "$s" = "$state" ] || remove="$remove,$s"; done
     "$TRACKER" issue-relabel "$iid" --add "$state" --remove "${remove#,}" "$@"
@@ -300,6 +320,12 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     _check_iid "$iid"
     case "$res" in pass|fail) ;; *) die "verdict must be pass|fail" ;; esac
     case "$sha" in [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;; *) die "bad head sha: '$sha'" ;; esac
+    # D-LANE-01: checked here, ahead of `_set_state`'s own copy of this guard,
+    # because the note below is posted BEFORE `_set_state` runs — a closed
+    # ticket must refuse the whole verdict, not just the label move that comes
+    # last. (#51 closed: `verdict 51 pass abcd1234` used to post the note and
+    # move it to `merge-queue` anyway, rc 0.)
+    _closed_guard "$iid" "refusing to gate finished work."
     # P30: a FAIL names its defect class in the machine-readable trailer.
     # Two consecutive same-class FAILs make the wave stop for a design
     # decision instead of a third same-tier guess (#39, 2026-08-02).
@@ -856,7 +882,7 @@ _run_install() { # <cmd> <dir>
 }
 
 cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
-    local iid="${1:-}" state="${2:-}" ok=0 s istate note=0 bodyargs=()
+    local iid="${1:-}" state="${2:-}" ok=0 s note=0 bodyargs=()
     _check_iid "$iid"
     # P36: the only way out of a human hold, and deliberately unpleasant to
     # reach by accident — see `_blocked_guard`.
@@ -887,13 +913,13 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
     # the board and a trap for the human reading it. (Paid for: #23.)
     # P47: read-failed must die, not read as "not closed" — a blind pass here
     # is exactly how a closed ticket got relabeled "requeued".
-    # This read is also the one `_blocked_guard` asks for a moment later, from
-    # inside `_set_state`: one GET answers both questions.
-    _read_issue "$iid" "refusing to guess whether it's closed."
-    istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
-    [ "$istate" != closed ] \
-        || die "issue $iid is CLOSED — refusing to set '$state' on finished work. Re-read the ticket: your snapshot is stale."
+    # The label move below is covered by `_set_state`'s own copy of this guard
+    # now (D-LANE-01), so nothing is checked here for the plain case — asking
+    # twice, before AND after, would just be the same read repeated for no new
+    # information (P74: one read per question). Only the `--note` write needs
+    # an early check of its own, since it lands BEFORE `_set_state` runs.
     if [ "$note" = 1 ]; then
+        _closed_guard "$iid" "refusing to set '$state' on finished work."
         local f; f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
         # Re-run safety. The label half can fail after the note half has landed
         # (a dropped connection, a 500), and the human's fix is to run the same
@@ -974,11 +1000,9 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
     # about, plus is it closed, has the gate already moved it past review, and
     # what is its title. P47: a failed read dies rather than guessing — an MR
     # opened over a stale answer is a write nothing undoes.
-    local istate cur
+    local cur
     _read_issue "$iid" "refusing to open an MR blind."
-    istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
-    [ "$istate" != closed ] \
-        || die "issue $iid is CLOSED — refusing to submit finished work. Re-read the ticket: your snapshot is stale."
+    _closed_guard "$iid" "refusing to submit finished work."
     cur=$(printf '%s' "$_ISSUE_JSON" | jq -r '[.labels[]? | select(. == "merge-queue")] | .[0] // empty' || true)
     [ "$cur" != merge-queue ] \
         || die "issue $iid is already 'merge-queue' — its gate passed. Submitting again would drag a judged ticket back to review."
