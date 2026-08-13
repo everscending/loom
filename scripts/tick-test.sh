@@ -50,22 +50,45 @@ else
     run=("${all[@]}")
 fi
 
-COUNTS=$(mktemp); trap 'rm -f "$COUNTS"' EXIT
-PASS=0; FAIL=0; BROKE=0
+# Sections are independent processes, each in its own mktemp sandbox (see
+# test-lib.sh) — nothing shared, so nothing stops them running at once. The
+# cap avoids thrashing a machine already busy running each section's own
+# subprocesses (spawn-lane, git, jq); override with LOOM_TEST_JOBS.
+ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)
+MAXJOBS="${LOOM_TEST_JOBS:-$ncpu}"
+case "$MAXJOBS" in *[!0-9]*) MAXJOBS=4;; esac
+[ "$MAXJOBS" -gt 8 ] && MAXJOBS=8
+[ "$MAXJOBS" -lt 1 ] && MAXJOBS=1
+
+JOBS_DIR=$(mktemp -d); trap 'rm -rf "$JOBS_DIR"' EXIT
+names=(); logs=(); counts=()
+i=0
 for f in "${run[@]}"; do
     name=$(basename "$f" .sh)
-    : > "$COUNTS"
-    LOOM_TEST_COUNTS="$COUNTS" LOOM_TEST_QUIET=1 bash "$f"
-    rc=$?
+    log="$JOBS_DIR/$name.log"; cnt="$JOBS_DIR/$name.counts"
+    : > "$cnt"
+    names[i]=$name; logs[i]=$log; counts[i]=$cnt
+    # Poll for a free slot rather than `wait -n` — stock macOS bash (3.2) has
+    # no `wait -n`; this works on anything with the `jobs` builtin.
+    while [ "$(jobs -rp | wc -l | tr -d ' ')" -ge "$MAXJOBS" ]; do sleep 0.05; done
+    ( LOOM_TEST_COUNTS="$cnt" LOOM_TEST_QUIET=1 bash "$f" > "$log" 2>&1 ) &
+    i=$((i+1))
+done
+wait
+
+PASS=0; FAIL=0; BROKE=0
+for ((j=0; j<i; j++)); do
+    name="${names[j]}"; log="${logs[j]}"; cnt="${counts[j]}"
+    cat "$log"
     # A section that never wrote its counts died before test_finish — an
     # unbound variable, a syntax error, a kill. Those tests did not run, so
     # they cannot be reported as passed: the driver counts the section itself
     # as one failure and says which.
-    if [ ! -s "$COUNTS" ]; then
-        echo "FAIL: $name: section exited (rc $rc) without reporting counts"
+    if [ ! -s "$cnt" ]; then
+        echo "FAIL: $name: section exited without reporting counts"
         BROKE=$((BROKE+1)); FAIL=$((FAIL+1)); continue
     fi
-    read -r p f_ < "$COUNTS"
+    read -r p f_ < "$cnt"
     PASS=$((PASS+p)); FAIL=$((FAIL+f_))
 done
 

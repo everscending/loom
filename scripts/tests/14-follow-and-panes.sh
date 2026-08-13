@@ -29,9 +29,9 @@ printf '{"type":"rate_limit_event","rate_limit_info":{}}\n' >> "$FJ"
 printf '{"type":"system","subtype":"init","model":"claude-opus-5","permissionMode":"auto","cwd":"/tmp/wt"}\n' >> "$FJ"
 _say "first thing the lane said"
 ( FENV "$TICK" render-log impl-5 --follow > "$WT/out.txt" 2>&1 ) & FOLLOWER=$!
-sleep 1
+sleep 0.4
 _say "something it said while being watched"
-sleep 1
+sleep 0.4
 kill "$FAKEPID" 2>/dev/null || :
 wait "$FOLLOWER" 2>/dev/null || :
 
@@ -81,7 +81,7 @@ printf '{"type":"assistant","message":{"content":[{"type":"text","text":"shared"
     > "$WT/home/logs/lane-impl-6.jsonl"
 ( FENV "$TICK" render-log impl-6 --follow > "$WT/a.txt" 2>&1 ) & V1=$!
 ( FENV "$TICK" render-log impl-6 --follow > "$WT/b.txt" 2>&1 ) & V2=$!
-sleep 1; kill "$FAKE2" 2>/dev/null || :; wait "$V1" "$V2" 2>/dev/null || :
+sleep 0.4; kill "$FAKE2" 2>/dev/null || :; wait "$V1" "$V2" 2>/dev/null || :
 if grep -q shared "$WT/a.txt" && grep -q shared "$WT/b.txt"; then
     ok "follow: two viewers can watch one lane at once"
 else
@@ -386,11 +386,11 @@ mkdir -p "$VH/lanes"; echo $$ > "$VH/lanes/impl-77.pid"
 # it off — startup reads config and can outlast a fixed sleep, and planting
 # the marker first would test the startup path instead of the mid-run one.
 ( for _ in $(seq 1 40); do
-      [ -f "$VH/watch-panes.pid" ] && break; sleep 0.25
+      [ -f "$VH/watch-panes.pid" ] && break; sleep 0.1
   done
   LOOM_HOME="$VH" bash "$WP" off >/dev/null 2>&1 ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 LOOM_HOME="$VH" WATCH_POLLS=10 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+    WATCH_TICKER=0 LOOM_HOME="$VH" WATCH_POLLS=10 WATCH_POLL_SECONDS=0.3 bash "$WP" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 grep -q "^pane close " "$T/herdr-calls" \
     && ok "watch-panes: a mid-run 'off' closes the panes it owns and exits" \
@@ -426,13 +426,13 @@ esac
 EOF
 chmod +x "$T/glab-p41-stub.sh"
 mkdir -p "$T/wp13p-home/lanes"
-sleep 1 & echo $! > "$T/wp13p-home/lanes/gate-95.pid"
-sleep 1 & echo $! > "$T/wp13p-home/lanes/impl-96.pid"
-sleep 1 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
+sleep 0.3 & echo $! > "$T/wp13p-home/lanes/gate-95.pid"
+sleep 0.3 & echo $! > "$T/wp13p-home/lanes/impl-96.pid"
+sleep 0.3 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
     bash "$WP" >/dev/null 2>&1 || :
 [ "$(grep -c "^pane close " "$T/herdr-calls" || :)" = 1 ] \
     && ok "watch-panes: a gate lane whose ticket closed takes its pane with it" \
@@ -455,11 +455,11 @@ link_trackers "$T/wpmod"
 ln -sf "$(dirname "$TICK")/lib.sh" "$T/wpmod/lib.sh"   # P73: tick.sh sources it
 sed 's/\*)  # P41/merge-*)  # P41/' "$WP" > "$T/wpmod/wp-mergeonly.sh"; chmod +x "$T/wpmod/wp-mergeonly.sh"
 mkdir -p "$T/wp13p2-home/lanes"
-sleep 1 & echo $! > "$T/wp13p2-home/lanes/gate-95.pid"
+sleep 0.3 & echo $! > "$T/wp13p2-home/lanes/gate-95.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13p2-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13p2-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
     bash "$T/wpmod/wp-mergeonly.sh" >/dev/null 2>&1 || :
 grep -q "^pane close " "$T/herdr-calls" \
     && bad "watch-panes-violation: the merge-only check still closed the pane" \
@@ -477,7 +477,7 @@ touch -t 202001010000 "$T/wp13q-home/logs/lane-impl-96.log"
 : > "$T/herdr-calls"
 LOOM_REPO="$WPQ_REPO" HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13q-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13q-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
     bash "$WP" >/dev/null 2>&1 || :
 kill "$(cat "$T/wp13q-home/lanes/impl-96.pid" 2>/dev/null)" 2>/dev/null
 if grep -Eq "rename [^ ]+ impl-96$" "$T/herdr-calls" \
@@ -547,11 +547,11 @@ HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID
 #      the way a newer viewer would.
 PH="$T/wp13o-home"; mkdir -p "$PH/lanes"; : > "$T/herdr-calls"
 ( for _ in $(seq 1 40); do
-      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.25
+      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.1
   done
   echo 999999 > "$PH/watch-panes.pid" ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 bash "$WP" >/dev/null 2>&1 || :
+    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=0.3 bash "$WP" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 [ "$(cat "$PH/watch-panes.pid" 2>/dev/null)" = 999999 ] \
     && ok "watch-panes: an exiting viewer keeps a pidfile it no longer owns" \
@@ -568,11 +568,11 @@ HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID
 # with it, which is how a live viewer ends up with none.
 sed 's/_owns_pidfile &&/: \&\&/' "$WP" > "$T/wpmod/wp-noown.sh"; chmod +x "$T/wpmod/wp-noown.sh"
 ( for _ in $(seq 1 40); do
-      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.25
+      [ -f "$PH/watch-panes.pid" ] && break; sleep 0.1
   done
   echo 999999 > "$PH/watch-panes.pid" ) &
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
-    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=1 \
+    WATCH_TICKER=0 LOOM_HOME="$PH" WATCH_POLLS=3 WATCH_POLL_SECONDS=0.3 \
     bash "$T/wpmod/wp-noown.sh" >/dev/null 2>&1 || :
 wait 2>/dev/null || :
 [ ! -f "$PH/watch-panes.pid" ] \
@@ -594,13 +594,13 @@ esac
 EOF
 chmod +x "$T/glab-close-stub.sh"
 mkdir -p "$T/wp13j-home/lanes"
-sleep 1 & echo $! > "$T/wp13j-home/lanes/merge-95.pid"
-sleep 1 & echo $! > "$T/wp13j-home/lanes/merge-96.pid"
-sleep 1 & echo $! > "$T/wp13j-home/lanes/probe-e9.pid"
+sleep 0.3 & echo $! > "$T/wp13j-home/lanes/merge-95.pid"
+sleep 0.3 & echo $! > "$T/wp13j-home/lanes/merge-96.pid"
+sleep 0.3 & echo $! > "$T/wp13j-home/lanes/probe-e9.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-close-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=2 \
+    LOOM_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
     bash "$WP" >/dev/null 2>&1 || :
 closes=$(grep -c "^pane close " "$T/herdr-calls" || :)
 [ "$closes" = 2 ] \

@@ -9,8 +9,8 @@
 #     and the kick it could not run is REMEMBERED rather than dropped (P1).
 #     The note is cleared before the holder exits so this test does not also
 #     trigger a re-tick — 1d owns that half.
-LOOM_WAVE_CMD="sleep 3" "$TICK" tick >/dev/null 2>&1 &
-first=$!; sleep 0.7
+LOOM_WAVE_CMD="sleep 1" "$TICK" tick >/dev/null 2>&1 &
+first=$!; sleep 0.3
 out=$(LOOM_WAVE_CMD="echo second-wave-ran" "$TICK" tick 2>&1)
 case "$out" in *"wave already running"*) ok "lock: concurrent tick skipped";; *) bad "lock: concurrent tick ran ($out)";; esac
 [ -f "$LOOM_HOME/tick.pending" ] \
@@ -21,8 +21,8 @@ wait "$first"
 
 # 1b. Planted violation: with a DIFFERENT lock dir the exclusion must fail
 #     (two waves overlap) — proving the shared lock is the guard.
-LOOM_WAVE_CMD="sleep 2" LOOM_LOCK_DIR="$T/lockA" "$TICK" tick >/dev/null 2>&1 &
-pa=$!; sleep 0.5
+LOOM_WAVE_CMD="sleep 0.8" LOOM_LOCK_DIR="$T/lockA" "$TICK" tick >/dev/null 2>&1 &
+pa=$!; sleep 0.25
 out=$(LOOM_WAVE_CMD="echo overlapped" LOOM_LOCK_DIR="$T/lockB" "$TICK" tick 2>&1)
 case "$out" in *"wave already running"*) bad "lock-violation: still excluded without shared lock";; *) ok "lock-violation: overlap observed when lock removed";; esac
 wait "$pa"
@@ -48,12 +48,12 @@ rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 WAVES="$T/waves.txt"; : > "$WAVES"
 # The prefix form exports for the holder AND its children, so the re-tick the
 # holder fires on exit inherits the same counting command.
-LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
-holder=$!; sleep 0.4
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 0.5'" "$TICK" tick >/dev/null 2>&1 &
+holder=$!; sleep 0.15
 for _ in 1 2 3; do "$TICK" tick >/dev/null 2>&1; done
 wait "$holder"
 _wait_waves "$WAVES" 2 || true
-sleep 1.5                      # a spurious third wave would have landed by now
+sleep 1                        # a spurious third wave would have landed by now
 n=$(wc -l < "$WAVES" | tr -d ' ')
 [ "$n" = "2" ] \
     && ok "pending: three mid-wave kicks replayed as exactly one re-tick" \
@@ -64,10 +64,10 @@ n=$(wc -l < "$WAVES" | tr -d ' ')
 #     be seen dying after a single wave — no replay, no second line.
 rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 : > "$WAVES"
-LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 1'" "$TICK" tick >/dev/null 2>&1 &
-holder=$!; sleep 0.4
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 0.5'" "$TICK" tick >/dev/null 2>&1 &
+holder=$!; sleep 0.15
 for _ in 1 2 3; do LOOM_PENDING_FILE="$T/note-nobody-reads" "$TICK" tick >/dev/null 2>&1; done
-wait "$holder"; sleep 1.5
+wait "$holder"; sleep 1
 n=$(wc -l < "$WAVES" | tr -d ' ')
 [ "$n" = "1" ] \
     && ok "pending-violation: an unrecorded kick stops the loop dead after one wave" \
@@ -85,7 +85,7 @@ fi
 kill "$pid" 2>/dev/null
 
 # 3. Dead lane detected (planted: child exits immediately).
-"$TICK" spawn-lane impl-2 -- true >/dev/null; sleep 0.5
+"$TICK" spawn-lane impl-2 -- true >/dev/null; sleep 0.2
 st=$("$TICK" lane-status | awk '$1=="impl-2"{print $3}')
 [ "$st" = "dead" ] && ok "liveness: dead child reported dead" || bad "liveness: dead child reported '$st'"
 
@@ -179,7 +179,7 @@ for good_id in impl-7 gate-7 gate-7-r2 merge-7 probe-e11; do
     "$TICK" spawn-lane "$good_id" -- true >/dev/null 2>&1 \
         || { bad "lane-id: structured id '$good_id' was refused"; break; }
 done
-sleep 0.5
+sleep 0.3
 types=$("$TICK" lane-status | awk '$1 ~ /-7$|-7-r2$|^probe-e11$/{print $4}' | sort -u | tr '\n' ' ')
 [ "$types" = "gate impl merge probe " ] \
     && ok "lane-status: type column derived from the id (all four kinds)" \
