@@ -893,8 +893,37 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
     istate=$(printf '%s' "$_ISSUE_JSON" | jq -r '.state // empty' || true)
     [ "$istate" != closed ] \
         || die "issue $iid is CLOSED — refusing to set '$state' on finished work. Re-read the ticket: your snapshot is stale."
-    if [ "$note" = 1 ]; then
-        local f; f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
+    # D-SNAP-17: the transition IS the release. A ticket that currently carries
+    # `blocked` and is being moved anywhere else is being let go, and that fact
+    # has to be stamped on the thread whether or not a note came with it — the
+    # trailer is machinery and `--note` is a human courtesy, so tying the one to
+    # the other loses the signal every time a human uses the two-verb path
+    # (`note` then `transition`) or moves the label in the tracker by hand. It
+    # did: build-2 #83 was released, verified and moved to review at 05:14, and
+    # a wave re-applied `blocked` 3h43m later off a thread that still read as an
+    # open block — silently, because a transition without `--note` says nothing.
+    # The labels come from the read `_read_issue` just cached; no second GET.
+    local releasing=0
+    if [ "$state" != blocked ] \
+       && printf '%s' "$_ISSUE_JSON" | jq -e '.labels | index("blocked")' >/dev/null 2>&1; then
+        releasing=1
+        # The hold guard, early. It runs again inside `_set_state` off the same
+        # cached body, so this costs nothing — and it buys the ordering the
+        # stamp needs: a release the guard is going to refuse must not leave a
+        # trailer (or a decision note) behind on the thread claiming one.
+        _blocked_guard "$iid" "$state"
+    fi
+    if [ "$note" = 1 ] || [ "$releasing" = 1 ]; then
+        local f
+        if [ "$note" = 1 ]; then f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
+        else
+            # No note was given, so this comment is the whole record. It says
+            # the one thing a later reader (human or wave) needs and cannot
+            # otherwise recover: the hold ended here, deliberately.
+            f=$(mktemp "${TMPDIR:-/tmp}/lane-body.XXXXXX")
+            printf 'Hold released: this ticket moved to `%s`. No decision note was given with the transition.\n' \
+                "$state" > "$f"
+        fi
         # Re-run safety. The label half can fail after the note half has landed
         # (a dropped connection, a 500), and the human's fix is to run the same
         # command again — which must complete the missing half without doubling

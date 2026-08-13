@@ -198,11 +198,25 @@ include "lib";
     # honest thing to do with it is say so rather than ask for the decision
     # twice.
     #
+    # D-SNAP-17: `ticket_state` is the ticket's CURRENT state label, carried
+    # here so `released: false` finally means something on its own. This report
+    # attaches to any ticket whose thread ever carried an `orch-blocked`
+    # trailer, whatever the ticket did next, and `released` sees only the
+    # `orch-unblock` trailer — which a hold released by hand in the tracker, or
+    # by the two-verb path, never gets. So a ticket that has genuinely moved on
+    # read byte-identical to one whose block nobody has answered, and a wave
+    # "repaired" the difference by putting `blocked` back on finished work
+    # (build-2 #83, released 05:14, re-blocked 08:57). Together the two fields
+    # separate the three cases and only the first is a decision:
+    #   ticket_state == "blocked", released false — nobody has answered it yet
+    #   ticket_state == "blocked", released true  — decided, only the label is missing
+    #   ticket_state != "blocked"                 — over; this is history, never re-block
+    #
     # The body is carried WHOLE. Every other parser here extracts a field; this
     # one exists so a human can read the report without opening the tracker, so
     # summarising it in jq would defeat the point. It lands only on tickets
     # that have one, and `--brief` drops blocked tickets to bare iids anyway.
-    def blocked_report_of($notes):
+    def blocked_report_of($notes; $ticket_state):
         ([$notes | to_entries[]
           | select((.value.body // "") | test("orch-blocked"))
           | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
@@ -216,6 +230,7 @@ include "lib";
             # The trailer is machinery, not report: a human reading this field
             # on a surface should see what the lane wrote and nothing else.
             body: ($r.body | sub("\\n*<!-- orch-blocked[^>]*-->\\n*"; "") | ltrimstr("\n") | rtrimstr("\n")),
+            ticket_state: $ticket_state,
             released: ($u != null and $u > $r.at) }
         end;
     # P31: which model this ticket next IMPLEMENTATION lane gets. The chain is
@@ -336,7 +351,7 @@ include "lib";
             related_merge_requests: ((($M[$t.id | tostring]) // [])
                 | map({id, title, state, draft, url, branch, sha})),
             rejections: $rej,
-            blocked_report: blocked_report_of((($N[$t.id | tostring]) // [])),
+            blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),
             model: model_of($lb; $rej; $config),
