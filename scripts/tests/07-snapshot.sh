@@ -1025,8 +1025,15 @@ mv "$T/lib.jq.hidden" "$MSCRIPTS/lib.jq"
 
 # 7k. Read-only guardrail: tick.sh must never mutate tracker state (its whole
 #     charter). Every captured argv is checked against a mutating denylist.
-if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (create|delete)|-X *(POST|PUT|DELETE|PATCH)" "$CALLS"; then
-    bad "snapshot: a mutating glab call was issued ($(grep -E 'update|close|create|merge|-X' "$CALLS" | head -1))"
+#     D-TEST-03: every real tracker mutation in this codebase goes through
+#     `glab api --method POST|PUT|DELETE|PATCH <path> ...` (see
+#     scripts/trackers/gitlab.sh) — not the `issue update`/`-X POST` forms
+#     this denylist was originally written for, which nothing here emits.
+#     `api --method (POST|PUT|DELETE|PATCH)` catches that real shape while
+#     leaving `api --method GET ...` (and plain `api <path>`, which defaults
+#     to GET) unmatched, so legitimate reads still pass.
+if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (create|delete)|-X *(POST|PUT|DELETE|PATCH)|api --method (POST|PUT|DELETE|PATCH)" "$CALLS"; then
+    bad "snapshot: a mutating glab call was issued ($(grep -E 'update|close|create|merge|-X|--method (POST|PUT|DELETE|PATCH)' "$CALLS" | head -1))"
 else
     ok "snapshot: every call was a read — no mutating verb in the captured argv"
 fi
