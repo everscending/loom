@@ -326,7 +326,11 @@ refuses outside herdr anyway.
    - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` a headless session
      whose brief **inlines** the work rather than naming `/implement`
      (headless has no slash commands): the
-     ticket body + lessons thread, no trailing self-review (the gate owns
+     ticket body + lessons thread — if that body names a contract (endpoint,
+     schema, route, wire shape) it consumes and the freshly-fetched base
+     lacks, block (`--category unmerged-dependency`) rather than build it,
+     since it belongs to whichever ticket owns it and building it twice is an
+     unresolvable merge conflict — no trailing self-review (the gate owns
      review), its own tier gate with what it reports fixed **before** pushing,
      a commit with the `Assisted-by` trailer, a push, then finishes with
      **`lane.sh submit <ticket>`**: one
