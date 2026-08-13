@@ -58,7 +58,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SNAP-08 | High | the config-line filter deletes real epic names |
 | D-SNAP-10 | High | `merge_attempts` ignores the scope-reset marker |
 | D-SNAP-16 | High | one verdict note stamped twice counts as two rejections |
-| D-SNAP-17 | High | a released hold reads as a half-written block, and waves re-block it |
 | D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
 | D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
 | D-BOOT-03 | High | `cmd_settings \|\| true` turns a settings refusal into "bootstrap: done" |
@@ -329,54 +328,6 @@ count the same way: the pattern needs the sha, so ordinary prose is safe, but an
 a full verdict trailer verbatim (a summary, a retro, a hand-written report) reads as a real verdict.
 **Test:** nothing asserts the count for a note carrying two trailers. `tick-test.sh`'s rescope and
 verdict cases each write one trailer per note, which is the only shape ever exercised.
-
-### D-SNAP-17 · a released hold reads as a half-written block, and waves re-block it
-`snapshot.jq` `blocked_report_of` (`:205-219`) attaches to **every** ticket whose thread carries an
-`orch-blocked` trailer, whatever the ticket's current state, and computes `released` from one
-signal only: an `orch-unblock` trailer newer than that block. That trailer is written in exactly
-one place — `lane.sh` `cmd_transition`, and only when `--note` is passed. A hold released by the
-two-verb path (`lane.sh note` then `lane.sh transition`), or by a human moving the label in the
-tracker, therefore leaves a ticket that has genuinely moved on still reporting
-`blocked_report {released: false}` — byte-identical on the surface to a block nobody has answered
-yet.
-**Failure:** `references/triage.md:32-34` gives `released: true` one meaning ("a decision note is
-already posted and only the relabel is missing: show it as a half-applied batch to finish") and
-gives `false` none, so the only repair direction the surface suggests is *write the missing label*.
-The opposite half-write — label already moved, trailer never stamped — is unrepresented, and reads
-as the case that points backwards. A wave acting on that reading re-applies `blocked` to work that
-is finished. `_blocked_guard` permits it without argument (`case "$intended" in blocked) return 0`,
-blocking is the one direction that never bounces) and `cmd_transition` posts no comment unless
-`--note` is passed, so the re-block lands silently: the thread's last word stays "all criteria met"
-next to a `blocked` label, with nothing saying why. It then repeats every wave, because the signal
-is re-derived from the thread each time and the thread never changes. Note this is not
-`repairs_of` — that function carries two shapes, neither of them this one, and it skips `blocked`
-tickets outright. The bad repair is a *reading* the surface invites, which is why no test covers it.
-**Confirmed live** (build-2 #83, 2026-08-13): blocked 02:04:06Z for prod-deploy authorization; a
-human ran the deploy, all three acceptance criteria were verified, and the ticket moved to In
-Review at 05:14:29Z with a note at 05:14:36Z. The seven-second gap in that order is the proof of
-the two-verb path — `cmd_transition --note` posts the note *first*, deliberately ("a released
-ticket carrying no reason is the half a later reader cannot reconstruct"), so label-then-note can
-only be `note` and `transition` run separately. No `orch-unblock` trailer exists on the thread. At
-08:57:44Z, 3h43m later and with nothing new having gone wrong, a wave re-applied `blocked`, logging
-"Fixed #83's stranded write — blocked_report existed, `blocked` label missing (prior wave died
-before finishing that write)". No comment was posted. The ticket was still parked ~10 hours later,
-and its recorded block reason had been answered before lunch.
-**Fix:** stamp the trailer on the transition, not on the note. `cmd_transition` already reads the
-issue in `_blocked_guard` and so already knows whether the ticket currently carries `blocked`; when
-it does and the intended state is anything else, that write *is* the release and should stamp
-`orch-unblock` unconditionally, `--note` or not. The note is the human record; the trailer is
-machinery, and tying the machinery to an optional flag is what loses it. Second, `blocked_report`
-should not present a ticket that is no longer labelled `blocked` as an open block at all — carry
-the current state alongside it so a reader can tell "unanswered" from "answered, unstamped"
-without inferring.
-**Test:** `scripts/tests/07-snapshot.sh` covers the trailer present (`snap-blockedrel`, asserts
-`released == true`), absent, and stale-versus-new. Every case holds the ticket at `blocked`. No
-case asks what `blocked_report` should say about a ticket that has left `blocked` without a
-trailer, which is the whole defect.
-
----
-
-## `scripts/lane.sh`
 
 ### D-LANE-02 · `close` refuses on "no open MR", not on "a merged MR exists"
 `lane.sh:529-532` — an abandoned MR (state `closed`, never merged) passes the guard.
@@ -1442,3 +1393,28 @@ rows to scope. Full suite: 1014 passed, 0 failed. The live half of **Failure** (
 the demand-letter-generator repo) was not re-run; what was verified is that both query builders
 emitted the named token, and that the fixture rejects it exactly as the API's error message says the
 API does.
+
+### D-SNAP-17 · a released hold reads as a half-written block, and waves re-block it
+*Closed 2026-08-13.*
+
+`snapshot.jq` `blocked_report_of` attached to every ticket whose thread carried an `orch-blocked`
+trailer, whatever the ticket's current state, and computed `released` from one signal only: an
+`orch-unblock` trailer newer than that block. `lane.sh` `cmd_transition` wrote that trailer only
+when `--note` was passed, so a hold released by the two-verb path (`note` then `transition`), or by
+a human moving the label in the tracker, left a ticket that had genuinely moved on still reporting
+`blocked_report {released: false}` — byte-identical to a block nobody had answered. `references/
+triage.md` gave `false` no meaning, so the only repair the surface suggested was "write the missing
+label", and a wave re-applied `blocked` to finished work, silently, every wave. Confirmed live
+(build-2 #83, released and verified at 05:14, re-blocked at 08:57).
+
+**Shipped:** `cmd_transition` now treats a move off `blocked` as the release itself and stamps the
+`orch-unblock` trailer whether or not `--note` was passed — without a note it posts a short
+trailer-carrying comment saying the hold ended here. `_release_noted` still gates it, so a re-run
+does not double it, and the hold guard now runs before either write, so a release the guard will
+refuse leaves nothing behind. `snapshot.jq` `blocked_report_of` takes the ticket's current state
+and carries it as `ticket_state`; `references/triage.md` documents the pairing — only
+`ticket_state: "blocked"` with `released: false` is an unanswered hold, any other `ticket_state` is
+history and never a reason to re-block. Tests: an assertion folded into `07-snapshot.sh`'s
+`snap-blockedrep` case and four into `16-ticker-and-lane-verbs.sh`'s `transition --note` block;
+`26-one-helper-one-read.sh`'s planted violation now asserts "more than one GET" rather than exactly
+two, since the number of questions `transition` asks of the issue is not the invariant it proves.
