@@ -31,12 +31,12 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-76 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
-just a new filing — 6 entries closed as part of the same pass, already fixed by earlier proposals
-but never marked); D-SNAP-16, D-LIN-01 and D-LIN-02 were filed later, on **2026-08-13**, and
-verified the same way against the live board that triggered each — D-LIN-01 has since been fixed
-and closed, and D-LIN-02 is a defect in that fix. Severity is a same-pass judgment call, not
-part of the original review:
+70 open, counted from the table below, which is the live set. Most were verified against the
+shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
+of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-LIN-01 and
+D-LIN-02 were filed later, on **2026-08-13**, and verified the same way against the live board that
+triggered each — D-LIN-01 and D-LIN-02 (a defect in D-LIN-01's own fix) have both since been fixed
+and closed. Severity is a same-pass judgment call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -52,7 +52,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-LIN-02 | Critical | `$project` is declared `String!`, so every project-scoped read is rejected |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -749,49 +748,6 @@ and the value passes straight to `claude --model`, so nothing breaks.
 
 ---
 
-## `scripts/trackers/linear.sh`
-
-### D-LIN-02 · the project filter declares `$project` as `String!`, a type Linear rejects
-`_issues_page_query` (`:355`) and `v_board` (`:574`) each declare the project-filter variable as
-`, $project: String!`. Linear's `project: { id: { eq: $project } }` is an `IDComparator`, whose
-`eq` field is typed `ID`. GraphQL does not coerce `String` into `ID` in variable position, so the
-server rejects the whole document at validation:
-
-```
-Variable "$project" of type "String!" used in position expecting type "ID".
-```
-
-Probed live against the API on 2026-08-13 with the same query and the same variables, varying only
-the declared type: `String!` → HTTP 400 `GRAPHQL_VALIDATION_FAILED`; `ID!` → OK; `ID` → OK.
-
-The failure is total, not partial, and it is scoped to exactly the repos D-LIN-01's fix was written
-for. Validation happens before execution, so the query returns no rows at all — a repo declaring
-`Project:` cannot run `issues-open` or `board`, which is to say `tick.sh snapshot` cannot read its
-board, which is to say no wave can run. A repo with no `Project:` line keeps `_PROJECT_MODE` false,
-never emits the variable, and is unaffected. D-LIN-01 made a project-mode read return the wrong
-issues; this makes it return nothing.
-
-**Failure:** `linear.sh issues-open`, run from the demand-letter-generator repo (which declares
-`Project: Demand Letter Generator`) immediately after D-LIN-01's fix merged, exited non-zero with
-the validation error above instead of the 76 issues it was meant to scope down to. Found while
-re-verifying that the fix worked before defining that repo's build.
-
-**The suite could not have caught it, and cannot catch this whole class.**
-`scripts/tests/32-linear-driver.sh:48-54` stubs the API by pattern-matching the query *text* for
-`project: { id: { eq: $project } }` and answering from a fixture. It proves the filter clause is
-present and the variable is threaded; nothing anywhere validates the query against a schema, so a
-declared type can be arbitrarily wrong and all nine D-LIN-01 assertions still pass. Every
-GraphQL-shape defect in this driver is invisible the same way — the same class as D-TEST-05, where
-planted violations pass against a copy that cannot fail the way production does.
-
-**Fix:** `$project: ID!` at both sites. The filter clause, the variable threading and the
-`_PROJECT_MODE` back-compat guard are all already correct — the declared type is the only wrong
-token. A test that fails without it needs the stub to reject a variable declaration whose type does
-not match the comparator field it is used in, at least for the handful this driver actually uses;
-short of that, the fix is only provable against the live API.
-
----
-
 ## Closed
 
 ### D-TEST-12 · the concurrency test's window is inside its own measurement error
@@ -1412,3 +1368,32 @@ project no longer see the other product's build, that `.project` carries the rea
 that the no-`Project:` path is unchanged. Proved red-then-green: with the fix reverted, 4 of the 6
 new assertions failed (cross-product leakage in both directions, wrong `.project` value); restored,
 all 6 pass. Full suite: 1008 passed, 0 failed.
+
+### D-LIN-02 · the project filter declares `$project` as `String!`, a type Linear rejects
+*Closed 2026-08-13.*
+
+`_issues_page_query` and `v_board` each declared the project-filter variable as `$project: String!`,
+but `project: { id: { eq: $project } }` is an `IDComparator` whose `eq` field is typed `ID`, and
+GraphQL does not coerce String into ID in variable position. Linear validates the document before
+executing it, so it refused the whole query — `Variable "$project" of type "String!" used in
+position expecting type "ID"` — and every project-mode read returned nothing at all. A repo
+declaring `Project:` could run neither `issues-open` nor `board`, so `tick.sh snapshot` could not
+read its board and no wave could run. A repo with no `Project:` line kept `_PROJECT_MODE` false and
+was unaffected. Introduced by D-LIN-01's fix, one day old when found.
+
+**Shipped:** `$project: ID!` at both sites, with a comment at each recording that the declared type
+follows the comparator field — `$team` beside it stays `String!` because `key: { eq: }` really is a
+`StringComparator`. The real fix is in the test stub: `scripts/tests/32-linear-driver.sh`'s canned
+API now does what the live one does, reading each `<field>: { eq: $var }` position, looking the
+variable's declared type up in the `query(...)` header, and answering a mismatch with HTTP 400 and
+Linear's own wording. Its type table covers the four comparator fields this driver filters on
+(`id`→`ID`, `number`→`Float`, `key`/`name`→`String`), so the entry's "the suite cannot catch this
+whole class" is no longer true for those. Two supporting stub changes: the list-query case now also
+answers `board`'s `issues(first: 50,` (previously `board` fell through to the relations fixture and
+was untestable here), and the stub applies `--label` server-side. Six new assertions; proved
+red-then-green — with `String!` restored, both new project-mode reads fail validation and four of
+D-LIN-01's own assertions collapse with them, which is correct, since a rejected query returns no
+rows to scope. Full suite: 1014 passed, 0 failed. The live half of **Failure** (a real API call from
+the demand-letter-generator repo) was not re-run; what was verified is that both query builders
+emitted the named token, and that the fixture rejects it exactly as the API's error message says the
+API does.

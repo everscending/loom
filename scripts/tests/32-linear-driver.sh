@@ -32,9 +32,44 @@ done
 q=$(jq -r '.query // ""' "$data" 2>/dev/null)
 say()  { printf '%s' "$1" > "$out"; echo 200; }
 file() { cat "$1" > "$out"; echo 200; }
+# D-LIN-02: a stub that matches query TEXT can only prove a clause is present.
+# The real API does something this one used to skip entirely — it checks the
+# document against its SCHEMA before executing any of it, and refuses the whole
+# query when a variable's DECLARED type cannot be used where the variable
+# appears. `$project: String!` dropped into `id: { eq: $project }`, an
+# `IDComparator` whose `eq` is typed `ID`, is exactly that: HTTP 400, zero rows,
+# every project-mode read down. So this fixture type-checks the handful of
+# comparator positions the driver actually filters on. The rule is per FIELD,
+# because that is how Linear's schema types them.
+badvar=""
+while read -r fld var; do
+  [ -n "${var:-}" ] || continue
+  case "$fld" in
+    id)       want=ID ;;      # IDComparator.eq
+    number)   want=Float ;;   # NumberComparator.eq
+    key|name) want=String ;;  # StringComparator.eq
+    *)        continue ;;
+  esac
+  # The declaration, from the `query(...)` header — absent means the value was
+  # inlined rather than threaded, which is a different bug and not this check's.
+  decl=$(printf '%s' "$q" | grep -o "[(,] *\\\$$var: *[A-Za-z]*" | head -1 | sed 's/.*: *//')
+  [ -n "$decl" ] || continue
+  [ "$decl" = "$want" ] \
+    || badvar="Variable \"\$$var\" of type \"$decl!\" used in position expecting type \"$want\"."
+done <<EOF
+$(printf '%s' "$q" | grep -o '[a-zA-Z]*: { eq: \$[a-zA-Z]*' | sed 's/: { eq: \$/ /')
+EOF
+if [ -n "$badvar" ]; then
+  jq -nc --arg m "$badvar" \
+     '{errors:[{message:$m,extensions:{code:"GRAPHQL_VALIDATION_FAILED"}}]}' > "$out"
+  echo 400; exit 0
+fi
 case "$q" in
   *"teams(first: 50)"*)      file "${TEAMS_JSON:?}" ;;
-  *"issues(first: 250"*)
+  # `first: 50` is `board`'s page size, `first: 250` every flat list read's.
+  # Both are the same list query with the same two filters, so the fixture
+  # answers them the same way.
+  *"issues(first: 250"*|*"issues(first: 50,"*)
       # The fixture honours the state filter, because the driver relies on the
       # API to apply it and a stub that ignored it would let this suite pass a
       # driver that never sent one.
@@ -55,6 +90,14 @@ case "$q" in
             proj=$(jq -r '.variables.project // ""' "$data" 2>/dev/null)
             [ -n "$proj" ] && filtered=$(printf '%s' "$filtered" \
                 | jq -c --arg p "$proj" '.data.issues.nodes |= map(select((.project.id // "") == $p))') ;;
+      esac
+      # `board --label` leans on the server for the label filter too, so the
+      # fixture applies it rather than handing every ticket back.
+      case "$q" in
+        *'labels: { name: { eq: $label } }'*)
+            lbl=$(jq -r '.variables.label // ""' "$data" 2>/dev/null)
+            [ -n "$lbl" ] && filtered=$(printf '%s' "$filtered" \
+                | jq -c --arg l "$lbl" '.data.issues.nodes |= map(select([(.labels.nodes // [])[].name] | index($l)))') ;;
       esac
       printf '%s' "$filtered" > "$out"
       echo 200 ;;
@@ -626,6 +669,78 @@ team_open=$(PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin1-issue
 [ "$(printf '%s' "$team_open" | jq -r '[.[] | select(.id == 302)][0].project')" = ENG ] \
     && ok "D-LIN-01: back-compat — with project mode off, the project field is still the team key" \
     || bad "D-LIN-01: the back-compat project field changed with no Project: line"
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+
+# --- D-LIN-02. The project variable is declared ID!, the type Linear wants --
+# D-LIN-01 above threaded the filter correctly and declared it `$project:
+# String!`. Linear's `project: { id: { eq: } }` is an `IDComparator` whose `eq`
+# is typed `ID`, and GraphQL will not coerce a String variable into an ID
+# position, so the server threw the WHOLE document out at validation — before
+# executing a line of it. Every read in project mode returned nothing at all: a
+# repo declaring `Project:` could not run `issues-open` or `board`, so
+# `tick.sh snapshot` could not read its board, so no wave could run.
+#
+# The old fixture could not see this, and neither could any of D-LIN-01's nine
+# assertions: it matched query TEXT, and the text was right. The stub now
+# type-checks each `<field>: { eq: $var }` against the comparator that field
+# carries, which is what makes the two mutant runs below fail.
+mkdir -p "$TD/dlin02"
+mirror_scripts "$TD/dlin02" >/dev/null
+rm -f "$TD/dlin02/trackers"
+mkdir -p "$TD/dlin02/trackers"
+cp "$SD/trackers"/*.sh "$TD/dlin02/trackers/"
+# The plant: the one token this fix changed, put back the way it was.
+sed 's/\$project: ID!/$project: String!/g' "$LIN" > "$TD/dlin02/trackers/linear.sh"
+chmod +x "$TD/dlin02/trackers"/*.sh
+LM() { env $(API_ENV | tr '\n' ' ') "$TD/dlin02/trackers/linear.sh" "$@"; }
+[ "$(grep -c '\$project: String!' "$TD/dlin02/trackers/linear.sh")" = 2 ] \
+    && ok "D-LIN-02: the planted driver really did get String! back at both query sites" \
+    || bad "D-LIN-02: the plant did not land, so the two mutant runs below prove nothing"
+
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: Triggers API\n' > "$TD/repo/docs/agents/issue-tracker.md"
+DL2() { PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin1-issues.json" "$@"; }
+
+# p-dlin02-1: the shipped driver reads its project's board, both verbs.
+d2_open=$(DL2 L issues-open 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s' "$d2_open" | jq -r '[.[].id] | sort | join(",")' 2>/dev/null)" = "301,302" ]; then
+    ok "D-LIN-02: issues-open in project mode is accepted and answers with the project's two issues"
+else
+    bad "D-LIN-02: issues-open in project mode failed the API's schema check (rc=$rc, $(printf '%s' "$d2_open" | head -1))"
+fi
+d2_board=$(DL2 L board --label build-2 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s' "$d2_board" | jq -r '[.[].id] | join(",")' 2>/dev/null)" = "302" ]; then
+    ok "D-LIN-02: board in project mode is accepted too and answers with the build's own ticket"
+else
+    bad "D-LIN-02: board in project mode failed the API's schema check (rc=$rc, $(printf '%s' "$d2_board" | head -1))"
+fi
+
+# p-dlin02-2: with String! put back, both verbs are refused outright — not
+# thinned, not mis-scoped, refused. That is the failure this entry describes,
+# and it is what the assertions above are standing on.
+m_open=$(DL2 LM issues-open 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$m_open" | grep -qE 'Variable .*project.* used in position expecting type'; then
+    ok "D-LIN-02: with String! restored, issues-open is rejected at validation — the declared type is what the API checks"
+else
+    bad "D-LIN-02: the String! driver was not rejected (rc=$rc, $(printf '%s' "$m_open" | head -1))"
+fi
+m_board=$(DL2 LM board --label build-2 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$m_board" | grep -qE 'Variable .*project.* used in position expecting type'; then
+    ok "D-LIN-02: with String! restored, board is rejected the same way — both query sites are covered"
+else
+    bad "D-LIN-02: the String! driver's board read was not rejected (rc=$rc, $(printf '%s' "$m_board" | head -1))"
+fi
+
+# p-dlin02-3: the check is a TYPE check, not a blanket refusal. `$team: String!`
+# sits in the same query against `key: { eq: }`, a StringComparator, and is
+# right — so with no `Project:` line even the planted driver emits no $project
+# and reads the whole team, exactly as before either fix.
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+m_team=$(DL2 LM issues-open 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s' "$m_team" | jq -r '[.[].id] | sort | join(",")' 2>/dev/null)" = "301,302,401,402" ]; then
+    ok "D-LIN-02: back-compat — with no Project: line no \$project is declared, so the read is unaffected by either type"
+else
+    bad "D-LIN-02: the schema check rejected a query it should have passed (rc=$rc, $(printf '%s' "$m_team" | head -1))"
+fi
 printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
 
 # --- p87-l7. The proof: a whole snapshot, then a plan ----------------------
