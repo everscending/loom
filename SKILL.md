@@ -306,9 +306,12 @@ refuses outside herdr anyway.
 
 4. **Fill lanes** — an `impl` spawn action. A **rework** respawn (its
    `cwd_from` names the *surviving* worktree) reuses that worktree and injects
-   the latest rejection comment; its `--model` is the ticket's own
-   `.model.effective`, which on a rework round is exactly where the escalation
-   chain differs from `lane_model`. A **new** one:
+   the latest rejection comment plus a diff of it against `origin/<base>`:
+   paths outside the ticket's tier or stated scope go in as a question —
+   "these files are outside this ticket's scope; decide whether they belong
+   here before continuing" — not a work item; its `--model` is the ticket's
+   own `.model.effective`, which on a rework round is exactly where the
+   escalation chain differs from `lane_model`. A **new** one:
 
    - claim (assignee + `in-progress`, the first write), `git fetch origin`;
    - create the lane worktree from the **freshly-fetched remote base**

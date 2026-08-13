@@ -607,27 +607,6 @@ only against a *verdict* trailer leaking in — no fixture carries a note that m
 merge-attempt marker.
 **Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
 
-### D-SKILL-15 · a resume brief inventories inherited work instead of questioning it
-SKILL.md's fill step describes a rework respawn as reusing the surviving worktree and injecting
-the latest rejection comment. Nothing says the wave must *judge* what is already in that
-worktree. In practice the brief lists the dirty files and tells the lane to finish them, which
-turns a previous lane's unreviewed decision into the next lane's instruction — the one thing a
-resume should never do, because the work in a surviving worktree has by definition passed no gate.
-**Failure:** triggers-api build-2, 2026-08-12, `briefs/impl-72.md`. JOR-72 is `tier::ui`. Its
-resume brief opens with the worktree's modified files as neutral inventory — including
-`apps/api/src/http/routes/deliveries.ts`, `apps/api/src/http/routes/deliveries.integration.test.ts`
-and `apps/api/src/http/sse.ts` — then instructs: "Read what's there first … finish what's already
-started rather than re-deriving it from scratch". A UI ticket editing API route modules was
-reported as a to-do list, never as a question. The same brief then affirmed "**Blocked by:** E10.2,
-E10.5 (both closed — this ticket is unblocked)", restating the incomplete edge set of D-REF-16 as
-a clearance. That inherited scope is what collided with JOR-49 (see D-SKILL-14).
-**Fix shape:** the fill step should require a resume brief to compare the surviving worktree's
-file surface against the ticket's tier and stated scope, and surface anything outside it as a
-judgement call — "these files are outside this ticket's scope; decide whether they belong here
-before continuing" — rather than folding them into the work list.
-**Test:** none. No fixture exercises brief *content*; the suite only asserts that briefs are
-staged, copied and paired with their placeholder (section 23).
-
 ### D-SKILL-16 · the gate checks behaviour but never scope, so a ticket may ship another ticket's work
 SKILL.md's gate step (step 3) specifies the pregate, then "the ticket's **single** independent
 `/code-review` + PRD-faithfulness check against its `PRD requirement`". Both halves ask what the
@@ -1164,3 +1143,20 @@ names a contract it consumes and the freshly-fetched base lacks it, the lane blo
 `--category unmerged-dependency` rather than building it, since another ticket owns it and building
 it twice is an unresolvable merge conflict. No test possible at the suite level (`tick-test.sh`
 982 passed / 0 failed, unaffected) — the enforceable half is D-SKILL-16's tier-to-tree gate check.
+
+### D-SKILL-15 · a resume brief inventories inherited work instead of questioning it
+*Closed 2026-08-12.*
+
+A rework respawn reused a rejected ticket's surviving worktree and injected the rejection comment,
+but nothing said the wave must *judge* what was already sitting in that worktree — in practice the
+brief listed the dirty files as a neutral to-do, turning a previous lane's unreviewed decision into
+the next lane's instruction. In triggers-api build-2, a `tier::ui` ticket's resume brief listed API
+route files it had modified as work to finish, never as a question, and that inherited scope is what
+collided with a sibling ticket owning those same routes (D-SKILL-14).
+
+**Shipped:** the rework-respawn sentence in the Fill lanes step now injects the rejection comment
+plus a diff of the worktree against `origin/<base>`, with paths outside the ticket's tier or stated
+scope posed as an explicit question — "these files are outside this ticket's scope; decide whether
+they belong here before continuing" — rather than folded into the work list. No fixture exercises
+brief content, so no suite test applies; `tick-test.sh` run clean, 982 passed / 0 failed, confirming
+no regression.
