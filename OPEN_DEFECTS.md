@@ -31,7 +31,7 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-76 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
+75 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
 just a new filing — 6 entries closed as part of the same pass, already fixed by earlier proposals
 but never marked); D-SNAP-16 and D-LIN-01 were filed later, on **2026-08-13**, and verified the
 same way against the live board that triggered each. Severity is a same-pass judgment call, not
@@ -51,7 +51,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-LIN-01 | Critical | every issue read is team-wide, so two products on one Linear team share a build |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -750,49 +749,6 @@ and the value passes straight to `claude --model`, so nothing breaks.
 
 ## `scripts/trackers/linear.sh`
 
-### D-LIN-01 · every issue read is team-wide, so two products on one Linear team share a build
-`_issues_page_query` (`:336`) and `v_board` (`:541`) both filter on `team: { key: { eq: $team } }`
-and nothing else. `v_issues_open` and `v_board` each call `_resolve_project` first — it resolves
-`PROJECT_ID` and sets `_PROJECT_MODE` — and then neither uses it in a filter. So a repo that
-declares `Project:` still reads the whole team's issues.
-
-Two consequences, and the second is the dangerous one:
-
-1. **Build discovery crosses products.** `cmd_snapshot` (`tick.sh:2391`) picks the current build
-   as the highest-iid open issue matching `^Build [0-9]+$` in whatever `issues-open` returned, then
-   derives the universe label from its title. With two products on one team, both repos resolve the
-   *same* `Build N` issue — whichever was created last — and therefore the same `build-N` label.
-   The loser's members are not in that label, so its whole build silently leaves its own universe,
-   and the winner's wave schedules and spawns lanes against another product's tickets inside the
-   wrong repo's worktrees.
-2. **`project` carries the team key, not the project.** `_MAP_ISSUE` (`:296`) emits
-   `project: $team` — a constant for every issue the driver returns. `gitlab.sh` (`:65`, `:73`)
-   emits the real `project_id` in the same field. `snapshot.jq:161` guards cross-project blockers
-   with `$proj != $home`, which on Linear compares the team key against itself and can never be
-   true, so the guard D-SNAP-15 is about is not merely weak here — it is dead. A native blocking
-   link to another product's issue is resolved against the home open-set as if it were local.
-
-This is P92 half-landed: it moved epics to ProjectMilestones inside a declared project and left
-every issue read at team scope.
-
-**Failure:** Linear team JOR carries two products — Triggers API and Demand Letter Generator, the
-latter declaring `Project: Demand Letter Generator`. On 2026-08-13, with Triggers API's `Build 2`
-(JOR-86) live at 5 open tickets — one in progress, two in review, two blocked — `linear.sh
-issues-open`, run from the demand-letter-generator repo, returned 85 issues: that repo's own 76,
-plus JOR-86 and its members. Demand Letter Generator therefore already resolved another product's
-build as its own, before defining a build of its own. Publishing its `Build 3` would have flipped
-the collision the other way and dropped Triggers API's five live tickets out of its universe
-mid-build. Caught only because phase 5 checked for an existing build issue by hand.
-
-**The suite could not have caught it.** Every tracker-driver test in `29-tracker-driver.sh` runs a
-single-product board, which is the only shape in which team scope and project scope agree.
-
-**Fix:** thread `PROJECT_ID` into both issue filters when `_PROJECT_MODE` is on
-(`project: { id: { eq: $project } }`), and emit the real project — `$i.project.id` — from
-`_MAP_ISSUE` instead of `$team`. Back-compat is the existing rule: no `Project:` line means
-`_PROJECT_MODE` stays false and both reads keep today's team-wide behaviour. A regression test
-needs a two-product fixture with a `Build N` issue in each.
-
 ---
 
 ## Closed
@@ -1396,3 +1352,22 @@ section alone: 115 passed, 0 failed. Full suite: 1001 passed, 1 failed on one ru
 one-off timing flake in a different file, `01-lock-and-spawn-lane.sh`'s wave-replay test, same class
 noted in D-TEST-01's closure) and the usual pre-existing `watch-panes` flake on another — neither in
 `07-snapshot`, and the snapshot path itself was confirmed to issue no mutating calls at all.
+
+### D-LIN-01 · every issue read is team-wide, so two products on one Linear team share a build
+*Closed 2026-08-13.*
+
+`_issues_page_query` and `v_board` filtered Linear issue reads on team only; a declared `Project:`
+line never narrowed either query, so two products on one team could resolve the same `Build N`
+issue and silently share (and corrupt) each other's build universe. `_MAP_ISSUE` also emitted the
+constant team key as `project` for every issue, leaving the cross-project blocker guard
+(D-SNAP-15) structurally dead for Linear.
+
+**Shipped:** both queries gain an additive `project: { id: { eq: $project } }` filter when
+`_PROJECT_MODE` is on (no `Project:` line keeps today's team-wide behaviour, byte-for-byte).
+`_MAP_ISSUE` now emits the real Linear project id in project mode, and still the team key when
+project mode is off. New two-product fixture in `scripts/tests/32-linear-driver.sh` (team `ENG`,
+two projects each with its own `Build N` issue and ticket) proves reads scoped to one declared
+project no longer see the other product's build, that `.project` carries the real project id, and
+that the no-`Project:` path is unchanged. Proved red-then-green: with the fix reverted, 4 of the 6
+new assertions failed (cross-product leakage in both directions, wrong `.project` value); restored,
+all 6 pass. Full suite: 1008 passed, 0 failed.
