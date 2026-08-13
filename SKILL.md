@@ -57,7 +57,7 @@ technique of its own.
 | `qa` | any | Review this skill's own files; report defects, never fix |
 | `optimize` | any | Compact this SKILL.md without changing behaviour |
 | `prop <Pn>` | any | Implement proposal `Pn` from PROPOSALS.md, then archive it |
-| `fix <Dn>` | any | Implement the fix for defect `Dn` from OPEN_DEFECTS.md, verify, then close it |
+| `fix <Dn>\|<severity>` | any | Implement the fix for defect `Dn`, or every open defect at `<severity>` in order, verify each, close each |
 | `retro` | after 6 | Explain a finished build's timings and spend; write proposals |
 
 **Verb boundaries are hard stops.** A verb ends at its own output and returns
@@ -574,13 +574,15 @@ machinery, spend `SKILL.md` lines last, test it, then archive the proposal.
 Resolution, layer order, the test bar and the archive step:
 [references/prop.md](references/prop.md).
 
-### `fix <Dn>`
+### `fix <Dn>|<severity>`
 
-Fix one confirmed defect from `OPEN_DEFECTS.md` — human-run, never invoked by
-a wave. Its Failure section is already reproduced; implement the fix, prove
-it with a test that fails without it, then close the entry. A defect marked
-`Covered by` a proposal is refused here — it belongs to `prop` instead.
-Resolution, the test bar and the close step:
+Fix one confirmed defect from `OPEN_DEFECTS.md`, or every open defect at a
+given severity (`critical`, `high`, `medium`, `low`) in one run — human-run,
+never invoked by a wave. Its Failure section is already reproduced; implement
+the fix, prove it with a test that fails without it, then close the entry. A
+defect marked `Covered by` a proposal is refused (single) or skipped
+(severity batch) here — it belongs to `prop` instead. Resolution, ordering,
+the test bar and the close step:
 [references/fix.md](references/fix.md).
 
 ## Failure policy
