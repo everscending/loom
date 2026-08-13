@@ -24,6 +24,7 @@ did.
 ## Step 1 — the cheap signals
 
     bash scripts/tick-test.sh              # expect all green; note the count
+    bash scripts/tick-test.sh --lint       # two `ok` shapes that can't fail (P45); seconds
     tick.sh snapshot | tick.sh graph       # against a real repo, read-only
     tick.sh lane-status
     tick.sh report
@@ -32,6 +33,14 @@ The live check is not optional. `graph` reporting the wrong opening width was ca
 running against a real tracker — out-of-build blockers were being dropped, and no fixture in the
 suite could have shown it. Anything that reads live tracker state can be wrong in ways fixtures are
 structurally unable to reproduce.
+
+**A green suite is not proof a guard still works, either.** `bash scripts/tick-test.sh --mutate`
+(P45) deletes or inverts one named guard, destructive path, or cap at a time — in a scratch clone,
+never the real files — and asserts the suite goes red. It is minutes, not seconds (it re-runs the
+whole suite once per target), so it belongs in a qa round, not every suite run: `--mutate` alone
+runs the full registry, `--mutate <name>` one target, `--mutate --list` names them. A target
+reported ESCAPED is a live finding — treat it exactly like anything else this round turns up, i.e.
+confirm it (Step 3) before reporting it.
 
 If the suite is red, stop and report that. Do not review on top of a broken baseline.
 

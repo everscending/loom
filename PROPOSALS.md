@@ -57,7 +57,6 @@ evidence, and implementation notes belong in this file, not there.
 | ID | Proposal | Status |
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
-| P45 | A test must prove it can fail | open — proposed 2026-08-06; 12 vacuous or misdirected tests in a 430-green suite, two of them guarding the only unbounded `rm -rf` |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
@@ -246,40 +245,6 @@ bootstrap seeds nothing.
 with the collector down (seam built wrong), or dashboards nobody has opened
 after two instrumented builds (artifact without a consumer — drop it).
 
-
-## P45 · A test must prove it can fail
-
-**Problem.** The suite is green at 430 and its trustworthiness did not grow with its size. Twelve
-tests were found on 2026-08-06 that cannot fail, or prove something other than what they name.
-The two worst guard the two most destructive mechanisms in the program: `tick-test.sh:394-397`
-never invokes `tick.sh` at all (it asserts on a `case` statement it writes itself inside
-`bash -c`, so deleting the guard in front of the only unbounded `rm -rf` leaves it green), and
-`tick-test.sh:2902-2906` greps for event-log readers matching `(<|read|cat|jq…)`, so it cannot
-see the two `tail`/`grep` readers already in production. Three watch-panes planted violations
-assert only the absence of a call, and pass against a stand-in that is `exit 127`. The
-`ok`-in-both-branches pattern killed in the ntfy block on 2026-08-01 survived at
-`tick-test.sh:2361-2363`.
-
-The `tick-test.sh:<line>` citations above are from 2026-08-06, when the suite was one file at 430
-tests. They no longer resolve — the suite grew, and P76 then split it into
-`scripts/tests/NN-<topic>.sh`. Find each test by the string it asserts; the sections are named
-after their subject, so the search is narrow.
-
-**Fix direction.** Make vacuity mechanically detectable rather than a review finding:
-
-- A `--mutate` mode that, for a named set of production lines (the guards, the destructive
-  paths, the caps), deletes or inverts the line in a scratch copy and asserts the suite goes
-  **red**. A test that stays green over its own mutation is reported by name. Run it in `qa`,
-  not on every suite run.
-- Every planted-violation test asserts the mutated copy *ran* — the `[ "$rc_n" = 0 ] && ok`
-  shape already used at `tick-test.sh:3498` — before asserting what it no longer does.
-- A lint pass over the suite banning `|| ok`, and banning an `ok` whose condition contains only
-  the loop variable that produced it.
-- Where a test asserts "no mutation reached the tracker", assert on the shape every mutation in
-  this codebase actually takes (`glab api --method PUT|POST|DELETE`), not on `glab` subcommands
-  nothing uses.
-
-**Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
 
 ## P50 · `references/loom-config.md` is generated from `resolve-config`
 

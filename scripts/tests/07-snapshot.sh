@@ -601,6 +601,72 @@ else
     bad "snapshot: epic rollup wrong ($(jq -c '.epics' "$T/snap.json"))"
 fi
 
+# 7f1. D-SNAP-02: a finished epic whose name is a SUBSTRING of an unrelated
+#      open epic's name must not be swallowed by it. The build-issue list
+#      names both "E10 Payments" (open, one ticket still on it) and "E1"
+#      (finished, zero open tickets — same shape "Reporting surface" has
+#      above). A bare mutual `contains` reads "e10 payments" as containing
+#      "e1" (it does — "e10" starts with "e1") and silently drops the
+#      completed epic out of `$epics_done`, invisible to `epics[]` and
+#      `epics_awaiting_probe`, letting `build_complete` close the build over
+#      an epic nobody probed (the build-2 failure the entry cites).
+cat > "$FX/open-substr.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- E10 Payments (#10)\n- E1 (#11)\n"},
+ {"iid":10,"title":"Wire E10 payment flow","project_id":1,"web_url":"https://x/10",
+  "labels":["build-2","ready-for-agent"],"assignees":[],"updated_at":"2026-07-28T10:00:00Z",
+  "milestone":{"title":"E10 Payments"},"description":"## Risk tier\n\napi\n"}
+]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-substr.json" STUB_LOG="$T/calls-substr" \
+    "$TICK" snapshot > "$T/snap-substr.json" 2>/dev/null
+if [ "$(jq -r '.epics|length' "$T/snap-substr.json")" = "2" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E10 Payments")|.complete' "$T/snap-substr.json")" = "false" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E10 Payments")|.open_tickets' "$T/snap-substr.json")" = "1" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E1")|.complete' "$T/snap-substr.json")" = "true" ] \
+   && [ "$(jq -r '.epics[]|select(.name=="E1")|.source' "$T/snap-substr.json")" = "build-issue" ]; then
+    ok "snapshot: a finished epic whose name is a substring of an open epic's name is not swallowed"
+else
+    bad "snapshot: substring collision dropped the finished epic ($(jq -c '.epics' "$T/snap-substr.json"))"
+fi
+
+# 7f1b. D-SNAP-01: the epic-to-MILESTONE match (a different site from 7f1's
+#       epic-to-epic rollup above) had the same unguarded, bidirectional
+#       `startswith`, and its own `| first` made the winner depend on API
+#       payload order. Epic "E1" (all members closed, so it's due a probe)
+#       sits alongside an unrelated active milestone "E11 Reporting" — "e1" is
+#       a prefix of "e11-reporting" with no boundary check, so the match could
+#       land on the wrong milestone entirely: E1 would report `milestone:
+#       "E11 Reporting"`, `needs_probe: true` forever (nothing ever closes
+#       ITS milestone), and E11 Reporting would read as though E1's probe had
+#       already accepted it. Tested both payload orderings, since that is
+#       exactly what made the bug's presence order-dependent.
+cat > "$FX/open-e1ms.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- E1 (#50)\n"}
+]
+EOF
+printf '%s\n' '[{"title":"E11 Reporting","state":"active"},{"title":"E1","state":"active"}]' \
+    > "$FX/milestones-e1-fwd.json"
+printf '%s\n' '[{"title":"E1","state":"active"},{"title":"E11 Reporting","state":"active"}]' \
+    > "$FX/milestones-e1-rev.json"
+for order in fwd rev; do
+    GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-e1ms.json" \
+        STUB_MILESTONES="$FX/milestones-e1-$order.json" STUB_LOG="$T/calls-e1-$order" \
+        "$TICK" snapshot > "$T/snap-e1-$order.json" 2>/dev/null
+    if [ "$(jq -r '.epics|length' "$T/snap-e1-$order.json")" = "1" ] \
+       && [ "$(jq -r '.epics[0].name' "$T/snap-e1-$order.json")" = "E1" ] \
+       && [ "$(jq -r '.epics[0].milestone' "$T/snap-e1-$order.json")" = "E1" ] \
+       && [ "$(jq -r '.epics[0].needs_probe' "$T/snap-e1-$order.json")" = "true" ] \
+       && [ "$(jq -r '.epics[0].accepted' "$T/snap-e1-$order.json")" = "false" ]; then
+        ok "snapshot: epic E1 matches milestone E1, not E11 Reporting ($order payload order)"
+    else
+        bad "snapshot: epic-milestone match wrong, $order order ($(jq -c '.epics' "$T/snap-e1-$order.json"))"
+    fi
+done
+
 # 7a2. Epic ACCEPTANCE is read back from the milestone the probe closes.
 #      `lane.sh probe-result <epic> pass` closes that milestone and its own
 #      source said "completeness stays DERIVED (nothing reads milestone
@@ -968,8 +1034,15 @@ mv "$T/lib.jq.hidden" "$MSCRIPTS/lib.jq"
 
 # 7k. Read-only guardrail: tick.sh must never mutate tracker state (its whole
 #     charter). Every captured argv is checked against a mutating denylist.
-if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (create|delete)|-X *(POST|PUT|DELETE|PATCH)" "$CALLS"; then
-    bad "snapshot: a mutating glab call was issued ($(grep -E 'update|close|create|merge|-X' "$CALLS" | head -1))"
+#     D-TEST-03: every real tracker mutation in this codebase goes through
+#     `glab api --method POST|PUT|DELETE|PATCH <path> ...` (see
+#     scripts/trackers/gitlab.sh) — not the `issue update`/`-X POST` forms
+#     this denylist was originally written for, which nothing here emits.
+#     `api --method (POST|PUT|DELETE|PATCH)` catches that real shape while
+#     leaving `api --method GET ...` (and plain `api <path>`, which defaults
+#     to GET) unmatched, so legitimate reads still pass.
+if grep -Eq "issue (update|close|create|note)|mr (merge|create|update)|label (create|delete)|-X *(POST|PUT|DELETE|PATCH)|api --method (POST|PUT|DELETE|PATCH)" "$CALLS"; then
+    bad "snapshot: a mutating glab call was issued ($(grep -E 'update|close|create|merge|-X|--method (POST|PUT|DELETE|PATCH)' "$CALLS" | head -1))"
 else
     ok "snapshot: every call was a read — no mutating verb in the captured argv"
 fi

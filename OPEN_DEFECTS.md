@@ -11,7 +11,8 @@ introduced five new ones.
 ## How to use this file
 
 **Keys are stable and never reused.** `D-<FILE>-<nn>`, where `<FILE>` is `TICK`, `SNAP`, `LANE`,
-`BOOT`, `PANE`, `TEST`, `SKILL` or `REF`. Cite a key in a commit message, a proposal, or a ticket:
+`BOOT`, `PANE`, `TEST`, `SKILL`, `REF` or `LIN` (`scripts/trackers/linear.sh`). Cite a key in a
+commit message, a proposal, or a ticket:
 "fixes D-LANE-02". A fixed defect keeps its key and moves to the Closed section at the bottom with
 the date and what shipped — never delete a row, and never renumber.
 
@@ -30,9 +31,12 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-74 open, verified against the shipping code on **2026-08-12** (a full re-check, not just a new
-filing — 6 entries closed as part of the same pass, already fixed by earlier proposals but never
-marked). Severity is a same-pass judgment call, not part of the original review:
+71 open, counted from the table below, which is the live set. Most were verified against the
+shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
+of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
+D-LIN-01 and D-LIN-02 were filed later, on **2026-08-13**, and verified the same way against the
+live board that triggered each — D-LIN-01 and D-LIN-02 (a defect in D-LIN-01's own fix) have both
+since been fixed and closed. Severity is a same-pass judgment call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -48,16 +52,13 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-SNAP-01 | Critical | epic→milestone matching is looser than the rule that closes the milestone |
-| D-SNAP-02 | Critical | an epic whose name is a substring of another is silently deleted |
-| D-LANE-01 | Critical | the closed-ticket guard is in `cmd_transition`, not in `_set_state` |
-| D-TEST-01 | Critical | the `rm -rf` guard's test never invokes `tick.sh` |
-| D-TEST-03 | Critical | "snapshot made no mutating call" denylists a form nothing uses |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
 | D-SNAP-08 | High | the config-line filter deletes real epic names |
 | D-SNAP-10 | High | `merge_attempts` ignores the scope-reset marker |
+| D-SNAP-16 | High | one verdict note stamped twice counts as two rejections |
+| D-SNAP-17 | High | a released hold reads as a half-written block, and waves re-block it |
 | D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
 | D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
 | D-BOOT-03 | High | `cmd_settings \|\| true` turns a settings refusal into "bootstrap: done" |
@@ -192,27 +193,6 @@ on a build that really was graph-bound.
 
 ## `scripts/snapshot.jq`
 
-### D-SNAP-01 · epic→milestone matching is looser than the rule that closes the milestone
-`snapshot.jq:256-257` — bare `startswith` in both directions with no boundary, while `lane.sh:351`
-matches `"$slug"|"$slug"-*` (exact, or prefix followed by a dash). `| first` at `:258` also makes
-the winner depend on API payload order.
-**Failure:** epic `E1` (all members closed); milestones `E11 Reporting` (active, first in payload)
-and `E1` (active). The snapshot emits for `E1`: `milestone: "E11 Reporting"`, `accepted: false`,
-`acceptance:` E11's criteria, `needs_probe: true`, and a warning to spawn `probe-e11-reporting`.
-`lane.sh` then closes `E11 Reporting` and skips `E1`. Net: E1's milestone never closes (permanent
-`needs_probe`, build can never complete), E11 is marked accepted with no probe ever run, and the
-probe brief is written against the wrong epic's criteria.
-**Test:** `tick-test.sh:1810-1838` uses two names with no prefix relationship, so only the
-exact-match path is exercised.
-
-### D-SNAP-02 · an epic whose name is a substring of another is silently deleted
-`snapshot.jq:244-246` — mutual `contains` with no boundary.
-**Failure:** `$items = ["E1"]`, `$epics_open = [{name: "E10 Payments"}]` → `$epics_done == []`,
-because `"e10 payments" | contains("e1")`. Completed epic `E1` appears in neither `epics[]` nor
-`epics_awaiting_probe`, no warning fires, and `build_complete` closes the build over an unaccepted
-epic — the build-2 failure recorded at `:233-240`.
-**Test:** same non-colliding-names fixture as D-SNAP-01.
-
 ### D-SNAP-03 · the gate's MR can be one that merely mentions the ticket
 `snapshot.jq:44` — `$M` is filled from `related_merge_requests` (`tick.sh:1860`), which
 `lane.sh:491` documents as including any MR that mentions the issue; that is why `lane.sh
@@ -323,20 +303,80 @@ blocker whose iid does not exist locally reports `closed: true` → `unblocked: 
 scheduled. Body-sourced blockers (`:199`) take this path by design; this one is an accident of
 `$bi` being absent.
 
+### D-SNAP-16 · one verdict note stamped twice counts as two rejections
+`snapshot.jq` `rejections_of` → `lib.jq:42-43` `orch_verdict_scan` — the scan is jq's `scan()`,
+which returns **every** match in a body, and each match becomes its own verdict entry carrying that
+note's `created_at` and index. One comment holding the same trailer twice is therefore two FAILs,
+one apparent rejection round apart, with identical timestamps.
+**Failure:** `same_class_tail` reaches 2 off a single gate failure, which is exactly the cap
+`plan.jq:243` uses to stop reworking and park the ticket for a human design decision. The ticket is
+then re-blocked on every subsequent wave, because the count is re-derived from the thread and never
+from the branch, and the only exit is `lane.sh rescope` — refused for automated callers, so it
+needs a human. Same inflation shape as D-SNAP-10, one layer down: that entry is a bare `test()` over
+notes, this one is a repeated match inside a single note.
+**Confirmed live** (build-2 #62, 2026-08-13): the thread holds exactly one `orch-verdict FAIL`
+comment (the 05:14 gate verdict on `787a64af`), whose trailer is written twice at the end of the
+body. Replaying the shipping `rejections_of` over that note returns
+`{total: 2, last_class: "scope-connection-collision", same_class_tail: 2}`; the same note with the
+trailer written once returns `{total: 1, …, same_class_tail: 1}`. The wave's blocked report opened
+with the words "Two straight gate rejections" — prose generated from the inflated count, describing
+a second rejection that never happened. #62 sat parked for roughly nine hours on a cap it never hit,
+and each later wave re-derived the same verdict and re-blocked it without reading the branch, whose
+diff no longer contained the file the rejection was about.
+**Fix:** collapse verdicts per note before they reach the tail scan — one entry per `(note, sha)`
+at most, so a trailer repeated in one body counts once. Note that a *quoted* trailer inflates the
+count the same way: the pattern needs the sha, so ordinary prose is safe, but any note reproducing
+a full verdict trailer verbatim (a summary, a retro, a hand-written report) reads as a real verdict.
+**Test:** nothing asserts the count for a note carrying two trailers. `tick-test.sh`'s rescope and
+verdict cases each write one trailer per note, which is the only shape ever exercised.
+
+### D-SNAP-17 · a released hold reads as a half-written block, and waves re-block it
+`snapshot.jq` `blocked_report_of` (`:205-219`) attaches to **every** ticket whose thread carries an
+`orch-blocked` trailer, whatever the ticket's current state, and computes `released` from one
+signal only: an `orch-unblock` trailer newer than that block. That trailer is written in exactly
+one place — `lane.sh` `cmd_transition`, and only when `--note` is passed. A hold released by the
+two-verb path (`lane.sh note` then `lane.sh transition`), or by a human moving the label in the
+tracker, therefore leaves a ticket that has genuinely moved on still reporting
+`blocked_report {released: false}` — byte-identical on the surface to a block nobody has answered
+yet.
+**Failure:** `references/triage.md:32-34` gives `released: true` one meaning ("a decision note is
+already posted and only the relabel is missing: show it as a half-applied batch to finish") and
+gives `false` none, so the only repair direction the surface suggests is *write the missing label*.
+The opposite half-write — label already moved, trailer never stamped — is unrepresented, and reads
+as the case that points backwards. A wave acting on that reading re-applies `blocked` to work that
+is finished. `_blocked_guard` permits it without argument (`case "$intended" in blocked) return 0`,
+blocking is the one direction that never bounces) and `cmd_transition` posts no comment unless
+`--note` is passed, so the re-block lands silently: the thread's last word stays "all criteria met"
+next to a `blocked` label, with nothing saying why. It then repeats every wave, because the signal
+is re-derived from the thread each time and the thread never changes. Note this is not
+`repairs_of` — that function carries two shapes, neither of them this one, and it skips `blocked`
+tickets outright. The bad repair is a *reading* the surface invites, which is why no test covers it.
+**Confirmed live** (build-2 #83, 2026-08-13): blocked 02:04:06Z for prod-deploy authorization; a
+human ran the deploy, all three acceptance criteria were verified, and the ticket moved to In
+Review at 05:14:29Z with a note at 05:14:36Z. The seven-second gap in that order is the proof of
+the two-verb path — `cmd_transition --note` posts the note *first*, deliberately ("a released
+ticket carrying no reason is the half a later reader cannot reconstruct"), so label-then-note can
+only be `note` and `transition` run separately. No `orch-unblock` trailer exists on the thread. At
+08:57:44Z, 3h43m later and with nothing new having gone wrong, a wave re-applied `blocked`, logging
+"Fixed #83's stranded write — blocked_report existed, `blocked` label missing (prior wave died
+before finishing that write)". No comment was posted. The ticket was still parked ~10 hours later,
+and its recorded block reason had been answered before lunch.
+**Fix:** stamp the trailer on the transition, not on the note. `cmd_transition` already reads the
+issue in `_blocked_guard` and so already knows whether the ticket currently carries `blocked`; when
+it does and the intended state is anything else, that write *is* the release and should stamp
+`orch-unblock` unconditionally, `--note` or not. The note is the human record; the trailer is
+machinery, and tying the machinery to an optional flag is what loses it. Second, `blocked_report`
+should not present a ticket that is no longer labelled `blocked` as an open block at all — carry
+the current state alongside it so a reader can tell "unanswered" from "answered, unstamped"
+without inferring.
+**Test:** `scripts/tests/07-snapshot.sh` covers the trailer present (`snap-blockedrel`, asserts
+`released == true`), absent, and stale-versus-new. Every case holds the ticket at `blocked`. No
+case asks what `blocked_report` should say about a ticket that has left `blocked` without a
+trailer, which is the whole defect.
+
 ---
 
 ## `scripts/lane.sh`
-
-### D-LANE-01 · the closed-ticket guard is in `cmd_transition`, not in `_set_state`
-`lane.sh:466-471` vs `:147` — `_set_state` is the shared write path and runs only `_blocked_guard`;
-the `.state == "closed"` check is a local of `cmd_transition`.
-**Failure:** verified with #51 closed — `lane.sh verdict 51 pass abcd1234` posted the note and
-issued `add_labels=merge-queue`, rc 0; `lane.sh claim 51` issued `add_labels=in-progress -f
-assignee_ids=5`, rc 0. This is the #23 stale-snapshot race the file documents at `:460-465`: the
-wave photographs #23 as `merge-queue`, the merge lane lands and closes it 90s later, the gate lane
-then stamps `merge-queue` on a closed ticket.
-**Test:** `tick-test.sh:4360-4380` exercises `transition` on a closed ticket only; no
-verdict-on-closed or claim-on-closed case exists.
 
 ### D-LANE-02 · `close` refuses on "no open MR", not on "a merged MR exists"
 `lane.sh:529-532` — an abandoned MR (state `closed`, never merged) passes the guard.
@@ -489,12 +529,6 @@ concedes Ctrl-C is not deliverable there, as do SKILL.md:214 and :502.
 The suite is 4,435 lines and 430 green tests. These are tests that cannot fail, or prove something
 other than what they name. All are covered by **P45**.
 
-### D-TEST-01 · the `rm -rf` guard's test never invokes `tick.sh`
-`tick-test.sh:394-397` — writes its own `case` statement inside a `bash -c` string and asserts on
-that; it is testing the bash `case` builtin.
-**Misses:** delete `tick.sh:124` (`case "$SCRATCH_ROOT" in ""|"/"|"$HOME") return 0 ;; esac`), the
-line guarding the `find … -exec rm -rf {} +` two lines below it. Demonstrated: test still PASSes.
-
 ### D-TEST-02 · the event-log invariant test cannot see `tail`/`grep` readers
 `tick-test.sh:2902-2906` — detector regex `(<|read|cat|jq[^|]*)[^|]*\$EVENTS`.
 **Misses:** two production *decision* readers already escape it — `tick.sh:285`
@@ -502,13 +536,6 @@ line guarding the `find … -exec rm -rf {} +` two lines below it. Demonstrated:
 (`grep '"ev":"wave_start"' "$EVENTS"` in `_wave_gap_ok` → whether a wave runs). The invariant the
 test names — constitution rule 1 — is already false in the code and the test is green.
 Demonstrated against the shipping `tick.sh`.
-
-### D-TEST-03 · "snapshot made no mutating call" denylists a form nothing uses
-`tick-test.sh:2019-2023` — denylist is `issue (update|close|create|note)|mr (merge|create|update)|
-label (create|delete)|-X *(POST|PUT|DELETE|PATCH)`, but every tracker mutation in this codebase is
-`glab api --method` (`lane.sh:102, 152, 308, 352, 501, 534`).
-**Misses:** `glab api --method PUT projects/:fullpath/issues/10 -f add_labels=blocked` in any
-snapshot path. Demonstrated: no match, test PASSes.
 
 ### D-TEST-04 · `ok` called in both branches
 `tick-test.sh:2361-2363` — `… && ok "P4-violation: bare Bash(uv *) is absent…" || ok "P4: bare rule
@@ -1271,3 +1298,147 @@ default (`tick.sh`'s `HEARTBEAT_INTERVAL`) and SKILL.md's own "every 60s" line.
 
 **Shipped:** corrected in the same pass that filed D-TICK-19 (commit `6c3e504`) — the heartbeat
 section now consistently states 60s, matching `tick.sh` and `phases-1-5.md`.
+
+### D-SNAP-02 · an epic whose name is a substring of another is silently deleted
+*Closed 2026-08-13.*
+
+`snapshot.jq`'s epic-done computation matched item names against open epic names with a mutual
+`contains` and no boundary, so `"E10 Payments"` swallowed `"E1"`: a finished epic whose name was a
+substring of an open epic's name vanished from both `epics[]` and `epics_awaiting_probe`, no
+warning fired, and `build_complete` could close the build over that unaccepted epic.
+
+**Shipped:** added a boundary-aware `epic_same($a; $b)` def to `scripts/snapshot.jq` — exact match,
+or one name a `-`-terminated prefix of the other, mirroring `lane.sh`'s own `"$slug"|"$slug"-*`
+convention — and rewired `$epics_done` to use it instead of the bare mutual `contains`. The separate
+epic→milestone `startswith` matching (D-SNAP-01) is untouched. New case `7f1` in
+`scripts/tests/07-snapshot.sh`: a finished epic (`E1`) whose name is a substring of an open epic's
+name (`E10 Payments`) now stays visible and complete rather than being swallowed. Full suite: 995
+passed, 0 failed (994 on `main` plus this one new case), stable across repeated runs.
+
+### D-SNAP-01 · epic→milestone matching is looser than the rule that closes the milestone
+*Closed 2026-08-13.*
+
+The epic→milestone matcher used a bare bidirectional `startswith` with no boundary, then `| first`
+over the matches. An epic `E1` (all members closed) next to milestones `E11 Reporting` and `E1`
+could match `E1` to `E11 Reporting` instead — `needs_probe` stuck permanently true, the wrong
+milestone accepted with no probe run, and the probe brief written from the wrong epic's criteria.
+
+**Shipped:** the match now goes through `epic_same()` (the boundary-aware def D-SNAP-02 added:
+exact match, or one name a `-`-terminated prefix of the other) instead of the bare `startswith`
+pair. This also resolves the `| first` order-dependence as a consequence, not by added machinery —
+with boundary-safe matching an epic name cannot ambiguously match two distinct milestones, so at
+most one candidate ever reaches the filter. New case `7f1b` in `scripts/tests/07-snapshot.sh`,
+covering both payload orderings of the `E1`/`E11 Reporting` scenario. Snapshot section alone: 128
+passed, 0 failed, stable across repeated runs; full suite carries a pre-existing, unrelated
+watch-panes flake (reproduces identically on unmodified `main`, not touched by this fix).
+
+### D-LANE-01 · the closed-ticket guard is in `cmd_transition`, not in `_set_state`
+*Closed 2026-08-13.*
+
+`_set_state`, the shared write path every label-changing verb goes through, ran only
+`_blocked_guard` — the closed-ticket check was a `cmd_transition`-only local. `verdict` and `claim`
+could both write onto a closed ticket: a verdict posted its note and moved a closed ticket to
+`merge-queue`, and a claim assigned and labelled a closed ticket `in-progress`, both rc 0 — the #23
+stale-snapshot race this entry names.
+
+**Shipped:** a shared `_closed_guard` helper (`scripts/lane.sh`, same read-then-refuse shape as
+`_blocked_guard`), wired into `_set_state` right after `_blocked_guard` so every caller inherits it.
+`cmd_verdict` also calls it directly before staging its note, since `_set_state`'s guard alone fires
+too late to stop that write; `cmd_submit`'s existing inline closed check now calls the same helper.
+`cmd_transition`'s local check was kept but narrowed to the `--note` branch only (that write happens
+before `_set_state`, so it still needs its own gate); the plain label-move path now relies solely on
+`_set_state`'s guard — verified against `26-one-helper-one-read.sh`'s call-count assertion, which
+catches a duplicate read. Four new cases in `scripts/tests/19-stale-snapshot.sh`: `verdict` and
+`claim` each refuse on a closed ticket (write nothing), and each still works normally on an open one.
+Full suite: 1000 passed, 1 failed, and separately 998 passed, 3 failed on a second run — all failures
+in `watch-panes`, the same pre-existing flake as D-SNAP-01's closure, not this change; the
+`stale-snapshot` and `one-helper-one-read` sections alone are clean every run (17/0, 10/0).
+
+### D-TEST-01 · the `rm -rf` guard's test never invokes `tick.sh`
+*Closed 2026-08-13.*
+
+The test for `tick.sh`'s scratch-root prune guard (`_prune_scratch`) wrote its own inline
+`case "$SCRATCH_ROOT" in ""|"/"|"$HOME") ... esac` inside a `bash -c` string and asserted on that
+string's own output — it never called `tick.sh` or `_prune_scratch` at all, so deleting the real
+guard line left the test green.
+
+**Shipped:** `scripts/tests/01-lock-and-spawn-lane.sh` section `4i5` now sources `tick.sh` and calls
+the real `_prune_scratch`, with a stand-in `find` on `PATH` that records invocation instead of
+touching the filesystem (running a real destructive sweep against `/` or `$HOME`, even in a test, is
+not acceptable). Asserts the guard blocks `SCRATCH_ROOT` = `""`, `"/"`, `"$HOME"` (stub `find` never
+reached) and a positive control confirms an ordinary scratch root does reach it. Verified to bite:
+deleting the real guard line in `tick.sh` makes the new test fail with `FAIL: scratch: prune guard
+let a dangerous root through`; restoring it passes again. Section `01-lock-and-spawn-lane` alone: 70
+passed, 0 failed, stable across 4 repeated runs. Full-suite runs carry the pre-existing `watch-panes`
+flake and, once, an unrelated one-off timing flake in the same file's wave-replay test under system
+load (did not recur across two more full runs) — neither touches the guard this entry is about.
+
+### D-TEST-03 · "snapshot made no mutating call" denylists a form nothing uses
+*Closed 2026-08-13.*
+
+The `snapshot: every call was a read` guardrail test's denylist regex matched `issue update` /
+`mr merge` / bare `-X POST`-style forms, but every real tracker mutation in this codebase is shaped
+`glab api --method POST|PUT|DELETE|PATCH ...`. A snapshot path issuing
+`glab api --method PUT projects/:fullpath/issues/10 -f add_labels=blocked` matched nothing, so the
+guardrail would have stayed green over a real mutation slipping into the read-only path.
+
+**Shipped:** `scripts/tests/07-snapshot.sh`'s denylist gained one alternative,
+`api --method (POST|PUT|DELETE|PATCH)`, alongside the originals. Checked against every real call
+site (`scripts/trackers/gitlab.sh`, `scripts/forges/github.sh`, `scripts/forges/gitlab.sh`): every
+mutation there is space-separated `--method <VERB>` (no `--method=<VERB>` form exists), and every
+read omits `--method` entirely (defaults to GET) — confirmed the new pattern doesn't over-match reads
+(`api --method GET ...`, plain `api .../notes`, `.../links`, `.../related_merge_requests`,
+`.../milestones` all checked, none match). Verified the entry's own example: the old regex missed
+`api --method PUT projects/foo/issues/10 -f add_labels=blocked`; the new one catches it. `07-snapshot`
+section alone: 115 passed, 0 failed. Full suite: 1001 passed, 1 failed on one run (an unrelated
+one-off timing flake in a different file, `01-lock-and-spawn-lane.sh`'s wave-replay test, same class
+noted in D-TEST-01's closure) and the usual pre-existing `watch-panes` flake on another — neither in
+`07-snapshot`, and the snapshot path itself was confirmed to issue no mutating calls at all.
+
+### D-LIN-01 · every issue read is team-wide, so two products on one Linear team share a build
+*Closed 2026-08-13.*
+
+`_issues_page_query` and `v_board` filtered Linear issue reads on team only; a declared `Project:`
+line never narrowed either query, so two products on one team could resolve the same `Build N`
+issue and silently share (and corrupt) each other's build universe. `_MAP_ISSUE` also emitted the
+constant team key as `project` for every issue, leaving the cross-project blocker guard
+(D-SNAP-15) structurally dead for Linear.
+
+**Shipped:** both queries gain an additive `project: { id: { eq: $project } }` filter when
+`_PROJECT_MODE` is on (no `Project:` line keeps today's team-wide behaviour, byte-for-byte).
+`_MAP_ISSUE` now emits the real Linear project id in project mode, and still the team key when
+project mode is off. New two-product fixture in `scripts/tests/32-linear-driver.sh` (team `ENG`,
+two projects each with its own `Build N` issue and ticket) proves reads scoped to one declared
+project no longer see the other product's build, that `.project` carries the real project id, and
+that the no-`Project:` path is unchanged. Proved red-then-green: with the fix reverted, 4 of the 6
+new assertions failed (cross-product leakage in both directions, wrong `.project` value); restored,
+all 6 pass. Full suite: 1008 passed, 0 failed.
+
+### D-LIN-02 · the project filter declares `$project` as `String!`, a type Linear rejects
+*Closed 2026-08-13.*
+
+`_issues_page_query` and `v_board` each declared the project-filter variable as `$project: String!`,
+but `project: { id: { eq: $project } }` is an `IDComparator` whose `eq` field is typed `ID`, and
+GraphQL does not coerce String into ID in variable position. Linear validates the document before
+executing it, so it refused the whole query — `Variable "$project" of type "String!" used in
+position expecting type "ID"` — and every project-mode read returned nothing at all. A repo
+declaring `Project:` could run neither `issues-open` nor `board`, so `tick.sh snapshot` could not
+read its board and no wave could run. A repo with no `Project:` line kept `_PROJECT_MODE` false and
+was unaffected. Introduced by D-LIN-01's fix, one day old when found.
+
+**Shipped:** `$project: ID!` at both sites, with a comment at each recording that the declared type
+follows the comparator field — `$team` beside it stays `String!` because `key: { eq: }` really is a
+`StringComparator`. The real fix is in the test stub: `scripts/tests/32-linear-driver.sh`'s canned
+API now does what the live one does, reading each `<field>: { eq: $var }` position, looking the
+variable's declared type up in the `query(...)` header, and answering a mismatch with HTTP 400 and
+Linear's own wording. Its type table covers the four comparator fields this driver filters on
+(`id`→`ID`, `number`→`Float`, `key`/`name`→`String`), so the entry's "the suite cannot catch this
+whole class" is no longer true for those. Two supporting stub changes: the list-query case now also
+answers `board`'s `issues(first: 50,` (previously `board` fell through to the relations fixture and
+was untestable here), and the stub applies `--label` server-side. Six new assertions; proved
+red-then-green — with `String!` restored, both new project-mode reads fail validation and four of
+D-LIN-01's own assertions collapse with them, which is correct, since a rejected query returns no
+rows to scope. Full suite: 1014 passed, 0 failed. The live half of **Failure** (a real API call from
+the demand-letter-generator repo) was not re-run; what was verified is that both query builders
+emitted the named token, and that the fixture rejects it exactly as the API's error message says the
+API does.

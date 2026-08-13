@@ -92,6 +92,8 @@ writing a new proposal that touches the same machinery.
 | P90 | Linear's state machine is its Status field, not a label | implemented 2026-08-11 (the whole mapping lives in `trackers/linear.sh`, both directions. On read, `_MAP_ISSUE` synthesises the matching loom label into `labels` from the issue's Status name, resolved against a per-repo map (`_state_map_json`) built from five defaults (`Todo`, `In Progress`, `In Review`, `Merge Queue`, `Blocked`) or `Status <loom-state>: <name>` overrides in the declaration file; an unrecognised Status matches nothing, so the ticket reads as untracked rather than guessed at. On write, `v_issue_relabel` and `v_issue_create` (the latter needed because `fix-ticket` creates with `ready-for-agent` inline in `--labels`) split a loom state name out into a `stateId` mutation — dropped from `--remove` outright, since Status is single-valued — and refuse two state names in one `--add`. `v_issue_close` and the new `_close_state_id` share one `_team_states` query (cached) and honor a `Status closed:` override. `duplicate` joins `completed`/`canceled` as closed everywhere the driver decides open/closed (`_MAP_ISSUE`, `v_issues_open`, `v_issues_by_label`, `v_issue_links`) — the same failure `canceled` would have been if dropped instead of closed. `v_labels` reports the five state names present so `bootstrap.sh cmd_labels` never tries to create them; `bootstrap.sh states` (new, part of `all`) creates whichever of the five a team is missing, as workflow states of type `started`, idempotent by name and covered by `--dry-run` — a no-op, named plainly, on any non-Linear tracker. `references/setup.md` documents the override syntax and warns that a workflow state is a column in every one of the team's views, more invasive than a label. One driver bug the suite caught before it shipped: splitting `--add`/`--labels` CSVs with a `while read` loop over `tr ',' '\n'` silently dropped the last token when the input had no trailing newline — fixed by feeding `printf '%s\n'` into `tr` instead of `printf '%s'`. SKILL.md, `lane.sh`, `tick.sh` and the jq layer untouched, per the proposal's own boundary. Suite 919 → 939, section 32 (`32-linear-driver.sh`) extended with the round trip (read AND write directions, proving the mapping injective), the blocked-hold-via-Status integration through `lane.sh transition`, the duplicate case, and the bootstrap states tests) |
 | P92 | On Linear, an epic is a project milestone, not a project | implemented 2026-08-11 (all inside `trackers/linear.sh`. A `Project: <name or id>` line beside `Team:` in the declaration file — resolved once by the new `_resolve_project`, cached like `_resolve_team` — opts a repo into keeping its epics as ProjectMilestones INSIDE that one project rather than as separate Projects on the team; no such line keeps every pre-P92 behaviour unchanged. `_ISSUE_FIELDS` gains `projectMilestone { id name }`, fetched unconditionally but read by `_MAP_ISSUE` only when project mode (`$pm`) is on, so `epic` becomes the milestone's name instead of the project's. `v_milestones` forks: project mode queries the resolved project's own `projectMilestones`, never the team's other Projects; back-compat keeps the old `team.projects` read. `v_issue_create --milestone-id` forks the same way — `projectId` from the declaration plus `projectMilestoneId` for the milestone, versus the old `projectId` alone. `v_milestone_close` stops calling `projectUpdate` in project mode, because a ProjectMilestone has no state field — Linear only derives a completion percentage from its issues, which is completeness, not acceptance, and a probe may FAIL an epic whose tickets all closed. Acceptance instead lives in a trailer appended to the milestone's own description, `<!-- loom-accepted <ISO8601> -->`, idempotent by presence; `_MAP_MILESTONE` reports `state: closed` exactly when it is there, which `snapshot.jq`'s existing `accepted: ($ms.state == "closed")` already reads unchanged. One `lib.sh` fix travels with it: `_tracker_decl_field` used to read only a bare `Field: value` line, so a human-written bullet like `- Team: **Jordan** (key JOR)` came back empty; it now accepts an optional leading list marker and strips a `**bold**` wrapper and a trailing ` (...)` parenthetical, which both `Team:` and the new `Project:` read through. Suite 939 → 949, section 32 extended with ten p92 assertions: milestone-not-project epic mapping, the declared project's own milestones versus the team's others, trailer-derived state, `--state active` filtering, the append-once close, the `--milestone-id` split, the back-compat contrast with no `Project:` line, and the bulleted-declaration parse for both `Team:` and `Project:`. SKILL.md untouched) |
 | P93 | The merge queue drains itself | implemented 2026-08-12 (`tick.sh`'s merge-lane epilogue now spawns its successor directly instead of firing a wave: `_spawn_build_epilogue` calls the new `chain-merge` verb for a `--merge-lock` lane in place of `tick --from-lane`, after the lock release already there. `chain-merge` reads `snapshot --merge-queue` — a new narrow mode in `cmd_snapshot`/`cmd_snapshot_merge_queue` that skips links, non-queue MRs, non-queue comment threads, milestones and closed members, computed by the new `scripts/merge-queue.jq` off `state_of`/`merge_attempts_of`/`merge_hold_of` (moved into `lib.jq` so both it and `snapshot.jq` share one definition) — resolves the head ticket's worktree with the new `_worktree_for_branch` (`git worktree list --porcelain`, keyed by branch, never by the `<repo>-wt-<n>` name), and spawns `merge-<next>` from the new templated `references/merge-brief.md` (three substitutions: ticket iid, worktree, base). Every step that cannot proceed — empty queue, no open MR, no worktree checked out on the branch, a refused spawn (lock race, stopped loop, live id collision) — falls back to firing `tick --from-lane`, unchanged from before; nothing depends on the fast path succeeding. New section 35 (`35-merge-chain.sh`, 11 assertions): the narrow read's ordering and cap exclusion, the end-to-end chain off a real git worktree with no wave firing, and both fallback paths. Full suite green, no regressions. SKILL.md untouched — chaining was never something a wave decided) |
+| P94 | `fix` proves a defect died; it doesn't have to grow the suite to do it | implemented 2026-08-13 (`references/fix.md` Step 2's Tests subsection now asks, before writing anything, whether a test in the section already exercises the function or scenario the defect lives in — a table row, an assertion inside an existing fixture-building test — before standing up a new `ok` block; a wholly new case only when nothing existing reaches the code path. The red-then-green proof is unchanged either way. Step 1's ask-back list and the Deliver section both reworded from "the new test case name" / "which case is new" to naming the assertion and whether it's new or folded in, so a report can't paper over which happened. Retroactive consolidation of the ~1008 existing assertions was explicitly scoped OUT — gated behind P45's `--mutate` machinery landing first, to be run file-by-file rather than as one blanket pass, and filed separately when it happens. `references/` only, no scripts touched, no test suite change — per `prop.md`'s own rule, `references/` has no executable check and this proposal's correctness is a reading) |
+| P45 | A test must prove it can fail | implemented 2026-08-13 (`scripts/mutate.sh`: a named registry of guards/destructive paths/caps, each marked in production with a stable `# mutate:<name>` comment; `tick-test.sh --mutate [name...]` clones the repo, deletes or inverts one named line, and asserts the WHOLE suite goes red against a pre-mutation baseline — run for real against this codebase's four registered lines (the scratch-prune guard and sweep's `rm -rf` in `tick.sh`, the merge-attempt and same-class-rejection caps in `plan.jq`): 4 caught, 0 escaped, 0 broken. `scripts/lint-tests.sh`: static scan banning `ok` reachable from both arms of one &&/|| chain (the D-TEST-04 shape) and an `ok` guarded only by its own loop variable's non-emptiness (the D-TEST-09 shape) — deliberately narrower than a literal `\|\| ok` ban, which false-positived on the suite's own sound `cond && bad ... \|\| ok ...` idiom; run for real, it finds exactly D-TEST-04 and D-TEST-09's lines and nothing else. `test-lib.sh` gains `assert_mutant_ran()` so a planted-violation test proves its stand-in copy actually executed before trusting an asserted absence (the D-TEST-05 shape, generalized). New section 37 (`37-mutation-tooling.sh`) proves the tooling itself against isolated fixtures, cheap enough for the normal suite; `--mutate` stays qa-only per the proposal. `references/qa.md` points at both flags. Two of the four Fix-direction bullets were already shipped by individually-filed defects before this ran — D-TEST-01 (the `rm -rf` guard's test now actually invokes `tick.sh`) and D-TEST-03 (the no-mutation denylist now catches `glab api --method`) — confirmed still true and left alone rather than redone. Suite 1008 → 1025, full run green; the machine this ran on carries pre-existing timing flakiness in `watch-panes`/`pending`/`chain-merge` sections unrelated to this change (documented at several earlier `D-TEST-*` closures), which is exactly what the baseline-diff in `--mutate` exists to not be fooled by. SKILL.md untouched — this is qa tooling, never a wave decision) |
 | P77 | The snapshot's per-ticket fan-out grows with the board | implemented 2026-08-12 (the fix is NOT the caching the proposal sketched — it is removing the calls. Linear meters two budgets an hour and they are three orders of magnitude apart: 2,500 REQUESTS against 3,000,000 COMPLEXITY points, with any one query capped at 10,000, so the fan-out was spending the scarce budget to protect the abundant one. Two mechanisms in `trackers/linear.sh`. First `_issue_ref` replaces `_issue_uuid`: Linear resolves the human identifier (`JOR-12`) in the `issue(id:)` query, in `issueUpdate(id:)` and in `commentCreate`'s `issueId`, all three verified against the live API, so the request that translated a number into a UUID was pure waste and DOUBLED every per-ticket read and every lane mutation. Second `board [--label L]` nests `relations`, `inverseRelations` and `comments` into the list query — pages of 50, not 250, because the nested connections cost ~100 points per issue and a 250-page would exceed the single-query cap. `tick.sh cmd_snapshot` gains a stage 1b that calls it and splits the result into the same per-iid files the fan-out wrote; a driver without the verb exits non-zero, which IS the capability probe, and the old fan-out runs unchanged — so GitLab is untouched and the fallback is the previously-shipped path rather than new code. MEASURED on a live 63-ticket build, not predicted as the proposal warned it would have to be: 393 requests and 28s before, 15 requests and 5.5s after, with the two snapshot documents byte-identical across every ticket and field. The proposal's two open questions are moot — nothing is cached, so nothing needs an `updated_at` key or a cold-run cost. `LOOM_SNAP_KEEP` added as a debugging seam, since the only way to compare the two paths is to see the intermediate files each wrote. Suite 949 → 966, new section 34 (`34-linear-batching.sh`), which counts REQUESTS rather than asserting output shape — including the planted violation where a UUID-resolving driver spends the extra call, and the assertion that the batched and fanned-out snapshots agree ticket for ticket. SKILL.md untouched) |
 
 ## Independent review round (2026-08-01)
@@ -4532,4 +4534,163 @@ path's win holds on a real board (and whether the fallback path fires as rarely 
 still open to the same `retro` measurement the original proposal named as its consumer.
 
 **Consumer.** The build loop's wall-clock, and `retro`, which reports the wave slice this moves.
+
+## P45 · A test must prove it can fail
+
+**Problem.** The suite is green at 430 and its trustworthiness did not grow with its size. Twelve
+tests were found on 2026-08-06 that cannot fail, or prove something other than what they name.
+The two worst guard the two most destructive mechanisms in the program: `tick-test.sh:394-397`
+never invokes `tick.sh` at all (it asserts on a `case` statement it writes itself inside
+`bash -c`, so deleting the guard in front of the only unbounded `rm -rf` leaves it green), and
+`tick-test.sh:2902-2906` greps for event-log readers matching `(<|read|cat|jq…)`, so it cannot
+see the two `tail`/`grep` readers already in production. Three watch-panes planted violations
+assert only the absence of a call, and pass against a stand-in that is `exit 127`. The
+`ok`-in-both-branches pattern killed in the ntfy block on 2026-08-01 survived at
+`tick-test.sh:2361-2363`.
+
+The `tick-test.sh:<line>` citations above are from 2026-08-06, when the suite was one file at 430
+tests. They no longer resolve — the suite grew, and P76 then split it into
+`scripts/tests/NN-<topic>.sh`. Find each test by the string it asserts; the sections are named
+after their subject, so the search is narrow.
+
+**Fix direction.** Make vacuity mechanically detectable rather than a review finding:
+
+- A `--mutate` mode that, for a named set of production lines (the guards, the destructive
+  paths, the caps), deletes or inverts the line in a scratch copy and asserts the suite goes
+  **red**. A test that stays green over its own mutation is reported by name. Run it in `qa`,
+  not on every suite run.
+- Every planted-violation test asserts the mutated copy *ran* — the `[ "$rc_n" = 0 ] && ok`
+  shape already used at `tick-test.sh:3498` — before asserting what it no longer does.
+- A lint pass over the suite banning `|| ok`, and banning an `ok` whose condition contains only
+  the loop variable that produced it.
+- Where a test asserts "no mutation reached the tracker", assert on the shape every mutation in
+  this codebase actually takes (`glab api --method PUT|POST|DELETE`), not on `glab` subcommands
+  nothing uses.
+
+**Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
+
+**Shipped 2026-08-13.** All four Fix-direction bullets, two of them already covered by defects
+filed and fixed independently in the meantime — checked, not re-done:
+
+- **Bullet 1 (`--mutate` mode), new.** `scripts/mutate.sh`. A registry entry is `name`, a
+  `relfile` under `scripts/`, and either `delete` or a `sub <from> <to>` — matched at run time by
+  a `# mutate:<name>` marker comment on the target line (never a line number or verbatim text,
+  both of which this codebase's own rule says drift). Four lines registered: the scratch-prune
+  guard and `cmd_sweep`'s `rm -rf` in `tick.sh`, and the merge-attempt and same-class-rejection
+  caps in `plan.jq`. Each run clones the whole repo (not just `scripts/` — a section reading
+  `PROPOSALS.md` by relative path needed the sibling file too, caught by one failing clone-only
+  run), mutates the one named line, forces cwd into the clone before running anything out of it
+  (the D-TEST-14 lesson — jq resolves a relative `include` against the caller's cwd before its own
+  `-L` directory), and asserts the WHOLE suite goes red — not a hand-picked section, since
+  mutation-to-section mapping is itself something that drifts silently. A sentinel confirms the
+  mutation physically landed before trusting anything the suite says. Verdict is diffed against a
+  fresh unmutated baseline run of the same clone shape, so this machine's own pre-existing
+  flakiness (a timing-sensitive lock test, occasional `watch-panes`/`chain-merge` noise) never
+  reads as a catch — only a failure absent from the baseline counts. Run for real: **4 caught, 0
+  escaped, 0 broken.** `tick-test.sh --mutate [name...]`, `--list` names the registry; qa-only,
+  minutes not seconds, never part of the default suite run.
+- **Bullet 2 (assert the mutated copy ran), new helper, applied where still needed.**
+  `test-lib.sh`'s `assert_mutant_ran <rc> <output> <label>` calls `bad` and returns 1 when a
+  stand-in copy's rc is 126/127 (bash's own "never started" codes) or its output was empty —
+  both indistinguishable from "ran and stayed silent" any other way — and is silent otherwise, so
+  the caller keeps owning exactly one `ok`/`bad` pair for what it actually names. This is D-TEST-05
+  generalized ("three watch-panes planted violations pass against a dead copy"); D-TEST-05 itself
+  is still open in `OPEN_DEFECTS.md` (applying the helper to its three specific tests is `fix`'s
+  job, not this proposal's).
+- **Bullet 3 (lint pass), new, narrower than literally specified.** `scripts/lint-tests.sh` bans
+  (a) `ok` reachable from both the `&&` and `||` side of one chain, and (b) an `ok` guarded only by
+  its own `for`-loop variable's non-emptiness with no other reference to it. A literal `|| ok` ban
+  was tried first and false-positived on the suite's own dominant, sound idiom,
+  `cond && bad "violation present" || ok "violation absent"` (`bad` always returns 0, so that shape
+  cannot vacuously pass) — narrowed to the two shapes that actually cannot fail, documented in-file
+  as a judgment call. Run for real against the live suite: finds exactly `01-lock-and-spawn-
+  lane.sh:159` (D-TEST-09's line) and `09-config.sh:128` (D-TEST-04's line), plus its own two
+  intentionally-planted fixture lines in its own test section — nothing else, no false positives
+  on the suite's ~1000 other assertions. `tick-test.sh --lint`, seconds, safe to run every time.
+  D-TEST-04 and D-TEST-09 themselves are still open (fixing the two specific tests is `fix`'s job).
+- **Bullet 4 (assert the real mutation shape for "no mutation reached the tracker"), already
+  shipped.** Confirmed via `OPEN_DEFECTS.md`'s `## Closed` section: D-TEST-03, closed 2026-08-13,
+  is this bullet verbatim — the snapshot no-mutation denylist now matches
+  `api --method (POST|PUT|DELETE|PATCH)`. Left untouched.
+- Also already shipped, confirmed the same way: D-TEST-01 (closed 2026-08-13) is the exact
+  `tick-test.sh:394-397` defect this proposal's own Problem section opens with — the scratch-root
+  prune guard's test now actually invokes `tick.sh`. Left untouched.
+
+New section 37 (`37-mutation-tooling.sh`) proves the tooling against isolated, cheap fixtures (a
+two-line stand-in `tick.sh` and a one-test fixture suite for `--mutate`'s CAUGHT/ESCAPED paths;
+planted-violation and legitimate-idiom fixtures for the lint pass; direct probes of
+`assert_mutant_ran`'s four cases) rather than depending on the real registry's fate, so it stays
+fast enough for the normal suite — the real registry's CAUGHT/ESCAPED verdicts are proven
+separately, by hand, once per entry, and reported above rather than re-asserted on every run.
+`references/qa.md` gained one line pointing at `--lint` (Step 1, cheap signals) and one paragraph
+pointing at `--mutate` (a green suite is not proof a guard still works either). Full suite
+1008 → 1025 tests, green. SKILL.md untouched — this is `qa` tooling, never a wave decision.
+
+**Consumer.** `qa`, which currently has to find this by reading 4,435 lines.
+
+## P94 · `fix` proves a defect died; it doesn't have to grow the suite to do it
+
+**Problem.** `references/fix.md`'s own rule — *"a fix is not done until a test fails without
+it"* — is read by `fix`'s Step 2 as "add a new test case", every time, with no check for whether
+an existing case in that file already exercises the function or scenario the defect lives in.
+Every one of the 76 (now 75) entries in `OPEN_DEFECTS.md` that has shipped added at least one new
+`ok` block this way. The suite is now 36 files, 11,358 lines, ~1008 assertions — up from the 430
+in one file that P45 was proposed against a week earlier — and the growth is entirely additive:
+nothing in `fix` or `prop` ever folds a new assertion into an existing case.
+`16-ticker-and-lane-verbs.sh:82-93` shows the shape concretely: three separate `ok` blocks assert
+the exact same `wave:`-prefix-stripping invariant against three literal string variants (case,
+spacing, mixed-case) — a single parametrized loop proves the same thing with the same coverage.
+Nothing wrong with any one of these tests in isolation; the process that adds them has no step
+that ever asks whether the assertion belongs inside a case that already exists.
+
+*(paid: no single incident yet — this is a rate problem, not a correctness incident. The cost is
+diffuse: every wave and every human running `qa` reads a suite that grows by one file-sized unit
+per fix regardless of whether the fix touched new ground or well-trodden ground, and `references/
+optimize.md`'s own warning about `SKILL.md` — "every line it grows is a tax on every session
+forever" — applies just as much to a suite every `fix` and `prop` run has to run in full before
+closing.)*
+
+**Fix direction.** Change what "add that case" means in `references/fix.md`'s Step 2, not the
+red-then-green requirement itself:
+
+- Before writing a new test, check whether a test in that file already exercises the function or
+  scenario the defect lives in. If one does, extend it — a new row in a table-driven case, a new
+  assertion inside a test that already builds the right fixture — rather than standing up a
+  separate `ok` block beside it. Write a wholly new case only when nothing existing reaches this
+  code path.
+- The red-then-green proof is unchanged either way: reverting the fix must still turn the
+  (possibly folded-in) assertion red.
+- Step 1's ask-back list and the Deliver section both currently say "the new test case name" /
+  "which case is new" — reword to "the new assertion — case name, and whether it's a new case or
+  folded into an existing one" so the report can't paper over which happened.
+
+**Retroactive scope, deliberately excluded here.** The same logic could in principle be run
+backward over the existing ~1008 assertions to consolidate duplicates like the one above — but
+not blind, and not in this proposal. `fix`'s whole reason for existing is proof a specific defect
+died; merging two assertions by hand risks silently weakening that proof exactly the way the
+`D-TEST-*` entries already show it can (a merged case that still passes for the wrong reason is
+worse than two verbose ones that each pass for the right one). That's P45's `--mutate` machinery's
+job, not a hand-audit: gate any retroactive consolidation pass behind P45 shipping, and run it
+file-by-file through `--mutate` so a fold that stops the assertion from going red on its original
+defect is caught mechanically, not trusted to review. File that as its own proposal once P45
+lands, scoped to whichever files a `qa` pass or an incidental `fix` touch flags — not a single
+blanket rewrite of all 1008 assertions at once.
+
+**Consumer.** `fix`, and `qa`, which currently has no way to tell a reactively-added duplicate
+from a load-bearing one without reading the whole file.
+
+**Shipped 2026-08-13.** Exactly the fix direction above. `references/fix.md` Step 2's Tests
+subsection now opens by asking whether an existing test in the section already exercises the
+defect's function or scenario before writing anything new — extend it (a table row, an added
+assertion) when one does, a wholly new case only when nothing does — with the `(paid: ...)`
+citation above quoting the `16-ticker-and-lane-verbs.sh:82-93` example inline, since this rule
+had no single prior incident to cite. The red-then-green requirement itself is untouched: a fix
+still isn't finished without one. Step 1's ask-back list and the Deliver section both reworded
+from "the new test case name" / "which case is new" to the assertion-first phrasing. The
+retroactive-consolidation scope stays explicitly out — still gated behind P45, still its own
+proposal when filed. `references/` only; no scripts, no test suite — per `prop.md`'s own rule,
+this proposal's correctness is a reading, not a run.
+
+**Consumer.** `fix`, and `qa`, which currently has no way to tell a reactively-added duplicate
+from a load-bearing one without reading the whole file.
 

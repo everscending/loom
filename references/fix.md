@@ -1,15 +1,29 @@
-# `fix <Dn>` — implement one confirmed defect
+# `fix <Dn>|<severity>` — implement one confirmed defect, or a whole severity tier
 
 Human-run, like `qa`, `retro`, `optimize` and `prop`. Never invoked by a wave.
-The argument is a defect key exactly as `OPEN_DEFECTS.md` writes it —
-`D-TICK-01`, `D-LANE-02`, case insensitive, with or without the `D-`.
+The argument is either a defect key exactly as `OPEN_DEFECTS.md` writes it —
+`D-TICK-01`, `D-LANE-02`, case insensitive, with or without the `D-` — or a
+severity word from the file's own scale, case insensitive: `critical`,
+`high`, `medium`, `low`. A severity argument runs every open defect at that
+severity, one at a time, in the order Step 0 derives — everything from Step 1
+on is unchanged and runs once per item: its own subagent, its own suite run,
+its own close, its own commit.
 
 ## Step 0 — resolve it, and read the rules that bind it
 
-Find `^### D-<FILE>-<nn> ·` in `OPEN_DEFECTS.md`. Not there? Say so and list
-the open keys in that file's section (or all sections if the file segment
-can't be told from the argument). Found under `## Closed`: it's already
-fixed — quote the `**Shipped:**` line and stop.
+**A defect key**: find `^### D-<FILE>-<nn> ·` in `OPEN_DEFECTS.md`. Not
+there? Say so and list the open keys in that file's section (or all sections
+if the file segment can't be told from the argument). Found under
+`## Closed`: it's already fixed — quote the `**Shipped:**` line and stop.
+
+**A severity word**: read the `| Key | Severity | Defect |` table under
+`## Index of open defects` and filter its rows to the given severity — that
+table *is* the open set, so there is nothing else to query. No matching rows:
+say so and stop, naming the severities that do have rows. A batch that stops
+partway — human interrupt, context limit, an entry that no longer matches
+(Step 2) — needs no bookkeeping to resume: closing an entry already removed
+its row from this table, so re-running the same severity word recomputes
+exactly what's left.
 
 Then read `## How to use this file` at the top, not just the entry itself.
 Those rules are this verb's constitution — stable keys, never renumbered,
@@ -17,9 +31,41 @@ line numbers drift, locate by function name — and are restated below only
 where this verb adds something.
 
 **A `Covered by: Pn` line means this defect is not a standalone fix.** It is
-scoped into a larger change decided in `PROPOSALS.md`. Refuse, name the
-proposal, and point at `prop <Pn>` instead — do not implement a partial fix
-that a proposal will later redo.
+scoped into a larger change decided in `PROPOSALS.md`. For a single defect
+key, refuse outright and point at `prop <Pn>` instead — do not implement a
+partial fix that a proposal will later redo. For a severity batch, skip it
+instead: name it and the proposal it belongs to in the final tally, and fix
+everything else at that severity — a batch that hard-stopped on the first
+`prop`-scoped entry it met would make the severity argument useless on any
+tier `prop` has already partly claimed.
+
+## Ordering a severity batch
+
+*(Skip this section for a single defect key — there is nothing to order.)*
+
+State the order and a one-line reason per item before the first fix starts,
+so a human watching can redirect before any edit lands. This is a judgment
+call, not a formula — the same kind of planner judgment this skill surfaces
+elsewhere rather than burying, and the reasoning below is exactly what should
+be said out loud, not silently applied:
+
+1. **File first.** Group defects by the file section they live under in
+   `OPEN_DEFECTS.md` (`scripts/tick.sh`, `scripts/snapshot.jq`, …) and finish
+   one file's group before starting the next. Adjacent fixes in the same
+   file are cheaper to get right back-to-back — the next subagent locates its
+   target against code the previous one already touched, instead of a
+   citation that has already drifted — and it keeps the collision Step 1
+   already warns about (every fix touches `scripts/tick-test.sh`; every close
+   touches `OPEN_DEFECTS.md`) confined to one file pair at a time instead of
+   scattering it across the whole batch.
+2. **Worst blast radius first, within a file.** Read each entry's
+   **Failure** paragraph, not just its title. A defect whose failure is
+   silent — wrong state accepted with no warning, a build or milestone
+   reporting done when it isn't — outranks one whose failure is visible (a
+   refusal, a crash, a stuck-but-flagged state): the silent one keeps
+   compounding for as long as it goes unnoticed. Severity in this file is
+   already a same-pass judgment call, not a fixed ranking (see `## Index of
+   open defects`), and this tiebreak is the same kind of call.
 
 ## Step 1 — hand the implementation to a subagent, in its own worktree
 
@@ -47,7 +93,10 @@ commit is the durable record — both stay where the human can see them.
 **One defect per subagent, and one subagent at a time.** Two defects sound
 parallel and are not: every fix touches `scripts/tick-test.sh` and every close
 touches `OPEN_DEFECTS.md`, so a second lane in flight collides on both. Run
-the second `fix` after the first commits.
+the second `fix` after the first commits. A severity batch is this same rule
+applied automatically down its ordered list: finish one item's Step 4
+(committed, merged, worktree removed) before Step 1 opens for the next —
+nothing about a severity argument grants two items in flight together.
 
 **Model.** Pick by the shape of the entry, not its severity. An entry whose
 **Fix** line names the exact edit and whose blast radius is one function is
@@ -61,7 +110,8 @@ context. Inline into it: the defect entry **verbatim**, the layer order and
 untouchable-contract rules from step 2, the test rule from step 3, *sibling
 skills are off limits*, *never run a real build*, and *do not touch
 `OPEN_DEFECTS.md` and do not commit*. Ask back for: files changed with one
-line each, the `SKILL.md` line delta if any, the new test case name, full
+line each, the `SKILL.md` line delta if any, the new assertion — case name,
+and whether it's a new case or folded into an existing one — full
 `tick-test.sh` counts, and anything in **Failure** that would not reproduce.
 
 If the report says the described behaviour is no longer in the code, stop —
@@ -107,16 +157,31 @@ which governs this file too. Re-scope into this skill's own layer or stop.
 
 ### Tests
 
-*"A fix is not done until a test fails without it"* — the file's own rule.
-The entry's **Test** line names what's missing; add that case to the section
-it belongs to — `scripts/tests/NN-<topic>.sh`, one process each over
-`scripts/test-lib.sh` — in its house style, asserting the guard both holding
-and failing with the fix reverted. While iterating, run that section alone
+*"A fix is not done until a test fails without it"* — the file's own rule,
+and it is about proof, not about volume: what's required is one new
+red-then-green **assertion**, not necessarily one new test process. *(paid:
+`16-ticker-and-lane-verbs.sh:82-93` carries three separate `ok` blocks
+asserting the exact same prefix-stripping invariant against three literal
+string variants — one parametrized case would have proven the same thing.
+Nothing wrong with any one of them alone; nothing in this step ever asked
+whether the assertion belonged inside a case that already existed.)*
+
+The entry's **Test** line names what's missing. Before writing anything,
+check whether a test in that section already exercises the function or
+scenario the defect lives in. If one does, extend it — a new row in a
+table-driven case, a new assertion inside a test that already builds the
+right fixture — rather than standing up a separate `ok` block beside it.
+Write a wholly new case only when nothing existing reaches this code path.
+Either way it lands in the section it belongs to —
+`scripts/tests/NN-<topic>.sh`, one process each over `scripts/test-lib.sh`
+— in its house style, asserting the guard both holding and failing with the
+fix reverted. While iterating, run that section alone
 (`bash scripts/tick-test.sh <name>`, seconds rather than minutes).
 
 Run `scripts/tick-test.sh` in full and report the counts, pass and fail. It
 is the only executable check this skill has. A fix that lands with no new
-red-then-green case in that suite is not finished.
+red-then-green assertion in that suite is not finished — assertion, not
+necessarily test count.
 
 Never run a real build to verify. It costs hours and real money.
 
@@ -162,6 +227,13 @@ is its work and does not need re-deriving:
 
 - what changed, one line per file
 - the `SKILL.md` line delta, and the reason for each line added
-- test counts from `scripts/tick-test.sh`, and which case is new
+- test counts from `scripts/tick-test.sh`, and which assertion is new — a
+  new case, or an addition to one that already existed
 - anything in **Failure** you could not reproduce, or **Covered by** you
   deferred to `prop` — flag it, do not improvise
+
+For a severity batch, deliver each item as its own block in the order it
+landed, then close with one line: how many fixed, how many skipped as
+`Covered by` (naming the proposal each defers to), and confirmation the
+suite was green after every single close along the way, not just the last
+one.

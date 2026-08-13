@@ -124,6 +124,47 @@ PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }
 
+# P45 bullet 2: every planted-violation test that runs a mutated/stand-in copy
+# and then asserts an ABSENCE (no call made, no file written, no pidfile
+# left) has to prove the copy actually ran BEFORE trusting that absence — an
+# absence proves nothing if the thing that would have produced it never
+# reached the code under test. Generalizes the shape already in use at
+# 14-follow-and-panes.sh ([ "$rc_n" = 0 ] && ok ... || bad ...). D-TEST-05
+# demonstrated the failure this closes: three watch-panes planted violations
+# asserted only "no herdr call happened" against a copy that was `exit 127`
+# (missing sibling, a `sed` that stopped matching, a syntax error) — a dead
+# copy reads exactly like a live one whose mechanism was removed, and all
+# three PASSed.
+#
+#   assert_mutant_ran <rc> <combined-output> <label>
+#
+# <rc>/<combined-output> are whatever the caller already captured running the
+# mutated/stand-in copy. Returns 1 (after calling `bad`) when rc is 126 or
+# 127 — the two codes bash itself uses for "never even started" (not
+# executable / not found) — or when the copy produced no output at all, which
+# cannot be told apart from "ran and legitimately stayed silent" any other
+# way. Returns 0 otherwise and calls neither `ok` nor `bad`: "the copy ran" is
+# a precondition for the caller's real assertion, not itself a pass worth
+# counting — every test that adopts this still owns exactly one ok/bad pair
+# for the thing it actually names.
+#
+#   out=$(HERDR_CMD="$deadstub" bash "$WP" 2>&1); rc=$?
+#   assert_mutant_ran "$rc" "$out" "watch-panes-violation" || continue
+#   [ -z "$(grep herdr-call ...)" ] && bad "..." || ok "..."
+assert_mutant_ran() { # <rc> <combined-output> <label>
+    local rc="$1" out="$2" label="$3"
+    case "$rc" in
+        126|127)
+            bad "$label: mutated/stand-in copy did not run (rc $rc — not executable or not found), so the absence below proves nothing"
+            return 1 ;;
+    esac
+    if [ -z "$out" ]; then
+        bad "$label: mutated/stand-in copy produced no output at all — cannot tell 'ran and stayed silent' from 'never started'"
+        return 1
+    fi
+    return 0
+}
+
 cat > "$LOOM_REPO/.loom.yml" <<'EOF'
 heartbeat_stale_minutes: 30
 ntfy:

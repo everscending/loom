@@ -172,7 +172,7 @@ _new_scratch() { # <prefix> → prints the directory
 # scheduler prunes its own. Scoped to $SCRATCH_ROOT and guarded: an empty or
 # unset root must delete nothing.
 _prune_scratch() {
-    case "$SCRATCH_ROOT" in ""|"/"|"$HOME") return 0 ;; esac
+    case "$SCRATCH_ROOT" in ""|"/"|"$HOME") return 0 ;; esac  # mutate:scratch-prune-guard
     [ -d "$SCRATCH_ROOT" ] || return 0
     find "$SCRATCH_ROOT" -mindepth 1 -maxdepth 1 -type d \
          -mtime +"$SCRATCH_KEEP_DAYS" -exec rm -rf {} + 2>/dev/null || true
@@ -378,7 +378,7 @@ cmd_sweep() {
                 echo "sweep: git refused to remove $dir — kept"; _sweep_hold "$dir" git-refused
                 continue
             fi
-            [ -d "$dir" ] && rm -rf "$dir"
+            [ -d "$dir" ] && rm -rf "$dir"  # mutate:sweep-merged-rmrf
             git -C "$REPO_ROOT" branch -d "$branch" >/dev/null 2>&1 || true
             echo "sweep: removed merged worktree $dir (branch $branch)"; _SWEEP_REMOVED=$((_SWEEP_REMOVED+1))
         else

@@ -19,8 +19,11 @@ case "$*" in
   # 51 = merged underneath the caller; 52 = genuinely still open
   *"issues/51/closed_by"*) echo '[{"iid":7,"state":"merged"}]' ;;
   *"issues/52/closed_by"*) echo '[{"iid":8,"state":"opened"}]' ;;
+  *"issues/51/notes"*)     echo '[]' ;;
+  *"issues/52/notes"*)     echo '[]' ;;
   *"issues/51"*)           echo '{"state":"closed","labels":[]}' ;;
   *"issues/52"*)           echo '{"state":"opened","labels":[]}' ;;
+  *"api user"*)            echo '{"id":5,"username":"loom-bot"}' ;;
   *) echo '[]' ;;
 esac
 EOF
@@ -64,6 +67,46 @@ if [ "$rc_tr3" = 0 ] && grep -q 'add_labels=merge-queue' "$SR/c5"; then
     ok "transition: an open ticket still advances normally"
 else
     bad "transition: guard broke the normal path (rc=$rc_tr3)"
+fi
+
+# D-LANE-01: `_set_state` is the shared write path every label-changing verb
+# routes through, but it used to run only `_blocked_guard` — the closed check
+# was a `cmd_transition` local, so `verdict` and `claim` sailed straight past
+# it. Verified with #51 closed: `verdict 51 pass abcd1234` posted the note and
+# moved it to `merge-queue`, `claim 51` assigned and labelled it
+# `in-progress`, both rc 0. Both verbs now refuse, same as `transition` above.
+echo "gate looks good" > "$SR/gate-note.md"
+GLAB_CMD="$SR/glab-stub.sh" STUB_LOG="$SR/c6" "$LANE" verdict 51 pass abcd1234 --file "$SR/gate-note.md" \
+    >"$SR/o6" 2>&1; rc_v1=$?
+if [ "$rc_v1" != 0 ] && grep -q 'is CLOSED' "$SR/o6" \
+   && ! grep -q '/notes' "$SR/c6" && ! grep -q 'add_labels' "$SR/c6"; then
+    ok "verdict: refuses to gate a closed ticket, posts no note and no label"
+else
+    bad "verdict: rc=$rc_v1, out=$(head -1 "$SR/o6")"
+fi
+GLAB_CMD="$SR/glab-stub.sh" STUB_LOG="$SR/c7" "$LANE" claim 51 \
+    >"$SR/o7" 2>&1; rc_c1=$?
+if [ "$rc_c1" != 0 ] && grep -q 'is CLOSED' "$SR/o7" \
+   && ! grep -q 'add_labels' "$SR/c7"; then
+    ok "claim: refuses to claim a closed ticket, writes nothing"
+else
+    bad "claim: rc=$rc_c1, out=$(head -1 "$SR/o7")"
+fi
+# Counterfactual: an open ticket still gates and claims normally — the guard
+# must not swallow a legitimate write.
+GLAB_CMD="$SR/glab-stub.sh" STUB_LOG="$SR/c8" "$LANE" verdict 52 pass cafe0001 --file "$SR/gate-note.md" \
+    >"$SR/o8" 2>&1; rc_v2=$?
+if [ "$rc_v2" = 0 ] && grep -q '/notes' "$SR/c8" && grep -q 'add_labels=merge-queue' "$SR/c8"; then
+    ok "verdict: an open ticket still gates normally"
+else
+    bad "verdict: guard broke the normal path (rc=$rc_v2, out=$(head -1 "$SR/o8"))"
+fi
+GLAB_CMD="$SR/glab-stub.sh" STUB_LOG="$SR/c9" "$LANE" claim 52 \
+    >"$SR/o9" 2>&1; rc_c2=$?
+if [ "$rc_c2" = 0 ] && grep -q 'add_labels=in-progress' "$SR/c9" && grep -q 'assignee_ids' "$SR/c9"; then
+    ok "claim: an open ticket still claims normally"
+else
+    bad "claim: guard broke the normal path (rc=$rc_c2, out=$(head -1 "$SR/o9"))"
 fi
 
 # 22. Hard cut from the pre-rename config name. A repo carrying only

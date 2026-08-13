@@ -11,6 +11,14 @@
 #   tick-test.sh snapshot         only sections whose name matches `snapshot`
 #   tick-test.sh 07 21            by number
 #   tick-test.sh --list           what the sections are
+#   tick-test.sh --lint           scripts/lint-tests.sh: bans two `ok` shapes
+#                                 that cannot fail (P45) — seconds, safe to
+#                                 run every time
+#   tick-test.sh --mutate [name..] scripts/mutate.sh: for each named guard /
+#                                 destructive path / cap (every one, if no
+#                                 name given), deletes or inverts it in a
+#                                 scratch clone and asserts the suite goes
+#                                 red — minutes, a `qa` check, not a suite one
 #
 # A section is standalone: `bash scripts/tests/07-snapshot.sh` works on its own
 # and prints its own counts. That is the point of the split — the full run is
@@ -18,6 +26,12 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+
+case "${1:-}" in
+    --lint)   shift; exec "$DIR/lint-tests.sh" "$@" ;;
+    --mutate) shift; exec "$DIR/mutate.sh" "$@" ;;
+esac
+
 # The section directory is a seam so the harness section can drive this file
 # against planted sections instead of the real ones.
 TESTS="${LOOM_TEST_DIR:-$DIR/tests}"
