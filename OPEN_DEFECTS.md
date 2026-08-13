@@ -494,6 +494,26 @@ Sections at `:1057`, `:1111`, `:1128`, `:1167` depend on the prefix form working
 invites a future "fix" that would rewrite working tests. Not a test defect; a trap for the next
 maintainer.
 
+### D-TEST-15 · repeat runs on unchanged code disagree on which assertions fail
+Three consecutive full-suite runs against the same unchanged tree named different failing
+assertions, while the total assertion count held at 980 every time: run 1 (serial, the suite as it
+stood before the parallel driver landed) — 976 passed, 4 failed; run 2 (`LOOM_TEST_JOBS=1`, serial,
+through the new parallel-capable driver) — 979 passed, 1 failed, naming `ticker: suppressed
+notification left no local trace`; run 3 (parallel, default job count) — 976 passed, 4 failed,
+naming `scratch: two waves shared a scratch directory` (`tests/01-lock-and-spawn-lane.sh`),
+`D-TICK-18: false positive — a plain prompt was refused`, and twice `document: the loom-only driver
+could not drive a snapshot (rc=3, jq: error: module not found: lib)` / `document: plan could not
+read a snapshot built from the loom-only driver` (`tests/29-tracker-driver.sh`,
+`tests/32-linear-driver.sh`).
+**Failure:** none of these assertions or the files they live in changed between runs. Run 2 was
+strictly serial and still disagreed with run 1, so the nondeterminism is not concurrency-induced —
+it predates the parallel driver and would have been invisible under the old one-shot serial suite,
+which nobody had reason to run back-to-back and diff.
+**Note:** not root-caused. Recorded as observed nondeterminism across five distinct assertions in
+four files, not as a pinned defect — isolating each one (rerun standalone, repeatedly, per the `fix`
+verb's own "two runs that disagree mean a flaky test, not a fixed one" rule) is separate work from
+what surfaced it.
+
 ---
 
 ## `SKILL.md`
