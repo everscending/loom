@@ -11,7 +11,8 @@ introduced five new ones.
 ## How to use this file
 
 **Keys are stable and never reused.** `D-<FILE>-<nn>`, where `<FILE>` is `TICK`, `SNAP`, `LANE`,
-`BOOT`, `PANE`, `TEST`, `SKILL` or `REF`. Cite a key in a commit message, a proposal, or a ticket:
+`BOOT`, `PANE`, `TEST`, `SKILL`, `REF` or `LIN` (`scripts/trackers/linear.sh`). Cite a key in a
+commit message, a proposal, or a ticket:
 "fixes D-LANE-02". A fixed defect keeps its key and moves to the Closed section at the bottom with
 the date and what shipped — never delete a row, and never renumber.
 
@@ -30,11 +31,11 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-75 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
+76 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
 just a new filing — 6 entries closed as part of the same pass, already fixed by earlier proposals
-but never marked); D-SNAP-16 was filed later, on **2026-08-13**, and verified the same way against
-the live thread that triggered it. Severity is a same-pass judgment call, not part of the original
-review:
+but never marked); D-SNAP-16 and D-LIN-01 were filed later, on **2026-08-13**, and verified the
+same way against the live board that triggered each. Severity is a same-pass judgment call, not
+part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -50,6 +51,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
+| D-LIN-01 | Critical | every issue read is team-wide, so two products on one Linear team share a build |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -743,6 +745,53 @@ worktrees, while a human trusting the documented bound assumes the loop would re
 `model::fable` label as a first-class per-ticket tier. Lowest rank: the docs also say "or full id"
 and the value passes straight to `claude --model`, so nothing breaks.
 **Covered by:** P50.
+
+---
+
+## `scripts/trackers/linear.sh`
+
+### D-LIN-01 · every issue read is team-wide, so two products on one Linear team share a build
+`_issues_page_query` (`:336`) and `v_board` (`:541`) both filter on `team: { key: { eq: $team } }`
+and nothing else. `v_issues_open` and `v_board` each call `_resolve_project` first — it resolves
+`PROJECT_ID` and sets `_PROJECT_MODE` — and then neither uses it in a filter. So a repo that
+declares `Project:` still reads the whole team's issues.
+
+Two consequences, and the second is the dangerous one:
+
+1. **Build discovery crosses products.** `cmd_snapshot` (`tick.sh:2391`) picks the current build
+   as the highest-iid open issue matching `^Build [0-9]+$` in whatever `issues-open` returned, then
+   derives the universe label from its title. With two products on one team, both repos resolve the
+   *same* `Build N` issue — whichever was created last — and therefore the same `build-N` label.
+   The loser's members are not in that label, so its whole build silently leaves its own universe,
+   and the winner's wave schedules and spawns lanes against another product's tickets inside the
+   wrong repo's worktrees.
+2. **`project` carries the team key, not the project.** `_MAP_ISSUE` (`:296`) emits
+   `project: $team` — a constant for every issue the driver returns. `gitlab.sh` (`:65`, `:73`)
+   emits the real `project_id` in the same field. `snapshot.jq:161` guards cross-project blockers
+   with `$proj != $home`, which on Linear compares the team key against itself and can never be
+   true, so the guard D-SNAP-15 is about is not merely weak here — it is dead. A native blocking
+   link to another product's issue is resolved against the home open-set as if it were local.
+
+This is P92 half-landed: it moved epics to ProjectMilestones inside a declared project and left
+every issue read at team scope.
+
+**Failure:** Linear team JOR carries two products — Triggers API and Demand Letter Generator, the
+latter declaring `Project: Demand Letter Generator`. On 2026-08-13, with Triggers API's `Build 2`
+(JOR-86) live at 5 open tickets — one in progress, two in review, two blocked — `linear.sh
+issues-open`, run from the demand-letter-generator repo, returned 85 issues: that repo's own 76,
+plus JOR-86 and its members. Demand Letter Generator therefore already resolved another product's
+build as its own, before defining a build of its own. Publishing its `Build 3` would have flipped
+the collision the other way and dropped Triggers API's five live tickets out of its universe
+mid-build. Caught only because phase 5 checked for an existing build issue by hand.
+
+**The suite could not have caught it.** Every tracker-driver test in `29-tracker-driver.sh` runs a
+single-product board, which is the only shape in which team scope and project scope agree.
+
+**Fix:** thread `PROJECT_ID` into both issue filters when `_PROJECT_MODE` is on
+(`project: { id: { eq: $project } }`), and emit the real project — `$i.project.id` — from
+`_MAP_ISSUE` instead of `$team`. Back-compat is the existing rule: no `Project:` line means
+`_PROJECT_MODE` stays false and both reads keep today's team-wide behaviour. A regression test
+needs a two-product fixture with a `Build N` issue in each.
 
 ---
 
