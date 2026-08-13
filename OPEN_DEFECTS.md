@@ -30,9 +30,11 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-74 open, verified against the shipping code on **2026-08-12** (a full re-check, not just a new
-filing — 6 entries closed as part of the same pass, already fixed by earlier proposals but never
-marked). Severity is a same-pass judgment call, not part of the original review:
+75 open. 74 of them were verified against the shipping code on **2026-08-12** (a full re-check, not
+just a new filing — 6 entries closed as part of the same pass, already fixed by earlier proposals
+but never marked); D-SNAP-16 was filed later, on **2026-08-13**, and verified the same way against
+the live thread that triggered it. Severity is a same-pass judgment call, not part of the original
+review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -56,6 +58,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
 | D-SNAP-08 | High | the config-line filter deletes real epic names |
 | D-SNAP-10 | High | `merge_attempts` ignores the scope-reset marker |
+| D-SNAP-16 | High | one verdict note stamped twice counts as two rejections |
 | D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
 | D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
 | D-BOOT-03 | High | `cmd_settings \|\| true` turns a settings refusal into "bootstrap: done" |
@@ -299,6 +302,33 @@ issue #5 in another project then falls to `($open_iids | index(5)) == null`, so 
 blocker whose iid does not exist locally reports `closed: true` → `unblocked: true` → the ticket is
 scheduled. Body-sourced blockers (`:199`) take this path by design; this one is an accident of
 `$bi` being absent.
+
+### D-SNAP-16 · one verdict note stamped twice counts as two rejections
+`snapshot.jq` `rejections_of` → `lib.jq:42-43` `orch_verdict_scan` — the scan is jq's `scan()`,
+which returns **every** match in a body, and each match becomes its own verdict entry carrying that
+note's `created_at` and index. One comment holding the same trailer twice is therefore two FAILs,
+one apparent rejection round apart, with identical timestamps.
+**Failure:** `same_class_tail` reaches 2 off a single gate failure, which is exactly the cap
+`plan.jq:243` uses to stop reworking and park the ticket for a human design decision. The ticket is
+then re-blocked on every subsequent wave, because the count is re-derived from the thread and never
+from the branch, and the only exit is `lane.sh rescope` — refused for automated callers, so it
+needs a human. Same inflation shape as D-SNAP-10, one layer down: that entry is a bare `test()` over
+notes, this one is a repeated match inside a single note.
+**Confirmed live** (build-2 #62, 2026-08-13): the thread holds exactly one `orch-verdict FAIL`
+comment (the 05:14 gate verdict on `787a64af`), whose trailer is written twice at the end of the
+body. Replaying the shipping `rejections_of` over that note returns
+`{total: 2, last_class: "scope-connection-collision", same_class_tail: 2}`; the same note with the
+trailer written once returns `{total: 1, …, same_class_tail: 1}`. The wave's blocked report opened
+with the words "Two straight gate rejections" — prose generated from the inflated count, describing
+a second rejection that never happened. #62 sat parked for roughly nine hours on a cap it never hit,
+and each later wave re-derived the same verdict and re-blocked it without reading the branch, whose
+diff no longer contained the file the rejection was about.
+**Fix:** collapse verdicts per note before they reach the tail scan — one entry per `(note, sha)`
+at most, so a trailer repeated in one body counts once. Note that a *quoted* trailer inflates the
+count the same way: the pattern needs the sha, so ordinary prose is safe, but any note reproducing
+a full verdict trailer verbatim (a summary, a retro, a hand-written report) reads as a real verdict.
+**Test:** nothing asserts the count for a note carrying two trailers. `tick-test.sh`'s rescope and
+verdict cases each write one trailer per note, which is the only shape ever exercised.
 
 ---
 
