@@ -35,8 +35,16 @@ hand-coding under a deadline.)*
    and reader sit in different epics. Pin: every wire shape (request and
    response), a module map for **every** deliverable (ownership, layering,
    forbidden imports) — not just the one an audit named — a vocabulary file
-   with a words-we-avoid table, every environment variable with default and
-   reader, the URL map, test-hook names, and **the exported signature of any
+   with a words-we-avoid table, every environment variable with its reader,
+   its **loader per process class** (app dev, integration tests, gate shell,
+   CI — a named, committed mechanism for each) and a local default **applied
+   by committed code** — a value present only in `.env` or `.env.example` is
+   not a default, and mixed fallback coverage inside one config module (some
+   variables with in-code defaults, some without) is refused on sight, because
+   the uncovered ones fall through to whatever ambient state the host exposes
+   *(paid: demand-letter build-1 — the S3 client never pinned credentials,
+   nothing loaded `.env` into the test process, and two tickets re-blocked the
+   same day they were unblocked)* — the URL map, test-hook names, and **the exported signature of any
    in-repo module more than one ticket will touch** — a component's props, a
    hook's arguments, a store's actions. A prop contract is a seam exactly as
    much as a wire shape is; it simply never leaves the process, so a pin list
@@ -289,7 +297,11 @@ frontier that merges, over a wider one that collides.
 - no gate command or live check binds a fixed listen port — a test fixture
   binds port 0 and passes the port to its client, because sibling lanes and
   sibling builds share the host and a fixed port is a collision waiting for
-  the second boot.
+  the second boot;
+- no gate or integration suite depends on ambient shell variables — it must
+  pass from a clean environment (`env -i` plus the contract's committed
+  defaults and loaders), because a suite that borrows the host's exported
+  credentials passes on the lane's machine and fails on the gate's.
 
 ## Phase 5 · `build` — define or adjust the build (never starts it)
 

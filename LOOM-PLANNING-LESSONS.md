@@ -22,6 +22,66 @@ Newest first.
 
 ---
 
+## PI-10 · The environment contract pinned variable values but never pinned a loader, so tests ran on ambient shell state
+
+**Date:** 2026-08-14 · **Status:** fixed, round 1 · **Incidents:** 1 (two tickets, second block of the day)
+
+**Symptom.** JOR-93 and JOR-95 (demand-letter build-1), freshly unblocked from
+PI-09's port collision, both re-blocked the same afternoon on
+`InvalidAccessKeyId` from MinIO. `packages/shared/src/s3-config.ts` builds its
+S3 client from `AWS_REGION` and `S3_ENDPOINT` only and never sets
+`credentials`; the AWS SDK falls through to its default provider chain. The
+pinned local credentials exist — in `.env` and `.env.example` — but no
+committed code loads `.env` into any test process (no dotenv, no vitest
+`setupFiles`/`env`). `DATABASE_URL`, `S3_ENDPOINT` and `SQS_QUEUE_URL` all
+carry in-code fallbacks; the two credential variables carry none. A clean gate
+shell therefore sends whatever the host's ambient chain finds, and MinIO
+rejects it. The failing file sits in `packages/shared` — owned by
+already-merged tickets — so neither blocked lane could fix it inside its own
+surface.
+
+**Cost.** Two gated tickets blocked a second time in one day, one pregate
+verdict that misdiagnosed the cause (blamed the port remap), two lanes
+independently reproducing and diagnosing one defect, six-plus dependents
+stalled.
+
+**Insight.** Phase 1–2 step 5 already demands "every environment variable with
+default and reader," and the contract met it — on paper. *A value that appears
+only in a gitignored env file is not a default; a default is code that applies
+it.* The rule pinned the value and the reader but never the **loader**: the
+committed mechanism by which each process class — app dev, integration test,
+gate shell, CI — actually receives the variable. CI happened to set the two
+vars explicitly, dev shells happened to export them, so every empirical run
+before the gate passed; only the clean shell told the truth. Same shape as
+PI-09: pass/fail depends on ambient host state, so the check must be
+structural, not empirical. The defect even had a visible signature in the
+draft: one config module where some variables have in-code fallbacks and
+others silently don't.
+
+**Fix.** Two edits to `references/phases-1-5.md`:
+
+1. *Phase 1–2, step 5 (Pin every shared surface)* — "every environment
+   variable with default and reader" becomes: every environment variable with
+   its reader, **its loader per process class** (app dev, integration tests,
+   gate shell, CI — named mechanism each, committed to the repo), and a local
+   default **applied by committed code**. A value present only in `.env` or
+   `.env.example` is refused as a default on sight. Mixed fallback coverage
+   inside one config module — some variables with in-code defaults, some
+   without — is refused on sight; it is this failure's signature.
+2. *Phase 4, check list (Ends group)* — a gate or integration suite whose
+   outcome depends on ambient shell variables is a defect; the suite must pass
+   from a clean environment (`env -i` plus the contract's committed defaults).
+   Echoes PI-09's port rule: the host is shared, so nothing may borrow its
+   state.
+
+**What to watch.** The misdiagnosed round-2 verdict is runtime, not planning:
+a pregate that names a cause it has not verified sends the next lane down the
+wrong path. Also whether "loader per process class" survives contact with
+serverless targets, where the deployed loader (Lambda env config) differs
+from all four local classes.
+
+---
+
 ## PI-09 · The environment contract pinned well-known host ports, and sibling builds own the same machine
 
 **Date:** 2026-08-14 · **Status:** fixed, round 1 · **Incidents:** 1 (three tickets)
