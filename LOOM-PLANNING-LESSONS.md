@@ -24,7 +24,7 @@ Newest first.
 
 ## PI-10 · The environment contract pinned variable values but never pinned a loader, so tests ran on ambient shell state
 
-**Date:** 2026-08-14 · **Status:** fixed, round 1 · **Incidents:** 1 (two tickets, second block of the day)
+**Date:** 2026-08-14 · **Status:** fixed-and-recurred, round 2 · **Incidents:** 2 (three tickets)
 
 **Symptom.** JOR-93 and JOR-95 (demand-letter build-1), freshly unblocked from
 PI-09's port collision, both re-blocked the same afternoon on
@@ -79,6 +79,47 @@ a pregate that names a cause it has not verified sends the next lane down the
 wrong path. Also whether "loader per process class" survives contact with
 serverless targets, where the deployed loader (Lambda env config) differs
 from all four local classes.
+
+**Round 2 — 2026-08-14 · demand-letter build-1 (JOR-107).** Three hours after
+the round-1 fix landed, JOR-107 (E2-4, the web login screen and app shell) hit
+the rejection cap on the same class: `db:migrate` threw `DATABASE_URL is not
+set` before any e2e spec ran. The value sits in `.env`; nothing committed
+loads it into the `test:e2e` chain. Round 1's own symptom text had cleared
+this variable — "DATABASE_URL … carr[ies] in-code fallbacks" — but that
+fallback belongs to a different reader; `packages/db/src/migrate.ts` fails
+fast on a missing value by design (E1-5's own contract). The audit unit was
+the variable; the defect unit is the (variable, reader, process class) triple.
+
+Round 1 failed twice over, one of them a gap in PI-01 round 2's mid-build
+rule. First, that rule re-audits the *published ticket text* — but this class
+lives in merged code, and no checklist pass over ticket bodies adds a dotenv
+loader to the repo. Second, the incident's unblock was instance-scoped:
+commit `90d4ed4` pinned the two MinIO credential variables inside
+`resolveS3ClientConfig` and requeued the two blocked lanes, and nobody
+enumerated the contract's other variables against the class the lesson had
+just named. Every sibling instance stayed armed; the next gated ticket found
+one the same afternoon.
+
+**Fix, round 2.** One edit to `references/phases-1-5.md`, phase 5, extending
+PI-01 round 2's mid-build re-audit:
+
+1. The re-audit splits by where the lesson's defect lives. A ticket-text
+   defect re-audits the published set (unchanged). A repo-level defect — one
+   with a code or harness signature — sweeps the *merged repo* for every
+   instance of the class, and the sweep's findings become one remediation
+   ticket blocked ahead of every tier whose gate can touch the class. A text
+   re-audit alone is not application, and fixing only the instance that
+   failed is refused as an unblock.
+2. For this class the sweep unit is named: every variable in the environment
+   contract × every process class (app dev, integration test, e2e, gate
+   shell, CI), each cell verified to have a committed loader. A variable
+   "already having a fallback" is checked per reader, not per name.
+
+**What to watch.** The sweep is only as good as the contract's variable list;
+a variable no document names is invisible to it. And the remediation ticket
+adds a serial step in front of blocked lanes — if that stalls a wave, the
+answer is a smaller sweep scoped to the failing process class, not skipping
+the sweep.
 
 ---
 

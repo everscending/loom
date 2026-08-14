@@ -343,13 +343,26 @@ ai-workout build-1 — merge lanes died on missing `gate.sh` and
 `gen_openapi_client.py`, five tickets mass-blocked, ~1h stall for a human
 waiver.)*
 
-**A lesson landing mid-build re-audits the published set.** When a fix to this
-file lands while a build holds published, not-yet-built tickets, run the new
-check over that set before the next wave — the kept phase-4 draft file makes
-it a checklist pass, and `replan` carries any amendments. A fix that reaches
-only the next plan is a lesson not applied. *(paid: demand-letter build-1 —
-the Ownership check landed the day after the tickets published, nothing
-re-read them, and its exact failure class recurred in the merge queue.)*
+**A lesson landing mid-build re-audits the published set — and sweeps the
+repo when the defect lives there.** When a fix to this file lands while a
+build holds published, not-yet-built tickets, apply it by where the defect
+lives, before the next wave. A ticket-text defect: run the new check over the
+published set — the kept phase-4 draft file makes it a checklist pass, and
+`replan` carries any amendments. A repo-level defect — one with a code or
+harness signature — additionally sweeps the *merged repo* for every instance
+of the class; the sweep's findings become one remediation ticket blocked
+ahead of every tier whose gate can touch the class. A text re-audit alone is
+not application, and an unblock that fixes only the instance that failed is
+refused. For the environment-contract class the sweep unit is named: every
+variable in the contract × every process class (app dev, integration test,
+e2e, gate shell, CI), each cell verified to have a committed loader —
+"already has a fallback" is checked per reader, not per variable name. A fix
+that reaches only the next plan is a lesson not applied. *(paid:
+demand-letter build-1, twice — the Ownership check landed the day after the
+tickets published, nothing re-read them, and its failure class recurred in
+the merge queue; then PI-10's loader rule landed mid-build, the unblock
+pinned only the failing MinIO credentials, and the same class re-blocked the
+next gated ticket on `DATABASE_URL` three hours later.)*
 
 `build` never loads the agent and never spends; the deliberate trigger is a
 separate verb.
