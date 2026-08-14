@@ -58,6 +58,7 @@ evidence, and implementation notes belong in this file, not there.
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
+| P95 | Consolidate the existing suite's reactive duplicates, gated behind `--mutate` | open — proposed 2026-08-13; the found example (`16-ticker-and-lane-verbs.sh:82-93`) folded 2026-08-14, `--mutate` confirms no coverage lost; rest of the suite unswept, opportunistic per the Fix direction |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
 | P19 | Cut the repeated advisory noise | open |
 | P20 | Parallelise the human-gated front half | open |
@@ -245,6 +246,66 @@ bootstrap seeds nothing.
 with the collector down (seam built wrong), or dashboards nobody has opened
 after two instrumented builds (artifact without a consumer — drop it).
 
+
+## P95 · Consolidate the existing suite's reactive duplicates, gated behind `--mutate`
+
+**Problem.** P94 stops new reactive duplication going forward — `fix`'s Step 2 now folds a new
+assertion into existing coverage where one already reaches the code path. It does nothing about
+the ~1008 assertions already on disk from years of "one new test per fix" with no such check.
+`16-ticker-and-lane-verbs.sh:82-93` is a live, already-confirmed example: three separate `ok`
+blocks assert the exact same `wave:`-prefix-stripping invariant against three literal string
+variants (case, spacing, mixed-case) — one parametrized loop proves the same thing. There are
+almost certainly more; that one was found by inspection, not by a systematic pass.
+
+Hand-merging old assertions is not safe on its own. `fix`'s whole reason for existing is proof a
+specific defect died, and a merge done by eye risks silently weakening that proof — exactly the
+shape the `D-TEST-*` entries already showed: a test that reads as thorough but cannot actually
+fail. P45 shipped the tool that makes that checkable instead of a trust call: `scripts/mutate.sh`
+proves a guard is still caught after any edit, by mutating the production line and asserting the
+whole suite goes red. This proposal was explicitly deferred behind P45 landing, in P94's own text,
+for exactly that reason — it's now unblocked.
+
+**Fix direction.**
+
+- Do not run this as one blanket rewrite of all ~1008 assertions. Scope it to whichever file a
+  `qa` round or an incidental `fix`/`prop` touch already has open — the same "while you're in
+  there" discipline `references/optimize.md` already uses for `SKILL.md` compaction, applied to
+  the test suite instead.
+- Per file: identify candidate duplicates (N assertions differing only in a literal input against
+  the same invariant — the `--mutate` registry's own "named production line" concept extends
+  naturally to "named invariant a test proves"), fold them into one table-driven case.
+- Before folding, run `scripts/tick-test.sh --mutate` against whatever production line the
+  candidate assertions guard (register one if none exists yet). After folding, run it again.
+  A fold that turns a target's verdict from CAUGHT to ESCAPED is a regression — the merge was
+  wrong, not the tool; revert and re-approach, don't force it through.
+- Where no `--mutate` registry entry exists for what a candidate duplicate actually guards (most
+  of the suite — the registry today has four entries, all named by P45 for a different purpose),
+  `scripts/tick-test.sh --lint`'s two checks don't help either, since they catch vacuity, not
+  redundancy. A fold with no mutate coverage available still needs the manual proof `fix.md`
+  already requires elsewhere: revert the merge, confirm the suite goes red on the original
+  defect's reproduction, restore it. Do not fold what cannot be proven this way — leave it
+  duplicated rather than guess.
+- Track progress as a running note (not a new file) in this proposal until it's done or the
+  human decides remaining duplication isn't worth the churn; archive with whatever fraction of
+  the suite got consolidated and by how much it shrank.
+
+**What this is not.** Not a size target. Nothing here says the suite must shrink by X, and a file
+with three assertions that each prove something genuinely different stays at three. The only
+question per candidate is "does one case already prove this," never "is the count too high."
+
+**Consumer.** `qa`, and every wave that reads this suite's size as a signal of its own health.
+
+**Progress.** 2026-08-14: folded the confirmed example. Of the three `ok` blocks at
+`16-ticker-and-lane-verbs.sh:82-93`, two (lines 88-90, 91-93) asserted the same invariant —
+stripping preserves note text — against a lowercase and a mixed-case literal; folded into one
+table-driven loop over both variants. The third (85-87, "no doubling") already proved a distinct
+invariant in one assertion spanning both variants and was left alone. No `--mutate` registry entry
+existed for the strip itself (`render-events.jq`'s `sub("(?i)^\\s*wave\\s*:\\s*"; "")`); registered
+`wave-prefix-strip` (sub, drops the `(?i)` flag) and ran it before and after folding — CAUGHT both
+times, so the fold lost no coverage. Full suite: 1043 passed, 0 failed. No systematic pass made
+over the remaining ~1008 assertions — this was the one example already found by inspection.
+Remaining work stays opportunistic per the Fix direction: fold on the next `qa`/`fix`/`prop` touch
+of a file, not as a dedicated sweep.
 
 ## P50 · `references/loom-config.md` is generated from `resolve-config`
 

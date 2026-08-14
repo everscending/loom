@@ -96,7 +96,7 @@ fromjson? // empty | . as $e
   # prefix; deduping it here is plumbing, and cheaper than a rule telling
   # every wave not to.
   elif $e.ev == "wave_note" then
-    "wave: " + (($e.note // "") | sub("(?i)^\\s*wave\\s*:\\s*"; ""))
+    "wave: " + (($e.note // "") | sub("(?i)^\\s*wave\\s*:\\s*"; ""))  # mutate:wave-prefix-strip
   elif $e.ev == "pregate_reduced" then
     $warn + "⚠ " + (stage($e.id // "") | "\(.t) — \(.s)")
     + ": \($e.runner // "the gate runner") missing — tier \($e.tier // "?") reduced to review-only (bootstrap not merged)" + $rst
