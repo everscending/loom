@@ -31,13 +31,13 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-71 open, counted from the table below, which is the live set. Most were verified against the
+70 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
 D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
-against the live board that triggered each. D-SNAP-17, D-LIN-01 and D-LIN-02 have since been fixed
-and closed; D-LIN-03 is a defect in D-LIN-01's fix, found the day after it shipped, and is the
-second one that fix has produced. Severity is a same-pass judgment call, not part of the original review:
+against the live board that triggered each. All of those but D-SNAP-16 have since been fixed and
+closed; D-LIN-03 was a defect in D-LIN-01's fix, found the day after it shipped, and was the
+second one that fix produced. Severity is a same-pass judgment call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -53,7 +53,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
-| D-LIN-03 | Critical | project-scoped reads hide the Build issue, emptying the universe |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -746,45 +745,6 @@ and the value passes straight to `claude --model`, so nothing breaks.
 
 ---
 
-## `scripts/trackers/linear.sh`
-
-### D-LIN-03 · project-scoped reads hide the Build issue, emptying the universe
-A repo whose `docs/agents/issue-tracker.md` declares a `Project:` puts `_resolve_project`
-(`linear.sh:138-157`) into project mode, and every issue read then carries
-`project: { id: { eq: $project } }` — `_issues_page_query` (`:363-380`) and `v_board` (`:577`).
-But the Build issue is not project work. `tick.sh:2391-2394` locates it by scanning the open-issue
-payload for a title matching `^Build [0-9]+$`, and `:2395-2396` then *derives* the build label from
-that title. Build issues carry no project and no labels — in the live workspace both `Build 2`
-(#86) and `Build 1` (#84) have `project: null, labels: []`. Project scoping therefore drops the one
-issue the whole universe is derived from.
-**Failure:** `nbuild` reads 0, `snapshot` emits `build: null` with `tickets: []`, and `plan`
-answers "No open Build issue. Nothing to schedule." The wave exits **rc 0**. Nothing is blocked,
-nothing is red, no notification names a cause — the loop reports the same thing it would report for
-a build that had genuinely finished, once a minute, forever. It never self-recovers, because the
-input it needs is the input it cannot see. The blast radius is every repo that declares a
-`Project:`, not one ticket. Note `snapshot` already warns when it finds *more than one* Build issue
-(`_snap_warn`, `tick.sh:2398`); the case where it finds none is the silent one, even though
-`tick.sh:484` already distinguishes "there IS a build and the tracker call FAILED" as a state worth
-naming.
-**Confirmed live** (triggers-api build-2, 2026-08-13): the fix that made project scoping actually
-take effect merged at 19:35:03Z (`0d1602f`, "Merge fix for D-LIN-02" — D-LIN-01 threaded the
-project id in, D-LIN-02 corrected its type, so the filter did nothing until the second landed). The
-next wave, `wave-20260813-143548` at **19:35:48Z — 45 seconds later** — reported "No open Build
-issue. Nothing to schedule." So did every wave after it (20:37, 20:57, 21:18, 21:39, 00:41). Build
-2's last open ticket sat in `review`, correctly labelled and with its branch pushed, unschedulable
-for roughly five hours. Two tickets did complete in that window (#173, #78), which masked the
-failure: their lanes were already running, and lanes do not need waves.
-**Fix:** exempt the Build-issue read from project scoping — it is orchestration metadata about the
-build, not a member of the project the build works on. Failing that, widen the filter to accept an
-unprojected issue rather than requiring a match. Independently, `nbuild == 0` in project mode
-should be loud: a declared project that yields no Build issue is far more likely to be this bug
-than a workspace with no build defined, and the two are currently indistinguishable on the surface.
-**Test:** nothing covers project mode against a Build issue with no project. D-LIN-02's fix added
-six assertions and a stub that answers `board`'s `issues(first: 50,` query, but every fixture issue
-carries a project, so the one shape that breaks the loop is the one shape never exercised.
-
----
-
 ## Closed
 
 ### D-TEST-12 · the concurrency test's window is inside its own measurement error
@@ -1459,3 +1419,44 @@ history and never a reason to re-block. Tests: an assertion folded into `07-snap
 `snap-blockedrep` case and four into `16-ticker-and-lane-verbs.sh`'s `transition --note` block;
 `26-one-helper-one-read.sh`'s planted violation now asserts "more than one GET" rather than exactly
 two, since the number of questions `transition` asks of the issue is not the invariant it proves.
+
+### D-LIN-03 · project-scoped reads hide the Build issue, emptying the universe
+*Closed 2026-08-13.*
+
+A repo declaring a `Project:` in `docs/agents/issue-tracker.md` put `linear.sh` into project mode,
+and every issue read then carried `project: { id: { eq: $project } }` — in `_issues_page_query` and
+in `v_board`. But the `Build N` issue is not project work: it is orchestration metadata about the
+build, it carries `project: null, labels: []` in a live workspace, and `snapshot` finds it by
+scanning that very payload for a title matching `^Build [0-9]+$` and derives the `build-N` label —
+and hence the scheduler's whole universe — from it. Project scoping therefore dropped the one issue
+every other read is derived from. `nbuild` read 0, `snapshot` emitted `build: null` with
+`tickets: []`, and `plan` answered "No open Build issue. Nothing to schedule." at rc 0 — the same
+thing it says for a build that genuinely finished. Nothing blocked, nothing red, nothing named a
+cause, and it never self-recovered, because the input it needed was the input it could not see.
+Blast radius: every repo declaring a `Project:`. Confirmed live (triggers-api build-2, 2026-08-13):
+45 seconds after D-LIN-02's fix made scoping actually take effect, the next wave went blind, and
+Build 2's last open ticket sat unschedulable in `review` for roughly five hours. Introduced by
+D-LIN-01's fix; the second defect that fix produced.
+
+**Shipped:** both query builders now emit
+`project: { or: [ { id: { eq: $project } }, { null: true } ] }` — `{ null: true }` is
+`NullableProjectFilter`'s own existence test, so an unprojected issue is admitted without a second
+read. This is the entry's stated **fallback**, not its primary option, and deliberately: there is no
+separate Build-issue read to exempt, so exempting one would have meant a new tracker verb in both
+drivers plus two changed snapshot paths, and Linear has no regex comparator, so a server-side title
+filter would have to be `startsWith: "Build "` — which pulls in another product's `Build N` issues
+and can resolve the wrong build. The widened clause stays strictly narrower than the team-wide read
+D-LIN-01 replaced: another product's *tickets* all carry that product's project and remain excluded.
+The independent half also shipped: when `cmd_snapshot` finds no `Build N` issue **and** the repo
+declares a `Project:`, a second warning names the scoping as the likelier cause and says the same on
+stderr, so "hidden" and "finished" stop reading identically — the distinction `_quiet_check` already
+draws between `unknown` and `unreadable`. Tests: a new `D-LIN-03. The Build issue is not project
+work` case in `scripts/tests/32-linear-driver.sh` (8 assertions, nothing existing reached this path —
+every D-LIN-01/D-LIN-02 fixture issue carries a project), extending the existing stub with the
+widened clause rather than adding a second stub. It covers both query sites, the other product still
+being excluded, end-to-end `snapshot` resolving `build-4` instead of `build: null`, the warning in
+`.warnings` and on stderr, and a permanent mutant plant. Proved red-then-green by reverting each half
+separately: driver half reverted → 3 failures, loudness half reverted → 2. Full suite: 1038 passed,
+0 failed (two of three runs clean; the third's single failure was in the pre-existing `watch-panes`
+/ `pending` timing-flake family, which also fails on the unmodified tree). Not verified against the
+live API — the warning wording and the widened filter are proved against the stub only.

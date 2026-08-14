@@ -358,11 +358,24 @@ _ISSUE_FIELDS='id number title description url updatedAt
 # Nothing partial about it: every project-mode read returned zero rows.
 # `$team` next to it stays `String!` because `key: { eq: }` really is a
 # `StringComparator` — the declared type follows the comparator, per field.
+#
+# D-LIN-03: the clause admits an issue with NO project as well as one in this
+# project, because the `Build N` issue is not project work. It is orchestration
+# metadata ABOUT the build — `snapshot` finds it by title in this very payload
+# and derives the `build-N` label, and hence the scheduler's whole universe,
+# from it — and in a live workspace it carries `project: null, labels: []`.
+# Requiring a project match therefore dropped the one issue every other read is
+# derived from: `nbuild` read 0, `snapshot` emitted `build: null`, and every
+# wave answered "nothing to schedule" at rc 0, forever, on a board with open
+# work. `{ null: true }` is `NullableProjectFilter`'s own existence test, so
+# this stays one server-side filter rather than a second read. It is still
+# narrower than the team-wide read D-LIN-01 replaced: another product's
+# TICKETS all carry that product's project and remain excluded.
 _issues_page_query() { # <extra filter clauses>
     local pvar='' pfilter=''
     if $_PROJECT_MODE; then
         pvar=', $project: ID!'
-        pfilter=', project: { id: { eq: $project } }'
+        pfilter=', project: { or: [ { id: { eq: $project } }, { null: true } ] }'
     fi
     printf 'query($team: String!, $after: String%s) {
   issues(first: 250, after: $after,
@@ -574,7 +587,10 @@ v_board() { # [--label L] → open issues, each with `links` and `notes` embedde
     # D-LIN-02: and `ID!` for the same reason it is `ID!` there — the `id`
     # comparator's `eq` is typed `ID`, and a `String!` variable in that
     # position fails schema validation before the query ever runs.
-    $_PROJECT_MODE && filter="$filter, project: { id: { eq: \$project } }"
+    # D-LIN-03: and it admits an unprojected issue here too, so a `board` read
+    # sees the `Build N` issue the build is named after. Same clause, same
+    # reason, spelled out at `_issues_page_query` above.
+    $_PROJECT_MODE && filter="$filter, project: { or: [ { id: { eq: \$project } }, { null: true } ] }"
     q=$(printf 'query($team: String!, $after: String%s%s) {
   issues(first: 50, after: $after,
          filter: { team: { key: { eq: $team } },
