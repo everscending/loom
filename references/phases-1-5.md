@@ -42,6 +42,18 @@ hand-coding under a deadline.)*
    much as a wire shape is; it simply never leaves the process, so a pin list
    built from process boundaries misses it. One unpinned word between a writer
    and a reader is a system that looks correct and silently fails.
+   The pin list also names the **host substrate**: the machine is a surface
+   shared between builds — concurrent lanes, sibling worktrees, and other
+   projects all contend for it — so every host-bound resource in the
+   environment contract (published container ports, listen ports of test
+   fixtures, container, volume and bucket names) is either namespaced per
+   project and worktree or configurable with a non-default per-repo default.
+   A bare well-known port (5432, 3000, 6379, 9000…) is refused on sight;
+   executing the compose file proves nothing, because the collision is
+   temporal — whoever boots second loses — so the check is structural, never
+   empirical. *(paid: demand-letter build-1 — a foreign container held 5432,
+   this repo's Postgres came up healthy with no published port, and three
+   gated tickets blocked on a human port decision.)*
 6. **Execute code-shaped artifacts against the real substrate.** SQL, state
    machines and schemas in a spec read as verified and are not; careful
    reading catches almost none of what matters. Run them at a scale where the
@@ -222,7 +234,17 @@ measured at all:
   E11.3 had rebuilt Track underneath both. E11.6 passed its gate clean, then
   spent both merge attempts on a conflict no merge lane may resolve and
   blocked for a human — a design decision phase 4 should have made once, paid
-  for at the most expensive moment instead.)*
+  for at the most expensive moment instead.)* When the co-owned module is a
+  **stateful core** — a handle or store with hidden internals — exported
+  signatures alone are not a pin: two extenders can satisfy the union
+  contract and still build irreconcilable state models underneath it. The pin
+  must include the state-ownership model — where the state lives, how an
+  extender attaches to it — quoted verbatim in every co-owner's body, and the
+  default for co-edited internals is serialization, not pinning. *(paid:
+  demand-letter build-1 — slots and tracked-changes both extended
+  `document.ts`/`save.ts`; one kept an `editedParts` Map on the handle, the
+  other a `WeakMap<DocxHandle, DocState>`, and the merge cap was spent on a
+  design decision no merge lane may make.)*
 
 Serialization narrows the graph on purpose. That is the trade: a narrower
 frontier that merges, over a wider one that collides.
@@ -263,7 +285,11 @@ frontier that merges, over a wider one that collides.
   nine tickets on the leftover)*;
 - every ticket claiming something about the running app either carries its own
   live acceptance criterion or says, in writing, why it defers that contact to
-  the epic's wiring ticket.
+  the epic's wiring ticket;
+- no gate command or live check binds a fixed listen port — a test fixture
+  binds port 0 and passes the port to its client, because sibling lanes and
+  sibling builds share the host and a fixed port is a collision waiting for
+  the second boot.
 
 ## Phase 5 · `build` — define or adjust the build (never starts it)
 
@@ -304,6 +330,14 @@ silently skipping, but by then merge lanes are already dying on it. *(paid:
 ai-workout build-1 — merge lanes died on missing `gate.sh` and
 `gen_openapi_client.py`, five tickets mass-blocked, ~1h stall for a human
 waiver.)*
+
+**A lesson landing mid-build re-audits the published set.** When a fix to this
+file lands while a build holds published, not-yet-built tickets, run the new
+check over that set before the next wave — the kept phase-4 draft file makes
+it a checklist pass, and `replan` carries any amendments. A fix that reaches
+only the next plan is a lesson not applied. *(paid: demand-letter build-1 —
+the Ownership check landed the day after the tickets published, nothing
+re-read them, and its exact failure class recurred in the merge queue.)*
 
 `build` never loads the agent and never spends; the deliberate trigger is a
 separate verb.

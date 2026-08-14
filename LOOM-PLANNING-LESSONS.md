@@ -22,9 +22,53 @@ Newest first.
 
 ---
 
+## PI-09 · The environment contract pinned well-known host ports, and sibling builds own the same machine
+
+**Date:** 2026-08-14 · **Status:** fixed, round 1 · **Incidents:** 1 (three tickets)
+
+**Symptom.** JOR-93, JOR-95 and JOR-114 (demand-letter build-1) all blocked on
+one wall: `Bind for 0.0.0.0:5432 failed: port is already allocated`. The
+compose file pins Postgres to host port `5432:5432`; another project's
+long-running container (`triggers-api-wt-62-postgres-1`) already held 5432, so
+this repo's Postgres came up healthy with no published port and every
+integration suite authenticated against the wrong database — `password
+authentication failed for user "postgres"`. Same class inside the build: a
+vite-proxy test bound fixed port 3000 that a sibling worktree's leftover dev
+process held.
+
+**Cost.** Three gated tickets parked on a human port decision, two pregate
+runs spent rediscovering one diagnosis, four dependent tickets stalled behind
+them.
+
+**Insight.** The pin list covers surfaces shared between tickets; the host
+machine is a surface shared between builds, and loom's own execution model —
+concurrent lanes, sibling worktrees, several projects per machine — guarantees
+contention for it. Pinning `5432:5432` asserts the lane owns the machine, and
+nothing owns the machine. Executing the compose file at planning time proves
+nothing here: the collision is temporal, whoever boots second loses, so the
+check must be structural, not empirical.
+
+**Fix.** Two edits to `references/phases-1-5.md`:
+
+1. *Phase 1–2, step 5 (Pin every shared surface)* — the pin list now names the
+   host substrate: every host-bound resource in the environment contract
+   (published container ports, listen ports of test fixtures, container,
+   volume and bucket names) is either namespaced per project and worktree or
+   configurable with a non-default per-repo default; a bare well-known port
+   (5432, 3000, 6379, 9000…) is refused on sight.
+2. *Phase 4, check list (Ends group)* — a gate or live check that binds a
+   fixed port is a defect; test fixtures bind port 0 and pass the port to the
+   client.
+
+**What to watch.** Whether lanes actually inherit per-worktree values, and
+whether the orchestrator cleans leftover dev processes — the port-3000 half of
+this incident was runtime hygiene, which no authoring rule reaches.
+
+---
+
 ## PI-01 · Sibling tickets co-own one module, and the collision only surfaces in the merge queue
 
-**Date:** 2026-08-13 · **Status:** fixed, round 1 · **Incidents:** 2
+**Date:** 2026-08-13 · **Status:** fixed-and-recurred, round 2 · **Incidents:** 3
 
 **Symptom.** JOR-69 (E11.6 · motion, reduced motion, keyboard) passed its gate
 clean — 125 tests, four Playwright e2e tests, an independent review with no
@@ -107,6 +151,33 @@ building is the one D-SKILL-16 already names: `snapshot` computes
 the pregate without judgement. Watch also whether serialization over-narrows a
 UI epic into a single chain; if it does, the answer is a smaller first ticket
 that pins the union contract, not a looser rule.
+
+**Round 2 — 2026-08-14 · demand-letter build-1 (JOR-97).** E3-1 built
+`packages/docx`; the slots ticket and the tracked-changes ticket extended
+`document.ts`/`save.ts` as siblings. The merge cap was hit on two incompatible
+models for `DocxHandle`'s hidden state — an `editedParts` Map on the handle vs
+a `WeakMap<DocxHandle, DocState>` — a design decision the merge lane is
+forbidden to make.
+
+Round 1 failed twice over. First, the tickets were published the day before
+the fix landed, and nothing re-audits a published set when a lesson arrives: a
+fix reaches only the next plan, so a lesson learned mid-build is a lesson not
+applied. Second, the union contract pins *exported signatures*, and this
+collision lived in state no export names. A stateful core — a handle or store
+with hidden internals — can satisfy the union pin and still carry two
+irreconcilable designs.
+
+**Fix, round 2.** Two edits to `references/phases-1-5.md`:
+
+1. *Phase 4, Ownership, co-edited case* — when the co-owned module is a
+   stateful core, the pin must include the state-ownership model (where state
+   lives, how an extender attaches to it), quoted verbatim in every co-owner's
+   body; exported signatures alone are not a pin. Default for co-edited
+   internals is serialization, not pinning.
+2. *Phase 5* — when a planning-lesson fix lands while a build has published,
+   not-yet-built tickets, run the new check over the published set before the
+   next wave; the kept phase-4 draft file (PI-06) makes this a checklist pass,
+   and `replan` carries any amendments.
 
 ---
 
