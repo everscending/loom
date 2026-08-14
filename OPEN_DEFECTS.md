@@ -34,9 +34,10 @@ find the test by the string it asserts, which is what the citation was really po
 71 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
-D-LIN-01 and D-LIN-02 were filed later, on **2026-08-13**, and verified the same way against the
-live board that triggered each — D-LIN-01 and D-LIN-02 (a defect in D-LIN-01's own fix) have both
-since been fixed and closed. Severity is a same-pass judgment call, not part of the original review:
+D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
+against the live board that triggered each. D-SNAP-17, D-LIN-01 and D-LIN-02 have since been fixed
+and closed; D-LIN-03 is a defect in D-LIN-01's fix, found the day after it shipped, and is the
+second one that fix has produced. Severity is a same-pass judgment call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -52,6 +53,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 
 | Key | Severity | Defect |
 |---|---|---|
+| D-LIN-03 | Critical | project-scoped reads hide the Build issue, emptying the universe |
 | D-SNAP-03 | High | the gate's MR can be one that merely mentions the ticket |
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
@@ -741,6 +743,45 @@ worktrees, while a human trusting the documented bound assumes the loop would re
 `model::fable` label as a first-class per-ticket tier. Lowest rank: the docs also say "or full id"
 and the value passes straight to `claude --model`, so nothing breaks.
 **Covered by:** P50.
+
+---
+
+## `scripts/trackers/linear.sh`
+
+### D-LIN-03 · project-scoped reads hide the Build issue, emptying the universe
+A repo whose `docs/agents/issue-tracker.md` declares a `Project:` puts `_resolve_project`
+(`linear.sh:138-157`) into project mode, and every issue read then carries
+`project: { id: { eq: $project } }` — `_issues_page_query` (`:363-380`) and `v_board` (`:577`).
+But the Build issue is not project work. `tick.sh:2391-2394` locates it by scanning the open-issue
+payload for a title matching `^Build [0-9]+$`, and `:2395-2396` then *derives* the build label from
+that title. Build issues carry no project and no labels — in the live workspace both `Build 2`
+(#86) and `Build 1` (#84) have `project: null, labels: []`. Project scoping therefore drops the one
+issue the whole universe is derived from.
+**Failure:** `nbuild` reads 0, `snapshot` emits `build: null` with `tickets: []`, and `plan`
+answers "No open Build issue. Nothing to schedule." The wave exits **rc 0**. Nothing is blocked,
+nothing is red, no notification names a cause — the loop reports the same thing it would report for
+a build that had genuinely finished, once a minute, forever. It never self-recovers, because the
+input it needs is the input it cannot see. The blast radius is every repo that declares a
+`Project:`, not one ticket. Note `snapshot` already warns when it finds *more than one* Build issue
+(`_snap_warn`, `tick.sh:2398`); the case where it finds none is the silent one, even though
+`tick.sh:484` already distinguishes "there IS a build and the tracker call FAILED" as a state worth
+naming.
+**Confirmed live** (triggers-api build-2, 2026-08-13): the fix that made project scoping actually
+take effect merged at 19:35:03Z (`0d1602f`, "Merge fix for D-LIN-02" — D-LIN-01 threaded the
+project id in, D-LIN-02 corrected its type, so the filter did nothing until the second landed). The
+next wave, `wave-20260813-143548` at **19:35:48Z — 45 seconds later** — reported "No open Build
+issue. Nothing to schedule." So did every wave after it (20:37, 20:57, 21:18, 21:39, 00:41). Build
+2's last open ticket sat in `review`, correctly labelled and with its branch pushed, unschedulable
+for roughly five hours. Two tickets did complete in that window (#173, #78), which masked the
+failure: their lanes were already running, and lanes do not need waves.
+**Fix:** exempt the Build-issue read from project scoping — it is orchestration metadata about the
+build, not a member of the project the build works on. Failing that, widen the filter to accept an
+unprojected issue rather than requiring a match. Independently, `nbuild == 0` in project mode
+should be loud: a declared project that yields no Build issue is far more likely to be this bug
+than a workspace with no build defined, and the two are currently indistinguishable on the surface.
+**Test:** nothing covers project mode against a Build issue with no project. D-LIN-02's fix added
+six assertions and a stub that answers `board`'s `issues(first: 50,` query, but every fixture issue
+carries a project, so the one shape that breaks the loop is the one shape never exercised.
 
 ---
 
