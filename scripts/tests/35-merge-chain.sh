@@ -185,4 +185,59 @@ for _ in $(seq 1 60); do [ -f "$WAVE_MARK_D" ] && break; sleep 0.1; done
     || ok "chain-merge: no lane spawned for a branch with no worktree"
 reap_lanes
 
+# --- E. D-TICK-13: the exiting lane died on the ACCOUNT's usage limit, not on
+#     its own work — so the successor must not spend ------------------------
+#     Live failure (triggers-api build-2, ticket #83): merge-83's session was
+#     killed in ~5s, its epilogue recorded rc 1 (schema-identical to a crash)
+#     and chained, and the identical lane was respawned into the same wall
+#     eight times in 47 seconds. Nothing paced it: the pause is written only by
+#     the two WAVE attempts, so `_usage_gate` had nothing to gate on and the
+#     ticker showed a crash loop. The queue fixture here is the one scenario B
+#     chained through, so the only difference is what the lane said on its way
+#     out.
+LIMIT_CMD='echo "You'"'"'ve hit your usage limit"; exit 1'
+cat > "$FX/open.json" <<'EOF'
+[{"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],"description":"noise"},
+ {"iid":28,"title":"Second in queue's blocker","project_id":1,"web_url":"https://x/28",
+  "labels":["build-9","merge-queue"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"}]
+EOF
+WAVE_MARK_E="$T/wave-fired-e"
+rm -f "$LOOM_HOME/usage.pause"
+GLAB_CMD="$FX/glab-stub.sh" LOOM_WAVE_CMD="touch $WAVE_MARK_E" \
+    "$TICK" spawn-lane merge-24 --merge-lock --cwd "$LOOM_REPO" -- sh -c "$LIMIT_CMD" >/dev/null
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/usage.pause" ] && break; sleep 0.1; done
+at=$(cat "$LOOM_HOME/usage.pause" 2>/dev/null || echo 0)
+[ "$at" -gt "$(date +%s)" ] 2>/dev/null \
+    && ok "chain-merge: a lane killed by the usage limit pauses the build from its own exit" \
+    || bad "chain-merge: lane-side limit wrote pause '$at' — nothing gates the successor"
+sleep 0.5   # settle: prove nothing follows, not just that nothing has yet
+[ -f "$LOOM_HOME/lanes/merge-28.pid" ] \
+    && bad "chain-merge: the fast path respawned a merge lane into a live usage limit" \
+    || ok "chain-merge: no successor lane spawned while the usage limit is up"
+[ -f "$WAVE_MARK_E" ] \
+    && bad "chain-merge: a wave was spent under a usage limit the lane already proved" \
+    || ok "chain-merge: no wave spent either — the pause is honoured by both successors"
+jq -e 'select(.ev=="usage_pause" and .source=="lane-merge-24")' "$LOOM_HOME/events.jsonl" >/dev/null 2>&1 \
+    && ok "chain-merge: the pause is recorded as the LANE's, so the ticker can tell it from a crash" \
+    || bad "chain-merge: no usage_pause event naming the lane — a busy-loop still reads as a crash loop"
+reap_lanes
+
+# F. The other successor: a non-merge lane chains through `tick --from-lane`,
+#    which ignores min_wave_gap_minutes on purpose. Same limit, same refusal —
+#    the gap timer is not what stops this, the pause is.
+WAVE_MARK_F="$T/wave-fired-f"
+rm -f "$LOOM_HOME/usage.pause"
+GLAB_CMD="$FX/glab-stub.sh" LOOM_WAVE_CMD="touch $WAVE_MARK_F" \
+    "$TICK" spawn-lane impl-24 --cwd "$LOOM_REPO" -- sh -c "$LIMIT_CMD" >/dev/null
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/usage.pause" ] && break; sleep 0.1; done
+sleep 0.5
+[ -f "$LOOM_HOME/usage.pause" ] \
+    && ok "from-lane: a limit met by any lane kind pauses before the handoff wave" \
+    || bad "from-lane: the lane's own limit left no pause, so the wave ran blind"
+[ -f "$WAVE_MARK_F" ] \
+    && bad "from-lane: the handoff wave spent a session under the lane's own usage limit" \
+    || ok "from-lane: the handoff wave is gated by the pause its lane wrote"
+rm -f "$LOOM_HOME/usage.pause"
+reap_lanes
+
 test_finish

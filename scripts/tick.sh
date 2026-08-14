@@ -915,12 +915,15 @@ _usage_gate() {
 # after it burned a fresh session against the same wall — the exact behaviour
 # P14 exists to stop. One helper, called from both, is what makes that
 # impossible to reintroduce by editing only one of them.
-_pause_on_limit() { # <stem> <first|retry> → 0 paused, 1 no limit in that run
+_pause_on_limit() { # <stem> <first|retry|lane-<id>> → 0 paused, 1 no limit there
     local stem="$1" source="$2" until_at where=""
     until_at=$(_limit_reset_at "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log" \
                                "$LOGS_DIR/$stem.err.log")
     [ -n "$until_at" ] || return 1
-    [ "$source" = retry ] && where=" on the retry"
+    case "$source" in
+        retry)  where=" on the retry" ;;
+        lane-*) where=" in lane ${source#lane-}" ;;
+    esac
     printf '%s\n' "$until_at" > "$USAGE_PAUSE"
     _ev usage_pause until "$until_at" source "$source"
     echo "tick: usage limit hit$where — pausing until $(_stamp "$until_at")"
@@ -928,6 +931,32 @@ _pause_on_limit() { # <stem> <first|retry> → 0 paused, 1 no limit in that run
         "No capacity until $(_stamp "$until_at"). The build resumes on the first tick after that." \
         >/dev/null 2>&1 || :
     return 0
+}
+
+# D-TICK-20: the same wall, met by a LANE instead of by a wave. A lane's own
+# `claude -p` is killed by the account-wide limit in ~5s, its epilogue records
+# `lane_exit rc=1` — schema-identical to a crash — and chains onward
+# (`chain-merge`, or `tick --from-lane`, which ignores `min_wave_gap_minutes`
+# because a handoff is work already in progress). The successor recomputes the
+# same plan off an untouched ticket and respawns the identical lane, which dies
+# to the same still-active limit. Nothing paced it: `_pause_on_limit` was
+# reachable only from the two wave attempts, so `_usage_gate` had nothing to
+# gate on and no `usage_pause` event ever said what was happening.
+# (triggers-api build-2, 2026-08-14: merge-83 cycled lane_exit rc=1 → lane_spawn
+# eight times in 47 seconds, ~6s each, until the limit lifted on its own.)
+#
+# Called by both of the exiting lane's successors, BEFORE either spends
+# anything: whichever runs, the pause is written first and the ordinary gate
+# then refuses. Keyed on LOOM_LANE_ID, which the epilogue's children inherit
+# from the lane that spawned them, and on `<id>.rc`, which the epilogue writes
+# before it chains — a limit is only ever read out of a FAILED session, the same
+# rule `_limit_reset_at` states for waves.
+_pause_on_lane_limit() { # → 0 a pause was written (do not spend), 1 otherwise
+    local id="${LOOM_LANE_ID:-}" rc=""
+    [ -n "$id" ] || return 1
+    rc=$(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo 0)
+    case "$rc" in ''|0|*[!0-9]*) return 1 ;; esac
+    _pause_on_limit "lane-$id" "lane-$id"
 }
 
 cmd_resume() {
@@ -1078,6 +1107,12 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     if [ "$mode" = manual ] && [ -n "${LOOM_LANE_ID:-}" ]; then
         die "tick: refusing a bare 'tick' from inside lane '$LOOM_LANE_ID' — use 'tick --from-lane', which the lane's own epilogue already runs on exit."
     fi
+    # D-TICK-20: before the environment is cleared, because the exiting lane's
+    # id is the only way to find its transcript — and before `_usage_gate`
+    # below, which is what actually refuses. A handoff from a lane the account's
+    # usage limit killed is not work in progress; it is the front of a respawn
+    # loop that nothing else paces.
+    if [ "$mode" = lane ]; then _pause_on_lane_limit || : ; fi
     # A tick fired from a lane's epilogue inherits that lane's environment, but
     # the wave it launches is the scheduler, not a lane — and must not have its
     # own spawns read as chained handoffs.
@@ -1925,6 +1960,16 @@ cmd_chain_merge() {
     # inherited by every other epilogue child), but there is no reason to
     # spend the queue read and the API calls behind it just to be told so.
     if _loop_stopped; then eval "$fallback"; return 0; fi
+    # D-TICK-20: the fast path is the tightest loop in the program — a merge
+    # lane killed by the account's usage limit chains straight into an identical
+    # merge lane, with no wave and therefore no gate in between. Read the
+    # exiting lane's own transcript first, then honour any pause (this one, or
+    # one an earlier wave wrote). No fallback wave here on purpose: the pause is
+    # exactly what the wave would refuse on, so firing it would spend a process
+    # to reach the same answer. The heartbeat tick is what picks the build back
+    # up once capacity returns.
+    _pause_on_lane_limit || :
+    _usage_gate || return 0
     command -v jq >/dev/null 2>&1 || { eval "$fallback"; return 0; }
     local queue_json head_id head_branch
     queue_json="$(cmd_snapshot --merge-queue 2>>"$LOGS_DIR/self-trigger.log")" || queue_json="[]"
