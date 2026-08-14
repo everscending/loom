@@ -6,3 +6,4 @@ lanes/
 *.progress
 
 .DS_Store
+.claude/worktrees
