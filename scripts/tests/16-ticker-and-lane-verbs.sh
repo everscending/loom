@@ -85,12 +85,16 @@ out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"wave: wave:"*|*"wave: Wave:"*) \
     bad "ticker: a self-prefixed wave_note rendered doubled ($(printf '%s' "$out" | grep -c 'wave: [Ww]ave:') line(s))";; \
     *) ok "ticker: a note that writes its own 'wave:' prefix is deduped";; esac
-case "$out" in *"wave: only #47 is ready"*) \
-    ok "ticker: stripping the prefix keeps the note itself intact";; \
-    *) bad "ticker: dedupe ate the note ($out)";; esac
-case "$out" in *"wave: spinning up the E5 probe"*) \
-    ok "ticker: dedupe is case- and space-insensitive";; \
-    *) bad "ticker: mixed-case self-prefix survived ($out)";; esac
+# P95: one invariant — stripping preserves the note text — proved against
+# two literal variants (plain lowercase, mixed-case with extra spacing) in
+# one loop, replacing two near-identical case blocks that asserted the same
+# thing twice.
+strip_ok=1
+for kept in "only #47 is ready" "spinning up the E5 probe"; do
+    case "$out" in *"wave: $kept"*) ;; *) strip_ok=0; bad "ticker: dedupe ate or mangled '$kept' ($out)";; esac
+done
+[ "$strip_ok" = "1" ] \
+    && ok "ticker: stripping the prefix keeps the note text intact, case- and space-insensitively" || :
 # Planted violation: a note that merely MENTIONS a wave mid-sentence must not
 # be truncated — the strip is anchored to the start, not a search-and-replace.
 LOOM_HOME="$EVH" "$TICK" event wave_note note "requeued after the wave: see #12"
