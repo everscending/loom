@@ -31,13 +31,14 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-70 open, counted from the table below, which is the live set. Most were verified against the
+71 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
 D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
 against the live board that triggered each. All of those but D-SNAP-16 have since been fixed and
 closed; D-LIN-03 was a defect in D-LIN-01's fix, found the day after it shipped, and was the
-second one that fix produced. Severity is a same-pass judgment call, not part of the original review:
+second one that fix produced. D-TICK-20 was filed on **2026-08-14**, confirmed live against a real
+build (triggers-api build-2). Severity is a same-pass judgment call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
   incorrectly, produces a permanent stuck state or mass duplicate work.
@@ -72,6 +73,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-REF-02 | High | `loom-config.md:116` says "`tick.sh` reads no gate key" |
 | D-REF-03 | High | `retro.md:81` states an invariant the code already breaks |
 | D-REF-06 | High | `ticket-template.md` omits `## Blocked by` |
+| D-TICK-20 | High | a lane's own usage-limit hit is indistinguishable from a crash, so it respawns in a tight loop instead of pausing |
 | D-TICK-03 | Medium | both locks stamp the owner pid after claiming the lock |
 | D-TICK-05 | Medium | sweep runs above the quiescence gate |
 | D-TICK-09 | Medium | `runner` and `base` bypass the global config layer |
@@ -188,6 +190,47 @@ input line and exits 0, so the ticker loses the line rather than failing loudly.
 **Failure:** a dependency chain deeper than 12 makes retro's "deepest chain in the graph was N"
 line (`:2167`) report too small a number, which can invert the conclusion printed at `:2168-2169`
 on a build that really was graph-bound.
+
+### D-TICK-20 · a lane's own usage-limit hit is indistinguishable from a crash, so it respawns in a tight loop instead of pausing
+`tick.sh:918-931` (`_pause_on_limit`) is only called from the two direct wave-attempt call sites at
+`:1236` and `:1249`, inside the `first`/`retry` path `_run_wave` (`:1271`) belongs to. The lane
+epilogue that every `spawn-lane` process runs on exit (`:1521`, `printf … > "$LANES_DIR/$id.rc"; …
+event lane_exit …`) calls neither `_pause_on_limit` nor `_limit_reset_at` (`:867-886`, the detector
+that greps a lane's own `.jsonl`/`.log`/`.err.log` for a usage-limit marker) before firing its
+fallback chain at `:1506`/`:1521` — `( "$SELF_PATH" tick --from-lane … & )`. `tick --from-lane`
+(`:1043`) deliberately ignores `min_wave_gap_minutes` "because a handoff is work already in
+progress" (SKILL.md:107-110) — correct for a lane that did real work, but nothing upstream of it
+ever asks whether *this* exit was real work or an account-wide usage limit killing the lane's own
+`claude -p` process in seconds. `_usage_gate` (`:890-910`) only ever sees a limit if `USAGE_PAUSE`
+was written, and only `_pause_on_limit` writes it — a path a lane's own exit never reaches.
+**Failure:** a `--merge-lock` lane's `claude -p` process is killed by the account's usage limit
+after ~5-6s (too fast to have attempted real work). Its epilogue records `lane_exit rc=1` — schema-
+identical to a genuine crash — and fires `tick --from-lane`. That wave reads a fresh snapshot,
+computes the same plan (the ticket is untouched, still at the top of the merge queue), and
+re-spawns the identical lane, which is killed by the same still-active limit in another ~5-6s.
+Repeat: `min_wave_gap_minutes` never engages because each cycle is a lane handoff, not a timer
+firing, so nothing paces it and nothing distinguishes it from real progress until the account-wide
+limit lifts on its own.
+**Confirmed live** (triggers-api build-2, 2026-08-14, ticket #83): `merge-83` cycled `lane_exit
+rc=1` → `lane_spawn` eight times in ~47 seconds (02:19:13–02:20:00, `events.jsonl`), each cycle
+5-6s, before the account's usage limit cleared and the ninth attempt ran for real (184s, rc 0,
+merged and closed #83). The human running the session watched the build ticker print `✗ #83 —
+merge ended (rc 1, 5s)` on a loop with a bell per line, with no way from the ticker output alone to
+tell a busy-loop from a stuck build — `render-events` has no marker for "this exit's rc came from a
+usage limit, not the lane's own work" because the wave-level `usage_pause`/`usage_resume` events
+(the only ones that carry that meaning) were never emitted; the lane path never reaches
+`_pause_on_limit` at all. Had the account-wide limit taken longer than ~47s to clear, this would
+have kept cycling every ~6-7s indefinitely — the equivalent failure `_pause_on_limit`'s own header
+comment (`:912-917`) already names as "the exact behaviour P14 exists to stop", but only for the
+two paths `_run_wave` covers directly.
+**Fix shape:** have the lane epilogue (or `tick --from-lane`'s entry) run `_limit_reset_at` against
+the exiting lane's own `$LOGS_DIR/lane-$id.jsonl`/`.log`/`.err.log` before chaining, and call
+`_pause_on_limit`-equivalent (write `USAGE_PAUSE`, emit `usage_pause`) when it finds a limit marker
+— so `_usage_gate` at the top of the chained wave actually has something to gate on. Until then,
+`_usage_gate` protects only the two wave-level attempts and is blind to every lane it spawns.
+**Test:** none. `_pause_on_limit`'s own test coverage (wherever it lives in the split suite) covers
+the `_run_wave` first/retry paths; nothing spawns a stub lane that exits with a usage-limit marker
+in its log and asserts the next `tick --from-lane` is gated.
 
 ---
 
