@@ -2402,6 +2402,23 @@ cmd_snapshot() {
         # emit a null-build document so a heartbeat wave no-ops cleanly.
         # Only tool or call failure dies.
         _snap_warn "no open \`Build N\` issue — empty universe"
+        # D-LIN-03: unless the repo declares a `Project:`, in which case the
+        # read that just came back empty was SCOPED, and a scoped read that
+        # hides the `Build N` issue looks exactly like a finished build — the
+        # wave says "nothing to schedule" at rc 0, once a minute, forever, and
+        # never self-recovers, because the input it needs is the input it
+        # cannot see. Same distinction `_quiet_check` already draws between
+        # `unknown` (no build yet) and `unreadable` (there IS one and the call
+        # failed): two different facts that must not read the same. Named on
+        # stderr as well as in the document, because a human running `snapshot`
+        # by hand to find out why the loop is idle is looking at a terminal.
+        local declared_project
+        declared_project=$(_tracker_decl_field "$REPO_ROOT" Project)
+        if [ -n "$declared_project" ]; then
+            _snap_warn "…and this repo declares \`Project: $declared_project\`, so every issue read was SCOPED to it — a \`Build N\` issue carrying no project is invisible to a scoped read, which is likelier than a workspace with no build at all. Check the board for an open \`Build N\` issue before believing this build is finished."
+            printf 'snapshot: no open `Build N` issue, and reads are scoped to `Project: %s` — the build may be hidden, not finished\n' \
+                "$declared_project" >&2
+        fi
     fi
 
     local member_iids="" active_iids="" review_iids="" iid

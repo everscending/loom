@@ -85,7 +85,17 @@ case "$q" in
       # rode along — a driver that dropped either half would leak every
       # product on the team straight back through, which is the bug this
       # fixture exists to catch.
+      # D-LIN-03: two project clauses, applied as the server would apply each.
+      # The widened one — `or: [ { id: { eq: $project } }, { null: true } ]` —
+      # also keeps an issue with NO project, which is the shape a `Build N`
+      # issue has. The strict one is kept, and kept EXACT, because the mutant
+      # run below plants it back: a fixture that stopped recognising it would
+      # answer the reverted driver with an unfiltered board and prove nothing.
       case "$q" in
+        *'project: { or: [ { id: { eq: $project } }, { null: true } ] }'*)
+            proj=$(jq -r '.variables.project // ""' "$data" 2>/dev/null)
+            [ -n "$proj" ] && filtered=$(printf '%s' "$filtered" \
+                | jq -c --arg p "$proj" '.data.issues.nodes |= map(select((.project.id // "") == $p or .project == null))') ;;
         *'project: { id: { eq: $project } }'*)
             proj=$(jq -r '.variables.project // ""' "$data" 2>/dev/null)
             [ -n "$proj" ] && filtered=$(printf '%s' "$filtered" \
@@ -741,6 +751,140 @@ if [ "$rc" = 0 ] && [ "$(printf '%s' "$m_team" | jq -r '[.[].id] | sort | join("
 else
     bad "D-LIN-02: the schema check rejected a query it should have passed (rc=$rc, $(printf '%s' "$m_team" | head -1))"
 fi
+printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
+
+# --- D-LIN-03. The Build issue is not project work -------------------------
+# D-LIN-01 and D-LIN-02 together made project scoping real, and it promptly
+# hid the one issue everything else is derived from. `snapshot` finds the build
+# by scanning the open-issue payload for a title matching `^Build [0-9]+$` and
+# derives the `build-N` label — the scheduler's whole universe — from that
+# title. A `Build N` issue is orchestration metadata about the build, not a
+# member of the project the build works on: in the live workspace both `Build
+# 2` (#86) and `Build 1` (#84) carry `project: null, labels: []`. A filter
+# demanding a project match therefore dropped it, `nbuild` read 0, the document
+# came back `build: null` with `tickets: []`, and every wave answered "No open
+# Build issue. Nothing to schedule." at rc 0 — indistinguishable from a build
+# that had genuinely finished, once a minute, for five hours.
+# (Confirmed live: triggers-api build-2, 2026-08-13. The wave 45 seconds after
+# the D-LIN-02 merge reported it, and so did every wave after it.)
+#
+# The fixture below is the one shape D-LIN-01's fixtures never had: a Build
+# issue with NO project, beside a projected ticket of its own and a whole other
+# product that must still stay out.
+cat > "$TD/dlin3-issues.json" <<'JSON'
+{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+ {"id":"b1","number":501,"title":"Build 4","description":"## Epics\n\n- E1 Bootstrap\n",
+  "url":null,"updatedAt":null,"state":{"type":"unstarted","name":"Todo"},
+  "labels":{"nodes":[]},"assignee":null,"project":null},
+ {"id":"b2","number":502,"title":"Wire the trigger","description":"## Risk tier\n\nlogic\n",
+  "url":null,"updatedAt":null,"state":{"type":"unstarted","name":"Todo"},
+  "labels":{"nodes":[{"name":"build-4"}]},"assignee":null,
+  "project":{"id":"proj-tapi","name":"Triggers API"}},
+ {"id":"b3","number":401,"title":"Build 3","description":"","url":null,"updatedAt":null,
+  "state":{"type":"unstarted","name":"Todo"},"labels":{"nodes":[]},"assignee":null,
+  "project":{"id":"proj-dlg","name":"Demand Letter Generator"}},
+ {"id":"b4","number":402,"title":"Draft the letter template","description":"","url":null,
+  "updatedAt":null,"state":{"type":"started","name":"In Progress"},
+  "labels":{"nodes":[{"name":"build-3"}]},"assignee":null,
+  "project":{"id":"proj-dlg","name":"Demand Letter Generator"}}
+]}}}
+JSON
+printf '# Issue tracker: Linear\n\nTeam: ENG\nProject: Triggers API\n' > "$TD/repo/docs/agents/issue-tracker.md"
+DL3() { PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin3-issues.json" "$@"; }
+
+# p-dlin03-1: issues-open in project mode returns the unprojected `Build 4`
+# (#501) as well as the project's own ticket (#502). This is the assertion the
+# whole entry turns on — without #501 there is no build, no label, no universe.
+d3_open=$(DL3 L issues-open 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s' "$d3_open" | jq -r '[.[].id] | sort | join(",")' 2>/dev/null)" = "501,502" ]; then
+    ok "D-LIN-03: issues-open in project mode sees the \`Build N\` issue that carries no project — the universe is not empty"
+else
+    bad "D-LIN-03: the unprojected Build issue was dropped by project scoping (rc=$rc, $(printf '%s' "$d3_open" | jq -c '[.[].id]' 2>/dev/null))"
+fi
+# And the widening is exactly that wide: an issue belonging to ANOTHER product
+# is still excluded, both the other product's Build and its ticket. Admitting
+# an unprojected issue must not undo D-LIN-01.
+printf '%s' "$d3_open" | jq -e '[.[].id] | index(401) == null and index(402) == null' >/dev/null 2>&1 \
+    && ok "D-LIN-03: the other product's Build 3 (401) and its ticket (402) are still excluded — an unprojected issue is admitted, a wrongly-projected one is not" \
+    || bad "D-LIN-03: widening the filter reopened the D-LIN-01 cross-product leak"
+
+# p-dlin03-2: `board` is the second query site and carries its own copy of the
+# clause, so it gets its own assertion — a fix applied to one read and not the
+# other leaves the wave reading a board with no build on it.
+d3_board=$(DL3 L board 2>&1); rc=$?
+if [ "$rc" = 0 ] && printf '%s' "$d3_board" | jq -e '[.[].id] | index(501) != null and index(401) == null' >/dev/null 2>&1; then
+    ok "D-LIN-03: board in project mode sees the unprojected Build issue too, and still not the other product's"
+else
+    bad "D-LIN-03: board dropped the unprojected Build issue (rc=$rc, $(printf '%s' "$d3_board" | jq -c '[.[].id]' 2>/dev/null))"
+fi
+
+# p-dlin03-3: the mutant. The strict clause put back at both sites, the way it
+# read before this fix — and the Build issue vanishes, which is the failure.
+mkdir -p "$TD/dlin03"
+mirror_scripts "$TD/dlin03" >/dev/null
+rm -f "$TD/dlin03/trackers"
+mkdir -p "$TD/dlin03/trackers"
+cp "$SD/trackers"/*.sh "$TD/dlin03/trackers/"
+# The `\\*` allows for the backslash `v_board` needs inside its double-quoted
+# string and `_issues_page_query` does not — one plant, both sites.
+sed 's/{ or: \[ { id: { eq: \(\\*\)$project } }, { null: true } \] }/{ id: { eq: \1$project } }/g' \
+    "$LIN" > "$TD/dlin03/trackers/linear.sh"
+chmod +x "$TD/dlin03/trackers"/*.sh
+L3M() { env $(API_ENV | tr '\n' ' ') "$TD/dlin03/trackers/linear.sh" "$@"; }
+[ "$(grep -Fc ", project: { id: { eq: \$project } }'" "$TD/dlin03/trackers/linear.sh")" = 1 ] \
+   && [ "$(grep -Fc ', project: { id: { eq: \$project } }"' "$TD/dlin03/trackers/linear.sh")" = 1 ] \
+    && ok "D-LIN-03: the planted driver really did get the strict project filter back at both query sites" \
+    || bad "D-LIN-03: the plant did not land, so the mutant run below proves nothing"
+m3_open=$(DL3 L3M issues-open 2>&1); rc=$?
+if [ "$rc" = 0 ] && [ "$(printf '%s' "$m3_open" | jq -r '[.[].id] | join(",")' 2>/dev/null)" = "502" ]; then
+    ok "D-LIN-03: with the strict filter restored the Build issue is gone and only the ticket survives — the empty universe, reproduced"
+else
+    bad "D-LIN-03: the strict-filter driver did not reproduce the failure (rc=$rc, $(printf '%s' "$m3_open" | jq -c '[.[].id]' 2>/dev/null))"
+fi
+
+# p-dlin03-4: end to end — the shipped driver builds a snapshot whose build is
+# `build-4` with its ticket in it, not the `build: null, tickets: []` document
+# the wave read as "nothing to schedule".
+cat > "$TD/forge3" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in ticket-marker) echo "Loom-Ticket: ${2:-0}" ;; *) echo '[]' ;; esac
+EOF
+chmod +x "$TD/forge3"
+env $(DL3 API_ENV | tr '\n' ' ') FORGE_CMD="$TD/forge3" \
+  LOOM_HOME="$TD/home3" LOOM_GLOBAL_CONFIG="$TD/g3.yml" \
+  "$TICK" snapshot > "$TD/snap3.json" 2>"$TD/snap3.err"; rc=$?
+if [ "$rc" = 0 ] && [ "$(jq -r '.build.label' "$TD/snap3.json" 2>/dev/null)" = "build-4" ] \
+   && jq -e '[.tickets[].id] | index(502) != null' "$TD/snap3.json" >/dev/null 2>&1; then
+    ok "D-LIN-03: end to end — snapshot in project mode resolves \`build-4\` and carries its ticket, instead of \`build: null\` with no tickets"
+else
+    bad "D-LIN-03: snapshot still reads an empty universe in project mode (rc=$rc, build=$(jq -c '.build' "$TD/snap3.json" 2>/dev/null), $(head -1 "$TD/snap3.err"))"
+fi
+
+# p-dlin03-5: the other half — when a project-mode board really does yield no
+# `Build N` issue, say so LOUDLY and name the scoping as the likelier cause.
+# `no open Build N issue — empty universe` alone reads identically to a
+# finished build, which is how five hours passed with nothing red anywhere.
+cat > "$TD/dlin3-nobuild.json" <<'JSON'
+{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+ {"id":"b4","number":402,"title":"Draft the letter template","description":"","url":null,
+  "updatedAt":null,"state":{"type":"started","name":"In Progress"},
+  "labels":{"nodes":[{"name":"build-3"}]},"assignee":null,
+  "project":{"id":"proj-dlg","name":"Demand Letter Generator"}}
+]}}}
+JSON
+env $(PROJECTS_JSON="$TD/dlin1-projects.json" ISSUES_JSON="$TD/dlin3-nobuild.json" API_ENV | tr '\n' ' ') \
+  FORGE_CMD="$TD/forge3" LOOM_HOME="$TD/home3" LOOM_GLOBAL_CONFIG="$TD/g3.yml" \
+  "$TICK" snapshot > "$TD/snap3b.json" 2>"$TD/snap3b.err"; rc=$?
+if [ "$rc" = 0 ] && [ "$(jq -r '.build' "$TD/snap3b.json" 2>/dev/null)" = null ] \
+   && jq -e '[.warnings[] | select(test("Project: Triggers API"))] | length == 1' \
+        "$TD/snap3b.json" >/dev/null 2>&1; then
+    ok "D-LIN-03: a project-mode snapshot with no Build issue names the scoping in .warnings — not the same silence as a finished build"
+else
+    bad "D-LIN-03: the empty universe stayed silent about project scoping (rc=$rc, $(jq -c '.warnings' "$TD/snap3b.json" 2>/dev/null))"
+fi
+grep -q 'Project: Triggers API' "$TD/snap3b.err" \
+    && ok "D-LIN-03: and it says so on stderr as well, where a human running \`snapshot\` to find out why the loop is idle is looking" \
+    || bad "D-LIN-03: nothing on stderr named the scoping ($(head -1 "$TD/snap3b.err"))"
 printf '# Issue tracker: Linear\n\nTeam: ENG\n' > "$TD/repo/docs/agents/issue-tracker.md"
 
 # --- p87-l7. The proof: a whole snapshot, then a plan ----------------------
