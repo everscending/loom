@@ -93,6 +93,7 @@ writing a new proposal that touches the same machinery.
 | P92 | On Linear, an epic is a project milestone, not a project | implemented 2026-08-11 (all inside `trackers/linear.sh`. A `Project: <name or id>` line beside `Team:` in the declaration file — resolved once by the new `_resolve_project`, cached like `_resolve_team` — opts a repo into keeping its epics as ProjectMilestones INSIDE that one project rather than as separate Projects on the team; no such line keeps every pre-P92 behaviour unchanged. `_ISSUE_FIELDS` gains `projectMilestone { id name }`, fetched unconditionally but read by `_MAP_ISSUE` only when project mode (`$pm`) is on, so `epic` becomes the milestone's name instead of the project's. `v_milestones` forks: project mode queries the resolved project's own `projectMilestones`, never the team's other Projects; back-compat keeps the old `team.projects` read. `v_issue_create --milestone-id` forks the same way — `projectId` from the declaration plus `projectMilestoneId` for the milestone, versus the old `projectId` alone. `v_milestone_close` stops calling `projectUpdate` in project mode, because a ProjectMilestone has no state field — Linear only derives a completion percentage from its issues, which is completeness, not acceptance, and a probe may FAIL an epic whose tickets all closed. Acceptance instead lives in a trailer appended to the milestone's own description, `<!-- loom-accepted <ISO8601> -->`, idempotent by presence; `_MAP_MILESTONE` reports `state: closed` exactly when it is there, which `snapshot.jq`'s existing `accepted: ($ms.state == "closed")` already reads unchanged. One `lib.sh` fix travels with it: `_tracker_decl_field` used to read only a bare `Field: value` line, so a human-written bullet like `- Team: **Jordan** (key JOR)` came back empty; it now accepts an optional leading list marker and strips a `**bold**` wrapper and a trailing ` (...)` parenthetical, which both `Team:` and the new `Project:` read through. Suite 939 → 949, section 32 extended with ten p92 assertions: milestone-not-project epic mapping, the declared project's own milestones versus the team's others, trailer-derived state, `--state active` filtering, the append-once close, the `--milestone-id` split, the back-compat contrast with no `Project:` line, and the bulleted-declaration parse for both `Team:` and `Project:`. SKILL.md untouched) |
 | P93 | The merge queue drains itself | implemented 2026-08-12 (`tick.sh`'s merge-lane epilogue now spawns its successor directly instead of firing a wave: `_spawn_build_epilogue` calls the new `chain-merge` verb for a `--merge-lock` lane in place of `tick --from-lane`, after the lock release already there. `chain-merge` reads `snapshot --merge-queue` — a new narrow mode in `cmd_snapshot`/`cmd_snapshot_merge_queue` that skips links, non-queue MRs, non-queue comment threads, milestones and closed members, computed by the new `scripts/merge-queue.jq` off `state_of`/`merge_attempts_of`/`merge_hold_of` (moved into `lib.jq` so both it and `snapshot.jq` share one definition) — resolves the head ticket's worktree with the new `_worktree_for_branch` (`git worktree list --porcelain`, keyed by branch, never by the `<repo>-wt-<n>` name), and spawns `merge-<next>` from the new templated `references/merge-brief.md` (three substitutions: ticket iid, worktree, base). Every step that cannot proceed — empty queue, no open MR, no worktree checked out on the branch, a refused spawn (lock race, stopped loop, live id collision) — falls back to firing `tick --from-lane`, unchanged from before; nothing depends on the fast path succeeding. New section 35 (`35-merge-chain.sh`, 11 assertions): the narrow read's ordering and cap exclusion, the end-to-end chain off a real git worktree with no wave firing, and both fallback paths. Full suite green, no regressions. SKILL.md untouched — chaining was never something a wave decided) |
 | P94 | `fix` proves a defect died; it doesn't have to grow the suite to do it | implemented 2026-08-13 (`references/fix.md` Step 2's Tests subsection now asks, before writing anything, whether a test in the section already exercises the function or scenario the defect lives in — a table row, an assertion inside an existing fixture-building test — before standing up a new `ok` block; a wholly new case only when nothing existing reaches the code path. The red-then-green proof is unchanged either way. Step 1's ask-back list and the Deliver section both reworded from "the new test case name" / "which case is new" to naming the assertion and whether it's new or folded in, so a report can't paper over which happened. Retroactive consolidation of the ~1008 existing assertions was explicitly scoped OUT — gated behind P45's `--mutate` machinery landing first, to be run file-by-file rather than as one blanket pass, and filed separately when it happens. `references/` only, no scripts touched, no test suite change — per `prop.md`'s own rule, `references/` has no executable check and this proposal's correctness is a reading) |
+| P96 | A merge-attempt cap a human can retire | implemented 2026-08-15 (`lane.sh merge-reset <iid>` writes an `orch-merge-reset` marker — human-only, refused for automated callers exactly as `rescope` is, body mandatory. `merge_attempts_of` in `scripts/lib.jq` now counts only attempts newer than the newest reset marker, taking `orch-scope-reset` as one too, so a rescoped ticket sheds its merge history along with its rejections; both consumers (`snapshot.jq`, `merge-queue.jq`) inherit it. The same rewrite anchors the scan on the trailer's full form `<!-- orch-merge-attempt <n> -->` instead of a bare substring, so a blocked report naming the marker it reports on no longer inflates the count — that form also excludes P62's base-red attempts on its own. Section 07 gains three cases, section 16 six; `scripts/mutate.sh` gains `merge-reset-cutoff` and `merge-attempt-anchor`. SKILL.md +1 line, `references/triage.md`'s "Retire a spent cap" row names both verbs. Closes D-SNAP-10 and D-SKILL-13) |
 | P45 | A test must prove it can fail | implemented 2026-08-13 (`scripts/mutate.sh`: a named registry of guards/destructive paths/caps, each marked in production with a stable `# mutate:<name>` comment; `tick-test.sh --mutate [name...]` clones the repo, deletes or inverts one named line, and asserts the WHOLE suite goes red against a pre-mutation baseline — run for real against this codebase's four registered lines (the scratch-prune guard and sweep's `rm -rf` in `tick.sh`, the merge-attempt and same-class-rejection caps in `plan.jq`): 4 caught, 0 escaped, 0 broken. `scripts/lint-tests.sh`: static scan banning `ok` reachable from both arms of one &&/|| chain (the D-TEST-04 shape) and an `ok` guarded only by its own loop variable's non-emptiness (the D-TEST-09 shape) — deliberately narrower than a literal `\|\| ok` ban, which false-positived on the suite's own sound `cond && bad ... \|\| ok ...` idiom; run for real, it finds exactly D-TEST-04 and D-TEST-09's lines and nothing else. `test-lib.sh` gains `assert_mutant_ran()` so a planted-violation test proves its stand-in copy actually executed before trusting an asserted absence (the D-TEST-05 shape, generalized). New section 37 (`37-mutation-tooling.sh`) proves the tooling itself against isolated fixtures, cheap enough for the normal suite; `--mutate` stays qa-only per the proposal. `references/qa.md` points at both flags. Two of the four Fix-direction bullets were already shipped by individually-filed defects before this ran — D-TEST-01 (the `rm -rf` guard's test now actually invokes `tick.sh`) and D-TEST-03 (the no-mutation denylist now catches `glab api --method`) — confirmed still true and left alone rather than redone. Suite 1008 → 1025, full run green; the machine this ran on carries pre-existing timing flakiness in `watch-panes`/`pending`/`chain-merge` sections unrelated to this change (documented at several earlier `D-TEST-*` closures), which is exactly what the baseline-diff in `--mutate` exists to not be fooled by. SKILL.md untouched — this is qa tooling, never a wave decision) |
 | P77 | The snapshot's per-ticket fan-out grows with the board | implemented 2026-08-12 (the fix is NOT the caching the proposal sketched — it is removing the calls. Linear meters two budgets an hour and they are three orders of magnitude apart: 2,500 REQUESTS against 3,000,000 COMPLEXITY points, with any one query capped at 10,000, so the fan-out was spending the scarce budget to protect the abundant one. Two mechanisms in `trackers/linear.sh`. First `_issue_ref` replaces `_issue_uuid`: Linear resolves the human identifier (`JOR-12`) in the `issue(id:)` query, in `issueUpdate(id:)` and in `commentCreate`'s `issueId`, all three verified against the live API, so the request that translated a number into a UUID was pure waste and DOUBLED every per-ticket read and every lane mutation. Second `board [--label L]` nests `relations`, `inverseRelations` and `comments` into the list query — pages of 50, not 250, because the nested connections cost ~100 points per issue and a 250-page would exceed the single-query cap. `tick.sh cmd_snapshot` gains a stage 1b that calls it and splits the result into the same per-iid files the fan-out wrote; a driver without the verb exits non-zero, which IS the capability probe, and the old fan-out runs unchanged — so GitLab is untouched and the fallback is the previously-shipped path rather than new code. MEASURED on a live 63-ticket build, not predicted as the proposal warned it would have to be: 393 requests and 28s before, 15 requests and 5.5s after, with the two snapshot documents byte-identical across every ticket and field. The proposal's two open questions are moot — nothing is cached, so nothing needs an `updated_at` key or a cold-run cost. `LOOM_SNAP_KEEP` added as a debugging seam, since the only way to compare the two paths is to see the intermediate files each wrote. Suite 949 → 966, new section 34 (`34-linear-batching.sh`), which counts REQUESTS rather than asserting output shape — including the planted violation where a UUID-resolving driver spends the extra call, and the assertion that the batched and fanned-out snapshots agree ticket for ticket. SKILL.md untouched) |
 
@@ -4694,3 +4695,80 @@ this proposal's correctness is a reading, not a run.
 **Consumer.** `fix`, and `qa`, which currently has no way to tell a reactively-added duplicate
 from a load-bearing one without reading the whole file.
 
+## P96 · A merge-attempt cap a human can retire
+
+**Problem.** A ticket that hits `merge_attempt_cap` has no way back. `merge_attempts_of`
+(`scripts/lib.jq`) counts failed merges by scanning a ticket's tracker comments for the
+`orch-merge-attempt` trailer `lane.sh merge-failed` writes; at the cap, `plan.jq` (the
+`mutate:merge-attempt-cap` line) blocks the ticket so the queue advances to the next one. Nothing
+ever lowers that count. Once the cap is spent, the only exits are deleting the comments by hand,
+raising `merge_attempt_cap` above the recorded number, or merging outside the queue entirely — and
+the first of those destroys the record of what went wrong.
+
+One reset does exist, and it covers exactly one cause. P62's `--base-red <check> --fix <iid>` marks
+an attempt that died on a check already red on clean base: it never counts toward the cap, and the
+ticket parks until the linked fix issue closes, then re-enters the queue on its own. That is the
+right shape, and it is the model for the rest of this proposal — but it only fires when the failure
+was the base's fault. Every other reason a merge failed and was then genuinely resolved — a conflict
+a human untangled, a dependency that has since landed, a wrong integration branch, a ticket rewritten
+into different work — leaves the count standing for the life of the ticket.
+
+Two open defects are the same wound seen from two sides:
+
+- **D-SNAP-10** — `lane.sh rescope` writes an `orch-scope-reset` marker that retires *gate
+  rejections* (`rejections_of` ignores verdicts older than the newest marker) but not merge
+  attempts. A ticket rewritten into different work returns to the board carrying merge history
+  against machinery that no longer exists. Confirmed live on build-1 #26, 2026-08-07.
+- **D-SKILL-13** — the count is a bare substring test, so *any* note that mentions
+  `orch-merge-attempt` in prose counts as an attempt. The blocked report the cap itself mandates has
+  every reason to name the marker, and on #26 it did: the counter read 3 against a cap of 2, putting
+  the ticket beyond even a raised cap.
+
+**Why not a counter in the ticket body.** The obvious idea — keep a number in the body and edit it
+down — loses on every axis that matters here. Body writes are read-modify-write, so two lanes
+touching one ticket silently drop an update; editing the number erases the history of what was tried,
+which is the one thing a human triaging a blocked ticket needs; and the body is human prose the
+machinery already declines to take orders from (the `--release-hold` guard exists precisely because
+ticket prose can talk a lane into things). It also breaks the shape everything else in this system
+uses: decisions are tracker state derived from append-only notes, and every other cap — `rejections`,
+`merge_hold` — is computed that way. The marker pattern gets the same reset with none of the losses.
+
+**Fix direction.**
+
+- Add `lane.sh merge-reset <iid>` (body mandatory, on stdin or `--file`), writing
+  `<!-- orch-merge-reset <iso8601> -->` as a tracker comment. Refused for automated callers via
+  `_automated_caller`, for the same reason `rescope` and `--release-hold` are: a lane that can retire
+  its own cap has no cap, and the ticket prose that would argue it into doing so is the prose those
+  guards already refuse. The old attempt trailers stay in the thread — this retires the cap, it does
+  not hide the history. Mirror `rescope` line for line; the reasoning is already written there.
+- Rework `merge_attempts_of` in `scripts/lib.jq` to take the newest-marker cutoff `rejections_of`
+  already uses — order notes by `created_at` with the same `[.at, -.i]` tiebreak, count only
+  attempts newer than the newest reset marker. Both callers (`snapshot.jq` and `merge-queue.jq`)
+  inherit it, which is why P93 moved the function here.
+- In the same rewrite, anchor the scan on the trailer's full form
+  (`<!-- orch-merge-attempt <iid> -->`, optionally with ` base-red=<check> fix=<iid>`) instead of the
+  bare substring, so prose that names the marker counts zero.
+- Treat `orch-scope-reset` as a merge reset too: take whichever of the two markers is newer as the
+  cutoff. Rescope means the ticket became different work, which is a superset of "the merge history
+  is stale" — a human who rescopes should not then have to reset the merge cap separately.
+- Documentation: the `lane.sh` usage string; `references/triage.md`'s action table, whose "Retire a
+  spent cap" row currently offers `rescope` alone and should name both verbs and say which cap each
+  retires; and the Failure policy bullet in `SKILL.md` that already describes the rescope escape —
+  extend the existing sentence rather than adding a line, per the keep-SKILL.md-small rule above.
+
+**Tests.** Four cases, all in the suite file covering the ticker and lane verbs:
+
+- Attempts recorded before a reset marker do not count; attempts after it do.
+- A note that merely *mentions* `orch-merge-attempt` in prose counts zero — the case that bit #26,
+  and the one D-SKILL-13 records as having no coverage at all.
+- An `orch-scope-reset` marker retires merge attempts as well as rejections.
+- `merge-reset` is refused when `LOOM_LANE_ID` is set.
+
+Register the cap comparison in `scripts/mutate.sh` if the existing `merge-attempt-cap` target does
+not already prove these guards catch a mutation, and run `--mutate` before and after.
+
+**Closes.** D-SNAP-10 and D-SKILL-13 — move both to the Closed section on implementation. Their line
+citations are stale (both point at `snapshot.jq:132-133`; P93 moved the function to `scripts/lib.jq`),
+so fix the pointers in the same pass rather than leaving them for the next reader. **Not** closed by
+this: D-SNAP-16, one-verdict-counted-twice, which is the same inflation shape in `orch_verdict_scan`
+but a different function and a different fix.

@@ -49,7 +49,7 @@ Six actions per ticket:
 |---|---|
 | Requeue to work | `lane.sh transition <n> ready-for-agent --release-hold --note` |
 | Human finished it → gate | `lane.sh transition <n> review --release-hold --note` |
-| Retire a spent cap | `lane.sh rescope <n>` |
+| Retire a spent cap | `lane.sh merge-reset <n>` (merge attempts) or `lane.sh rescope <n>` (rejections **and** merge attempts — the ticket is now different work) |
 | Escalate the model | `lane.sh model-tier <n> <tier>` |
 | Leave blocked | nothing |
 | Close as won't-do | `lane.sh close <n>` |

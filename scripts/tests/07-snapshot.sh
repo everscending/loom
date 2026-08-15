@@ -388,6 +388,72 @@ br() { jq -r "$1" "$T/snap-basered.json"; }
 [ "$(br '.tickets[] | select(.id==51) | .merge_attempts')" = "1" ] \
     && ok "snapshot: a real attempt beside a base-red one still counts" \
     || bad "snapshot: mixed history miscounted ($(br '.tickets[] | select(.id==51) | .merge_attempts'), want 1)"
+# 7a7c. P96: a spent merge cap can be retired. Before this the count had no
+#       reset at all — the exits were deleting the ticket's comments, raising
+#       merge_attempt_cap past the count, or merging outside the queue — and
+#       the count itself read high, because it matched the trailer name
+#       anywhere in a note including the blocked report the cap mandates
+#       (build-1 #26, 2026-08-07: 3 against a cap of 2, past even a raised
+#       cap). Two markers reset it: `orch-merge-reset` (lane.sh merge-reset)
+#       and `orch-scope-reset` (lane.sh rescope — different work has no merge
+#       history either).
+cat > "$FX/open-mergereset.json" <<'EOF'
+[
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+  "description":"**Selected epics**:\n- Ledger core (#70, #71, #72)\n"},
+ {"iid":70,"title":"Conflict untangled by hand","project_id":1,"web_url":"https://x/70",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":71,"title":"Blocked report names the marker","project_id":1,"web_url":"https://x/71",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":72,"title":"Rewritten into different work","project_id":1,"web_url":"https://x/72",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"}
+]
+EOF
+cat > "$FX/notes-70.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-15T12:00:00Z","author":{"username":"merge"},
+  "body":"conflict in schema.ts again\n\n<!-- orch-merge-attempt 70 -->"},
+ {"system":false,"created_at":"2026-08-15T11:00:00Z","author":{"username":"human"},
+  "body":"Untangled the schema.ts conflict by hand and pushed it; those two attempts died on something that no longer exists.\n\n<!-- orch-merge-reset 2026-08-15T11:00:00Z -->"},
+ {"system":false,"created_at":"2026-08-15T10:30:00Z","author":{"username":"merge"},
+  "body":"conflict in schema.ts, aborted\n\n<!-- orch-merge-attempt 70 -->"},
+ {"system":false,"created_at":"2026-08-15T10:00:00Z","author":{"username":"merge"},
+  "body":"conflict in schema.ts, aborted\n\n<!-- orch-merge-attempt 70 -->"}]
+EOF
+cat > "$FX/notes-71.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-15T12:30:00Z","author":{"username":"wave"},
+  "body":"Blocked: two merge attempts against a cap of 2. Each one wrote an orch-merge-attempt trailer on this thread; the second died in the same place as the first.\n\n<!-- orch-blocked-report category=merge-conflict -->"},
+ {"system":false,"created_at":"2026-08-15T12:00:00Z","author":{"username":"merge"},
+  "body":"conflict in live-app.ts, aborted\n\n<!-- orch-merge-attempt 71 -->"},
+ {"system":false,"created_at":"2026-08-15T11:00:00Z","author":{"username":"merge"},
+  "body":"conflict in live-app.ts, aborted\n\n<!-- orch-merge-attempt 71 -->"}]
+EOF
+cat > "$FX/notes-72.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-15T12:00:00Z","author":{"username":"human"},
+  "body":"Re-scoped: the code these merges conflicted over moved to #48.\n\n<!-- orch-scope-reset 2026-08-15T12:00:00Z -->"},
+ {"system":false,"created_at":"2026-08-15T11:00:00Z","author":{"username":"merge"},
+  "body":"conflict in pairing.ts, aborted\n\n<!-- orch-merge-attempt 72 -->"},
+ {"system":false,"created_at":"2026-08-15T10:00:00Z","author":{"username":"merge"},
+  "body":"conflict in pairing.ts, aborted\n\n<!-- orch-merge-attempt 72 -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-mergereset.json" STUB_LOG="$T/calls-mergereset" \
+    "$TICK" snapshot > "$T/snap-mergereset.json" 2>/dev/null
+rm -f "$FX/notes-70.json" "$FX/notes-71.json" "$FX/notes-72.json"
+mr() { jq -r "$1" "$T/snap-mergereset.json"; }
+[ "$(mr '.tickets[] | select(.id==70) | .merge_attempts')" = "1" ] \
+    && ok "snapshot: a merge reset retires the attempts recorded before it" \
+    || bad "snapshot: merge reset ignored ($(mr '.tickets[] | select(.id==70) | .merge_attempts'), want 1)"
+# Planted violation: that same assertion is also the guard against a marker
+# that eats history NEWER than itself — one reset would then make the cap
+# permanently unreachable. #70's third attempt is after the marker and counts.
+[ "$(mr '.tickets[] | select(.id==71) | .merge_attempts')" = "2" ] \
+    && ok "snapshot: a note that merely names the trailer is not an attempt" \
+    || bad "snapshot: prose mentioning orch-merge-attempt counted ($(mr '.tickets[] | select(.id==71) | .merge_attempts'), want 2) — the blocked report inflates the cap it reports on"
+[ "$(mr '.tickets[] | select(.id==72) | .merge_attempts')" = "0" ] \
+    && ok "snapshot: a scope reset retires merge attempts too — different work has no merge history" \
+    || bad "snapshot: rescope left the merge cap standing ($(mr '.tickets[] | select(.id==72) | .merge_attempts'), want 0)"
 [ "$(jq -r '.config.merge_attempt_cap' "$T/snap-unblocked.json")" != "null" ] \
     && ok "snapshot: merge_attempt_cap is published so the wave can bound retries" \
     || bad "snapshot: no merge_attempt_cap in config"

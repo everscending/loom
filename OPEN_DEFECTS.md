@@ -31,14 +31,16 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-70 open, counted from the table below, which is the live set. Most were verified against the
+68 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
 D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
 against the live board that triggered each. All of those but D-SNAP-16 have since been fixed and
 closed; D-LIN-03 was a defect in D-LIN-01's fix, found the day after it shipped, and was the
 second one that fix produced. D-TICK-20 was filed on **2026-08-14**, confirmed live against a real
-build (triggers-api build-2), and fixed and closed the same day. Severity is a same-pass judgment
+build (triggers-api build-2), and fixed and closed the same day. D-SNAP-10 and D-SKILL-13,
+both halves of one wound in the merge-attempt count, were closed together by P96 on
+**2026-08-15**. Severity is a same-pass judgment
 call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
@@ -59,7 +61,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
 | D-SNAP-08 | High | the config-line filter deletes real epic names |
-| D-SNAP-10 | High | `merge_attempts` ignores the scope-reset marker |
 | D-SNAP-16 | High | one verdict note stamped twice counts as two rejections |
 | D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
 | D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
@@ -102,7 +103,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SKILL-04 | Medium | `spawn-lane --model` is not a flag |
 | D-SKILL-09 | Medium | "the ticker can say why nothing ran" holds for one reason in six |
 | D-SKILL-12 | Medium | `references/optimize.md:107` still carries the four-item fix-ticket list |
-| D-SKILL-13 | Medium | the blocked report the cap mandates inflates the counter it reports on |
 | D-REF-04 | Medium | three read keys are missing from the canonical schema |
 | D-REF-07 | Medium | `loom-config.md:95` lists push events nothing emits |
 | D-REF-08 | Medium | `loom-config.md:86` skips the middle ntfy layer |
@@ -248,28 +248,6 @@ Asymmetric too — `Max lanes: 4` survives.
 Body `Not just docs — this is api work` yields `tier: "docs"`, so the gate picks the cheapest suite
 for api-risk code, and no warning fires because `.tier != null`.
 **Test:** fixtures at `:1498`, `:1575`, `:1623` use bare one-word sections.
-
-### D-SNAP-10 · `merge_attempts` ignores the scope-reset marker
-`snapshot.jq:132-133` — `rejections_of` retires verdicts older than `orch-scope-reset` (`:105-115`);
-`merge_attempts_of` is a bare `test("orch-merge-attempt")` over every note.
-**Failure:** a ticket rescoped after two failed merges returns with `rejections.total: 0` but
-`merge_attempts: 2` — at `merge_attempt_cap: 2` it is blocked from the merge queue on history the
-rescope was meant to retire. Any note quoting the trailer name also inflates the count, and the
-notes most likely to quote it are the machine's own reports about the cap (see D-SKILL-13).
-**Confirmed live** (build-1 #26, 2026-08-07): two merge attempts failed on an unrelated defect on
-the integration base (#65's over-broad model-literal regex, since fixed at `d85fac2`). Ticket #26's
-own diff never failed a gate — a merge of `origin/main` into `loom/ticket-26` runs the `logic` tier
-clean (ruff, mypy, 232 passed / 5 skipped) and MR !14 reports `detailed_merge_status: mergeable`.
-The ticket is nonetheless unmergeable through the queue, and `rescope` cannot free it: the marker
-`lane.sh rescope` writes is read by `rejections_of` only. Worse, the blocked report the wave wrote
-at the cap names `orch-merge-attempt` in its prose, so the scan now returns **3** against a cap of
-2 — the counter is above the cap by one attempt that never happened. The only exits left are a
-hand-merge outside the queue, or raising `merge_attempt_cap` past the inflated count.
-**Test:** `tick-test.sh:1547` tests rescope against `rejections` only. Nothing asserts that a note
-merely *mentioning* the trailer is not counted, which is the case that bit #26.
-**Covered by:** P96 — the reset marker it adds needs the same newest-marker cutoff `rejections_of`
-uses, and takes `orch-scope-reset` as a merge reset too. Note the citation above is stale: P93
-moved `merge_attempts_of` out of `snapshot.jq` into `scripts/lib.jq`.
 
 ### D-SNAP-11 · `impl_slots_free` can go negative
 `snapshot.jq:364-366` — no clamp. `max_lanes: 2` with three alive impl lanes → `-1`. Reachable by
@@ -617,30 +595,6 @@ history can never land.
 of #64 sitting stateless and unclaimed.
 **Failure:** an `optimize` pass reads the five-item rule as bloat and compacts it back to the
 broken four.
-
-### D-SKILL-13 · the blocked report the cap mandates inflates the counter it reports on
-SKILL.md:264-268 — at `merge_attempt_cap` recorded attempts the wave must stop retrying and
-`transition <iid> blocked` "with a report", and the same passage names the counter's source as
-`.merge_attempts`. But `merge_attempts_of` (`snapshot.jq:132-133`) counts every note whose body
-matches `orch-merge-attempt`, with no check that the note is a real `lane.sh merge-failed` trailer.
-A report explaining *why the cap was reached* has every reason to name the marker it is counting,
-and the prose gives no warning not to.
-**Failure:** build-1 #26 (2026-08-07). Two genuine attempts, then a blocked report quoting
-`orch-merge-attempt` in a sentence — `merge_attempts` reads 3 against `merge_attempt_cap: 2`. The
-step that exists to *stop* the queue burning lanes on one ticket instead pushed the ticket one
-attempt further out of reach, so even raising the cap to 3 would not have released it. Any later
-human or agent comment discussing the cap does the same.
-**Fix shape:** either the scan anchors on the trailer's full form (`<!-- orch-merge-attempt <iid> -->`
-as written at `lane.sh:240`) rather than a bare substring, or SKILL.md tells report writers to name
-the marker only as prose (`merge-attempt trailer`) and never verbatim. The first is the real fix;
-the second is a workaround that every writer must remember.
-**Test:** none. `tick-test.sh:1724` asserts a count of 2 from two real trailers, and `:1730` guards
-only against a *verdict* trailer leaking in — no fixture carries a note that merely mentions the
-merge-attempt marker.
-**Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
-**Covered by:** P96 — takes the first of the two fix shapes above, anchoring the scan on the
-trailer's full form as part of the same rewrite of `merge_attempts_of`. Note the citation above is
-stale: P93 moved that function out of `snapshot.jq` into `scripts/lib.jq`.
 
 ---
 
@@ -1505,3 +1459,70 @@ pause its own lane wrote. Proved red by reverting each half separately against t
 (no copy, so no vacuous-source risk): the `cmd_chain_merge` half reverted → 3 failures including
 `chain-merge: the fast path respawned a merge lane into a live usage limit`; the `_tick_gates` half
 reverted → 2. Full suite: 1044 passed, 0 failed. SKILL.md unchanged — 0 lines.
+
+### D-SNAP-10 · `merge_attempts` ignores the scope-reset marker
+*Closed 2026-08-15.*
+
+`snapshot.jq:132-133` — `rejections_of` retires verdicts older than `orch-scope-reset` (`:105-115`);
+`merge_attempts_of` is a bare `test("orch-merge-attempt")` over every note.
+**Failure:** a ticket rescoped after two failed merges returns with `rejections.total: 0` but
+`merge_attempts: 2` — at `merge_attempt_cap: 2` it is blocked from the merge queue on history the
+rescope was meant to retire. Any note quoting the trailer name also inflates the count, and the
+notes most likely to quote it are the machine's own reports about the cap (see D-SKILL-13).
+**Confirmed live** (build-1 #26, 2026-08-07): two merge attempts failed on an unrelated defect on
+the integration base (#65's over-broad model-literal regex, since fixed at `d85fac2`). Ticket #26's
+own diff never failed a gate — a merge of `origin/main` into `loom/ticket-26` runs the `logic` tier
+clean (ruff, mypy, 232 passed / 5 skipped) and MR !14 reports `detailed_merge_status: mergeable`.
+The ticket is nonetheless unmergeable through the queue, and `rescope` cannot free it: the marker
+`lane.sh rescope` writes is read by `rejections_of` only. Worse, the blocked report the wave wrote
+at the cap names `orch-merge-attempt` in its prose, so the scan now returns **3** against a cap of
+2 — the counter is above the cap by one attempt that never happened. The only exits left are a
+hand-merge outside the queue, or raising `merge_attempt_cap` past the inflated count.
+**Test:** `tick-test.sh:1547` tests rescope against `rejections` only. Nothing asserts that a note
+merely *mentioning* the trailer is not counted, which is the case that bit #26.
+**Covered by:** P96 — the reset marker it adds needs the same newest-marker cutoff `rejections_of`
+uses, and takes `orch-scope-reset` as a merge reset too. Note the citation above is stale: P93
+moved `merge_attempts_of` out of `snapshot.jq` into `scripts/lib.jq`.
+
+**Shipped (P96):** `merge_attempts_of` (in `scripts/lib.jq` since P93 — the citation above predates
+that move) now takes the same newest-marker cutoff `rejections_of` uses, over two markers:
+`orch-merge-reset`, written by the new `lane.sh merge-reset`, and `orch-scope-reset`, written by
+`rescope`. A rescoped ticket therefore sheds its merge history along with its rejections, and a
+ticket whose merges failed on something since fixed has a reset that does not touch its scope. The
+same rewrite anchors the scan on the trailer's full form, which closes D-SKILL-13. Section 07 gains
+three cases (a reset retires older attempts and not newer ones; prose naming the trailer counts
+zero; a scope reset retires merge attempts too), section 16 gains six on the verb, and
+`scripts/mutate.sh` gains `merge-reset-cutoff` and `merge-attempt-anchor`.
+
+### D-SKILL-13 · the blocked report the cap mandates inflates the counter it reports on
+*Closed 2026-08-15.*
+
+SKILL.md:264-268 — at `merge_attempt_cap` recorded attempts the wave must stop retrying and
+`transition <iid> blocked` "with a report", and the same passage names the counter's source as
+`.merge_attempts`. But `merge_attempts_of` (`snapshot.jq:132-133`) counts every note whose body
+matches `orch-merge-attempt`, with no check that the note is a real `lane.sh merge-failed` trailer.
+A report explaining *why the cap was reached* has every reason to name the marker it is counting,
+and the prose gives no warning not to.
+**Failure:** build-1 #26 (2026-08-07). Two genuine attempts, then a blocked report quoting
+`orch-merge-attempt` in a sentence — `merge_attempts` reads 3 against `merge_attempt_cap: 2`. The
+step that exists to *stop* the queue burning lanes on one ticket instead pushed the ticket one
+attempt further out of reach, so even raising the cap to 3 would not have released it. Any later
+human or agent comment discussing the cap does the same.
+**Fix shape:** either the scan anchors on the trailer's full form (`<!-- orch-merge-attempt <iid> -->`
+as written at `lane.sh:240`) rather than a bare substring, or SKILL.md tells report writers to name
+the marker only as prose (`merge-attempt trailer`) and never verbatim. The first is the real fix;
+the second is a workaround that every writer must remember.
+**Test:** none. `tick-test.sh:1724` asserts a count of 2 from two real trailers, and `:1730` guards
+only against a *verdict* trailer leaking in — no fixture carries a note that merely mentions the
+merge-attempt marker.
+**Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
+**Covered by:** P96 — takes the first of the two fix shapes above, anchoring the scan on the
+trailer's full form as part of the same rewrite of `merge_attempts_of`. Note the citation above is
+stale: P93 moved that function out of `snapshot.jq` into `scripts/lib.jq`.
+
+**Shipped (P96):** the first of the two fix shapes above — `merge_attempts_of` (in `scripts/lib.jq`
+since P93, not `snapshot.jq` as cited) matches `<!-- orch-merge-attempt <n> -->` in full rather than
+the bare substring, so a blocked report naming the marker it reports on counts zero. That form also
+excludes P62's base-red attempts on its own, since those carry ` base-red=… fix=…` before the `-->`.
+The suite gains the fixture this entry says it lacked: a note that merely mentions the marker,
+asserted at 2 attempts, not 3.

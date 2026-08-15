@@ -57,7 +57,6 @@ evidence, and implementation notes belong in this file, not there.
 | ID | Proposal | Status |
 |----|----------|--------|
 | P54 | The wave reads the snapshot once | deferred 2026-08-06 — P51 cut the read it targets from ~19k to ~4k tokens and P57 halves it again, so the estimate fell from 4-6% to about 1%; it fixes no correctness problem. Revisit on the `retro` wave line of the first post-P51 build, against the pre-P51 baseline `retro` now reports for boostlingo build-3: waves $358.14 of $1482.32, 24% |
-| P96 | A merge-attempt cap a human can retire | open — proposed 2026-08-15; a spent cap has no reset at all, and the counter reads high. Closes D-SNAP-10 and D-SKILL-13 |
 | P50 | `references/loom-config.md` is generated from `resolve-config` | open — proposed 2026-08-06; three read keys undocumented, four documented facts false |
 | P95 | Consolidate the existing suite's reactive duplicates, gated behind `--mutate` | open — proposed 2026-08-13; the found example (`16-ticker-and-lane-verbs.sh:82-93`) folded 2026-08-14, `--mutate` confirms no coverage lost; rest of the suite unswept, opportunistic per the Fix direction |
 | P18 | Use a cheaper model for scheduling | open — fresh number 2026-08-03: 36 waves, 1h29m, 57.5% of span |
@@ -322,84 +321,6 @@ which is the primary spend control. Documented but false: the heartbeat is 60s, 
 default, source layer and accepted values, and `loom-config.md`'s schema block is that output with
 prose around it. `ntfy` resolution moves into `resolve-config` so one command really does answer
 "where do pushes go". A suite case diffs the documented key set against the emitted one.
-
-## P96 · A merge-attempt cap a human can retire
-
-**Problem.** A ticket that hits `merge_attempt_cap` has no way back. `merge_attempts_of`
-(`scripts/lib.jq`) counts failed merges by scanning a ticket's tracker comments for the
-`orch-merge-attempt` trailer `lane.sh merge-failed` writes; at the cap, `plan.jq` (the
-`mutate:merge-attempt-cap` line) blocks the ticket so the queue advances to the next one. Nothing
-ever lowers that count. Once the cap is spent, the only exits are deleting the comments by hand,
-raising `merge_attempt_cap` above the recorded number, or merging outside the queue entirely — and
-the first of those destroys the record of what went wrong.
-
-One reset does exist, and it covers exactly one cause. P62's `--base-red <check> --fix <iid>` marks
-an attempt that died on a check already red on clean base: it never counts toward the cap, and the
-ticket parks until the linked fix issue closes, then re-enters the queue on its own. That is the
-right shape, and it is the model for the rest of this proposal — but it only fires when the failure
-was the base's fault. Every other reason a merge failed and was then genuinely resolved — a conflict
-a human untangled, a dependency that has since landed, a wrong integration branch, a ticket rewritten
-into different work — leaves the count standing for the life of the ticket.
-
-Two open defects are the same wound seen from two sides:
-
-- **D-SNAP-10** — `lane.sh rescope` writes an `orch-scope-reset` marker that retires *gate
-  rejections* (`rejections_of` ignores verdicts older than the newest marker) but not merge
-  attempts. A ticket rewritten into different work returns to the board carrying merge history
-  against machinery that no longer exists. Confirmed live on build-1 #26, 2026-08-07.
-- **D-SKILL-13** — the count is a bare substring test, so *any* note that mentions
-  `orch-merge-attempt` in prose counts as an attempt. The blocked report the cap itself mandates has
-  every reason to name the marker, and on #26 it did: the counter read 3 against a cap of 2, putting
-  the ticket beyond even a raised cap.
-
-**Why not a counter in the ticket body.** The obvious idea — keep a number in the body and edit it
-down — loses on every axis that matters here. Body writes are read-modify-write, so two lanes
-touching one ticket silently drop an update; editing the number erases the history of what was tried,
-which is the one thing a human triaging a blocked ticket needs; and the body is human prose the
-machinery already declines to take orders from (the `--release-hold` guard exists precisely because
-ticket prose can talk a lane into things). It also breaks the shape everything else in this system
-uses: decisions are tracker state derived from append-only notes, and every other cap — `rejections`,
-`merge_hold` — is computed that way. The marker pattern gets the same reset with none of the losses.
-
-**Fix direction.**
-
-- Add `lane.sh merge-reset <iid>` (body mandatory, on stdin or `--file`), writing
-  `<!-- orch-merge-reset <iso8601> -->` as a tracker comment. Refused for automated callers via
-  `_automated_caller`, for the same reason `rescope` and `--release-hold` are: a lane that can retire
-  its own cap has no cap, and the ticket prose that would argue it into doing so is the prose those
-  guards already refuse. The old attempt trailers stay in the thread — this retires the cap, it does
-  not hide the history. Mirror `rescope` line for line; the reasoning is already written there.
-- Rework `merge_attempts_of` in `scripts/lib.jq` to take the newest-marker cutoff `rejections_of`
-  already uses — order notes by `created_at` with the same `[.at, -.i]` tiebreak, count only
-  attempts newer than the newest reset marker. Both callers (`snapshot.jq` and `merge-queue.jq`)
-  inherit it, which is why P93 moved the function here.
-- In the same rewrite, anchor the scan on the trailer's full form
-  (`<!-- orch-merge-attempt <iid> -->`, optionally with ` base-red=<check> fix=<iid>`) instead of the
-  bare substring, so prose that names the marker counts zero.
-- Treat `orch-scope-reset` as a merge reset too: take whichever of the two markers is newer as the
-  cutoff. Rescope means the ticket became different work, which is a superset of "the merge history
-  is stale" — a human who rescopes should not then have to reset the merge cap separately.
-- Documentation: the `lane.sh` usage string; `references/triage.md`'s action table, whose "Retire a
-  spent cap" row currently offers `rescope` alone and should name both verbs and say which cap each
-  retires; and the Failure policy bullet in `SKILL.md` that already describes the rescope escape —
-  extend the existing sentence rather than adding a line, per the keep-SKILL.md-small rule above.
-
-**Tests.** Four cases, all in the suite file covering the ticker and lane verbs:
-
-- Attempts recorded before a reset marker do not count; attempts after it do.
-- A note that merely *mentions* `orch-merge-attempt` in prose counts zero — the case that bit #26,
-  and the one D-SKILL-13 records as having no coverage at all.
-- An `orch-scope-reset` marker retires merge attempts as well as rejections.
-- `merge-reset` is refused when `LOOM_LANE_ID` is set.
-
-Register the cap comparison in `scripts/mutate.sh` if the existing `merge-attempt-cap` target does
-not already prove these guards catch a mutation, and run `--mutate` before and after.
-
-**Closes.** D-SNAP-10 and D-SKILL-13 — move both to the Closed section on implementation. Their line
-citations are stale (both point at `snapshot.jq:132-133`; P93 moved the function to `scripts/lib.jq`),
-so fix the pointers in the same pass rather than leaving them for the next reader. **Not** closed by
-this: D-SNAP-16, one-verdict-counted-twice, which is the same inflation shape in `orch_verdict_scan`
-but a different function and a different fix.
 
 ## Token spend — the measurement these six proposals come from
 
