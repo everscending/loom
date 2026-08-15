@@ -29,6 +29,26 @@ tree — `git status --short` empty — and report the SHA you started from.
 Never make a `.bak` copy. A stale one is a second SKILL.md that nobody knows is
 stale, and it is the file a later reader greps by accident.
 
+## Where the work happens
+
+Not in the main clone. Cut a worktree first and make every edit, every grep
+check and every new `references/` file there:
+
+    git worktree add .claude/worktrees/optimize-<date> -b optimize-<date> main
+
+**Branch from local `main` by name, never from `origin/HEAD`.** Same rule, and
+the same reason, as [prop.md](prop.md): an agent harness cutting a worktree for
+itself branches from the remote's default head, which lags by however many
+commits this repo has not pushed — and a compaction pass rewriting a stale
+`SKILL.md` silently reverts every line the unpushed commits added. *(paid:
+D-SNAP-17's worktree came from `origin/main`, 32 unpushed commits behind.)*
+
+`.claude/worktrees/` is git-ignored, which is what makes a path inside the
+repo safe here. A **sibling** directory is not: this repo lives in the skills
+tree, and a sibling of it carrying a `SKILL.md` registers as a second skill.
+
+Step 8 merges it back and removes it. Nothing is left standing.
+
 ## Step 1 — structural moves, before any rewording
 
 The largest wins are not wording. They are noticing that two different readers
@@ -165,10 +185,31 @@ Any invocation or flag present before and absent after is a defect unless you
 can name the sentence that made it redundant. This catches the whole
 silent-damage class, which is why it is not optional.
 
+## Step 8 — commit, merge back, push, clean up
+
+Still in the worktree. Commit the rewritten `SKILL.md` and every new
+`references/` file as one commit whose subject names what the pass moved or
+cut, not the word "optimize" (`git log --oneline` shows the house style). That
+commit, not a `.bak`, is the revert path.
+
+Then, back in the main clone: `git merge --no-ff optimize-<date>` into `main`
+— never rebase, so what merges is exactly the text step 7 checked. A conflict
+here means `SKILL.md` moved under you while the pass ran: stop and report it,
+never hand-pick, because a merged compaction that quietly drops someone else's
+new rule is the same silent damage this file exists to prevent. Then
+`git worktree remove .claude/worktrees/optimize-<date>` and delete the branch;
+teardown is this session's job, not a chore left for the human.
+
+**Then push `main`.** Not housekeeping — the next `prop`, `fix` or `optimize`
+run is handed a base cut from `origin/HEAD`, so an unpushed compaction is a
+compaction the next run will rewrite from scratch or silently undo. Skip it
+when the repo has no remote; otherwise `git push origin main` is the last act
+of the verb.
+
 ## Deliver
 
 - the rewritten `SKILL.md`, plus any new `references/` files
-- the SHA you started from
+- the SHA you started from, and the merge commit on `main`
 - before/after word counts, overall and per section
 - the two grep diffs from step 7
 - anything you were unsure whether to cut — **flag it, do not guess**

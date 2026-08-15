@@ -563,7 +563,7 @@ its words are paid for on every tick — **without changing what it makes an
 agent do**. Human-run, never invoked by a wave. It is surgery, not editing:
 this file is also the only place a wave learns to drive the scripts, and the
 damage from a careless cut is mostly silent. The procedure, the untouchable
-machine contracts, and the mechanical check that catches the silent class:
+machine contracts, the worktree, and the check that catches the silent class:
 [references/optimize.md](references/optimize.md).
 
 ### `prop <Pn>`
