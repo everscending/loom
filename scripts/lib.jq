@@ -76,10 +76,34 @@ def state_of($labels):
 # main-is-red, and the spent caps had no reset when the fix merged).
 # P93: moved here so merge-queue.jq's narrow read counts attempts the same
 # way a full snapshot does. Consumers: snapshot.jq and merge-queue.jq.
+# P96, two changes, both paid for by build-1 #26 (2026-08-07):
+#   1. The match is the trailer's FULL form, not a bare substring. A note that
+#      merely names `orch-merge-attempt` in prose used to count as an attempt —
+#      and the blocked report the cap itself mandates has every reason to name
+#      the marker it is reporting on. #26's did, so the count read 3 against a
+#      cap of 2, past even a raised cap. The plain form is also what excludes
+#      P62's base-red attempts: they carry ` base-red=… fix=…` before the `-->`
+#      and so cannot match, which is the same exclusion the old second test did.
+#   2. Attempts older than the newest reset marker do not count, exactly as
+#      `rejections_of` retires verdicts older than an `orch-scope-reset`. Two
+#      markers reset here: `orch-merge-reset` (lane.sh merge-reset — the merge
+#      history is stale, e.g. a conflict a human untangled) and `orch-scope-
+#      reset` (lane.sh rescope — the ticket became different work, which is a
+#      superset). Before this a spent cap had no reset at all: the exits were
+#      deleting the ticket's comments, raising `merge_attempt_cap` past the
+#      count, or merging outside the queue. Ordering uses the created_at of the
+#      notes themselves with the same `[.at, -.i]` tiebreak `rejections_of`
+#      uses — one clock, the one the tracker stamps.
 def merge_attempts_of($notes):
-    [$notes[] | select((.body // "")
-      | test("orch-merge-attempt") and (test("orch-merge-attempt [0-9]+ base-red=") | not))]
-    | length;
+    ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-(merge|scope)-reset "))
+      | {at: (.value.created_at // ""), i: .key}]
+     | sort_by([.at, -.i]) | last) as $reset
+  | [$notes | to_entries[] | .key as $i | .value as $note
+     | select((($note.body // "") | test("<!-- orch-merge-attempt \\d+ -->")))  # mutate:merge-attempt-anchor
+     | {at: ($note.created_at // ""), i: $i}]
+  | (if $reset == null then . else map(select([.at, -.i] > [$reset.at, -$reset.i])) end)  # mutate:merge-reset-cutoff
+  | length;
 
 # P62 release side: the park and its automatic release, derived rather
 # than written. A ticket whose base-red attempts link a fix issue that is

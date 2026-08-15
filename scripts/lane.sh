@@ -67,7 +67,15 @@
 #                                            forever
 #   lane.sh rescope <iid> [--file F]          this ticket is now DIFFERENT work:
 #                                            post what changed and retire the
-#                                            rejections recorded before it. A
+#                                            rejections recorded before it —
+#                                            and its merge attempts, since
+#                                            different work has no merge
+#                                            history. A human's call only —
+#                                            refused inside a lane or a wave
+#   lane.sh merge-reset <iid> [--file F]      same work, but what those merges
+#                                            failed on is resolved: post what
+#                                            changed and retire the merge
+#                                            attempts recorded before it. A
 #                                            human's call only — refused inside
 #                                            a lane or a wave
 #   lane.sh fix-ticket --title <t> --tier <t> --milestone <m>
@@ -531,6 +539,10 @@ cmd_rescope() { # <iid> [--file F]
     # ticket gets blocked, and decisions are tracker-state (constitution rule
     # 1), so a fresh session reads the same history any wave does. The old
     # trailers stay in the thread — this retires the cap, it does not hide it.
+    # P96: `merge_attempts_of` reads this marker too, so a rescope retires the
+    # ticket's merge attempts along with its rejections — different work has no
+    # merge history either. `merge-reset` below is the narrower verb, for the
+    # SAME work whose merges failed on something since resolved.
     local iid="${1:-}"
     _check_iid "$iid"
     # Refused for automated callers, exactly as `--release-hold` is, and for the
@@ -548,7 +560,46 @@ cmd_rescope() { # <iid> [--file F]
     printf '\n\n<!-- orch-scope-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
     _post_note issue "$iid" "$f"
     _lane_ev ticket_rescope ticket "$iid"
-    echo "lane.sh: issue $iid re-scoped — rejections recorded before this note no longer count"
+    echo "lane.sh: issue $iid re-scoped — rejections and merge attempts recorded before this note no longer count"
+}
+
+cmd_merge_reset() { # <iid> [--file F]
+    # P96: retire the MERGE cap. `rescope` above does this for gate rejections
+    # and `merge_attempts_of` now honours its marker too, but the two decisions
+    # are not the same one: a ticket whose merge failed on a conflict a human
+    # then untangled, or on a dependency that has since landed, is the SAME
+    # work — nothing to re-scope — and until this verb existed its spent cap
+    # had no reset at all. The exits were deleting the ticket's comments (which
+    # destroys the record of what was tried, the one thing a human triaging it
+    # needs), raising `merge_attempt_cap` past the count, or merging outside the
+    # queue entirely.
+    #
+    # P62's `--base-red` covers exactly one cause — the failing check was
+    # already red on clean base — and releases itself when the linked fix
+    # closes. This is the general case, and it needs a human because no
+    # machine-readable signal says "that conflict is resolved now".
+    #
+    # A marker, not a counter in the ticket body. Body writes are
+    # read-modify-write, so two lanes touching one ticket silently drop an
+    # update; editing a number erases the history; and the body is human prose
+    # the machinery already declines to take orders from. Decisions are tracker
+    # state derived from append-only notes (constitution rule 1) — the same
+    # shape `rejections`, `merge_hold` and the scope reset already use.
+    local iid="${1:-}"
+    _check_iid "$iid"
+    # Refused for automated callers, exactly as `rescope` and `--release-hold`
+    # are: a lane that can retire its own cap has no cap, and the ticket prose
+    # that would argue it into doing so is what those guards already refuse.
+    if _automated_caller; then
+        die "merge-reset is refused in an automated session (${LOOM_LANE_ID:-wave}): retiring a ticket's merge-attempt cap is a human's decision that the reason those merges failed is now resolved, never a lane's or a wave's."
+    fi
+    # A body is mandatory, for `rescope`'s reason: a bare marker retires a cap
+    # while explaining nothing to the next reader.
+    local f; f=$(_stage_body "${@:2}")
+    printf '\n\n<!-- orch-merge-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issue "$iid" "$f"
+    _lane_ev ticket_merge_reset ticket "$iid"
+    echo "lane.sh: issue $iid — merge attempts recorded before this note no longer count toward the cap"
 }
 
 cmd_blocked_report() { # <iid> [--category <slug>] [--file F]
@@ -1184,7 +1235,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1222,6 +1273,7 @@ case "${1:-}" in
     wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
     rescope)    shift; cmd_rescope "$@" ;;
+    merge-reset) shift; cmd_merge_reset "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;
     submit)     shift; cmd_submit "$@" ;;

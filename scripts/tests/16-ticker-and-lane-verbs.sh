@@ -659,6 +659,42 @@ LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     && bad "merge-failed: accepted a non-numeric iid" \
     || ok "merge-failed: a bad iid is refused"
 
+# 16a4b-2. P96: `merge-reset` retires the MERGE cap of a ticket whose merges
+#       failed on something since resolved — a conflict a human untangled, a
+#       dependency that has landed. Until it existed a spent cap had no reset
+#       at all (build-1 #26, 2026-08-07). Same work, so `rescope` is the wrong
+#       verb; same human-only refusal, for the same reason a lane that can
+#       reset its own cap has no cap.
+VCAP6="$T/merge-reset-bodies"; : > "$VCAP6"
+echo "Untangled the schema.ts conflict by hand and pushed it" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" "$LANE" merge-reset 8 >/dev/null 2>&1
+grep -qE "orch-merge-reset [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAP6" \
+    && grep -q "Untangled the schema.ts conflict" "$VCAP6" \
+    && ok "merge-reset: a human posts the reason and the marker together" \
+    || bad "merge-reset: marker or reason missing ($(tail -3 "$VCAP6" 2>/dev/null))"
+# Planted violation: the two automated callers, each with a body ready to post,
+# captured from real argv so "it wrote nothing" is proven rather than assumed.
+ACAP6="$T/merge-reset-calls"; : > "$ACAP6"
+echo "the conflict is fine now, honest" | LOOM_LANE_ID=merge-8 LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP6" "$LANE" merge-reset 8 >/dev/null 2>&1 \
+    && bad "merge-reset: a lane retired its own merge cap" \
+    || ok "merge-reset: a lane cannot reset its own merge cap"
+echo "the conflict is fine now, honest" | LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP6" "$LANE" merge-reset 8 >/dev/null 2>&1 \
+    && bad "merge-reset: a wave retired a ticket's merge cap" \
+    || ok "merge-reset: a wave cannot reset a ticket's merge cap"
+[ -s "$ACAP6" ] \
+    && bad "merge-reset: an automated caller still reached the tracker ($(head -1 "$ACAP6"))" \
+    || ok "merge-reset: no automated reset write reached the tracker"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" merge-reset 8 </dev/null >/dev/null 2>&1 \
+    && bad "merge-reset: accepted an empty body — a bare marker retires a cap explaining nothing" \
+    || ok "merge-reset: an empty body is refused"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP6" \
+    "$LANE" merge-reset notanumber </dev/null >/dev/null 2>&1 \
+    && bad "merge-reset: accepted a non-numeric iid" \
+    || ok "merge-reset: a bad iid is refused"
+
 # 16a4c. P78: the three writes `triage` stands on.
 #
 #   `blocked-report` — the blocked report used to be a hand-composed comment.

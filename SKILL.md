@@ -466,8 +466,11 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
   only the human can make is missing, or an external dependency. Crashes are
   counted separately (`crash_cap`) and are not rejections. A ticket **rewritten
   into different work** keeps the old scope's rejections until a human retires
-  them with `lane.sh rescope <n>` — refused inside a lane or a wave, like
-  `--release-hold`. *(paid: a spent cap against deleted code.)*
+  them with `lane.sh rescope <n>`, which retires its merge attempts too;
+  `lane.sh merge-reset <n>` retires those alone, when the work is unchanged and
+  what its merges died on is fixed. Both refused inside a lane or a wave, like
+  `--release-hold`. *(paid: a spent cap against deleted code; a merge cap with
+  no reset.)*
 - Blocking writes a **blocked report** with
   **`lane.sh blocked-report <n> --category <slug>`** (body on stdin): what each
   attempt tried, branch/MR links, *the single decision or action needed*. Never
