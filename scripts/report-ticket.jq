@@ -33,10 +33,10 @@ include "lib";
            | "    \($s.id // $e.id)  " +
              (if $e == null then "still running" else "\($e.secs)s  rc \($e.rc)" end) +
              (if $e.rc == 7 then "  (pregate rejection — no review session spent)" else "" end) +
-             # P31: which model the round ran on, so an escalation can be
-             # priced against its outcome (does the stronger tier actually
-             # clear a ticket the base tier failed?). Blank = session default.
-             (if ($s.model // "") == "" then "" else "  on \($s.model)" end) +
+             # Provider + public tier explain which runtime profile the adapter
+             # resolved without leaking native model ids into core events.
+             (if ($s.provider // "") == "" then ""
+              else "  on \($s.provider)/\($s.tier // "?")" end) +
              "  \($s.log // "")"])
      else [] end)
   | join("\n") end

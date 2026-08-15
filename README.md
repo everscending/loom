@@ -10,8 +10,9 @@ then runs an unattended loop that implements those tickets in parallel, reviews
 each one, merges the passing ones, and tests each epic like a user would. It
 tells you when it needs a decision and when it is done.
 
-It is a Claude Code skill: a set of instructions plus shell scripts. It is not
-a service, and there is nothing to host.
+It is an agent-agnostic coding skill: provider-neutral instructions and shell
+machinery with Claude Code and Codex adapters. It is not a service, and there
+is nothing to host.
 
 ---
 
@@ -23,7 +24,7 @@ the build. The sixth phase runs on its own until the work is finished or it
 hits something only you can decide.
 
 **Runs several tickets at the same time.** Each in-flight ticket gets its own
-git worktree and its own headless Claude session ("a lane"). The default is
+git worktree and its own headless coding-agent session ("a lane"). The default is
 four implementation lanes plus a smaller pool for review, merge, and test
 lanes.
 
@@ -70,22 +71,21 @@ time and money went and writes up proposals for improving the next one.
 
 | Dependency | Why Loom needs it |
 |---|---|
-| **Claude Code** | Loom is a skill. Every wave, implementer, reviewer, merger, and probe is a headless `claude -p` session that Loom spawns. |
+| **Claude Code or Codex** | The interactive provider starts the build; every headless job then runs through Loom's matching adapter. Provider identity is recorded on the Build issue. |
 | **A git repository** | Each in-flight ticket gets its own git worktree, cut as a sibling directory of the repo. Local-only repos will not work — lanes always branch from the remote. |
-| **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. It is what `/setup-matt-pocock-skills` writes and what every lane reads through your `CLAUDE.md`, so Loom reads that same file rather than keeping an answer of its own. Without it, every Loom verb refuses. |
+| **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. Loom scripts and every provider job read that file directly, so there is no second tracker setting that can drift. Without it, every Loom verb refuses. |
 | **A board Loom drives** — GitLab or Linear | Epics, issues, labels, blocking links and comments are where **all** build state lives. Loom needs a board it can create labels in. Every board call goes through `scripts/trackers/<name>.sh`, the one file that knows that tracker; a repo declaring anything else is refused by name until a driver for it exists. |
 | **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom **derives** it rather than asking: a board that is itself a code host is its own forge, and otherwise your `origin` remote decides. |
 | **`glab`** or **`gh`**, logged in — or `LINEAR_API_KEY` | Whatever your drivers need. GitLab and GitHub are driven through their command-line tools: run `glab auth status` (or `gh auth status`) in the repo first, because a tool that cannot resolve the project makes Loom read the board as unknown and skip the wave. Linear has no CLI and is driven over its API, so it wants `LINEAR_API_KEY` in a `secrets:` block in `~/.loom/config.yml` — not in `.loom.yml`, which is committed, and not in your shell profile, which the launchd agent never reads. |
 | **`jq`** | Every snapshot, dependency graph, report, and log render is a `jq` query. Missing `jq` is a hard error, not a downgrade. macOS 15 and later ship it at `/usr/bin/jq`; on anything older, `brew install jq`. |
 | **A scheduler — launchd (macOS) or cron** | The once-a-minute heartbeat that watches lanes, makes the first wave fire, and resumes a build after a full stall. `/loom start` writes and loads the launchd agent for you. Without one, a build only advances when a lane hands off to the next lane, and a single wedge stops it for good. |
 | **A gate runner in your repo** | `scripts/gate.sh <tier>` — yours, not Loom's. Every branch is gated by it before review and again before merge. You do not have to write it up front — it is normally the first epic of your first build. |
-| **A trusted workspace** | Claude Code's trust dialog, accepted once for the repo. Untrusted, Claude Code ignores `.claude/settings.json`, so lanes run without the permission allowlist Loom generates for them. Only a human can accept it. |
+| **A trusted workspace and synced guardrails** | Claude uses `.claude/settings.json`; Codex uses `.codex/rules/loom.rules`. `/loom start` preflights the selected provider and refuses if its project policy would be ignored. |
 
 ### Required for the planning phases
 
-These are other Claude Code skills. Loom **routes** to them rather than
-teaching their techniques, so the first five verbs will not work properly
-without them installed alongside Loom in `~/.claude/skills/`:
+These are sibling skills. Loom **routes** to them rather than teaching their
+techniques; install them where your interactive provider discovers skills:
 
 | Skill | Used by | For |
 |---|---|---|
@@ -115,10 +115,10 @@ commands, so a wave inlines that work instead.
 Almost nothing. Loom sets itself up on its first tick; what is left is the two
 things a program is not allowed to do for you.
 
-### 1. Install the skills
+### 1. Install Loom and its sibling skills
 
-Put this directory at `~/.claude/skills/loom/` — the scripts run from where
-they sit. Install `lavish`, `grilling`, `to-tickets`, `implement`,
+Put this directory in your provider's skill directory — the scripts locate
+Loom from their own path. Install `lavish`, `grilling`, `to-tickets`, `implement`,
 `code-review`, `domain-modeling`, and `prototype` beside it; the planning
 verbs hand off to them.
 
@@ -143,10 +143,9 @@ remote is then the forge, and the rest of that file is what tells the sibling
 skills how to work the board. [setup.md](references/setup.md) has the detail,
 including why that last part is the thing that decides whether builds work.
 
-Then open the repo once in Claude Code and accept the workspace trust dialog.
-Untrusted, Claude Code ignores `.claude/settings.json`, so lanes run without
-the permission allowlist Loom writes for them. Loom detects this and pushes a
-`workspace_untrusted` warning, but only a human can accept the dialog.
+Then trust the repo in the provider you will use. Loom never accepts trust or
+writes credentials for you; its preflight fails closed when project guardrails
+would be ignored.
 
 That is the whole manual setup. Run `/loom plan <PRD>` next.
 
@@ -158,14 +157,14 @@ You do not need to run any of this. It is here so you know what appeared and
 why.
 
 **On the first tick in a repo**, `scripts/bootstrap.sh all` runs by itself and
-then the wave proceeds. It writes `~/.loom/config.yml` (your machine-wide
-preferences), writes `.claude/settings.json` (the permission allowlist,
-generated from the very commands your gates and probes will run, so it cannot
-drift from them), and creates the ticket-state labels on the board. A failed
+then the wave proceeds. It writes `~/.loom/config.yml` (machine-wide Loom
+preferences) and creates the ticket-state labels on the board. `/loom start`
+has already synced the selected provider's repo-local guardrail artifact. A failed
 bootstrap writes no sentinel, so the next tick just retries. Running
 `bootstrap.sh all` by hand is safe and idempotent, but it buys you nothing.
 
-**One thing does need you afterward: commit `.claude/settings.json`.** Lane
+**One thing does need you afterward: commit the provider guardrail artifact**
+(`.claude/settings.json` or `.codex/rules/loom.rules`). Lane
 worktrees are cut from `origin/<base>`, so an uncommitted allowlist reaches no
 lane. Bootstrap prints a warning rather than committing it, because a
 permission surface entering your history is your call.
@@ -177,7 +176,7 @@ detected stack, the runner path. Most repos need no configuration file at all.
 To see what yours actually resolves to:
 
 ```sh
-~/.claude/skills/loom/scripts/tick.sh resolve-config
+<loom-install>/scripts/tick.sh resolve-config
 ```
 
 **The gate runner is built by your first build, not by you.** Loom runs
@@ -200,13 +199,12 @@ max_lanes: 4                    # 1-6; each lane is a full worktree
 rejection_cap: 2                # review rejections before a ticket is blocked
 crash_cap: 2                    # crashes before blocked (crashes are not rejections)
 heartbeat_stale_minutes: 30     # alive but silent this long = wedged
-permission_mode: dontAsk        # dontAsk | auto
-usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_model
+usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_tier
 base: develop                   # integration base branch
 
-wave_model: ""                  # empty inherits your saved interactive default
-lane_model: ""                  # model for implement / review / merge / probe lanes
-rework_model: ""                # model for an implementation lane after a rejection
+wave_tier: medium               # provider adapter resolves the native profile
+lane_tier: medium               # gate/merge/probe and default implementation tier
+rework_tier: high               # implementation tier after a rejection
 
 ntfy:
   topic: ""                     # use an access-protected topic; a public one is an injection path
@@ -230,7 +228,7 @@ finishing lanes set the real pace.
 
 ## The workflow, step by step
 
-Every verb is `/loom <verb>` inside Claude Code. **A verb stops at its own
+Every verb is `/loom <verb>` in the interactive provider. **A verb stops at its own
 output and hands back to you.** It never rolls on into the next one, and it
 never writes production code by hand.
 
@@ -290,9 +288,11 @@ This step spends nothing and starts nothing.
 
 ### Step 5 — `/loom start`
 
-The trigger. It installs a launchd agent for this repo, clears the stop switch,
-and fires the first wave. Inside herdr it also raises the viewer — a pane per
-lane plus the build ticker.
+The trigger. It detects the interactive provider (or accepts one explicit
+`--provider` override), records exactly one `provider::<id>` label on the active
+Build issue, syncs that provider's guardrails, installs a repo-specific
+scheduler carrying the same provider as a consistency check, clears the stop
+switch, and fires the first wave. Inside herdr it also raises the viewer.
 
 This is the only thing you run to go unattended. No `launchctl`, no plist file,
 no cron entry to write.
@@ -360,7 +360,7 @@ belongs:
 - **A hold** is the `blocked` label. It sticks: Loom refuses to advance a
   blocked ticket, so a hold you place mid-flight beats any lane already
   running. Only you can release it.
-- **An escalation** is a `model::<tier>` label on a ticket. It survives every
+- **An escalation** is `model::medium` or `model::high` on a ticket. It survives every
   round until you remove it, and it changes only that ticket's implementation
   lane — not its reviewer.
 
@@ -370,9 +370,8 @@ belongs:
 
 - **Force-push, `reset --hard`, and `rm -rf` are denied** in every permission
   mode, in every lane. The merge step merges; it never rebases.
-- **Lanes never run with `bypassPermissions`.** They run `dontAsk`
-  (allowlist or immediate denial — deterministic) or `auto` (a classifier
-  judges the long tail).
+- **Lanes never bypass approvals or sandboxing.** Each adapter supplies its
+  provider-native non-interactive safety settings explicitly.
 - **Every tracker write in a lane goes through `scripts/lane.sh`**, never a
   hand-rolled `glab` call. A lane that needs something `lane.sh` cannot do has
   found a missing verb, not a reason for a wider allowlist.

@@ -48,8 +48,9 @@ rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 WAVES="$T/waves.txt"; : > "$WAVES"
 # The prefix form exports for the holder AND its children, so the re-tick the
 # holder fires on exit inherits the same counting command.
-LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 0.5'" "$TICK" tick >/dev/null 2>&1 &
-holder=$!; sleep 0.15
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 2'" "$TICK" tick >/dev/null 2>&1 &
+holder=$!
+for _ in $(seq 1 80); do [ -d "$LOOM_HOME/tick.lock.d" ] && break; sleep 0.05; done
 for _ in 1 2 3; do "$TICK" tick >/dev/null 2>&1; done
 wait "$holder"
 _wait_waves "$WAVES" 2 || true
@@ -64,8 +65,9 @@ n=$(wc -l < "$WAVES" | tr -d ' ')
 #     be seen dying after a single wave — no replay, no second line.
 rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 : > "$WAVES"
-LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 0.5'" "$TICK" tick >/dev/null 2>&1 &
-holder=$!; sleep 0.15
+LOOM_WAVE_CMD="sh -c 'echo w >> $WAVES; sleep 2'" "$TICK" tick >/dev/null 2>&1 &
+holder=$!
+for _ in $(seq 1 80); do [ -d "$LOOM_HOME/tick.lock.d" ] && break; sleep 0.05; done
 for _ in 1 2 3; do LOOM_PENDING_FILE="$T/note-nobody-reads" "$TICK" tick >/dev/null 2>&1; done
 wait "$holder"; sleep 1
 n=$(wc -l < "$WAVES" | tr -d ' ')
@@ -205,7 +207,7 @@ turns1=$("$TICK" lane-status | awk '$1=="impl-7"{print $6}')
 # own `message.usage` — 1M haiku input tokens at $1.00/MTok is exactly $1,
 # chosen to sidestep float-formatting noise in the assertion.
 mkdir -p "$LOOM_HOME/logs"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"implementation","tokens":{"input":1000000,"output":0},"cost_usd":1}' \
     > "$LOOM_HOME/logs/lane-impl-7.jsonl"
 cost7=$("$TICK" lane-status | awk '$1=="impl-7"{print $7}')
 [ "$cost7" = "1" ] && ok "lane-status: cost column prices the session log by its own model" \
@@ -397,7 +399,7 @@ fi
 rm -rf "$LOOM_HOME/tick.lock.d"
 MARK3="$T/self-trigger-fired-3"
 LOOM_WAVE_CMD="touch $MARK3" "$TICK" spawn-lane --cwd "$WT" gate-23 --on-done-tick -- pwd >/dev/null
-for _ in $(seq 1 40); do [ -f "$MARK3" ] && break; sleep 0.1; done
+for _ in $(seq 1 100); do [ -f "$MARK3" ] && break; sleep 0.1; done
 if [ -f "$MARK3" ] && grep -q "^$WT$" "$LOOM_HOME/logs/lane-gate-23.log"; then
     ok "spawn-lane: --cwd before the id composes with --on-done-tick"
 else

@@ -10,17 +10,17 @@
 # contradicts SKILL.md it wins, from inside the session. Hand-maintained, it
 # went five verbs stale, told merge lanes to finish with `close` (the build-1
 # merge-1 failure `cmd_merge` was written to end and `cmd_close` now refuses),
-# and pinned every lane to a flat `--model <lane_model>` — outranking the
-# per-ticket escalation `snapshot` resolves into `.model.effective`, so a
+# and pinned every lane to a flat native model — outranking the
+# per-ticket escalation `snapshot` resolves into `.tier_selection.effective`, so a
 # rework round ran on the tier that had just failed it.
 WP="$T/waveprompt"; mkdir -p "$WP/repo" "$WP/bin"
 seed_tracker_decl "$WP/repo"
-printf 'lane_model: sonnet\n' > "$WP/repo/.loom.yml"
+printf 'lane_tier: high\n' > "$WP/repo/.loom.yml"
 wave_prompt() { # wave_prompt <tick.sh> → the context that tick injected
     : > "$WP/prompt.txt"
     LOOM_HOME="$WP/home" LOOM_REPO="$WP/repo" \
       LOOM_WAVE_CMD="sh -c 'printf %s \"\$LOOM_WAVE_PROMPT\" > $WP/prompt.txt'" \
-      "$1" tick >/dev/null 2>&1
+      "$1" tick --provider claude >/dev/null 2>&1
     cat "$WP/prompt.txt"
 }
 LANE_SH="$(cd "$(dirname "$TICK")" && pwd)/lane.sh"
@@ -37,12 +37,29 @@ if [ -n "$dispatched" ] && [ "$injected" = "$dispatched" ]; then
 else
     bad "P48: verb roster drifted — injected [$injected] vs dispatched [$dispatched]"
 fi
-# The model is per ticket. A configured lane_model must not reach the prompt as
-# a flat flag, and the prompt must send the wave to the snapshot for it.
+# The tier is per implementation ticket; provider-native flags stay in adapters.
 case "$WPROMPT" in
-  *"--model sonnet"*) bad "P48: the flat lane_model flag is back in the wave prompt" ;;
-  *".model.effective"*) ok "P48: the prompt derives the model per ticket, not one flag for all lanes" ;;
-  *) bad "P48: the prompt names neither .model.effective nor a model at all" ;;
+  *"--model"*) bad "P48: a provider-native model flag is back in the wave prompt" ;;
+  *"--tier <medium|high>"*) ok "P48: the prompt transports Loom tiers through the agent interface" ;;
+  *) bad "P48: the prompt does not describe the provider-neutral tier spawn" ;;
+esac
+# Production waves consume a plan derived before the provider sandbox opens.
+# Opt this command-seam test into that path and prove the prompt no longer asks
+# the provider to prepare worktrees itself.
+cat > "$WP/bin/empty-driver" <<'EOF'
+#!/bin/sh
+printf '[]\n'
+EOF
+chmod +x "$WP/bin/empty-driver"
+: > "$WP/prepared-prompt.txt"
+LOOM_HOME="$WP/prepared-home" LOOM_REPO="$WP/repo" TRACKER_CMD="$WP/bin/empty-driver" FORGE_CMD="$WP/bin/empty-driver" \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 \
+  LOOM_WAVE_CMD="sh -c 'printf %s \"\$LOOM_WAVE_PROMPT\" > $WP/prepared-prompt.txt'" \
+  "$TICK" tick --provider claude >/dev/null 2>&1
+case "$(cat "$WP/prepared-prompt.txt")" in
+  *"immutable schedule derived from this wave's tracker snapshot"*"no provider session creates a worktree"*)
+    ok "P48: production prompt consumes the precomputed plan outside the provider sandbox" ;;
+  *) bad "P48: production prompt still delegates worktree setup to the provider" ;;
 esac
 # Which verb finishes a merge is a decision, and decisions live in SKILL.md.
 case "$WPROMPT" in

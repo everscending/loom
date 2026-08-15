@@ -53,13 +53,13 @@ case "$out" in
     *"gate-77"*"pregate rejection"*) ok "report: the per-ticket view traces its lanes and says why" ;;
     *) bad "report: ticket view wrong ($(printf '%s' "$out" | tr '\n' '|'))" ;;
 esac
-# P31: the per-ticket trace names the model each round ran on — otherwise an
+# The per-ticket trace names the provider and Loom tier each round used — otherwise an
 # escalation cannot be priced against its outcome, which is the whole test of
 # whether escalating was worth it.
-LOOM_WAVE_CMD=true EVENV "$TICK" spawn-lane impl-77 --no-tick --cwd "$ET/repo" -- /bin/echo --model opus >/dev/null 2>&1
+EVENV "$TICK" event lane_spawn id impl-77 type impl job implementation provider codex tier high log /tmp/impl-77.log
 out=$(EVENV "$TICK" report --ticket 77 2>&1)
-case "$out" in *"impl-77"*"on opus"*) ok "report: a lane's model appears in the per-ticket trace" ;;
-               *) bad "report: model missing from the ticket trace ($(printf '%s' "$out" | tr '\n' '|'))" ;;
+case "$out" in *"impl-77"*"on codex/high"*) ok "report: a lane's provider/tier appears in the per-ticket trace" ;;
+               *) bad "report: provider/tier missing from the ticket trace ($(printf '%s' "$out" | tr '\n' '|'))" ;;
 esac
 
 # 11d. Planted violation: the record must never feed a decision. If a wave read

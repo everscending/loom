@@ -14,7 +14,9 @@
 #   global-config       seed ~/.loom/config.yml if absent
 #   labels              create the five missing ticket-state labels
 #   states              Linear only: create the five missing ticket-state Statuses (P90)
-#   settings            write .claude/settings.json (delegates to tick.sh)
+#   guardrails <id>     sync the selected provider's repo-local guardrails
+#   provider-label <id> create the selected provider label when absent
+#   settings            compatibility alias for `guardrails claude`
 #   all                 all four, in dependency order
 #
 # Test seams (env): LOOM_REPO, LOOM_GLOBAL_CONFIG, TRACKER_CMD (the driver),
@@ -24,6 +26,7 @@ set -euo pipefail
 REPO_ROOT="${LOOM_REPO:-$PWD}"
 GLOBAL_CONFIG="${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 TICK="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/tick.sh"
+AGENT_SH="${LOOM_AGENT_CMD:-$(cd "$(dirname "$0")" 2>/dev/null && pwd)/agent.sh}"
 
 # P73: `die` was written a third time here. It lives in lib.sh beside this
 # script now, with the rest of the derivations both halves share.
@@ -65,7 +68,7 @@ _require_repo() { # <what>
 # state, not a label, and `build-N` is minted per build by the build verb —
 # neither belongs here.
 # Fields are `|`-separated, NOT `:`-separated: P31's escalation labels are
-# GitLab scoped labels (`model::opus`), whose names contain the colon — read
+# GitLab scoped labels (`model::high`), whose names contain the colon — read
 # with IFS=':' they split as name "model", colour "", and the rest of the line
 # as the description, and every one of them would be created wrong.
 LABELS="ready-for-agent|#428BCA|queued and unblocked, free for any lane to claim
@@ -74,10 +77,8 @@ review|#F0AD4E|MR open, waiting on its gate verdict
 merge-queue|#8E44AD|gate passed, waiting for the single-writer merge step
 blocked|#D9534F|needs a human decision — see the blocked report comment
 fix|#E67E22|defect ticket filed mid-build (probe or lane) — outranks the rest of the ready set
-model::opus|#6C3483|P31: run this ticket's next implementation lane on opus (outranks rework_model and lane_model)
-model::fable|#7D3C98|P31: run this ticket's next implementation lane on fable
-model::sonnet|#5499C7|P31: pin this ticket's next implementation lane to sonnet
-model::haiku|#48C9B0|P31: pin this ticket's next implementation lane to haiku"
+model::medium|#5499C7|run this ticket's next implementation lane on Loom's medium tier
+model::high|#6C3483|run this ticket's next implementation lane on Loom's high tier"
 
 # P88: a config file carrying a `secrets:` block is a credential store, and a
 # credential store readable by anyone else on the machine is the thing this
@@ -119,7 +120,10 @@ max_lanes: 4                    # 1-6; each lane is a full worktree
 rejection_cap: 3                # gate rejections before a ticket is blocked
 crash_cap: 2                    # implementer crashes before blocked (not rejections)
 heartbeat_stale_minutes: 30     # PID alive but log silent this long = wedged
-usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_model
+usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_tier
+wave_tier: medium               # scheduler judgement
+lane_tier: medium               # normal implementation/review/merge/probe judgement
+rework_tier: high               # implementation after a rejection
 
 ntfy:
   # Per-repo topic, derived as <topic_prefix><repo-name>. Keep the prefix
@@ -231,21 +235,50 @@ _check_trust() { # → 0 trusted or unknowable; 1 untrusted
 }
 
 cmd_settings() { # settings [--force]
-    [ -x "$TICK" ] || die "settings: tick.sh not found beside this script"
-    _require_repo settings
-    local rc=0
-    LOOM_REPO="$REPO_ROOT" "$TICK" install-settings "$@" || rc=$?
+    echo "settings: compatibility alias — syncing Claude guardrails" >&2
+    cmd_guardrails claude "$@"
+}
+
+cmd_guardrails() { # guardrails <provider>
+    local provider="${1:-}"; shift || true
+    [ "${1:-}" != --force ] || shift # compatibility: sync now preserves unrelated settings
+    [ $# -eq 0 ] || die "guardrails: unknown argument '$1'"
+    [ -n "$provider" ] || die "guardrails: provider is required"
+    local agent="${TICK%/*}/agent.sh"
+    [ -x "$agent" ] || die "guardrails: agent.sh not found beside this script"
+    _require_repo guardrails
+    local sync_out target=""
+    sync_out=$(LOOM_REPO="$REPO_ROOT" "$agent" sync-guardrails --provider "$provider" --repo "$REPO_ROOT" "$@")
+    printf '%s\n' "$sync_out"
+    target=$(printf '%s\n' "$sync_out" | awk '/^sync-guardrails: /{print $NF}' | tail -1)
+    case "$target" in "$REPO_ROOT"/*) target="${target#"$REPO_ROOT"/}";; *) target="";; esac
     # A lane's worktree is created from origin/<base>, so an UNCOMMITTED
     # allowlist reaches no lane at all — the file exists in the base clone and
     # nowhere the work actually happens. Committing is the human's call (it is
     # a security surface entering history), so say so rather than doing it.
-    if git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
-       && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- .claude/settings.json 2>/dev/null)" ]; then
-        echo "settings: .claude/settings.json is uncommitted — commit it, or lane worktrees (created from origin/<base>) will run without the allowlist" >&2
+    if [ -n "$target" ] && git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
+       && [ -n "$(git -C "$REPO_ROOT" status --porcelain -- "$target" 2>/dev/null)" ]; then
+        echo "guardrails: $target is uncommitted — commit it, or lane worktrees created from origin/<base> will not load it" >&2
     fi
-    # Report what install-settings actually did. Returning 0 unconditionally
-    # made `bootstrap.sh settings` claim success on a refusal.
-    return "$rc"
+}
+
+cmd_provider_label() { # provider-label <provider> [--dry-run]
+    local provider="${1:-}" dry=0
+    [ "${2:-}" = --dry-run ] && dry=1
+    [ -x "$AGENT_SH" ] || die "provider-label: provider runtime missing: $AGENT_SH"
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "provider-label: no registered adapter for '$provider'"
+    _require_repo provider-label
+    _require_tracker "$REPO_ROOT" provider-label >/dev/null
+    local TRACKER existing
+    TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "$REPO_ROOT")"
+    existing=$("$TRACKER" labels | jq -r '.[].name') || die "provider-label: could not read labels"
+    if printf '%s\n' "$existing" | grep -qxF "provider::$provider"; then
+      echo "provider-label: provider::$provider already present"; return 0
+    fi
+    [ "$dry" -eq 0 ] || { echo "provider-label: would create provider::$provider"; return 0; }
+    "$TRACKER" label-create "provider::$provider" "#34495E" "Loom runtime provider selected for this build" >/dev/null
+    echo "provider-label: created provider::$provider"
 }
 
 # `all` used to discard its arguments entirely, so `bootstrap.sh all --dry-run`
@@ -276,12 +309,12 @@ cmd_all() {
     # A hand-edited allowlist is a refusal, not a failure — install-settings
     # declines rather than clobbering it. Other failures are swallowed here too;
     # run `bootstrap.sh settings` directly to see the real status.
-    cmd_settings || true
+    # Provider guardrails are selected at /loom start, not globally here.
     cmd_labels
     cmd_states
     # Last, and after the writes: the settings file is written either way, so it
     # is ready the moment trust lands, and the labels above are unaffected by it.
-    if ! _check_trust; then
+    if [ "${LOOM_PROVIDER:-claude}" = claude ] && ! _check_trust; then
         echo "bootstrap: incomplete — '$REPO_ROOT' is not a trusted workspace, so the
   allowlist just written reaches no lane. Accept the trust prompt there once;
   the next tick retries this automatically." >&2
@@ -294,8 +327,10 @@ case "${1:-}" in
     global-config) shift; cmd_global_config "$@" ;;
     labels)        shift; cmd_labels "$@" ;;
     states)        shift; cmd_states "$@" ;;
+    guardrails)    shift; cmd_guardrails "$@" ;;
+    provider-label) shift; cmd_provider_label "$@" ;;
     settings)      shift; cmd_settings "$@" ;;
     all)           shift; cmd_all "$@" ;;
     "")            cmd_all ;;
-    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | states [--dry-run] | settings [--force]" ;;
+    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | states [--dry-run] | guardrails <provider> | provider-label <provider> [--dry-run] | settings [--force]" ;;
 esac

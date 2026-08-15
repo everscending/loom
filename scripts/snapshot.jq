@@ -233,28 +233,23 @@ include "lib";
             ticket_state: $ticket_state,
             released: ($u != null and $u > $r.at) }
         end;
-    # P31: which model this ticket next IMPLEMENTATION lane gets. The chain is
-    # deterministic, so it is resolved here rather than reasoned about in each
-    # wave: ticket `model::` label > `rework_model` (round 2 and later) >
-    # `lane_model` > the session default (null = inherit, pass no --model).
+    # Which Loom tier this ticket's next IMPLEMENTATION job gets. Provider
+    # execution profiles are resolved later, inside agent.sh.
+    # deterministic: ticket `model::` label > `rework_tier` (round 2+) >
+    # `lane_tier`.
     # Round is derived, not stored: a rework round is exactly one that follows
     # a rejection, so round == rejections.total + 1.
-    # Rank exists only to break the two-labels case; a `model::` value that is
-    # not one of the known tiers still resolves (the human may name any model
-    # the CLI accepts) but ranks below all of them.
-    def model_rank($m):
-        (["haiku", "sonnet", "fable", "opus"] | index($m)) // -1;
-    def model_of($labels; $rejections; $config):
-        ([$labels[] | select(startswith("model::")) | ltrimstr("model::")
-          | select(length > 0)] | unique) as $picked
-      | ($picked | sort_by(model_rank(.)) | last) as $lbl
+    def tier_rank($m): (["medium", "high"] | index($m)) // -1;
+    def tier_of_job($labels; $rejections; $config):
+        ([$labels[] | select(startswith("model::")) | ltrimstr("model::")] | unique) as $seen
+      | ([$seen[] | select(. == "medium" or . == "high")]) as $picked
+      | ($picked | sort_by(tier_rank(.)) | last) as $lbl
       | (if $lbl != null then {effective: $lbl, source: "label"}
-         elif ($rejections.total > 0 and ($config.rework_model // null) != null)
-              then {effective: $config.rework_model, source: "rework_model"}
-         elif ($config.lane_model // null) != null
-              then {effective: $config.lane_model, source: "lane_model"}
-         else {effective: null, source: "session-default"} end)
-      | . + { label: $lbl, labels_seen: $picked };
+         elif $rejections.total > 0
+              then {effective: ($config.rework_tier // "high"), source: "rework_tier"}
+         else {effective: ($config.lane_tier // "medium"), source: "lane_tier"} end)
+      | . + { label: $lbl, labels_seen: $picked,
+              invalid_labels: [$seen[] | select(. != "medium" and . != "high")] };
     def blocker($iid; $src; $state; $proj; $open_iids; $home):
         # State comes straight off a native link when present; otherwise the
         # open-set inference, which is only valid inside this project.
@@ -298,6 +293,9 @@ include "lib";
     ($open[0]) as $issues
     | ($issues | map(.id)) as $open_iids
     | ($issues | map(select((.title // "") | test("^Build [0-9]+$"))) | sort_by(.id) | last) as $bi
+    | ([($bi.labels // [])[] | select(startswith("provider::"))]) as $provider_labels
+    | (($provider_labels[0] // "") | ltrimstr("provider::")
+       | if length > 0 then . else null end) as $provider
     | ($bi.project? // null) as $home
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
@@ -368,7 +366,7 @@ include "lib";
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),
-            model: model_of($lb; $rej; $config),
+            tier_selection: tier_of_job($lb; $rej; $config),
             gate: gate_of($t.id; state_of($lb);
                           (($M[$t.id | tostring]) // []);
                           (($N[$t.id | tostring]) // []); $gating) })) as $tickets
@@ -467,9 +465,12 @@ include "lib";
           | "epic \(.name): ready to probe but its milestone has no "
             + "`## Acceptance criteria` section — the probe brief would have "
             + "nothing to check against but the defect history"]
-       + [$tickets[] | select((.model.labels_seen | length) > 1)
-          | "ticket #\(.id): \(.model.labels_seen | length) `model::` labels "
-            + "(\(.model.labels_seen | join(", "))) — using \(.model.label)"]
+       + [$tickets[] | select((.tier_selection.labels_seen | length) > 1)
+          | "ticket #\(.id): \(.tier_selection.labels_seen | length) `model::` labels "
+            + "(\(.tier_selection.labels_seen | join(", "))) — using \(.tier_selection.label)"]
+       + [$tickets[] | select((.tier_selection.invalid_labels | length) > 0)
+          | "ticket #\(.id): unsupported provider-native or legacy model label(s) "
+            + "\(.tier_selection.invalid_labels | map("`model::" + . + "`") | join(", ")) — remove them and choose exactly `model::medium` or `model::high`; Loom will not guess"]
        # A ticket still holding the assignee its lane wrote, after returning to
        # `ready-for-agent` falls between BOTH fill paths: `summary.stranded`
        # only looks at `in-progress`, and the ready set only takes unclaimed.
@@ -519,6 +520,9 @@ include "lib";
                + "note landed and the label flip did not. Repair: \(.fix)" end]
        + [$tickets[] | select(.blocked_by | any(.closed == null))
           | "ticket #\(.id): blocker closed-state unknown (cross-project link) — treated as not closed"]
+       + (if $bi != null and ($provider_labels | length) != 1
+          then ["Build #\($bi.id) must carry exactly one provider:: label; found \($provider_labels | length)"]
+          else [] end)
        + (if ($bi != null and ($items | length) == 0)
           then ["build issue body has no parseable epic list — epics[] shows only epics with open tickets"]
           else [] end)
@@ -532,7 +536,8 @@ include "lib";
             + "NOT complete until one does: spawn probe-\((.milestone // .name) | epic_norm)"]) as $warnings
     | { generated_at: $generated_at, logs_dir: $logs_dir, config: $config,
         build: (if $bi == null then null
-                else { id: $bi.id, label: $label, title: $bi.title, url: ($bi.url // null) } end),
+                else { id: $bi.id, label: $label, title: $bi.title, url: ($bi.url // null),
+                       provider: $provider, provider_labels: $provider_labels } end),
         # P57: --brief drops `acceptance` from every epic that isn't awaiting
         # a probe — it's 88% of the epics block and only step 6's probe-brief
         # assembly ever reads it. `needs_probe` IS `epics_awaiting_probe`'s own

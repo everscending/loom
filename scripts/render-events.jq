@@ -23,7 +23,10 @@ def round($id): (($id | capture("-r(?<n>[0-9]+)$") | " (round \(.n))") // "");
 # P31: an escalation the human asked for must be visibly taken. Empty model
 # (the lane inherits the session default) renders nothing — the common case
 # should stay quiet.
-def model($e): (if ($e.model // "") == "" then "" else " (\($e.model))" end);
+def runtime($e):
+  if ($e.provider // "") == "" then ""
+  elif $e.provider == "custom" then " (custom)"
+  else " (\($e.provider), \(if ($e.tier // "") == "" then "?" else $e.tier end) tier)" end;
 fromjson? // empty | . as $e
 | (if $e.ev == "snapshot" then empty else . end)
 | (
@@ -31,7 +34,7 @@ fromjson? // empty | . as $e
   elif $e.ev == "wave_end"  then
     (if ($e.rc | tostring) == "0" then "wave ended (rc \($e.rc), \($e.secs)s)"
      else $bad + "✗ wave ended (rc \($e.rc), \($e.secs)s)" + $rst end)
-  elif $e.ev == "lane_spawn" then (stage($e.id) | "\(.t) — \(.s) started") + round($e.id) + model($e)
+  elif $e.ev == "lane_spawn" then (stage($e.id) | "\(.t) — \(.s) started") + round($e.id) + runtime($e)
   elif $e.ev == "lane_exit" then
     # A clean exit is suppressed (except probes): its story is already told by
     # its outcome event (→ review / verdict / closed), and chained handoffs

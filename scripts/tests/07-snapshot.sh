@@ -217,27 +217,24 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockednone" "$TICK" snapshot > "
     && ok "snapshot: a blocked report does not disturb the rejection parser beside it" \
     || bad "snapshot: blocked_report shifted the rejection read ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-blockedrep.json"))"
 
-# 7a6. P31: the model escalation chain is RESOLVED in the snapshot, not
-#      reasoned about per wave — ticket `model::` label > rework_model (a
-#      round following a rejection) > lane_model > the session default.
-#      With neither key set, the chain must resolve to "inherit", never to an
-#      invented tier (2026-08-02: a fable interactive default silently ran
-#      every worker top-tier — the failure that made lane_model exist).
-[ "$(q '.tickets[] | select(.id==10) | .model | "\(.effective)/\(.source)"')" = "null/session-default" ] \
-    && ok "snapshot: no model config resolves to inherit-the-default, not an invented tier" \
-    || bad "snapshot: unconfigured model chain invented $(q '.tickets[] | select(.id==10) | .model | @json')"
+# 7a6. The provider-neutral tier chain is resolved in the snapshot: ticket
+#      model label > rework_tier after a rejection > lane_tier. Defaults are
+#      explicit so a provider's interactive model can never leak into a lane.
+[ "$(q '.tickets[] | select(.id==10) | .tier_selection | "\(.effective)/\(.source)"')" = "medium/lane_tier" ] \
+    && ok "snapshot: unconfigured implementation uses the locked medium tier" \
+    || bad "snapshot: default tier chain wrong $(q '.tickets[] | select(.id==10) | .tier_selection | @json')"
 cat > "$FX/open-model.json" <<'EOF'
 [
- {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":["provider::claude"],"assignees":[],
   "description":"**Selected epics**:\n- Ledger core (#10, #11, #12, #13)\n"},
  {"iid":10,"title":"Fresh, unlabeled","project_id":1,"web_url":"https://x/10",
   "labels":["build-2","ready-for-agent"],"assignees":[],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
  {"iid":11,"title":"Two escalation labels","project_id":1,"web_url":"https://x/11",
-  "labels":["build-2","in-progress","model::haiku","model::opus"],"assignees":[{"username":"agent-a"}],
+  "labels":["build-2","in-progress","model::medium","model::high"],"assignees":[{"username":"agent-a"}],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
  {"iid":12,"title":"Rejected twice AND labeled","project_id":1,"web_url":"https://x/12",
-  "labels":["build-2","review","model::fable"],"assignees":[{"username":"agent-a"}],
+  "labels":["build-2","review","model::medium"],"assignees":[{"username":"agent-a"}],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
  {"iid":13,"title":"Rejected twice, unlabeled","project_id":1,"web_url":"https://x/13",
   "labels":["build-2","in-progress"],"assignees":[{"username":"agent-a"}],
@@ -245,24 +242,24 @@ cat > "$FX/open-model.json" <<'EOF'
 ]
 EOF
 cp "$FX/notes-12.json" "$FX/notes-13.json"
-printf 'lane_model: sonnet\nrework_model: opus\n' >> "$LOOM_REPO/.loom.yml"
+printf 'lane_tier: medium\nrework_tier: high\n' >> "$LOOM_REPO/.loom.yml"
 GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-model.json" STUB_LOG="$T/calls-model" \
     "$TICK" snapshot > "$T/snap-model.json" 2>/dev/null
-sed -i.bak '/^lane_model: sonnet$/d;/^rework_model: opus$/d' "$LOOM_REPO/.loom.yml"
+sed -i.bak '/^lane_tier: medium$/d;/^rework_tier: high$/d' "$LOOM_REPO/.loom.yml"
 rm -f "$FX/notes-13.json"
-m() { jq -r ".tickets[] | select(.id==$1) | .model | \"\(.effective)/\(.source)\"" "$T/snap-model.json"; }
-[ "$(m 10)" = "sonnet/lane_model" ] \
-    && ok "snapshot: an unlabeled first round takes lane_model" \
-    || bad "snapshot: first round resolved $(m 10), want sonnet/lane_model"
-[ "$(m 13)" = "opus/rework_model" ] \
-    && ok "snapshot: a round following a rejection takes rework_model" \
-    || bad "snapshot: rework round resolved $(m 13), want opus/rework_model"
-[ "$(m 12)" = "fable/label" ] \
-    && ok "snapshot: the human's model:: label outranks rework_model" \
+m() { jq -r ".tickets[] | select(.id==$1) | .tier_selection | \"\(.effective)/\(.source)\"" "$T/snap-model.json"; }
+[ "$(m 10)" = "medium/lane_tier" ] \
+    && ok "snapshot: an unlabeled first round takes lane_tier" \
+    || bad "snapshot: first round resolved $(m 10), want medium/lane_tier"
+[ "$(m 13)" = "high/rework_tier" ] \
+    && ok "snapshot: a round following a rejection takes rework_tier" \
+    || bad "snapshot: rework round resolved $(m 13), want high/rework_tier"
+[ "$(m 12)" = "medium/label" ] \
+    && ok "snapshot: the human's model:: label outranks rework_tier" \
     || bad "snapshot: label lost to the config chain ($(m 12))"
-[ "$(m 11)" = "opus/label" ] \
+[ "$(m 11)" = "high/label" ] \
     && ok "snapshot: two model:: labels resolve to the highest tier" \
-    || bad "snapshot: two labels resolved $(m 11), want opus/label"
+    || bad "snapshot: two labels resolved $(m 11), want high/label"
 jq -e '[.warnings[] | select(test("2 .model::. labels"))] | length == 1' "$T/snap-model.json" >/dev/null \
     && ok "snapshot: the ambiguous ticket is warned about once, not silently picked" \
     || bad "snapshot: two model:: labels produced no warning ($(jq -c .warnings "$T/snap-model.json"))"

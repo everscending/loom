@@ -18,15 +18,15 @@ WT="$T/follow"; mkdir -p "$WT/home/lanes" "$WT/home/logs"
 FENV() { LOOM_REPO="$ET/repo" LOOM_HOME="$WT/home" LOOM_GLOBAL_CONFIG="$ET/g.yml" \
          LOOM_SKIP_BOOTSTRAP=1 LOOM_FOLLOW_POLL=0.2 "$@"; }
 FJ="$WT/home/logs/lane-impl-5.jsonl"
-_say() { printf '{"type":"assistant","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$1" >> "$FJ"; }
+_say() { printf '{"schema":1,"type":"assistant_progress","provider":"codex","job":"implementation","text":"%s"}\n' "$1" >> "$FJ"; }
 sleep 30 & FAKEPID=$!
 echo "$FAKEPID" > "$WT/home/lanes/impl-5.pid"
 # The session's own `system`/`init` record, which precedes any output it
 # produces. Rendering it is what puts the model at the top of the pane
 # (asked for by the human, 2026-08-03) — and a rate-limit record ahead of it
 # is what the real stream opens with, so the model line must survive that.
-printf '{"type":"rate_limit_event","rate_limit_info":{}}\n' >> "$FJ"
-printf '{"type":"system","subtype":"init","model":"claude-opus-5","permissionMode":"auto","cwd":"/tmp/wt"}\n' >> "$FJ"
+printf '{"schema":1,"type":"limit","provider":"codex","job":"implementation","reset_at":null}\n' >> "$FJ"
+printf '{"schema":1,"type":"session_start","provider":"codex","job":"implementation","requested_tier":"high","resolved_profile":{"model":"gpt-5.6-sol","reasoning_effort":"high"}}\n' >> "$FJ"
 _say "first thing the lane said"
 ( FENV "$TICK" render-log impl-5 --follow > "$WT/out.txt" 2>&1 ) & FOLLOWER=$!
 sleep 0.4
@@ -46,12 +46,12 @@ grep -q "lane impl-5 ended" "$WT/out.txt" \
 # The model must be the FIRST thing rendered, not merely present somewhere:
 # the point is knowing what a worker is running on before reading its output.
 [ "$(grep -vE '^── lane ' "$WT/out.txt" | grep -c .)" -gt 0 ] \
-    && [ "$(grep -vE '^── lane ' "$WT/out.txt" | grep . | head -1)" = "── model claude-opus-5 · permission auto ──" ] \
+    && [ "$(grep -vE '^── lane ' "$WT/out.txt" | grep . | head -1)" = "── provider codex · implementation · tier high · model gpt-5.6-sol · reasoning high ──" ] \
     && ok "follow: the resolved model is the first line of the pane" \
     || bad "follow: model line not first ($(grep -vE '^── lane ' "$WT/out.txt" | grep . | head -1))"
 # Taken from the stream, so an alias or a usage-limit downshift shows what the
 # session RESOLVED, not what the spawn line asked for.
-grep -q "claude-opus-5" "$WT/out.txt" \
+grep -q "gpt-5.6-sol" "$WT/out.txt" \
     && ok "follow: the model shown is the one the session resolved" \
     || bad "follow: resolved model missing from the render"
 
@@ -77,7 +77,7 @@ fi
 # 13c. Several viewers on one lane, because following is a file read.
 sleep 30 & FAKE2=$!
 echo "$FAKE2" > "$WT/home/lanes/impl-6.pid"
-printf '{"type":"assistant","message":{"content":[{"type":"text","text":"shared"}]}}\n' \
+printf '{"schema":1,"type":"assistant_progress","provider":"claude","job":"implementation","text":"shared"}\n' \
     > "$WT/home/logs/lane-impl-6.jsonl"
 ( FENV "$TICK" render-log impl-6 --follow > "$WT/a.txt" 2>&1 ) & V1=$!
 ( FENV "$TICK" render-log impl-6 --follow > "$WT/b.txt" 2>&1 ) & V2=$!
@@ -426,13 +426,13 @@ esac
 EOF
 chmod +x "$T/glab-p41-stub.sh"
 mkdir -p "$T/wp13p-home/lanes"
-sleep 0.3 & echo $! > "$T/wp13p-home/lanes/gate-95.pid"
-sleep 0.3 & echo $! > "$T/wp13p-home/lanes/impl-96.pid"
-sleep 0.3 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
+sleep 1.5 & echo $! > "$T/wp13p-home/lanes/gate-95.pid"
+sleep 1.5 & echo $! > "$T/wp13p-home/lanes/impl-96.pid"
+sleep 1.5 & echo $! > "$T/wp13p-home/lanes/gate-97.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-p41-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
+    LOOM_HOME="$T/wp13p-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=1.7 \
     bash "$WP" >/dev/null 2>&1 || :
 [ "$(grep -c "^pane close " "$T/herdr-calls" || :)" = 1 ] \
     && ok "watch-panes: a gate lane whose ticket closed takes its pane with it" \
@@ -594,13 +594,13 @@ esac
 EOF
 chmod +x "$T/glab-close-stub.sh"
 mkdir -p "$T/wp13j-home/lanes"
-sleep 0.3 & echo $! > "$T/wp13j-home/lanes/merge-95.pid"
-sleep 0.3 & echo $! > "$T/wp13j-home/lanes/merge-96.pid"
-sleep 0.3 & echo $! > "$T/wp13j-home/lanes/probe-e9.pid"
+sleep 1.5 & echo $! > "$T/wp13j-home/lanes/merge-95.pid"
+sleep 1.5 & echo $! > "$T/wp13j-home/lanes/merge-96.pid"
+sleep 1.5 & echo $! > "$T/wp13j-home/lanes/probe-e9.pid"
 : > "$T/herdr-calls"
 HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
     GLAB_CMD="$T/glab-close-stub.sh" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
-    LOOM_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=0.6 \
+    LOOM_HOME="$T/wp13j-home" WATCH_POLLS=2 WATCH_POLL_SECONDS=1.7 \
     bash "$WP" >/dev/null 2>&1 || :
 closes=$(grep -c "^pane close " "$T/herdr-calls" || :)
 [ "$closes" = 2 ] \

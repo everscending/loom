@@ -149,19 +149,18 @@ case "$out" in *"✓ epic e4 — acceptance probe PASSED"*) \
 case "$out" in *"✗ epic e5 — acceptance probe FAILED (fix tickets filed)"*) \
     ok "ticker: probe FAIL renders highlighted";; \
     *) bad "ticker: probe fail rendered wrong ($out)";; esac
-# P31: an escalation the human paid for must be visibly TAKEN. The model is
-# read off the spawned command line, not self-reported, and the default case
-# (no --model, the lane inherits the session model) stays quiet.
-LOOM_HOME="$EVH" "$TICK" spawn-lane impl-46 -- /bin/echo --model opus >/dev/null 2>&1
+# The requested Loom tier and provider are visible without parsing a native
+# command line. A custom test-seam command has neither and stays quiet.
+printf '{"ts":1,"ev":"lane_spawn","id":"impl-46","provider":"codex","tier":"high"}\n' >> "$EVH/events.jsonl"
 LOOM_HOME="$EVH" "$TICK" spawn-lane impl-47 -- /bin/echo plain >/dev/null 2>&1
 out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
-case "$out" in *"#46 — implementation started (opus)"*) \
-    ok "ticker: an escalated lane names its model";; \
+case "$out" in *"#46 — implementation started (codex, high tier)"*) \
+    ok "ticker: a lane names its provider and requested tier";; \
     *) bad "ticker: escalation not shown ($(printf '%s' "$out" | grep '#4[67]'))";; esac
-case "$out" in *"#47 — implementation started ("*) \
-    bad "ticker: an unescalated lane invented a model suffix";; \
-    *) ok "ticker: the default model stays quiet";; esac
-for l in impl-46 impl-47; do LOOM_HOME="$EVH" "$TICK" clear-lane "$l" >/dev/null 2>&1; done
+case "$out" in *"#47 — implementation started (custom)"*) \
+    ok "ticker: a custom test-seam lane is identified without inventing a native model";; \
+    *) bad "ticker: custom lane runtime metadata wrong";; esac
+LOOM_HOME="$EVH" "$TICK" clear-lane impl-47 >/dev/null 2>&1
 
 # 16n. The ticker stops announcing a replay that is not going to happen (P42).
 #      `tick_skipped` fires for three unrelated reasons and the renderer
@@ -743,50 +742,50 @@ cat > "$T/glab-tier-stub.sh" <<'STUB'
 #!/usr/bin/env bash
 case "$*" in
     *"--method PUT"*) echo "$*" >> "${TCAP:?}"; echo '{}' ;;
-    *"issues/8"*) echo '{"iid":8,"labels":["build-3","blocked","model::haiku"]}' ;;
+    *"issues/8"*) echo '{"iid":8,"labels":["build-3","blocked","model::medium"]}' ;;
     *) echo '{}' ;;
 esac
 STUB
 chmod +x "$T/glab-tier-stub.sh"
 TCAP="$T/tier-calls"; : > "$TCAP"
 LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP" \
-    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    "$LANE" model-tier 8 high >/dev/null 2>&1 \
     && ok "model-tier: a human can escalate a ticket's model" \
     || bad "model-tier: refused a human caller"
-grep -q "add_labels=model::opus" "$TCAP" \
+grep -q "add_labels=model::high" "$TCAP" \
     && ok "model-tier: the new tier is written as a label" \
     || bad "model-tier: no label write reached the tracker ($(tail -1 "$TCAP"))"
 # One `model::` label at a time. Two resolve (the higher rank wins) but the
 # board then shows a ticket claiming both, and the next human to read it cannot
 # tell which is the live decision.
-grep -q "remove_labels=model::haiku" "$TCAP" \
+grep -q "remove_labels=model::medium" "$TCAP" \
     && ok "model-tier: the tier it replaces is removed in the same write" \
     || bad "model-tier: left two model:: labels on the ticket ($(tail -1 "$TCAP"))"
 # Planted violation: both automated callers, each naming a real tier.
 TCAP2="$T/tier-auto-calls"; : > "$TCAP2"
 LOOM_LANE_ID=impl-8 LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP2" \
-    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    "$LANE" model-tier 8 high >/dev/null 2>&1 \
     && bad "model-tier: a lane escalated its own model" \
     || ok "model-tier: a lane cannot escalate its own model"
 LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP2" \
-    "$LANE" model-tier 8 opus >/dev/null 2>&1 \
+    "$LANE" model-tier 8 high >/dev/null 2>&1 \
     && bad "model-tier: a wave escalated a ticket's model" \
     || ok "model-tier: a wave cannot escalate a ticket's model"
 [ -s "$TCAP2" ] \
     && bad "model-tier: an automated escalation still reached the tracker ($(head -1 "$TCAP2"))" \
     || ok "model-tier: no automated escalation write reached the tracker"
-# NOT restricted to the four model_rank knows — its comment is explicit that a
-# human may name any model the CLI accepts, and an unknown tier still resolves.
-# It warns rather than refusing; refusing would break that documented affordance.
+# Provider-native model names are no longer tracker state. Only Loom's two
+# public tiers are valid, and an ambiguous legacy value must be chosen by a
+# human rather than guessed.
 TCAP3="$T/tier-unknown"; : > "$TCAP3"
 out=$(LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP3" \
     "$LANE" model-tier 8 some-new-model 2>&1)
-case "$out" in *"ranks below"*) \
-    ok "model-tier: an unrecognised tier is allowed and said out loud";; \
-    *) bad "model-tier: an unknown tier was refused or passed silently ($out)";; esac
-case "$out" in *"issue 8 → model::some-new-model"*) \
-    ok "model-tier: the warning does not stop the label being written";; \
-    *) bad "model-tier: warning replaced the write ($out)";; esac
+case "$out" in *"medium|high"*) \
+    ok "model-tier: an unknown provider-native tier is refused with its replacement";; \
+    *) bad "model-tier: an unknown tier passed or gave no migration help ($out)";; esac
+[ ! -s "$TCAP3" ] \
+    && ok "model-tier: an invalid tier makes no tracker write" \
+    || bad "model-tier: invalid tier reached the tracker"
 LOOM_HOME="$EVH" GLAB_CMD="$T/glab-tier-stub.sh" TCAP="$TCAP3" \
     "$LANE" model-tier 8 "bad tier" >/dev/null 2>&1 \
     && bad "model-tier: accepted a tier that is not label-safe" \

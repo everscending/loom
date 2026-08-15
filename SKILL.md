@@ -47,7 +47,7 @@ technique of its own.
 | `epics` | 3 | Epic breakdown, adjusted on a surface, created in tracker |
 | `tickets` | 4 | Tickets per epic with contracts, tiers, PRD IDs, edges |
 | `build` | 5 | Define a new build (epic selection) or adjust one — **never starts it** |
-| `start` | 5→6 | The trigger: kick the unattended loop (`tick.sh install`); also resumes a halted build |
+| `start` | 5→6 | Detect/bind the provider, sync its guardrails, then kick the unattended loop; also resumes |
 | `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
 | `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
@@ -79,13 +79,16 @@ under "Human-run verbs" below.
 
 Plumbing is [scripts/tick.sh](scripts/tick.sh) (lock, detach, liveness,
 snapshot, notify — deterministic; test suite `scripts/tick-test.sh`). A
-scheduler entry (launchd/cron) runs `tick.sh tick`, which takes the lock and
-launches one headless wave session running `/loom tick`. **A wave is
+scheduler entry (launchd/cron) runs `tick.sh tick --auto --provider <id>`,
+cross-checks that transport against the active Build issue's single
+`provider::<id>` label, takes the lock, and launches one headless wave through
+`scripts/agent.sh`. **A wave is
 stateless**: it must work from tracker + lane state alone, and end by writing
 back.
 
 **Lanes, and chaining as a fast path.** Lanes are spawned with
-`tick.sh spawn-lane <id> --cwd <worktree> -- <cmd>`, whose `<id>` is
+`tick.sh spawn-lane <id> --provider <id> --job <kind> --tier <medium|high>
+--brief <file> --cwd <worktree>`, whose `<id>` is
 `impl-<ticket>`, `gate-<ticket>[-r<round>]`, `merge-<ticket>` or
 `probe-<epic-slug>` — the scheduler reads a lane's kind off its name, and
 `spawn-lane` refuses anything else, so **slugify the epic**: an id with a
@@ -100,9 +103,9 @@ and nothing depends on one: the numbered steps below do the same work next
 wave regardless.
 
 **Briefs travel as files, never inline prompts.**
-`spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it to the run
-directory, appends the headless rules, and swaps the placeholder for a pointer
-prompt. **Write the source where `lane.sh scratch` points** — a brief inside
+`spawn-lane … --brief <file>` copies it to the run directory, appends the
+headless rules, and gives the selected adapter that file. **Write the source
+where `lane.sh scratch` points** — a brief inside
 the repo or the lane's worktree is refused *(paid: 30 worktrees never swept)*.
 Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
 invoke — headless has no slash commands, so inline that work instead. The flag
@@ -121,33 +124,20 @@ error — the next wave does the same work. The timer, the quiet gate and the
 switch:
 [references/scheduling.md](references/scheduling.md).
 
-**Headless permissions.** Every spawned session — wave, implementers,
-verifiers — runs `claude -p ... --permission-mode <permission_mode>`, a config
-key (default `dontAsk`). Before composing any spawn line read the mode and the
-models from `tick.sh resolve-config` **at their real paths** —
-`.scalars.permission_mode.value`, `.scalars.lane_model.value`,
-`.scalars.wave_model.value` (empty model = inherit the session default) — and
-treat a jq `null` as "wrong query path", never as "unset, use the skill
-default". *(paid: a guessed top-level path returned null, was read as
-unconfigured, and nearly spawned four `dontAsk` lanes on the top-tier model
-against a global config saying otherwise.)*
+**Headless runtime and permissions.** Every paid session goes through
+`scripts/agent.sh`; core code passes only provider, Loom job kind, tier, cwd,
+and brief. Adapters own native flags, model IDs, authentication, trust, sandbox,
+approval mode, guardrail artifacts, and native-to-canonical JSONL conversion.
+Never construct a provider command in a wave. Force-push, `reset --hard`, and
+unscoped recursive deletion remain denied for every provider.
 
-Pass the configured mode and nothing else: never spawn a loop session with
-`bypassPermissions` (no guardrails — legitimate only inside a real sandbox) or
-`acceptEdits` (hangs on bash). The deny guardrails (force-push, `reset --hard`,
-`rm -rf`) bind in every mode. The durable fix for a denial is never a longer
-allowlist: models judge, scripts plumb — grow `lane.sh` until lanes barely need
-open shell. Which mode to configure, and why `dontAsk` is brittle:
-[references/setup.md](references/setup.md).
-
-**An implementation lane takes its model from the snapshot, not from
-`lane_model` directly**: `snapshot` resolves the escalation chain per ticket
-into `.model` — `{effective, source}`, where `source` is `label` (a human's
-`model::<tier>`), `rework_model` (round 2 and later, i.e. after a rejection),
-`lane_model`, or `session-default`. Spawn with `--model <effective>` unless it
-is `null`. **Implementation lanes only** — gates, merges and probes keep
-`lane_model`: escalating the reviewer because the implementer struggled is a
-different decision, and one mechanism must not mean two things.
+**An implementation lane takes its Loom tier from the snapshot**:
+`.tier_selection` is `{effective, source}` and resolves ticket
+`model::<medium|high>` label, then `rework_tier` after a rejection, then
+`lane_tier`. Gates, merges, and probes use `lane_tier`; waves use `wave_tier`.
+Plans and tracker state never carry provider-native model IDs. The adapter
+resolves a tier to its execution profile and records that profile in canonical
+session events.
 
 **Every tracker write in a lane goes through `scripts/lane.sh`** — `claim`,
 `transition`, `note`, `mr-note`, `verdict`, `merge-failed`, `merge`,
@@ -205,7 +195,7 @@ refuses outside herdr anyway.
    below say only how to carry one out, and nothing in this file re-derives a
    choice the plan made. `clear-lane`, `kill-lane`, `repair` and `transition`
    carry `via` + `argv`: run them verbatim. `spawn` carries the lane id, the
-   `--cwd` to cut or reuse, the `--model` (already resolved per ticket), the
+   provider, job, `--cwd`, Loom tier (already resolved per ticket), the
    pregate tier and its brief inputs — you write the brief and spawn it. An
    action carrying `needs_report` is paired with a `blocked-report` residue
    item: post the report first (**`lane.sh blocked-report <n> --category
@@ -228,7 +218,7 @@ refuses outside herdr anyway.
 
 3. **Gate** — a `gate` spawn action:
 
-       spawn-lane gate-<ticket>[-r<round>] --pregate <tier> --cwd <worktree> -- <cmd>
+       spawn-lane gate-<ticket>[-r<round>] --provider <id> --job gate --tier <tier> --pregate <gate-tier> --brief <file> --cwd <worktree>
 
    `--pregate` runs the repo's own gate runner in shell first, so a
    mechanically red branch exits 7 in seconds having spent no model time.
@@ -269,24 +259,18 @@ refuses outside herdr anyway.
    the latest rejection comment plus a diff of it against `origin/<base>`:
    paths outside the ticket's tier or stated scope go in as a question —
    "these files are outside this ticket's scope; decide whether they belong
-   here before continuing" — not a work item; its `--model` is the ticket's
-   own `.model.effective`, which on a rework round is exactly where the
-   escalation chain differs from `lane_model`. A **new** one:
+   here before continuing" — not a work item; its tier is the ticket's own
+   `.tier_selection.effective`, which on a rework round is exactly where the
+   escalation chain differs from `lane_tier`. A **new** one:
 
-   - claim (assignee + `in-progress`, the first write), `git fetch origin`;
-   - create the lane worktree from the **freshly-fetched remote base**
-     (`origin/<base>`, so it contains every already-merged blocker) **with the
-     repo's own mechanism** — `openemr-cmd worktree add <branch> -b --base
-     develop --env copilot --start` in openemr; `git worktree add <path> -b
-     <branch> origin/<base>` plus the repo's documented setup elsewhere.
-     Always a **sibling** directory of the repo (`../<repo>-wt-<n>`), never
-     nested inside it *(paid: a nested worktree polluted `git status`)* — the
-     sweeper's teardown assumes that naming too;
-   - **copy the repo root's untracked `.env` into the new worktree when
-     present** — keys are canonical at root and worktrees stay disposable
-     *(paid: a hand-filled `.env` trapped in one worktree became hostage
-     state)*;
-   - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` a headless session
+   - `tick.sh` has already run the action's `worktree.sh prepare` operation
+     before opening the provider sandbox. It fetched `origin/<base>`, created
+     or reused the sibling worktree through the repo's declared mechanism, and
+     copied root `.env` only when the target lacked one. Claim (assignee +
+     `in-progress`, the first tracker write), then use the action's absolute
+     `.spawn.cwd`;
+   - `spawn-lane impl-<ticket> --provider <id> --job implementation --tier
+     <tier> --brief <file> --cwd <worktree>` starts a headless session
      whose brief **inlines** the work rather than naming `/implement`
      (headless has no slash commands): the ticket body + lessons thread — if
      that body names a contract (endpoint, schema, route, wire shape) it
@@ -303,7 +287,7 @@ refuses outside herdr anyway.
 
 5. **Merge queue** — a `merge` spawn action, never inline:
 
-       spawn-lane merge-<ticket> --merge-lock --cwd <worktree> -- <cmd>
+       spawn-lane merge-<ticket> --provider <id> --job merge --tier <tier> --merge-lock --brief <file> --cwd <worktree>
 
    which holds the single-writer merge lock for that lane alone, so scheduling
    continues while it runs and a second merge is refused.
@@ -350,7 +334,8 @@ refuses outside herdr anyway.
    this step own merging.
 
 6. **Epic acceptance** — a `probe` spawn action:
-   `spawn-lane probe-<epic-slug> --cwd <worktree> -- <cmd>`, a lane that
+   `spawn-lane probe-<epic-slug> --provider <id> --job probe --tier <tier>
+   --brief <file> --cwd <worktree>`, a lane that
    exercises the epic the way a *user* would, against a really-running stack,
    not the test suite again.
 
@@ -504,7 +489,7 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
   human hold comment's "Release: when #48 merges, `/loom unblock 67`", posted
   a release note of its own, and had the held ticket requeued, re-claimed and
   back in `review` nine seconds later.)*
-- **A human escalation = a `model::<tier>` label on the ticket**, added while
+- **A human escalation = a `model::medium` or `model::high` label on the ticket**, added while
   reading the rejection that motivates it. It survives every round until
   removed, is tracker-resident like every other decision, and only ever
   changes that ticket's *implementation* lane. Removing it drops the ticket

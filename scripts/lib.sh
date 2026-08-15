@@ -53,10 +53,9 @@ _jq_lib_dir() { # <dir the scripts ship in> → the same dir, prelude proven pre
 
 # --- the tracker declaration (P86) ----------------------------------------
 # ONE place says which tracker a repo uses, and it is not this skill's file.
-# Every lane is a `claude -p` session in a worktree, so it loads that repo's
-# CLAUDE.md, whose `## Agent skills` block points at
-# `docs/agents/issue-tracker.md` — the sibling skills' declaration of the
-# tracker and its whole workflow. A second answer kept in `.loom.yml` would not
+# Every lane is a provider job in a worktree, and Loom gives every provider the
+# same committed `docs/agents/issue-tracker.md` declaration. A second answer
+# kept in `.loom.yml` would not
 # be a config key, it would be a way for tick.sh to read one board while the
 # lanes it spawns write to another, with nothing in the design able to notice.
 # So loom READS that file and never writes one of its own.
@@ -136,9 +135,9 @@ _require_tracker() { # <dir inside the repo> <who is refusing> → tracker name
     rel=$(_tracker_decl_path)
     [ -f "$root/$rel" ] \
         || die "$what: '$root/$rel' is missing — nothing declares which issue tracker this
-  repo uses. Every lane loom spawns reads that file through the repo's CLAUDE.md,
-  so without it a headless session infers a tracker from the git remote and
-  guesses. Run /setup-matt-pocock-skills in this repo to write it, then commit it."
+  repo uses. Loom scripts and every provider job read that file directly; without
+  it a headless session has no canonical board. Run /setup-matt-pocock-skills in
+  this repo to write it, then commit it."
     # Present is not enough. Worktrees sit BESIDE the repo and each is a
     # checkout, so an untracked or ignored declaration is visible to the human
     # in the primary clone and absent from every lane — the worst version of
@@ -528,4 +527,20 @@ _lane_type() { # <id> → impl | gate | probe | merge, or fails
         probe-[A-Za-z0-9]*)   echo probe ;;
         *) return 1 ;;
     esac
+}
+
+# Provider-native runtime keys are not safe to translate implicitly. Returns
+# the first legacy key/value form found across the supplied config files.
+# Consumers: tick.sh and agent.sh, so both scheduler and chained jobs fail at
+# the same migration boundary.
+_legacy_runtime_config() { # <config-file>...
+    local f key
+    for f in "$@"; do
+      [ -f "$f" ] || continue
+      key=$(sed -nE 's/^[[:space:]]*(wave_model|lane_model|rework_model|fallback_model|permission_mode):.*/\1/p' "$f" | head -1)
+      [ -z "$key" ] || { printf '%s\n' "$key"; return 0; }
+      grep -qE '^[[:space:]]*usage_limit:[[:space:]]*downshift_model' "$f" \
+        && { printf '%s\n' usage_limit:downshift_model; return 0; }
+    done
+    return 1
 }

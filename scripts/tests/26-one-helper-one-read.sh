@@ -161,10 +161,10 @@ PU="$T/p74usage"; mkdir -p "$PU/repo" "$PU/home" "$PU/fx"
 seed_tracker_decl "$PU/repo"
 : > "$PU/g.yml"
 printf 'ntfy:\n  topic: "p74-topic"\n  push: [usage_pause]\n' > "$PU/repo/.loom.yml"
-make_wave_stub "$PU/fx/claude"   # the shared wave stub, `crash_then_limit` mode
+make_wave_stub "$PU/fx/wave-stub"   # the shared wave stub, `crash_then_limit` mode
 PUENV() { LOOM_REPO="$PU/repo" LOOM_HOME="$PU/home" LOOM_GLOBAL_CONFIG="$PU/g.yml" \
           NTFY_CMD=true WAVE_COUNT="$PU/count" WAVE_ARGV="$PU/argv" \
-          LOOM_WAVE_CMD="$PU/fx/claude -p wave" LOOM_RETRY_BACKOFF_SECONDS=0 \
+          LOOM_WAVE_CMD="$PU/fx/wave-stub wave" LOOM_RETRY_BACKOFF_SECONDS=0 \
           LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 PUFUT=$(( $(date +%s) + 3600 ))
 echo 0 > "$PU/count"

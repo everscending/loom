@@ -23,10 +23,10 @@ ntfy:
 EOF
 UCAP="$UT/ntfy-capture"; USTUB="$UT/ntfy-stub.sh"
 printf '#!/bin/sh\necho "$@" >> "%s"\n' "$UCAP" > "$USTUB"; chmod +x "$USTUB"
-make_wave_stub "$UT/fx/claude"   # every WAVE_MODE below is a mode of that stub
+make_wave_stub "$UT/fx/wave-stub"   # every WAVE_MODE below is a mode of that stub
 UENV() { LOOM_REPO="$UT/repo" LOOM_HOME="$UT/home" LOOM_GLOBAL_CONFIG="$UT/g.yml" \
          NTFY_CMD="$USTUB" WAVE_COUNT="$UT/count" WAVE_ARGV="$UT/argv" \
-         LOOM_WAVE_CMD="$UT/fx/claude -p wave" LOOM_RETRY_BACKOFF_SECONDS=0 \
+         LOOM_WAVE_CMD="$UT/fx/wave-stub wave" LOOM_RETRY_BACKOFF_SECONDS=0 \
          LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 _ureset() { rm -rf "$UT/home/tick.lock.d"; rm -f "$UT/home/usage.pause" "$UT/home/tick.pending"; \
             echo 0 > "$UT/count"; : > "$UT/argv"; : > "$UCAP"; }
@@ -172,9 +172,8 @@ n=$(cat "$UT/count" 2>/dev/null || echo 0)
                || bad "usage: resume did not release the build ($n waves)"
 sed -i.bak '/usage_limit: stop_and_wait/d' "$UT/repo/.loom.yml"
 
-# 10k. `downshift_model` is the third policy: hand the session a cheaper model to
-#      fall back to rather than stopping. Asserted on the argv the wave actually
-#      received, and absent under the default policy.
+# 10k. Provider-native fallback configuration is refused. Tier downshift is
+#      implemented inside agent.sh and covered by adapter conformance tests.
 _ureset
 WAVE_MODE=ok UENV "$TICK" tick >/dev/null 2>&1
 grep -q -- "--fallback-model" "$UT/argv" 2>/dev/null \
@@ -182,10 +181,10 @@ grep -q -- "--fallback-model" "$UT/argv" 2>/dev/null \
     || ok "downshift: the default policy passes no fallback model"
 _ureset
 printf 'usage_limit: downshift_model\nfallback_model: sonnet\n' >> "$UT/repo/.loom.yml"
-WAVE_MODE=ok UENV "$TICK" tick >/dev/null 2>&1
-grep -q -- "--fallback-model sonnet" "$UT/argv" 2>/dev/null \
-    && ok "downshift: the configured fallback model reaches the wave's argv" \
-    || bad "downshift: no --fallback-model in '$(cat "$UT/argv" 2>/dev/null)'"
+out=$(WAVE_MODE=ok UENV "$TICK" tick 2>&1); rc_code=$?
+[ "$rc_code" -ne 0 ] && case "$out" in *"config migration"*"provider profiles"*|*"config migration"*"downshift_tier"*) true;; *) false;; esac \
+    && ok "downshift: legacy native-model config fails with precise migration guidance" \
+    || bad "downshift: legacy config did not fail closed ($out)"
 sed -i.bak '/^usage_limit: downshift_model/d;/^fallback_model: sonnet/d' "$UT/repo/.loom.yml"
 
 test_finish

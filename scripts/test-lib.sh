@@ -89,6 +89,7 @@ export LOOM_GLOBAL_CONFIG="$T/global.yml"
 #     9 tests bootstrap itself and switches it back on via BOOTENV.
 export LOOM_WAVE_CMD="true"
 export LOOM_SKIP_BOOTSTRAP=1
+export LOOM_PROVIDER=claude LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT=1
 # launchd is stubbed GLOBALLY, like glab: any test path that reaches
 # watcher-arm or install must capture argv, never mutate real launchd.
 # (Paid for: 2026-08-02 — the suite armed a real watcher agent per run;
@@ -189,7 +190,7 @@ make_glab_fixture() { # <dir>
     mkdir -p "$FX"
 cat > "$FX/open.json" <<'EOF'
 [
- {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
+ {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":["provider::claude"],"assignees":[],
   "description":"**Selected epics** (4 tickets, ~6h):\n- Ledger core (#10, #11, #12) — 4h\n- Reporting surface (#13) — 2h\n\n**Deliberately dropped** (remain unlabeled):\n- Archive sweep\n\nConfig snapshot:\n\n- max_lanes: 4\n"},
  {"iid":10,"title":"Add ledger table","project_id":1,"web_url":"https://x/10",
   "labels":["build-2","ready-for-agent"],"assignees":[],"updated_at":"2026-07-28T10:00:00Z",
@@ -268,9 +269,8 @@ chmod +x "$FX/glab-stub.sh"
 echo '[]' > "$FX/closed-none.json"
 }
 
-# The fake `claude` the wave tests run instead of a real session. The basename
-# is what makes tick treat it as a claude session, so the stub exercises the
-# real streaming path; it counts its own invocations, which is how "retries
+# The fake wave command emits canonical runtime events. It counts its own
+# invocations, which is how "retries
 # exactly once" becomes observable. Two sections need it — the usage-limit
 # section, which owns every mode, and P74's consolidation test, which reuses
 # `crash_then_limit` — so it lives here rather than in whichever runs first.
@@ -279,24 +279,24 @@ cat > "$1" <<'STUBEOF'
 #!/usr/bin/env bash
 echo "$@" >> "${WAVE_ARGV:-/dev/null}"
 n=$(cat "$WAVE_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$WAVE_COUNT"
-DONE='{"type":"result","subtype":"success","is_error":false,"result":"wave done"}'
+DONE='{"schema":1,"type":"session_end","provider":"claude","job":"wave","status":"success","rc":0}'
 case "${WAVE_MODE:-ok}" in
   ok)    printf '%s\n' "$DONE" ;;
   crash) echo "Execution error" >&2; exit 1 ;;
   flaky) if [ "$n" -ge 2 ]; then printf '%s\n' "$DONE"
          else echo "Execution error" >&2; exit 1; fi ;;
-  limit) printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":${WAVE_RESET:-0},\"rateLimitType\":\"five_hour\"}}"
+  limit) printf '%s\n' "{\"schema\":1,\"type\":\"limit\",\"provider\":\"claude\",\"job\":\"wave\",\"reset_at\":${WAVE_RESET:-0}}"
          echo "You've hit your session limit · resets 10pm" >&2; exit 1 ;;
   quiet_limit)                       # a limit with no resetsAt to read
          echo "You've hit your usage limit" >&2; exit 1 ;;
   crash_then_limit)                  # crashes once, then meets the wall
          if [ "$n" -ge 2 ]; then
-           printf '%s\n' "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":${WAVE_RESET:-0},\"rateLimitType\":\"five_hour\"}}"
+           printf '%s\n' "{\"schema\":1,\"type\":\"limit\",\"provider\":\"claude\",\"job\":\"wave\",\"reset_at\":${WAVE_RESET:-0}}"
            echo "You have hit your session limit" >&2
          else echo "Execution error" >&2; fi
          exit 1 ;;
   healthy_limit_event)               # a NORMAL wave that merely reports capacity
-         printf '%s\n' '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1,"rateLimitType":"five_hour"}}'
+         printf '%s\n' '{"schema":1,"type":"limit","provider":"claude","job":"wave","reset_at":1}'
          printf '%s\n' "$DONE" ;;
 esac
 STUBEOF

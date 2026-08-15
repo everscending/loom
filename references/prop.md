@@ -39,7 +39,7 @@ Evidence that no longer reproduces is worth a sentence in your summary.
 Not in the main clone. Cut a worktree first and make every edit, every suite
 run and the archive edit there:
 
-    git worktree add .claude/worktrees/prop-<Pn> -b prop-<Pn> main
+    git worktree add .loom-worktrees/prop-<Pn> -b prop-<Pn> main
 
 **Branch from local `main` by name, never from `origin/HEAD`.** That is the
 whole reason this step is written down: an agent harness cutting a worktree
@@ -50,7 +50,7 @@ missing its own dependencies. *(paid: D-SNAP-17's worktree came from
 function `main` had already rewritten — one hand-resolved conflict and a
 second full suite run.)*
 
-`.claude/worktrees/` is git-ignored, which is what makes a path inside the
+`.loom-worktrees/` is git-ignored, which is what makes a path inside the
 repo safe here. A **sibling** directory is not: this repo lives in the skills
 tree, and a sibling of it carrying a `SKILL.md` registers as a second skill.
 
@@ -128,7 +128,7 @@ style). That commit is the revert path; do not leave `.bak` copies behind.
 Then, back in the main clone: `git merge --no-ff prop-<Pn>` into `main` — never
 rebase, so what merges is exactly what the suite ran green. Resolve a real
 conflict as a stop-and-report, not a silent pick. Then
-`git worktree remove .claude/worktrees/prop-<Pn>` and delete the branch;
+`git worktree remove .loom-worktrees/prop-<Pn>` and delete the branch;
 teardown is this session's job, not a chore left for the human.
 
 **Then push `main`.** Not housekeeping — a worktree is cut from `origin/HEAD`

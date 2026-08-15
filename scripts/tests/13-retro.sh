@@ -78,9 +78,9 @@ esac
 #       counts (1M input tokens per lane) so the dollar amounts land on exact
 #       integers and the assertion isn't chasing float formatting.
 mkdir -p "$RT/home/logs"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"implementation","tokens":{"input":1000000,"output":0},"cost_usd":3}' \
     > "$RT/home/logs/lane-impl-1.jsonl"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"gate","tokens":{"input":1000000,"output":0},"cost_usd":1}' \
     > "$RT/home/logs/lane-gate-1.jsonl"
 out=$(RTENV "$TICK" retro --build build-r 2>&1)
 case "$out" in
@@ -88,7 +88,7 @@ case "$out" in
     *) bad "retro: no spend section in output" ;;
 esac
 case "$out" in
-    *"total          \$4"*) ok "retro: spend totals every priced lane, not just one kind" ;;
+    *"known total    \$4"*) ok "retro: spend totals every provider-priced lane" ;;
     *) bad "retro: spend total wrong ($(printf '%s' "$out" | grep -A1 'Spend '))" ;;
 esac
 case "$out" in
@@ -111,16 +111,16 @@ rm -f "$RT/home/logs/lane-impl-1.jsonl" "$RT/home/logs/lane-gate-1.jsonl"
 #        wave emits no `lane_exit`, so it cannot join by lane id like the
 #        others -- it joins by `stem` (the wave log's own basename) instead.
 printf '{"ts":2700,"ev":"wave_end","build":"build-r","stem":"wave-9","rc":0,"secs":5}\n' >> "$RTF"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"implementation","tokens":{"input":1000000,"output":0},"cost_usd":3}' \
     > "$RT/home/logs/lane-impl-1.jsonl"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"gate","tokens":{"input":1000000,"output":0},"cost_usd":1}' \
     > "$RT/home/logs/lane-gate-1.jsonl"
-printf '%s\n' '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
-                '{"type":"assistant","message":{"model":"claude-haiku-4-5","usage":{"input_tokens":1000000,"output_tokens":0}}}' \
+printf '%s\n' '{"schema":1,"type":"usage","provider":"claude","job":"wave","tokens":{"input":1000000,"output":0},"cost_usd":1}' \
+                '{"schema":1,"type":"usage","provider":"claude","job":"wave","tokens":{"input":1000000,"output":0},"cost_usd":1}' \
     > "$RT/home/logs/wave-9.jsonl"
 out=$(RTENV "$TICK" retro --build build-r 2>&1)
 case "$out" in
-    *"total          \$6"*) ok "retro: a priced total includes wave sessions, not just lanes" ;;
+    *"known total    \$6"*) ok "retro: a priced total includes wave sessions, not just lanes" ;;
     *) bad "retro: wave spend missing from total ($(printf '%s' "$out" | grep -A1 'Spend '))" ;;
 esac
 case "$out" in

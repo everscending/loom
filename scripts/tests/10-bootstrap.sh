@@ -53,13 +53,13 @@ grep -q "max_lanes: 6" "$BT/g.yml" \
 # 9b. Idempotent labels: only the missing ones are created, and nothing is
 #     ever deleted — the write half gets the same class of guard as 7k.
 out=$(BOOTENV "$BOOT" labels 2>&1)
-case "$out" in *"9 created, 1 already present"*) ok "bootstrap: creates only the missing labels";;
+case "$out" in *"7 created, 1 already present"*) ok "bootstrap: creates only the missing labels";;
                *) bad "bootstrap: label run reported '$out'";; esac
 # P31's escalation labels are GitLab SCOPED labels — the colon is part of the
-# name. The label table was `:`-separated, so read that way `model::opus`
+# name. The label table was `:`-separated, so read that way `model::high`
 # splits into name "model", no colour, and the rest as description: four
 # labels created wrong and none of them ever matched.
-grep -q -- "label create --name model::opus --color #6C3483" "$BCALLS" \
+grep -q -- "label create --name model::high --color #6C3483" "$BCALLS" \
     && ok "bootstrap: a scoped model:: label keeps its colon and its colour" \
     || bad "bootstrap: model:: label mangled ($(grep -c 'label create' "$BCALLS") creates: $(grep 'label create' "$BCALLS" | tr '\n' ';'))"
 if grep -qE "label (delete|remove)" "$BCALLS"; then
@@ -95,7 +95,7 @@ DESCJSON="$BT/desc-labels.json"
 printf '%s' '[{"name":"triage","description":"waiting on review before merge-queue"}]' > "$DESCJSON"
 out=$(STUB_LABELS_JSON="$DESCJSON" BOOTENV "$BOOT" labels --dry-run 2>&1)
 case "$out" in
-    *"would create 10"*) ok "bootstrap: a description mentioning a label name does not fake its presence" ;;
+    *"would create 8"*) ok "bootstrap: a description mentioning a label name does not fake its presence" ;;
     *) bad "bootstrap: description text matched as a label name ($out)" ;;
 esac
 

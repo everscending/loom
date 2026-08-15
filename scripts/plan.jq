@@ -5,7 +5,7 @@
 # snapshot document, computed deterministically: `gate.eligible` with its
 # `reason`, `summary.stranded`, `summary.impl_slots_free`,
 # `summary.merge_in_flight`, `.merge_hold`, `.merge_attempts`,
-# `rejections.same_class_tail`, `.model.effective`,
+# `rejections.same_class_tail`, `.tier_selection.effective`,
 # `summary.epics_awaiting_probe`. Reading those fields and applying the rules
 # adds no information the document does not already carry — and it cost a full
 # model session between "a ticket became ready" and "a lane exists for it"
@@ -75,6 +75,12 @@ elif (type != "object") or (has("tickets") and has("lanes") and has("summary") |
 elif (.build == null) then
     empty_plan(.generated_at; null;
         "no open `Build N` issue — empty universe, nothing to schedule")
+elif ((.build.provider // "") == "") then
+    empty_plan(.generated_at; .build;
+        "Build issue has no single provider:: label — provider identity must be tracker-resident before scheduling")
+elif any(.tickets[]?; ((.tier_selection.invalid_labels // []) | length) > 0) then
+    empty_plan(.generated_at; .build;
+        "a ticket carries a provider-native or legacy model:: label — choose model::medium or model::high explicitly before scheduling")
 else
 
 . as $s
@@ -83,11 +89,12 @@ else
 | ($s.lanes // []) as $lanes
 | ($s.summary // {}) as $sum
 | ($s.epics // []) as $epics
+| ($s.build.provider // null) as $provider
 | (($cfg.lane_turn_cap | tonumber?) // 150) as $turn_cap
 | (($cfg.merge_attempt_cap | tonumber?) // 2) as $merge_cap
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_free
-| ($cfg.lane_model // null) as $lane_model
+| ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
 
 # One lookup, so every rule below reads the same row for the same ticket.
@@ -200,7 +207,7 @@ else
      | (gate_lane(.id)) as $lid
      | select(spawnable($lid))
      | { step: "gate", kind: "spawn", lane: $lid, ticket: .id,
-         spawn: { id: $lid, type: "gate", model: $lane_model, pregate: .tier,
+         spawn: { id: $lid, type: "gate", provider: $provider, tier: $lane_tier, pregate: .tier,
                   merge_lock: false,
                   cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                   brief: { step: 3,
@@ -267,21 +274,22 @@ else
      | ("impl-\(.id)") as $lid
      | select(spawnable($lid))
      | { step: "fill", kind: "spawn", lane: $lid, ticket: .id,
-         spawn: { id: $lid, type: "impl", model: (.model.effective), pregate: null,
+         spawn: { id: $lid, type: "implementation", provider: $provider, tier: (.tier_selection.effective), pregate: null,
                   merge_lock: false,
                   cwd_from: "the ticket's SURVIVING worktree — this is a respawn, not a new lane",
                   brief: { step: 4,
                            inputs: ["ticket #\(.id) body",
                                     "the latest rejection comment on #\(.id)",
                                     "the build lessons thread"] } },
-         why: "stranded rework (round \((.rejections.total // 0) + 1), model source `\(.model.source)`) — closest to done and its rejection cap is already counting" } ]
+         why: "stranded rework (round \((.rejections.total // 0) + 1), tier source `\(.tier_selection.source)`) — closest to done and its rejection cap is already counting" } ]
    + [ $ready_take[]
      | ("impl-\(.id)") as $lid
      | select(spawnable($lid))
      | { step: "fill", kind: "spawn", lane: $lid, ticket: .id,
-         spawn: { id: $lid, type: "impl", model: (.model.effective), pregate: null,
+         spawn: { id: $lid, type: "implementation", provider: $provider, tier: (.tier_selection.effective), pregate: null,
                   merge_lock: false,
-                  cwd_from: "a NEW worktree cut from the freshly-fetched `origin/\($cfg.base // "<base>")`, a sibling of the repo; copy the repo root's untracked .env in when present",
+                  prepare: {via:"worktree.sh", argv:["prepare","--repo","<repo-root>","--ticket",(.id|tostring),"--base",($cfg.base // "<base>")]},
+                  cwd_from: "the absolute path returned by the deterministic prepare operation",
                   brief: { step: 4,
                            inputs: ["ticket #\(.id) body",
                                     "the build lessons thread"] } },
@@ -320,7 +328,7 @@ else
           | ("merge-\(.id)") as $lid
           | select(spawnable($lid))
           | { step: "merge", kind: "spawn", lane: $lid, ticket: .id,
-              spawn: { id: $lid, type: "merge", model: $lane_model, pregate: null,
+              spawn: { id: $lid, type: "merge", provider: $provider, tier: $lane_tier, pregate: null,
                        merge_lock: true,
                        cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                        brief: { step: 5,
@@ -365,9 +373,10 @@ else
      | ("probe-" + ((.milestone // .name) | epic_norm)) as $lid
      | select(spawnable($lid))
      | { step: "probe", kind: "spawn", lane: $lid, epic: .name,
-         spawn: { id: $lid, type: "probe", model: $lane_model, pregate: null,
+         spawn: { id: $lid, type: "probe", provider: $provider, tier: $lane_tier, pregate: null,
                   merge_lock: false,
-                  cwd_from: "a worktree on the freshly-fetched `origin/\($cfg.base // "<base>")` with the stack really running",
+                  prepare: {via:"worktree.sh", argv:["prepare","--repo","<repo-root>","--key",$lid,"--base",($cfg.base // "<base>")]},
+                  cwd_from: "the absolute path returned by the deterministic prepare operation",
                   brief: { step: 6,
                            inputs: ["the epic's `## Acceptance criteria` (.epics[].acceptance)",
                                     "targeted regression checks for defects this epic has already produced"] } },
@@ -432,7 +441,7 @@ else
   as $residue
 | ($gate_deferred + $fill_deferred + $merge_deferred + $probe_deferred) as $deferred
 | { generated_at: $s.generated_at,
-    build: { id: $s.build.id, label: $s.build.label },
+    build: { id: $s.build.id, label: $s.build.label, provider: $provider },
     reason: (if ($actions | length) == 0 and ($residue | length) == 0
              then "nothing to schedule: \($open_count) open ticket(s), \($sum.lanes_running // 0) lane(s) running"
              else null end),

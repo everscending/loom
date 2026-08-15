@@ -75,19 +75,20 @@ include "lib";
   # excludes sessions from any other build. Waves emit no `lane_exit`, so they
   # join on `stem` (the log basename) instead of `id`.
   | ($spend | map({key: .id, value: .cost}) | from_entries) as $spend_by_id
-  | ($lanes | map(. + {cost: ($spend_by_id[.id] // 0)})) as $lanes_c
+  | ($lanes | map(. + {cost: ($spend_by_id[.id] // null)})) as $lanes_c
   | ($evs | map(select(.ev == "wave_end"))) as $waves
-  | ($waves | map(. + {cost: ($spend_by_id[.stem // ""] // 0)})) as $waves_c
-  | ($waves_c | map(.cost) | add // 0) as $wave_cost
-  | (($lanes_c | map(.cost) | add // 0) + $wave_cost) as $total_cost
-  | ($lanes_c | group_by(.type)
+  | ($waves | map(. + {cost: ($spend_by_id[.stem // ""] // null)})) as $waves_c
+  | ($waves_c | map(.cost) | map(select(. != null)) | add // 0) as $wave_cost
+  | (($lanes_c | map(.cost) | map(select(. != null)) | add // 0) + $wave_cost) as $total_cost
+  | (($lanes_c + $waves_c) | map(select(.cost == null)) | length) as $unknown_costs
+  | ($lanes_c | map(select(.cost != null)) | group_by(.type)
      | map({type: .[0].type, cost: (map(.cost) | add // 0)})
      | (if $wave_cost > 0 then . + [{type: "wave", cost: $wave_cost}] else . end)
      | sort_by(-.cost)) as $by_kind
   | ($tw | map(. as $t | . + {cost: ($lanes_c
        | map(select(.id | test("^(impl|gate|merge)-\($t.id)(-|$)")))
-       | map(.cost) | add // 0)})) as $twc
-  | ($lanes_c | sort_by(-.cost) | [limit(5; .[])]) as $top
+       | map(.cost) | map(select(. != null)) | add // 0)})) as $twc
+  | ($lanes_c | map(select(.cost != null)) | sort_by(-.cost) | [limit(5; .[])]) as $top
   | ($tk | map({key: .id, value: .last}) | from_entries) as $closed_at
   | (($snaps | map(select((.deps // {}) | length > 0)) | first | .deps) // {}) as $deps
   # Longest dependency chain the graph allowed — what `graph` would have
@@ -132,7 +133,8 @@ include "lib";
            | "  #\(.id)   open \(hms(.open))   work \(hms(.work))   wait \(hms(.wait))"] end)
   + ["", "Spend   (priced from every lane and wave session log)", ""]
   + (if ($lanes_c | length) == 0 and ($waves_c | length) == 0 then ["  nothing recorded"]
-     else ["  total          \(usd($total_cost))"]
+     else ["  known total    \(usd($total_cost))"]
+          + (if $unknown_costs > 0 then ["  unknown        \($unknown_costs) session(s) — provider reported cost_usd: null"] else [] end)
           + ($by_kind | map("  \(.type)  \(usd(.cost))"))
           + ["", "  top spenders", ""]
           + ($top | map("  \(.id)  \(usd(.cost))"))

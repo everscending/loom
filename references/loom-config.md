@@ -5,6 +5,12 @@ state). **Do not reinvent key names per repo** — a bootstrap that renames keys
 makes two repos read differently for no gain. The keys below are fixed; only
 the *values* are repo-specific.
 
+Legacy `wave_model`, `lane_model`, `rework_model`, `fallback_model`,
+`permission_mode`, and `usage_limit: downshift_model` fail with the exact
+replacement. Loom does not guess whether a native model name means `medium` or
+`high`; migrate ticket labels and config explicitly. Provider choice is not a
+config key: it is the active Build issue's single `provider::<id>` label.
+
 ## Three layers (P22)
 
 Every key resolves as **repo → derived → global → built-in default**, and
@@ -19,10 +25,9 @@ about.
 2. **Derived — no file.** Anything readable off the repo: `base`
    (`origin/develop` if it exists, else `main`), the `gates` pack (from the
    detected stack), `runner` (`scripts/gate.sh`), `tracker` (read off
-   `docs/agents/issue-tracker.md` — see below), and the whole
-   `.claude/settings.json` permission surface. `tick.sh install-settings`
-   writes that surface; it is idempotent and refuses to overwrite a differing
-   hand-edited file without `--force`.
+   `docs/agents/issue-tracker.md` — see below), and the provider-neutral
+   guardrail surface. `agent.sh sync-guardrails --provider <id>` renders the
+   selected adapter's owned repo artifact and preserves unrelated settings.
 3. **Repo — `.loom.yml`, optional.** Only facts no detector can infer.
    Its absence is a valid, complete configuration.
 
@@ -30,8 +35,8 @@ about.
 
 `tracker` has **no `.loom.yml` key, deliberately**. Which tracker a repo uses
 is already declared in `docs/agents/issue-tracker.md` — the file
-`/setup-matt-pocock-skills` writes, and the one every lane reads through the
-repo's `CLAUDE.md`. A second copy of the answer here would not be a config key;
+`/setup-matt-pocock-skills` writes, and the one Loom scripts and all provider
+jobs read directly. A second copy of the answer here would not be a config key;
 it would be a way for `tick.sh` to read one board while the lanes it spawns
 write to another, with nothing in the design able to notice.
 
@@ -155,19 +160,12 @@ max_lanes: 4                    # 1-6; each lane is a full worktree (+ stack whe
 rejection_cap: 2                # gate-review rejections before a ticket is blocked
 crash_cap: 2                    # implementer crashes before blocked (crashes are not rejections)
 heartbeat_stale_minutes: 30     # PID alive but log silent this long = wedged (never a wall-clock ticket timeout)
-permission_mode: dontAsk        # dontAsk | auto — mode for every spawned wave/lane session.
-                                # dontAsk: deterministic (allowlist or immediate denial).
-                                # auto: classifier judges the long tail; denials still
-                                # return to the model. Both honor allow/deny rules.
-                                # (build-1 2026-08-02 paid three dontAsk failures in one
-                                # morning; that machine's global config selects auto.)
-usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_model
+usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_tier
                                 # pause_and_resume: pause until the limit's own reset time, then
-                                #   carry on — the reset epoch is read from the session's
-                                #   rate_limit_event, never parsed out of prose
+                                #   carry on — the reset epoch is read from the canonical
+                                #   limit event, never parsed out of prose
                                 # stop_and_wait:    pause and stay paused; `tick.sh resume` clears it
-                                # downshift_model:  pass --fallback-model to waves and lanes
-fallback_model: sonnet          # only read under downshift_model; an alias (sonnet|opus|haiku) or full id
+                                # downshift_tier: high retries once at medium; a medium limit pauses
 min_wave_gap_minutes: 10        # floor between wave STARTS, measured from the last
                                 # `wave_start` event (not from when the wave ended, and
                                 # not from a second state file that could drift). This is
@@ -178,7 +176,7 @@ min_wave_gap_minutes: 10        # floor between wave STARTS, measured from the l
                                 # finish-trigger (`--from-lane`) and a hand-run `tick` are
                                 # not gated — a finishing lane must be able to start the
                                 # next one immediately.
-base: develop                   # integration base; the merge queue rebases onto origin/<base>
+base: develop                   # integration base; the merge queue merges origin/<base>
                                 # NOTE: there is deliberately no tick_interval key — the
                                 # heartbeat is a fixed 60s (tick.sh HEARTBEAT_INTERVAL). One
                                 # agent does both jobs: it watches on every firing, and starts
@@ -186,17 +184,17 @@ base: develop                   # integration base; the merge queue rebases onto
                                 # not the timer, paces spending — so the fast tick costs
                                 # nothing. Lane self-triggers set the loop's real pace.
 
-wave_model: ""                  # model for scheduling waves (alias like sonnet|opus|haiku
-                                # or a full id). EMPTY INHERITS THE HUMAN'S SAVED
-                                # INTERACTIVE DEFAULT — set these, or an interactive
-                                # /model switch silently reprices every worker
-                                # (2026-08-02: a fable default ran all lanes top-tier).
-lane_model: ""                  # model for impl/gate/merge/probe lanes, same rules
-rework_model: ""                # P31: model for an IMPLEMENTATION lane on round 2+
-                                # (a round that follows a rejection). Empty = same as
-                                # lane_model. Late rounds are rare and self-select for
-                                # hardness; gates keep lane_model either way. A ticket
-                                # `model::<tier>` label outranks this.
+wave_tier: medium               # Loom tier; adapter resolves its native model profile
+lane_tier: medium               # default implementation and every gate/merge/probe tier
+rework_tier: high               # implementation tier after a rejection; a ticket
+                                # model::medium|high label outranks it
+provider_profiles:              # OPTIONAL customization; never selects the provider
+  claude:
+    medium: {model: sonnet}
+    high: {model: opus}
+  codex:
+    medium: {model: gpt-5.6-terra, reasoning_effort: medium}
+    high: {model: gpt-5.6-sol, reasoning_effort: high}
 stall_action: resume            # resume | notify_only — what a tick does when the
                                 # quiescence check finds work ready but nothing
                                 # running. resume: the wave is the recovery (the

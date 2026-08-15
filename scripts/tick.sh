@@ -51,6 +51,7 @@ REPO_ROOT="${LOOM_REPO:-$PWD}"
 # resolve to the same lock. Two repos never collide.
 REPO_KEY="$(basename "$REPO_ROOT")-$(printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1)"
 LOOM_HOME="${LOOM_HOME:-$HOME/.loom/$REPO_KEY}"
+export LOOM_REPO="$REPO_ROOT" LOOM_HOME
 CONFIG="$REPO_ROOT/.loom.yml"
 # Hard cut from the pre-rename name. A repo still carrying `.orchestrator.yml`
 # with no `.loom.yml` would otherwise run silently on derived + global defaults,
@@ -114,6 +115,7 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 # viewer itself (see _raise_viewer), and the test suite must never open a real
 # pane.
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
+AGENT_SH="${LOOM_AGENT_CMD:-${SELF_PATH%/*}/agent.sh}"
 
 mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR"
 
@@ -858,7 +860,24 @@ _stamp() { # <epoch> → local human time, for a human reading a push notificati
     date -r "$1" '+%H:%M %Z' 2>/dev/null || date -d "@$1" '+%H:%M %Z' 2>/dev/null || printf '%s' "$1"
 }
 
-_is_claude_cmd() { case "${1%% *}" in claude|*/claude) return 0 ;; *) return 1 ;; esac; }
+_is_agent_cmd() { [ "${1:-}" = "$AGENT_SH" ] || [ "$(basename "${1:-}")" = agent.sh ]; }
+
+_assert_build_provider() { # <provider> — tracker is canonical, argument is transport
+    local provider="$1" raw build labels count current
+    [ -n "${LOOM_SKIP_PROVIDER_CHECK:-}" ] && return 0
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "tick: '$provider' has no registered provider adapter"
+    raw=$("$TRACKER_SH" issues-open) || die "tick: cannot verify provider — open Build issue read failed"
+    build=$(printf '%s' "$raw" | jq -r '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
+    [ -n "$build" ] || die "tick: cannot verify provider — no open Build N issue"
+    labels=$(printf '%s' "$raw" | jq -r --argjson id "$build" '.[]|select(.id==$id)|[.labels[]?|select(startswith("provider::"))]|join(",")')
+    count=$(printf '%s' "$raw" | jq -r --argjson id "$build" '.[]|select(.id==$id)|[.labels[]?|select(startswith("provider::"))]|length')
+    [ "$count" -eq 1 ] || die "tick: Build #$build must carry exactly one provider:: label (found ${count}: ${labels:-none})"
+    current="${labels#provider::}"
+    "$AGENT_SH" detect --provider "$current" >/dev/null \
+      || die "tick: Build #$build carries provider::$current, but that adapter is not registered"
+    [ "$current" = "$provider" ] || die "tick: scheduler transport says '$provider' but Build #$build says '$current' — refusing before model invocation"
+}
 
 # Only ever consulted on a FAILED session. A `rate_limit_event` with status
 # "allowed" appears in perfectly normal runs — treating one as a limit would
@@ -869,11 +888,12 @@ _limit_reset_at() { # <jsonl> <log> <err> → epoch to resume after, or nothing
     shift
     # A limit must be named somewhere in what the session actually said.
     grep -qiE 'usage limit|session limit|rate limit|quota|limit reached|resets? (at|in) ' "$@" 2>/dev/null \
-        || { [ -s "$jsonl" ] && grep -qiE '"(usage|rate)_limit|limit reached' "$jsonl" 2>/dev/null; } \
+        || { [ -s "$jsonl" ] && grep -q '"type":"limit"' "$jsonl" 2>/dev/null; } \
         || return 0
-    if [ -s "$jsonl" ] && command -v jq >/dev/null 2>&1; then
-        at=$(jq -r 'select(.type == "rate_limit_event") | .rate_limit_info.resetsAt // empty' \
-                "$jsonl" 2>/dev/null | tail -1)
+    if command -v jq >/dev/null 2>&1; then
+        at=$(cat "$jsonl" "$@" 2>/dev/null \
+             | jq -Rr 'fromjson? | select(.type == "limit") | .reset_at // empty' 2>/dev/null \
+             | tail -1)
     fi
     case "$at" in
         ''|*[!0-9]*) # Known to be a limit, but the runtime did not say when it
@@ -934,7 +954,7 @@ _pause_on_limit() { # <stem> <first|retry|lane-<id>> → 0 paused, 1 no limit th
 }
 
 # D-TICK-20: the same wall, met by a LANE instead of by a wave. A lane's own
-# `claude -p` is killed by the account-wide limit in ~5s, its epilogue records
+# A provider session is killed by the account-wide limit in ~5s, its epilogue records
 # `lane_exit rc=1` — schema-identical to a crash — and chains onward
 # (`chain-merge`, or `tick --from-lane`, which ignores `min_wave_gap_minutes`
 # because a handoff is work already in progress). The successor recomputes the
@@ -1001,7 +1021,8 @@ _tick_exit() {
         rm -f "$PENDING_FILE"
         _ev tick_replayed
         echo "tick: a lane finished during this wave — re-ticking once"
-        ( "$SELF_PATH" tick --from-lane >>"$LOGS_DIR/self-trigger.log" 2>&1 & )
+        ( nohup "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1 </dev/null & )
     fi
     return $rc
 }
@@ -1085,7 +1106,8 @@ cmd_tick() {
     # correct amount of noise for a build that cannot legally start.
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
-    local mode="manual" quiet="" tick_go=0
+    _refuse_legacy_runtime_config
+    local mode="manual" quiet="" tick_go=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -1095,10 +1117,15 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # quiet, and tick_go — 1 when a wave should launch, 0 when this firing
     # already did everything it may (watch, note, event). Gate ORDER here is
     # load-bearing; each gate's comment names the build that paid for it.
-    case "${1:-}" in
+    while [ $# -gt 0 ]; do case "$1" in
         --auto) mode="auto"; shift ;;
         --from-lane) mode="lane"; shift ;;
-    esac
+        --provider) provider="${2:-}"; shift 2 ;;
+        *) die "tick: unknown argument '$1'" ;;
+    esac; done
+    [ -n "$provider" ] || die "tick: --provider <id> is required (scheduled and chained sessions never auto-detect)"
+    export LOOM_PROVIDER="$provider"
+    _assert_build_provider "$provider"
     # A lane hands off through its own epilogue ('tick --from-lane'), never by
     # calling a bare 'tick' itself: that takes the manual, always-runs
     # contract in the foreground, and a lane that self-invokes it takes the
@@ -1202,32 +1229,70 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     tick_go=1
 }
 
+_prepare_wave_plan() { # <scratch> — resolve every new-worktree cwd before sandboxing the wave
+    local scratch="$1" snapshot="$1/snapshot.json" plan="$1/plan.json" raw="$1/plan.raw.json"
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base cwd tmp
+    [ -x "$worktree_sh" ] || die "wave: deterministic worktree helper missing: $worktree_sh"
+    "$SELF_PATH" snapshot --brief > "$snapshot" \
+      || die "wave: could not capture the tracker snapshot before provider invocation"
+    "$SELF_PATH" plan "$snapshot" > "$raw" \
+      || die "wave: could not derive the deterministic schedule before provider invocation"
+    if [ -z "${LOOM_SKIP_PROVIDER_CHECK:-}" ]; then
+      local planned_provider
+      planned_provider=$(jq -r '.build.provider // empty' "$raw")
+      [ "$planned_provider" = "$provider" ] \
+        || die "wave: provider changed while deriving the schedule (transport '$provider', snapshot '${planned_provider:-none}') — refusing before provider invocation"
+    fi
+    cp "$raw" "$plan"
+    jq -r '.actions[] | select(.spawn.prepare != null)
+      | [.lane, ((.ticket // "")|tostring),
+         (.spawn.prepare.argv as $a | ($a|index("--base")) as $i | $a[$i+1])]
+      | @tsv' "$raw" | while IFS="$(printf '\t')" read -r lane ticket base; do
+        [ -n "$lane" ] || continue
+        if [ -n "$ticket" ]; then
+          cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --base "$base")
+        else
+          cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --key "$lane" --base "$base")
+        fi
+        tmp="$plan.tmp.$$"
+        jq --arg lane "$lane" --arg cwd "$cwd" '
+          (.actions[] | select(.lane == $lane) | .spawn) |=
+            ((. + {cwd:$cwd, cwd_from:"the worktree prepared by tick.sh before this wave"}) | del(.prepare))' \
+          "$plan" > "$tmp" && mv "$tmp" "$plan"
+      done
+    printf '%s\n' "$plan"
+}
+
 _launch_wave() { # the spend half of cmd_tick: prompt assembly through the
     # retry policy. Runs only after every gate in _tick_gates has passed, with
     # the tick lock held and _tick_exit trapped.
     LOOM_SCRATCH=$(_new_scratch wave); export LOOM_SCRATCH
-    # Sessions run under cfg permission_mode (see SKILL.md "Headless
-    # permissions" and references/loom-config.md). Both values honor
-    # the repo's allow/deny rules; the deny guardrails bind in every mode.
-    # User-approved change 2026-08-02 after three dontAsk failures in one
-    # morning; this machine's global config selects auto.
-    local perm_mode; perm_mode="$(cfg permission_mode dontAsk)"
-    # Model tiers for spawned sessions. Without an explicit --model, every
-    # wave and lane inherits the human's saved interactive default — which on
-    # 2026-08-02 was the top tier chosen for skill-repair work, silently
-    # making every worker run at max cost. Empty = inherit, deliberately.
-    # The LANE model is deliberately absent from this prompt (P48): it is per
-    # ticket, resolved by `snapshot` into `.model.effective`, and a flat
-    # `--model <lane_model>` injected here outranked that — running a rework
-    # round on the very tier that just failed it.
-    local wave_model wm_flag=""
-    wave_model="$(cfg wave_model "")"
-    [ -n "$wave_model" ] && wm_flag=" --model $wave_model"
-    local lane_path verb_txt
+    local wave_tier; wave_tier="$(cfg wave_tier medium)"
+    case "$wave_tier" in medium|high) ;; *) die "wave_tier must be medium or high, got '$wave_tier'";; esac
+    if [ -z "${LOOM_WAVE_CMD:-}" ]; then
+      [ -x "$AGENT_SH" ] || die "wave: provider runtime missing or not executable: $AGENT_SH"
+      if [ -z "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ]; then
+        "$AGENT_SH" preflight --provider "$provider" --job wave --tier "$wave_tier" --cwd "$REPO_ROOT" >/dev/null
+      fi
+    fi
+    local lane_path verb_txt wave_plan="" first_action
     lane_path="$(dirname "$SELF_PATH")/lane.sh"
     verb_txt="$(_lane_verbs "$lane_path" 2>/dev/null || true)"
     if [ -n "$verb_txt" ]; then verb_txt="verbs: $verb_txt; "
     else verb_txt=""; fi
+    # Production sessions receive the one snapshot-derived plan that this wave
+    # will execute. Worktree creation happens here, outside every provider
+    # sandbox; the wave gets only absolute prepared cwd values. LOOM_WAVE_CMD
+    # remains a deterministic test seam and keeps its self-contained prompt
+    # unless a test explicitly opts into preparation.
+    if [ -z "${LOOM_WAVE_CMD:-}" ] || [ -n "${LOOM_PREPARE_PLAN_WITH_WAVE_CMD:-}" ]; then
+      wave_plan=$(_prepare_wave_plan "$LOOM_SCRATCH")
+    fi
+    if [ -n "$wave_plan" ]; then
+      first_action="read $wave_plan — it is the immutable schedule derived from this wave's tracker snapshot. Run its .actions[] in order; every new-worktree spawn already carries .spawn.cwd and no provider session creates a worktree."
+    else
+      first_action="run \"$SELF_PATH\" snapshot --brief | \"$SELF_PATH\" plan — the read step and the schedule."
+    fi
     # The wave prompt carries the ground truth the spawner already has. A fresh
     # headless session that must rediscover repo/state/config by shelling
     # around can get its exploratory commands denied and misread that as
@@ -1240,30 +1305,20 @@ Wave context from tick.sh — trust it over rediscovery:
 - repo root: $REPO_ROOT (this repo IS loom-managed; bootstrap already ran)
 - tick.sh: $SELF_PATH
 - state dir: $LOOM_HOME
-- FIRST action: run \"$SELF_PATH\" snapshot --brief | \"$SELF_PATH\" plan — the read step and the schedule. The plan's .actions[] are already decided: run them in order (each carries via + argv, or everything a spawn needs but its brief). .residue[] is what needs prose from you; .deferred[] is what a cap or a hold cut. Absence of .loom.yml is normal (config resolves from derived/global layers).
-- Spawn every lane with: --permission-mode $perm_mode. The model is per ticket, not global: pass --model from that ticket's .model.effective in the snapshot, and omit the flag when it is null.
+- FIRST action: $first_action The plan's .actions[] are already decided: run them in order (each carries via + argv, or everything a spawn needs but its brief). .residue[] is what needs prose from you; .deferred[] is what a cap or a hold cut. Absence of .loom.yml is normal (config resolves from derived/global layers).
+- Every spawn action carries a Loom tier. Spawn with --provider $provider --job <kind> --tier <medium|high>; never construct provider-native flags.
 - Lanes make EVERY tracker write through the verb script $lane_path (${verb_txt}long bodies via stdin or --file; run it bare for usage).
-- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --brief <file> --cwd <wt> -- claude -p @brief ... — spawn-lane copies it into the worktree, appends the headless execution rules every lane needs, and swaps @brief for a pointer prompt. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Inline arguments over 1000 chars are refused. Never hand-roll tracker mutations in a lane prompt: inline -m bodies are denied on length, and any \$VAR or \$(...) in a command defeats allowlist matching.
+- Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --provider $provider --job <kind> --tier <tier> --brief <file> --cwd <wt>. spawn-lane stages it outside the worktree and agent.sh invokes the selected provider. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Never hand-roll tracker mutations in a lane prompt.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
     export LOOM_WAVE_PROMPT
-    local wave_cmd="${LOOM_WAVE_CMD:-claude -p \"\$LOOM_WAVE_PROMPT\" --permission-mode $perm_mode$wm_flag}"
-    local stem="wave-$(date +%Y%m%d-%H%M%S)" stream=0 fb="" rc=0
-    if _is_claude_cmd "$wave_cmd"; then
-        # The wave gets the same streaming treatment as a lane (P13): it is what
-        # makes the usage-limit signal machine-readable, and it gives a crashed
-        # wave a transcript instead of the 15 bytes P15 had to work from.
-        case "$wave_cmd" in *--output-format*) ;; *) stream=1
-            wave_cmd="$wave_cmd --output-format stream-json --verbose" ;; esac
-        # Documented scope is "overloaded or not available" — see the note in
-        # PROPOSALS_ARCHIVED.md P14. Wired because it is the right primitive
-        # and costs nothing; the pause below does not lean on it working.
-        if [ "$(cfg usage_limit pause_and_resume)" = "downshift_model" ]; then
-            fb=$(cfg fallback_model sonnet)
-            [ -n "$fb" ] && wave_cmd="$wave_cmd --fallback-model $fb"
-        fi
-    fi
-
-    _run_wave "$stem" "$wave_cmd" "$stream" || rc=$?
+    local wave_brief="$LOOM_SCRATCH/wave.md"
+    printf '%s\n' "$LOOM_WAVE_PROMPT" > "$wave_brief"
+    # Seconds alone collided when two test/manual ticks began in one second:
+    # the later limit parser inherited reset_at=1 from the earlier log and
+    # treated an expired timestamp as a fresh pause (full-suite run 2026-08-15).
+    # The process id makes each session's diagnostic artifact unambiguous.
+    local stem="wave-$(date +%Y%m%d-%H%M%S)-$$" rc=0
+    _run_wave "$stem" "$provider" "$wave_tier" "$wave_brief" || rc=$?
     if [ "$rc" -eq 0 ]; then : > "$WAVE_FAILS"; return 0; fi
 
     # A usage limit is not a crash: retrying it immediately spends a session to
@@ -1276,7 +1331,7 @@ Wave context from tick.sh — trust it over rediscovery:
     # what survives that is escalated to a human rather than silently repeated.
     echo "tick: wave failed (see $LOGS_DIR/$stem.err.log) — retrying once in ${RETRY_BACKOFF}s"
     sleep "$RETRY_BACKOFF"
-    rc=0; _run_wave "$stem-retry" "$wave_cmd" "$stream" || rc=$?
+    rc=0; _run_wave "$stem-retry" "$provider" "$wave_tier" "$wave_brief" || rc=$?
     if [ "$rc" -eq 0 ]; then : > "$WAVE_FAILS"; return 0; fi
 
     # The retry needs the SAME limit check as the first attempt — the same
@@ -1303,19 +1358,21 @@ Wave context from tick.sh — trust it over rediscovery:
 # stdout and stderr go to SEPARATE files. Merging them is why build 2's crashed
 # waves left 15 bytes and no diagnosis: with a stream on stdout, an error on
 # stderr is the only thing that explains an empty transcript (P15).
-_run_wave() { # _run_wave <stem> <cmd> <stream?> → the wave's exit code
-    local stem="$1" cmd="$2" stream="$3" rc=0 t0 retry=0
+_run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
+    local stem="$1" provider="$2" tier="$3" brief="$4" rc=0 t0 retry=0
     t0=$(_now)
     case "$stem" in *-retry) retry=1 ;; esac
-    _ev wave_start stem "$stem" retry "$retry"
+    _ev wave_start stem "$stem" retry "$retry" provider "$provider" tier "$tier"
     echo "tick: running wave (log: $LOGS_DIR/$stem.log)"
-    if [ "$stream" -eq 1 ]; then
-        ( cd "$REPO_ROOT" && eval "$cmd" ) >"$LOGS_DIR/$stem.jsonl" 2>"$LOGS_DIR/$stem.err.log" || rc=$?
-        _render_stream "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log"
+    if [ -n "${LOOM_WAVE_CMD:-}" ]; then
+        ( cd "$REPO_ROOT" && eval "$LOOM_WAVE_CMD" ) >>"$LOGS_DIR/$stem.log" 2>"$LOGS_DIR/$stem.err.log" || rc=$?
     else
-        ( cd "$REPO_ROOT" && eval "$cmd" ) >>"$LOGS_DIR/$stem.log" 2>"$LOGS_DIR/$stem.err.log" || rc=$?
+        LOOM_AGENT_NATIVE_LOG="$LOGS_DIR/$stem.native.jsonl" \
+          "$AGENT_SH" run --provider "$provider" --job wave --tier "$tier" --cwd "$REPO_ROOT" --brief "$brief" \
+          >"$LOGS_DIR/$stem.jsonl" 2>"$LOGS_DIR/$stem.err.log" || rc=$?
+        _render_stream "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log"
     fi
-    _ev wave_end stem "$stem" rc "$rc" secs "$(( $(_now) - t0 ))"
+    _ev wave_end stem "$stem" rc "$rc" secs "$(( $(_now) - t0 ))" provider "$provider" tier "$tier"
     return $rc
 }
 
@@ -1338,6 +1395,12 @@ _spawn_parse_flags() {
                    cwd="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --brief) shift; [ $# -gt 0 ] || die "spawn-lane: --brief needs a file"
                      brief="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --provider) shift; [ $# -gt 0 ] || die "spawn-lane: --provider needs an id"
+                     provider="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --job) shift; [ $# -gt 0 ] || die "spawn-lane: --job needs a kind"
+                     job="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --tier) shift; [ $# -gt 0 ] || die "spawn-lane: --tier needs medium or high"
+                     agent_tier="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --) shift; _spawn_shift=$((_spawn_shift+1)); break ;;
             --*) die "spawn-lane: unknown flag '$1'" ;;
             *) if [ -z "$id" ]; then id="$1"; shift; _spawn_shift=$((_spawn_shift+1)); else break; fi ;;
@@ -1450,8 +1513,13 @@ BRIEFEOF
         fi
         _prev="$_b"
     done
-    [ "$_hit" -eq 1 ] || die "spawn-lane: --brief requires the command to carry '-p @brief' — the placeholder spawn-lane replaces with the pointer prompt"
-    _SPAWN_ARGS=("${_brf[@]}")
+    if [ -n "$provider" ]; then
+        _SPAWN_ARGS=("$AGENT_SH" run --provider "$provider" --job "$job" --tier "$agent_tier" \
+                     --cwd "$abs" --brief "$BRIEFS_DIR/$id.md" --lane-id "$id")
+    else
+        [ "$_hit" -eq 1 ] || die "spawn-lane: --brief with a custom command requires '-p @brief' so the staged file has a consumer"
+        _SPAWN_ARGS=("${_brf[@]}")
+    fi
 }
 
 # What the lane does after its command exits, in order: release the merge
@@ -1462,7 +1530,7 @@ BRIEFEOF
 # heartbeat is a true backstop for the initial kick and post-stall resume.
 # Render BEFORE the tick fires: the wave this lane wakes up reads lane logs
 # for verdicts and crash triage, and must not race the transcript.
-# Reads, from the caller's scope: id, jsonl, stream, is_claude, inject,
+# Reads, from the caller's scope: id, jsonl, stream,
 # merge_lock, gate_lock_key, on_done, and the lane command as "$@"; sets epi
 # and redirect there, and leaves the (possibly flag-extended) command in
 # _SPAWN_ARGS for the caller to `set --` back. Everything the program text needs travels by
@@ -1471,60 +1539,10 @@ BRIEFEOF
 # refuses, nothing here destroys.
 _spawn_build_epilogue() {
     epi=""; redirect=""
-    local _a=""
     if [ "$stream" -eq 1 ]; then
         export LOOM_LANE_JSONL="$jsonl"
-        redirect=' >"$LOOM_LANE_JSONL"'      # expanded inside the lane's shell
-        # The redirect above is unconditional for a streaming lane; only the
-        # FLAGS are conditional. A caller who already asked for stream-json
-        # gets the stream file like everyone else — it just does not get the
-        # flag twice.
-        if [ "$inject" -eq 1 ]; then
-            set -- "$@" --output-format stream-json --verbose
-        fi
-        # Lanes downshift on the same policy the wave does (P14) — a limit that
-        # stops the scheduler stops the work it schedules just as hard. Skipped
-        # when the caller set their own, for the same reason as the format.
-        if [ "$(cfg usage_limit pause_and_resume)" = "downshift_model" ]; then
-            local fb has_fb=0
-            for _a in "$@"; do
-                case "$_a" in --fallback-model|--fallback-model=*) has_fb=1; break ;; esac
-            done
-            fb=$(cfg fallback_model sonnet)
-            if [ -n "$fb" ] && [ "$has_fb" -eq 0 ]; then
-                set -- "$@" --fallback-model "$fb"
-            fi
-        fi
+        redirect=' >"$LOOM_LANE_JSONL"'
         epi="'$SELF_PATH' render-log '$id'; "
-    fi
-    # D-TICK-16: `ScheduleWakeup` is a main-loop tool — nothing resumes a
-    # headless `claude -p`, so a lane that schedules a wakeup instead of
-    # waiting ends its session for good. It dies rc 0, which is neither the
-    # crash path nor the rejection path, with its ticket still unreviewed and
-    # its background children alive and unreaped. Paid for twice in one day
-    # (boostlingo build-4, 2026-08-08): impl-96 dead rc 0 at 162 turns over a
-    # live 300s run, impl-98 dead rc 0 at 91 turns over a background retry
-    # loop. The P68 brief already forbids the shape in prose and both lanes
-    # read it anyway, so the durable fix goes in the plumbing: deny the tool
-    # on the command line, where a model cannot read past it.
-    # Gated on is_claude, not `stream` — `stream` answers "does stdout go to
-    # the .jsonl?" and a caller who set `--output-format json` turns it off
-    # while still running a session that can strand itself.
-    # Appended LAST: --disallowedTools is variadic, so it must never sit where
-    # the next token is another injected flag's value.
-    if [ "$is_claude" -eq 1 ]; then
-        local has_dt=0
-        for _a in "$@"; do
-            case "$_a" in
-                --disallowedTools|--disallowedTools=*|--disallowed-tools|--disallowed-tools=*)
-                    has_dt=1; break ;;
-            esac
-        done
-        # A caller who set their own deny list owns it whole — the lane must
-        # not argue with itself, same rule as the format and the fallback.
-        if [ "$has_dt" -eq 0 ]; then
-            set -- "$@" --disallowedTools ScheduleWakeup
-        fi
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
@@ -1538,7 +1556,7 @@ _spawn_build_epilogue() {
         if [ "$merge_lock" -eq 1 ]; then
             epi="$epi( '$SELF_PATH' chain-merge >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
         else
-            epi="$epi( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+            epi="$epi( '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
         fi
     fi
     # The exit code is recorded FIRST, before the tick fires, or the wave this
@@ -1648,7 +1666,7 @@ cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
     # malformed spawn must abort here, never produce a lane that reads as a
@@ -1668,7 +1686,16 @@ cmd_spawn_lane() {
     _lane_type "$id" >/dev/null || die "spawn-lane: '$id' is not a structured
   lane id, so the scheduler could not tell what kind of lane it is (P10). Use
   impl-<ticket>, gate-<ticket>[-r<round>], merge-<ticket>, or probe-<epic>."
-    [ $# -gt 0 ] || die "spawn-lane: no command to run for lane '$id'"
+    if [ -n "$provider" ]; then
+        "$AGENT_SH" detect --provider "$provider" >/dev/null \
+          || die "spawn-lane: no registered adapter for '$provider'"
+        case "$job" in implementation|gate|merge|probe) ;; *) die "spawn-lane: --job must be implementation|gate|merge|probe";; esac
+        case "$agent_tier" in medium|high) ;; *) die "spawn-lane: --tier must be medium|high";; esac
+        [ -n "$brief" ] || die "spawn-lane: provider jobs require --brief"
+        [ $# -eq 0 ] || die "spawn-lane: provider jobs accept no raw command after --"
+    else
+        [ $# -gt 0 ] || die "spawn-lane: no provider job or custom command for lane '$id'"
+    fi
     # Decision 4: `stop` cuts the direct handoffs too, so a ticket already in
     # flight finishes its CURRENT worker and nothing follows it. The chain
     # (implementer -> gate -> merge) is spawned by the lanes themselves, not by
@@ -1687,11 +1714,16 @@ cmd_spawn_lane() {
     local dir="${cwd:-$REPO_ROOT}"
     [ -d "$dir" ] || die "spawn-lane: --cwd '$dir' is not a directory"
     local abs; abs=$(cd "$dir" && pwd)
+    if [ -n "$provider" ] && [ -z "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ]; then
+        [ -x "$AGENT_SH" ] || die "spawn-lane: provider runtime missing: $AGENT_SH"
+        "$AGENT_SH" preflight --provider "$provider" --job "$job" --tier "$agent_tier" --cwd "$abs" >/dev/null \
+          || die "spawn-lane: provider preflight failed for $provider/$job/$agent_tier in $abs"
+    fi
     # Refuse the FIRST lane rather than the first merge (P30): the untrusted
     # path is usually the repo root, not this worktree, and nothing else looks
     # until a command finally needs the allowlist.
     local _bad=""
-    if ! _bad=$(_trust_check_dir "$abs"); then
+    if [ -z "$provider" ] && ! _bad=$(_trust_check_dir "$abs"); then
         _notify_trust "$_bad"
         die "spawn-lane: '$_bad' is not a trusted workspace, so a headless lane
   in '$abs' would ignore the repo allowlist and have nearly every command denied
@@ -1699,7 +1731,7 @@ cmd_spawn_lane() {
   trust prompt — trust cascades to every worktree beneath it. A script must
   never write that flag for you."
     fi
-    _notify_trust ""
+    [ -n "$provider" ] || _notify_trust ""
     # The lane's own id, inherited by everything it runs — including the
     # `spawn-lane` it calls to hand off to its successor. That inheritance is
     # the seam the stopped-loop check above reads.
@@ -1731,74 +1763,23 @@ cmd_spawn_lane() {
     for _b in "$@"; do
         [ "${#_b}" -le "$_maxlen" ] || die "spawn-lane: an inline argument is ${#_b} chars (cap $_maxlen) —
   prompts this long die at the CLI/permission boundary (P28). Write the brief
-  to a file and spawn with:  --brief <file> ... -- claude -p @brief ..."
+  to a file and spawn through the provider-neutral --provider/--job/--tier interface."
     done
-    local log="$LOGS_DIR/lane-$id.log" jsonl="$LOGS_DIR/lane-$id.jsonl" stream=0 is_claude=0 _a=""
-    # P13: liveness is judged by log mtime, and `claude -p` writes nothing until
-    # it exits — so a healthy lane working past `heartbeat_stale_minutes` looks
-    # silent, is classified wedged, and is killed with all its work. Streaming is
-    # the only honest signal, because the session emits events as it works.
-    # The stream lands in lane-<id>.jsonl (which `lane-status` reads for
-    # liveness) and the readable transcript is rendered into lane-<id>.log when
-    # the lane exits, so humans and waves keep reading plain text.
-    # Injected here rather than asked of the caller: this is the same shape as
-    # P2 — a flag whose omission silently breaks the loop must not be optional.
-    # A command that only reaches claude indirectly (`bash -c "claude …"`) is not
-    # detected, and does not need to be: SKILL.md spawns claude directly.
-    # `is_claude` is the same detection kept as its own answer, because
-    # `stream` is turned back off below for a non-streaming format while the
-    # lane is still a real session (D-TICK-16 reads it).
-    case "$(basename "${1:-}")" in claude) stream=1; is_claude=1 ;; esac
-    # Two SEPARATE decisions, and conflating them cost a build day. `inject`
-    # is "do I add the flags?" — no, if the caller already set
-    # `--output-format`, or the lane would argue with itself over a flag set
-    # on purpose. `stream` is "does stdout go to the .jsonl?" — which stays
-    # YES whenever the output is a JSON stream, however it got that way.
-    #
-    # One variable meant both, so a wave that helpfully wrote out
-    # `--output-format stream-json --verbose` itself (SKILL.md documents that
-    # spawn-lane injects them, so writing them is a reasonable thing for a
-    # wave to do) silently lost its stream file. That costs three things at
-    # once, all of them quiet: `render-log --follow` tails a file that does
-    # not exist, so the human's viewer pane stays blank; `_stamp_progress`
-    # skips the lane, so staleness falls back to raw .log mtime — the weak
-    # signal that counts any output as progress; and the exit epilogue never
-    # renders, leaving the .log as raw JSON instead of a readable transcript.
-    # (Paid for: build-3 2026-08-03 — probe-e4-realtime-mode ran 30 minutes
-    # behind an empty pane. 4 of ~190 lanes hit it; the rare ones are the
-    # long ones, which are exactly the ones somebody is watching.)
-    local inject="$stream" fmt_next=0 fmt=""
-    if [ "$stream" -eq 1 ]; then
-        for _a in "$@"; do
-            if [ "$fmt_next" -eq 1 ]; then fmt="$_a"; fmt_next=0; continue; fi
-            case "$_a" in
-                --output-format)   inject=0; fmt_next=1 ;;
-                --output-format=*) inject=0; fmt="${_a#--output-format=}" ;;
-            esac
-        done
-        # Only a stream-json format produces the line-per-event file every
-        # reader here assumes. An explicit `--output-format json` emits one
-        # blob at exit, which is the pre-P13 shape: no streaming liveness to
-        # be had, so do not pretend otherwise by creating a stream file.
-        [ "$inject" -eq 0 ] && [ "$fmt" != "stream-json" ] && stream=0
-    fi
+    local log="$LOGS_DIR/lane-$id.log" jsonl="$LOGS_DIR/lane-$id.jsonl" stream=0
+    # Provider jobs emit canonical JSONL through agent.sh. Core never detects,
+    # injects, or parses a provider-native streaming flag.
+    _is_agent_cmd "${1:-}" && stream=1
     # P31: record the model this lane actually runs on, read off the command
     # rather than asked for as a second flag — a self-reported model can differ
     # from the one spawned, the command line cannot. Empty means the lane
     # inherits the session default. Consumer: the ticker, so an escalation is
     # visibly taken ("#46 — implementation started (opus)"), and `retro`.
-    local lane_model="" _mnext=0
-    for _a in "$@"; do
-        if [ "$_mnext" -eq 1 ]; then lane_model="$_a"; break; fi
-        case "$_a" in
-            --model)   _mnext=1 ;;
-            --model=*) lane_model="${_a#--model=}"; break ;;
-        esac
-    done
+    local lane_tier="$agent_tier"
     # Carry the loom's location to any child (the lane, and the
     # completion-triggered tick), so a self-trigger targets the right repo
     # even though the lane runs in a worktree cwd.
     export LOOM_REPO="$REPO_ROOT" LOOM_HOME="$LOOM_HOME"
+    [ -z "$provider" ] || export LOOM_PROVIDER="$provider"
     LOOM_SCRATCH=$(_new_scratch "lane-$id"); export LOOM_SCRATCH
     # D-TICK-19: put the scripts directory (home of lane.sh and tick.sh) on
     # PATH before spawning, so a handoff a lane composes can say `lane.sh
@@ -1883,8 +1864,9 @@ cmd_spawn_lane() {
         _lane "$@" ) >>"$log" 2>&1 &
     echo $! > "$LANES_DIR/$id.pid"
     _now > "$LANES_DIR/$id.start"
-    _ev lane_spawn id "$id" type "$(_lane_type "$id")" \
-        pregate "${pregate:-}" merge_lock "$merge_lock" model "$lane_model" log "$log"
+    _ev lane_spawn id "$id" type "$(_lane_type "$id")" job "${job:-custom}" \
+        provider "${provider:-custom}" tier "$lane_tier" \
+        pregate "${pregate:-}" merge_lock "$merge_lock" log "$log"
     # (The merge lock is stamped by the lane itself — see the spawn above.
     # Between reserve and that stamp the lock carries tick.sh's own pid, which
     # is alive for that whole window, so it is never breakable in between.)
@@ -1954,7 +1936,7 @@ _render_stream() { # _render_stream <jsonl> <log>
 # holding this id). Nothing here depends on the fast path succeeding — the
 # numbered steps in SKILL.md do the same merge, next wave, regardless.
 cmd_chain_merge() {
-    local fallback="( '$SELF_PATH' tick --from-lane >>'$LOGS_DIR/self-trigger.log' 2>&1 & )"
+    local fallback="( '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 & )"
     # Cheap and early: a stopped loop is refused by spawn-lane too (P30's
     # LOOM_LANE_ID guard, inherited into this process the same way it is
     # inherited by every other epilogue child), but there is no reason to
@@ -1985,22 +1967,10 @@ cmd_chain_merge() {
     [ -f "$briefsrc" ] || { eval "$fallback"; return 0; }
     sed -e "s/{{TICKET_IID}}/$head_id/g" -e "s#{{WORKTREE}}#$wt#g" -e "s/{{BASE}}/$base/g" \
         "$briefsrc" > "$briefpath"
-    # Same config the wave reads for a merge action (SKILL.md's "Headless
-    # permissions"): the wave's own model, resolved into `.model.effective`,
-    # is for rework escalation on IMPLEMENTATION lanes — a merge is not a
-    # rework round, so plan.jq's own merge action already spawns on
-    # `lane_model` directly, matched here.
-    local perm_mode; perm_mode="$(cfg permission_mode dontAsk)"
-    local model; model="$(cfg lane_model "")"
-    if [ -n "$model" ]; then
-        "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" -- \
-            claude -p @brief --permission-mode "$perm_mode" --model "$model" \
-            >>"$LOGS_DIR/self-trigger.log" 2>&1
-    else
-        "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" -- \
-            claude -p @brief --permission-mode "$perm_mode" \
-            >>"$LOGS_DIR/self-trigger.log" 2>&1
-    fi || eval "$fallback"
+    local tier; tier="$(cfg lane_tier medium)"
+    "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
+        --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" \
+        >>"$LOGS_DIR/self-trigger.log" 2>&1 || eval "$fallback"
 }
 
 # Render new events to STDOUT as they arrive, and stop when the lane is gone.
@@ -2138,23 +2108,20 @@ cmd_render_events() { # render-events [--follow]
     fi
 }
 
-# P55: dollar cost of one session log, priced by each assistant message's own
-# model off `message.usage`. Source: claude-api skill pricing cache, read
-# 2026-08-06 — $/MTok, cache write assumed at the 5m ephemeral default (the
-# harness never requests a 1h breakpoint). Re-derive this table whenever
-# pricing changes; nothing else in the skill depends on the literal numbers.
-_lane_cost() { # _lane_cost <jsonl-file> -> USD spent by that session, "0" if unreadable
-    [ -f "$1" ] || { echo 0; return; }
+# P55: provider-reported dollar cost from canonical usage events. Unknown is
+# null; Loom never estimates from native model names.
+_lane_cost() { # _lane_cost <jsonl-file> -> USD or null when unavailable
+    [ -f "$1" ] || { echo null; return; }
     # No jq, no cost — same "0" the old inline `|| echo 0` fallback gave when
     # jq itself was missing, checked explicitly here so the file resolution
     # below (which needs `dirname`) is never reached on a PATH without jq.
-    command -v jq >/dev/null 2>&1 || { echo 0; return; }
+    command -v jq >/dev/null 2>&1 || { echo null; return; }
     # P71: the price table lives in usage.jq beside this script — moved out
     # of a single-quoted shell string, following snapshot.jq's own precedent.
     local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
     USAGE_JQ="$jqd/usage.jq"
     [ -f "$USAGE_JQ" ] || die "usage-cost: $USAGE_JQ is missing — it holds the usage-cost program and ships beside tick.sh"
-    jq -L "$jqd" -R -s -f "$USAGE_JQ" < "$1" 2>/dev/null || echo 0
+    jq -L "$jqd" -R -s -f "$USAGE_JQ" < "$1" 2>/dev/null || echo null
 }
 
 # P55/D-TICK-13: every lane AND wave log this repo has ever kept — `clear-lane`
@@ -2208,8 +2175,8 @@ cmd_lane_status() {
         # the branch before any review session ran (P12). `turns` (P52) is the
         # same assistant-event count `.progress` already stamps for staleness —
         # a spend signal, not a liveness one — `-` when no stamp exists yet.
-        # `cost` (P55) is priced straight off the session log's own
-        # `message.usage`, so a running build shows spend next to progress.
+        # `cost` (P55) comes from canonical provider-reported usage, so a
+        # running build shows known spend next to progress and null otherwise.
         echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl")"
     done
 }
@@ -2364,6 +2331,7 @@ cmd_snapshot() {
         --merge-queue) mq=true; shift ;;
     esac
     command -v jq >/dev/null 2>&1 || die "snapshot: jq required"
+    _refuse_legacy_runtime_config
     # The document builder lives in snapshot.jq beside this script. Say so
     # here: without the check jq fails deep in stage 3 with its own message
     # about an unreadable -f argument, and the wave reads that as a tracker
@@ -2597,7 +2565,7 @@ cmd_snapshot() {
         --arg merge_attempt_cap "$(cfg merge_attempt_cap 2)" \
         --arg lane_turn_cap "$(cfg lane_turn_cap 150)" \
         --arg base "$(cfg base '')" --arg max_aux "$(cfg max_aux_lanes 4)" \
-        --arg lane_model "$(cfg lane_model '')" --arg rework_model "$(cfg rework_model '')" \
+        --arg lane_tier "$(_tier_cfg lane_tier medium)" --arg rework_tier "$(_tier_cfg rework_tier high)" \
         '{ max_lanes: ($max_lanes | tonumber? // $max_lanes),
            max_aux_lanes: ($max_aux | tonumber? // $max_aux),
            rejection_cap: ($rejection_cap | tonumber? // $rejection_cap),
@@ -2605,8 +2573,8 @@ cmd_snapshot() {
            merge_attempt_cap: ($merge_attempt_cap | tonumber? // $merge_attempt_cap),
            lane_turn_cap: ($lane_turn_cap | tonumber? // $lane_turn_cap),
            heartbeat_stale_minutes: ($stale | tonumber? // $stale),
-           lane_model: (if $lane_model == "" then null else $lane_model end),
-           rework_model: (if $rework_model == "" then null else $rework_model end),
+           lane_tier: $lane_tier,
+           rework_tier: $rework_tier,
            base: (if $base == "" then null else $base end) }')
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
@@ -2878,11 +2846,14 @@ PLIST_DIR="${LOOM_PLIST_DIR:-$HOME/Library/LaunchAgents}"
 HEARTBEAT_INTERVAL=60
 
 _write_plist() {  # _write_plist <path> <interval>
-    local path="$1" interval="$2" b d toolpath=""
+    local path="$1" interval="$2" provider="${3:-${LOOM_PROVIDER:-}}" b d toolpath=""
+    [ -n "$provider" ] || die "install: provider is required before writing the scheduler"
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "install: no registered adapter for '$provider'"
     # launchd starts with a bare environment; bake a PATH covering the real
-    # tool locations (the interactive `claude` may be a shell alias — resolve
-    # the binary via PATH here, at install time).
-    for b in claude uv glab gh jq git node bash; do
+    # tool locations (the interactive provider may be a shell alias — resolve
+    # its binary via PATH here, at install time).
+    for b in "$provider" uv glab gh jq git node bash; do
         d="$(command -v "$b" 2>/dev/null)" && toolpath="$toolpath:$(dirname "$d")"
     done
     local pathval="${toolpath#:}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -2893,7 +2864,7 @@ _write_plist() {  # _write_plist <path> <interval>
 <dict>
     <key>Label</key><string>$LOOM_LABEL</string>
     <key>ProgramArguments</key>
-    <array><string>$SELF_PATH</string><string>tick</string><string>--auto</string></array>
+    <array><string>$SELF_PATH</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>LOOM_REPO</key><string>$REPO_ROOT</string>
@@ -3444,8 +3415,27 @@ _tsv_to_json() { jq -R -s 'split("\n") | map(select(length>0) | split("\t"))
                            | reduce .[] as $p ({}; .[$p[0]] += [$p[1]])'; }
 _lines_to_json() { jq -R -s 'split("\n") | map(select(length>0)) | unique'; }
 
+_refuse_legacy_runtime_config() {
+    local key=""
+    key=$(_legacy_runtime_config "$CONFIG" "$GLOBAL_CONFIG") || return 0
+    case "$key" in
+        wave_model) die "config migration: '$key' is provider-native; replace it with wave_tier: medium|high";;
+        lane_model) die "config migration: '$key' is provider-native; replace it with lane_tier: medium|high";;
+        rework_model) die "config migration: '$key' is provider-native; replace it with rework_tier: medium|high";;
+        fallback_model) die "config migration: '$key' is removed; usage downshift is high → medium and provider profiles own model ids";;
+        permission_mode) die "config migration: '$key' is provider-specific and now owned by the selected adapter";;
+        usage_limit:downshift_model) die "config migration: usage_limit: downshift_model is now usage_limit: downshift_tier";;
+    esac
+}
+
+_tier_cfg() { # <key> <default>
+    local v; v="$(cfg "$1" "$2")"
+    case "$v" in medium|high) printf '%s\n' "$v";; *) die "$1 must be medium or high, got '$v'";; esac
+}
+
 cmd_resolve_config() {
     command -v jq >/dev/null 2>&1 || die "resolve-config: jq required"
+    _refuse_legacy_runtime_config
     local stack base gates_tsv gates_src runner
     stack=$(detect_stack)
     # `base` was never a real setting: SKILL.md already states the rule.
@@ -3469,12 +3459,10 @@ cmd_resolve_config() {
         --arg tcap  "$(cfg lane_turn_cap 150)"     --arg tcap_s  "$(cfg_source lane_turn_cap)" \
         --arg stalem "$(cfg heartbeat_stale_minutes 30)" --arg stalem_s "$(cfg_source heartbeat_stale_minutes)" \
         --arg usage "$(cfg usage_limit pause_and_resume)" --arg usage_s "$(cfg_source usage_limit)" \
-        --arg fbm  "$(cfg fallback_model sonnet)"        --arg fbm_s   "$(cfg_source fallback_model)" \
         --arg wgap "$(cfg min_wave_gap_minutes 10)"      --arg wgap_s  "$(cfg_source min_wave_gap_minutes)" \
-        --arg pmode "$(cfg permission_mode dontAsk)"     --arg pmode_s "$(cfg_source permission_mode)" \
-        --arg wmod "$(cfg wave_model '')"                --arg wmod_s  "$(cfg_source wave_model)" \
-        --arg lmod "$(cfg lane_model '')"                --arg lmod_s  "$(cfg_source lane_model)" \
-        --arg rmod "$(cfg rework_model '')"              --arg rmod_s  "$(cfg_source rework_model)" \
+        --arg wtier "$(_tier_cfg wave_tier medium)"       --arg wtier_s "$(cfg_source wave_tier)" \
+        --arg ltier "$(_tier_cfg lane_tier medium)"       --arg ltier_s "$(cfg_source lane_tier)" \
+        --arg rtier "$(_tier_cfg rework_tier high)"       --arg rtier_s "$(cfg_source rework_tier)" \
         --arg trk  "$(_tracker_declared "$REPO_ROOT")" \
         --arg frg  "$(_forge_declared "$REPO_ROOT")" \
         --arg frg_s "$(_forge_source "$REPO_ROOT")" \
@@ -3482,7 +3470,7 @@ cmd_resolve_config() {
         --arg csrc "$(_secret_source "$(_tracker_credential "$(_tracker_declared "$REPO_ROOT")")")" \
         '{repo: $repo, stack: $stack, base: $base, runner: $runner,
           gates: $gates, gates_source: $gsrc,
-          settings: {permissions: {allow: $allow, deny: $deny}},
+          guardrails: {allow: $allow, deny: $deny},
           scalars: {
             max_lanes:               {value: $lanes,  source: $lanes_s},
             max_aux_lanes:           {value: $aux,    source: $aux_s},
@@ -3494,11 +3482,9 @@ cmd_resolve_config() {
             heartbeat_stale_minutes: {value: $stalem, source: $stalem_s},
             min_wave_gap_minutes:    {value: $wgap,   source: $wgap_s},
             usage_limit:             {value: $usage,  source: $usage_s},
-            fallback_model:          {value: $fbm,    source: $fbm_s},
-            permission_mode:         {value: $pmode,  source: $pmode_s},
-            wave_model:              {value: $wmod,   source: $wmod_s},
-            lane_model:              {value: $lmod,   source: $lmod_s},
-            rework_model:            {value: $rmod,   source: $rmod_s},
+            wave_tier:               {value: $wtier,  source: $wtier_s},
+            lane_tier:               {value: $ltier,  source: $ltier_s},
+            rework_tier:             {value: $rtier,  source: $rtier_s},
             tracker:                 {value: $trk,    source: "derived"},
             forge:                   {value: $frg,    source: $frg_s}
           },
@@ -3506,22 +3492,9 @@ cmd_resolve_config() {
 }
 
 cmd_install_settings() { # install-settings [--force]
-    command -v jq >/dev/null 2>&1 || die "install-settings: jq required"
-    local force=0; [ "${1:-}" = "--force" ] && force=1
-    local target="$REPO_ROOT/.claude/settings.json"
-    mkdir -p "$REPO_ROOT/.claude"
-    local generated; generated=$(cmd_resolve_config | jq '.settings')
-    if [ -f "$target" ] && [ "$force" -eq 0 ]; then
-        if jq -e --argjson g "$generated" '. == $g' "$target" >/dev/null 2>&1; then
-            echo "install-settings: already current — $target"; return 0
-        fi
-        # Never silently discard a hand-edited surface: an allowlist is a
-        # security boundary, and the human may have added a rule on purpose.
-        echo "install-settings: $target differs from generated; re-run with --force to overwrite" >&2
-        return 1
-    fi
-    printf '%s\n' "$generated" > "$target"
-    echo "install-settings: wrote $target"
+    echo "install-settings: compatibility alias — use agent.sh sync-guardrails --provider claude" >&2
+    [ -x "$AGENT_SH" ] || die "install-settings: missing $AGENT_SH"
+    "$AGENT_SH" sync-guardrails --provider claude --repo "$REPO_ROOT"
 }
 
 # `start` opens the human's window on the build, rather than printing a command
@@ -3562,18 +3535,31 @@ _require_credential() { # <who is refusing>
   Both sit outside every working tree. NEVER in .loom.yml, which is committed."
 }
 
-cmd_install() {  # install [--dry-run] [interval-seconds]
-    local dry=0; [ "${1:-}" = "--dry-run" ] && { dry=1; shift; }
-    local interval="${1:-$HEARTBEAT_INTERVAL}"
+cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
+    local dry=0 provider="${LOOM_PROVIDER:-}" interval="$HEARTBEAT_INTERVAL"
+    while [ $# -gt 0 ]; do case "$1" in
+      --dry-run) dry=1; shift;;
+      --provider) provider="${2:-}"; shift 2;;
+      [0-9]*) interval="$1"; shift;;
+      *) die "install: unknown argument '$1'";;
+    esac; done
+    [ -n "$provider" ] || die "install: --provider <id> is required"
+    [ -x "$AGENT_SH" ] || die "install: provider runtime missing: $AGENT_SH"
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "install: no registered adapter for '$provider'"
+    export LOOM_PROVIDER="$provider"
     _require_tracker "$REPO_ROOT" "install" >/dev/null
     _require_credential "install"
+    _assert_build_provider "$provider"
+    [ -n "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ] || \
+      "$AGENT_SH" preflight --provider "$provider" --job wave --tier "$(_tier_cfg wave_tier medium)" --cwd "$REPO_ROOT" >/dev/null
     if [ "$dry" -eq 1 ]; then
         # A preview, written OUTSIDE the LaunchAgents directory. Written where
         # the real one goes, it would leave a plist launchd never loaded, and
         # the arm record every later context reads is that file's presence.
         local preview="$LOOM_HOME/$LOOM_LABEL.plist.preview"
         mkdir -p "$LOOM_HOME"
-        _write_plist "$preview" "$interval"
+        _write_plist "$preview" "$interval" "$provider"
         echo "generated (dry-run): $preview"; return 0
     fi
     # `start` is the switch going ON, and it must clear a previous `stop` or
@@ -3589,7 +3575,7 @@ cmd_install() {  # install [--dry-run] [interval-seconds]
   Then re-run /loom start. Until it loads, the build survives only on lane self-triggers."
     fi
     rm -f "$UNARMED_STATE"
-    echo "loom: build agent LOADED ($LOOM_LABEL, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
+    echo "loom: build agent LOADED ($LOOM_LABEL, provider $provider, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
     _raise_viewer
 }
 
@@ -3671,7 +3657,7 @@ _retire_watcher() {  # unload the old watcher agent and forget it ever ran
 # Truncated trailing lines are normal in a stream being written to right now,
 # so parse per line and drop what does not parse, rather than failing the count.
 _turn_count() {
-    jq -R -r 'fromjson? | select(.type == "assistant") | 1' "$1" 2>/dev/null \
+    jq -R -r 'fromjson? | select(.type == "assistant_progress") | 1' "$1" 2>/dev/null \
         | wc -l | tr -d ' '
 }
 
@@ -3792,5 +3778,5 @@ case "${1:-}" in
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
-    *) die "usage: tick.sh tick | spawn-lane <id> [--no-tick] [--merge-lock] [--cwd <dir>] -- <cmd...> | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install [interval] | uninstall | agent-status | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
 esac

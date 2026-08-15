@@ -34,7 +34,7 @@ stale, and it is the file a later reader greps by accident.
 Not in the main clone. Cut a worktree first and make every edit, every grep
 check and every new `references/` file there:
 
-    git worktree add .claude/worktrees/optimize-<date> -b optimize-<date> main
+    git worktree add .loom-worktrees/optimize-<date> -b optimize-<date> main
 
 **Branch from local `main` by name, never from `origin/HEAD`.** Same rule, and
 the same reason, as [prop.md](prop.md): an agent harness cutting a worktree for
@@ -43,7 +43,7 @@ commits this repo has not pushed — and a compaction pass rewriting a stale
 `SKILL.md` silently reverts every line the unpushed commits added. *(paid:
 D-SNAP-17's worktree came from `origin/main`, 32 unpushed commits behind.)*
 
-`.claude/worktrees/` is git-ignored, which is what makes a path inside the
+`.loom-worktrees/` is git-ignored, which is what makes a path inside the
 repo safe here. A **sibling** directory is not: this repo lives in the skills
 tree, and a sibling of it carrying a `SKILL.md` registers as a second skill.
 
@@ -119,7 +119,7 @@ worse. Each looks optional and is not:
 
 - `Closes #<ticket-iid>` in the MR description — without it the MR is
   invisible to the scheduler. (Known gap as of the first optimize run: this
-  rule lives in the *repo's* `CLAUDE.md`, not in `SKILL.md`. Do not add it
+  rule lives in the repo's provider instruction file, not in `SKILL.md`. Do not add it
   during an optimize pass — authoring is not compaction — but report it again
   if it is still missing.)
 - the `orch-verdict` trailer — without it a HEAD is re-gated forever.
@@ -197,7 +197,7 @@ Then, back in the main clone: `git merge --no-ff optimize-<date>` into `main`
 here means `SKILL.md` moved under you while the pass ran: stop and report it,
 never hand-pick, because a merged compaction that quietly drops someone else's
 new rule is the same silent damage this file exists to prevent. Then
-`git worktree remove .claude/worktrees/optimize-<date>` and delete the branch;
+`git worktree remove .loom-worktrees/optimize-<date>` and delete the branch;
 teardown is this session's job, not a chore left for the human.
 
 **Then push `main`.** Not housekeeping — the next `prop`, `fix` or `optimize`

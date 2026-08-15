@@ -11,94 +11,39 @@
 # window was therefore classified wedged and killed, losing everything it had
 # done. W1 of build 2 spotted this in-band and worked around it by renaming a
 # lane, noting "That's a convention, not a fix."
-# A fake `claude` stands in throughout: basename is what triggers streaming, so
-# a stub named `claude` exercises the real path without a real session.
+# A fake agent interface stands in throughout. Core owns canonical streaming;
+# provider-native flags and parsing are tested with each adapter.
 mkdir -p "$T/fx"
-cat > "$T/fx/claude" <<'STUBEOF'
+cat > "$T/fx/agent.sh" <<'STUBEOF'
 #!/usr/bin/env bash
-echo "$@" > "${STUB_ARGV:-/dev/null}"
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"reviewing the diff"}]}}'
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"uv run pytest -q"}}]}}'
-sleep "${STUB_SLEEP:-0}"
-printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"PASS"}'
+case "$1" in
+  preflight) exit 0 ;;
+  run)
+    echo "$@" > "${STUB_ARGV:-/dev/null}"
+    printf '%s\n' '{"schema":1,"type":"session_start","provider":"claude","job":"gate","requested_tier":"medium"}'
+    printf '%s\n' '{"schema":1,"type":"assistant_progress","provider":"claude","job":"gate","text":"reviewing the diff"}'
+    printf '%s\n' '{"schema":1,"type":"tool_progress","provider":"claude","job":"gate","tool":"shell","summary":"pytest"}'
+    sleep "${STUB_SLEEP:-0}"
+    printf '%s\n' '{"schema":1,"type":"session_end","provider":"claude","job":"gate","status":"success","rc":0}' ;;
+esac
 STUBEOF
-chmod +x "$T/fx/claude"
-FAKE="$T/fx/claude"
+chmod +x "$T/fx/agent.sh"
+FAKE="$T/fx/agent.sh"; BRIEF="$T/brief.md"; printf 'review this branch\n' > "$BRIEF"
 
-# 4h1. The streaming flags are INJECTED, never asked of the caller — the P2
-#      lesson: a flag whose omission silently breaks the loop must not be
-#      optional. A non-claude command is left exactly as it was.
 ARGV="$T/stub-argv"; rm -f "$ARGV"
-STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-31 --no-tick -- "$FAKE" -p "/code-review" >/dev/null
+LOOM_AGENT_CMD="$FAKE" STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-31 --no-tick \
+  --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-grep -q -- "--output-format stream-json --verbose" "$ARGV" \
-    && ok "stream: spawn-lane injects the streaming flags into a claude lane" \
-    || bad "stream: claude lane spawned unstreamed ($(cat "$ARGV" 2>/dev/null))"
+case "$(cat "$ARGV")" in *"--provider claude"*"--job gate"*"--tier medium"*)
+  ok "stream: spawn-lane invokes only the provider-neutral agent interface";;
+  *) bad "stream: provider-neutral arguments missing ($(cat "$ARGV" 2>/dev/null))";; esac
+[ -s "$LOOM_HOME/logs/lane-gate-31.jsonl" ] \
+  && ok "stream: a provider lane records canonical JSONL" \
+  || bad "stream: provider lane produced no canonical stream"
 "$TICK" spawn-lane impl-32 --no-tick -- true >/dev/null; sleep 0.4
 [ -f "$LOOM_HOME/logs/lane-impl-32.jsonl" ] \
-    && bad "stream: a non-claude lane was given a stream file" \
-    || ok "stream: a non-claude command is spawned unchanged"
-# An explicit --output-format is the caller's decision and must survive.
-rm -f "$ARGV"
-STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-35 --no-tick -- "$FAKE" -p "x" --output-format json >/dev/null
-for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-grep -q -- "stream-json" "$ARGV" \
-    && bad "stream: injected a second --output-format over the caller's" \
-    || ok "stream: an explicit --output-format is left alone"
-# ...and `--output-format json` is NOT a stream, so no stream file is created
-# for it: one blob at exit is the pre-P13 shape, and a .jsonl that never gets
-# a second line would be a liveness signal that is always stale.
-[ -f "$LOOM_HOME/logs/lane-gate-35.jsonl" ] \
-    && bad "stream: non-stream --output-format json still got a stream file" \
-    || ok "stream: --output-format json gets no stream file"
-# The bug this pair exists for: `inject` and `stream` are DIFFERENT questions.
-# A caller who writes out `--output-format stream-json` themselves — which
-# SKILL.md's own description of the injection invites — must still get the
-# stream file. One variable meant both, so that caller silently lost it:
-# `render-log --follow` tailed a file that never appeared (a blank viewer
-# pane for 30 minutes), `_stamp_progress` skipped the lane, and the .log was
-# left as raw JSON. 4 of ~190 lanes hit it, all of them long-running.
-rm -f "$ARGV"
-STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-36 --no-tick -- \
-    "$FAKE" -p "x" --output-format stream-json --verbose >/dev/null
-for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-[ -f "$LOOM_HOME/logs/lane-gate-36.jsonl" ] \
-    && ok "stream: an explicitly-streaming lane still gets its stream file" \
-    || bad "stream: caller-supplied stream-json lost the .jsonl (blank viewer pane)"
-[ "$(grep -o -- "--output-format" "$ARGV" | wc -l | tr -d ' ')" = "1" ] \
-    && ok "stream: the flag is not duplicated for a caller who set it" \
-    || bad "stream: --output-format appears $(grep -o -- '--output-format' "$ARGV" | wc -l | tr -d ' ') times"
-
-# 4h1b. D-TICK-16: ScheduleWakeup is denied on the lane's command line. It is a
-#       main-loop tool, so a headless lane that schedules a wakeup instead of
-#       waiting ends its session for good — dead rc 0, ticket unreviewed,
-#       background children unreaped (boostlingo build-4 2026-08-08: impl-96 at
-#       162 turns, impl-98 at 91). The P68 brief already forbade the shape in
-#       prose and both lanes did it anyway, so the rule lives in the flags.
-rm -f "$ARGV"
-STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-37 --no-tick -- "$FAKE" -p "x" >/dev/null
-for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-grep -q -- "--disallowedTools ScheduleWakeup" "$ARGV" \
-    && ok "D-TICK-16: spawn-lane denies ScheduleWakeup on a claude lane's command line" \
-    || bad "D-TICK-16: lane spawned able to ScheduleWakeup ($(cat "$ARGV" 2>/dev/null))"
-# --disallowedTools is variadic: put anywhere but last it eats whatever follows
-# as a second tool name, so the flag it precedes is silently denied instead of
-# passed. The deny list must therefore END the command line.
-grep -q -- "--disallowedTools ScheduleWakeup$" "$ARGV" \
-    && ok "D-TICK-16: the variadic deny list ends the command line, swallowing nothing" \
-    || bad "D-TICK-16: a flag follows the deny list and would be eaten as a tool name ($(cat "$ARGV" 2>/dev/null))"
-# A caller who set their own deny list owns it whole — a second copy would have
-# the lane arguing with itself, same rule as --output-format and --fallback-model.
-rm -f "$ARGV"
-STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-38 --no-tick -- \
-    "$FAKE" -p "x" --disallowedTools "WebSearch" >/dev/null
-for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
-if [ "$(grep -o -- "--disallowedTools" "$ARGV" | wc -l | tr -d ' ')" = "1" ] \
-   && ! grep -q -- "ScheduleWakeup" "$ARGV"; then
-    ok "D-TICK-16: a caller's own --disallowedTools is left alone, not doubled"
-else
-    bad "D-TICK-16: injected over the caller's deny list ($(cat "$ARGV" 2>/dev/null))"
-fi
+  && bad "stream: a custom test-seam command was given a canonical stream" \
+  || ok "stream: a custom command is spawned unchanged"
 
 # 4h2. The fix itself, under the REAL 30-minute window rather than a contrived
 #      zero: a lane whose .log has not moved since 2020 — which is what a
@@ -106,7 +51,8 @@ fi
 #      what liveness judges. (A zero-minute window would make this test turn on
 #      sub-second timing; the scenario it is modelling is a lane 40 minutes into
 #      real work, so the real window is also the honest one.)
-STUB_SLEEP=6 "$TICK" spawn-lane gate-33 --no-tick -- "$FAKE" -p "/code-review" >/dev/null
+LOOM_AGENT_CMD="$FAKE" STUB_SLEEP=6 "$TICK" spawn-lane gate-33 --no-tick \
+  --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 80); do [ -s "$LOOM_HOME/logs/lane-gate-33.jsonl" ] && break; sleep 0.1; done
 touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-33.log"   # the buffered .log, frozen
 if [ ! -s "$LOOM_HOME/logs/lane-gate-33.jsonl" ]; then
@@ -141,7 +87,7 @@ kill "$(cat "$LOOM_HOME/lanes/gate-33.pid")" 2>/dev/null
 WATCH() { : > "$LOOM_HOME/loop.stopped"; "$TICK" tick --auto >/dev/null 2>&1; rm -f "$LOOM_HOME/loop.stopped"; }
 "$TICK" spawn-lane gate-34 --no-tick -- sleep 30 >/dev/null
 PJ="$LOOM_HOME/logs/lane-gate-34.jsonl"; PS="$LOOM_HOME/lanes/gate-34.progress"
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bash scripts/gate.sh logic"}}]}}' > "$PJ"
+printf '%s\n' '{"schema":1,"type":"assistant_progress","provider":"claude","job":"gate","text":"starting gate"}' > "$PJ"
 WATCH
 p0=$(cat "$PS" 2>/dev/null || echo missing)
 for _ in $(seq 1 40); do printf '%s\n' '{"type":"tool_progress"}' >> "$PJ"; done
@@ -152,7 +98,7 @@ p1=$(cat "$PS" 2>/dev/null || echo missing)
     || bad "staleness: poll chatter moved the stamp ($p0 -> $p1) — a wedged lane reads fresh"
 # Planted violation: a real model turn MUST move it, or the stamp would freeze
 # on every healthy lane and the watcher would kill working sessions.
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"gate came back red"}]}}' >> "$PJ"
+printf '%s\n' '{"schema":1,"type":"assistant_progress","provider":"claude","job":"gate","text":"gate came back red"}' >> "$PJ"
 WATCH
 p2=$(cat "$PS" 2>/dev/null || echo missing)
 [ "$p2" != "$p1" ] \
@@ -180,7 +126,7 @@ for i in $(seq 1 23); do
     for _ in $(seq 1 7); do
         printf '%s\n' '{"type":"system","subtype":"thinking_tokens","thinking_tokens":128}' >> "$PJ"
     done
-    printf '%s\n' "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Bash\",\"input\":{\"command\":\"echo $i\"}}]}}" >> "$PJ"
+    printf '%s\n' "{\"schema\":1,\"type\":\"assistant_progress\",\"provider\":\"claude\",\"job\":\"gate\",\"text\":\"turn $i\"}" >> "$PJ"
     printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}' >> "$PJ"
 done
 printf '%s\n' '{"type":"system","subtype":"thinking_tokens","thinking_tokens":64}' >> "$PJ"
@@ -532,10 +478,11 @@ fi
 #      commands it ran, because waves and humans read these files for verdicts
 #      and crash triage.
 rm -f "$LOOM_HOME/logs/lane-gate-34.log" "$LOOM_HOME/logs/lane-gate-34.jsonl"
-"$TICK" spawn-lane gate-34 --no-tick -- "$FAKE" -p "/code-review" >/dev/null
+LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
+  --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 40); do grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
 if grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null \
-   && grep -q "uv run pytest -q" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null; then
+   && grep -q "pytest" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null; then
     ok "stream: the .log still reads as prose plus the commands the lane ran"
 else
     bad "stream: .log did not render ($(head -3 "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null))"
@@ -546,8 +493,9 @@ fi
 #      away: build 2 stacked two to four sessions per file and lost its session
 #      boundaries, and a crashed lane's transcript is what triage needs.
 sleep 1                                    # distinct rotation timestamp
-"$TICK" spawn-lane gate-34 --no-tick -- "$FAKE" -p "/code-review round 2" >/dev/null
-sleep 0.6
+LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
+  --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
+for _ in $(seq 1 40); do grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
 if ls "$LOOM_HOME/logs"/lane-gate-34-*.log >/dev/null 2>&1 \
    && grep -ql "reviewing the diff" "$LOOM_HOME/logs"/lane-gate-34-*.log 2>/dev/null; then
     ok "rotate: the previous session's transcript is preserved under its own name"

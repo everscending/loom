@@ -16,27 +16,26 @@ lane, no bootstrap — ever writes `.loom.yml`; the one exception is a human
 answering the forge question below through an interactive verb, and even
 then it is the human's answer being recorded, never a guess.
 
-## Choosing the permission mode
+## Provider runtime and guardrails
 
-`permission_mode` (default `dontAsk`) is what every spawned session runs
-under; `SKILL.md`'s "Headless permissions" says how a wave reads and passes
-it. Which value to set is a config decision, made here.
+`scripts/agent.sh` is the only headless runtime interface. The interactive
+`start` boundary detects Claude or Codex, writes that decision to the active
+Build issue as `provider::<id>`, syncs the matching repo-local guardrail
+artifact, and installs the scheduler with the provider argument. Scheduled
+waves and lanes never detect or inherit a provider default; they receive the
+recorded provider explicitly and refuse a mismatch before model invocation.
 
-`dontAsk` is deterministic: allowlist or immediate denial, never a hang.
-`auto` sends the long tail to the classifier instead of hard-denying it;
-denials still return to the model. Both honor the repo's `permissions.allow`,
-and the deny guardrails bind in every mode. `dontAsk`'s brittleness is paid
-for three ways *(a compound command denied wholesale and misread as "never
-bootstrapped"; `$VAR` defeating prefix match; worktree-frozen allowlists going
-stale)* — prefer `auto` where the machine's global config says so, and treat
-"auto aborts after repeated classifier blocks" as a claim to re-verify per
-Claude Code version, not settled fact.
+Claude consumes Loom-managed entries in `.claude/settings.json`. Codex
+consumes `.codex/rules/loom.rules`. `agent.sh sync-guardrails` preserves
+unrelated settings and never accepts trust, installs credentials, or writes a
+global provider configuration. Per-run approval, sandbox, network, writable
+roots, model, and reasoning controls are adapter-owned and explicit. The hard
+denials remain force-push, `git reset --hard`, `git clean`, and unscoped
+recursive deletion.
 
-The repo's allowlist and denylist (hard guardrails: force-push,
-`reset --hard`, `rm -rf`) are a bootstrap-epic artifact, committed so every
-worktree and CI inherit them. Never spawn a loop session with
-`bypassPermissions` (no guardrails — legitimate only inside a real sandbox) or
-`acceptEdits` (hangs on bash).
+Loom's own maintenance worktrees now use the git-ignored
+`.loom-worktrees/` path. The old `.claude/worktrees/` remains ignored for a
+transition window; existing registered worktrees are never moved implicitly.
 
 ## Before anything: declare the tracker
 
@@ -138,8 +137,8 @@ rather than one.
 
 **And the part that decides whether builds actually work.** Loom's own
 tracker calls are perhaps a third of what a build makes. The rest come from
-inside lanes: each lane is a `claude -p` session running `/implement`,
-`/code-review` and the rest, and those skills do their own tracker work by
+inside lanes: each lane is a headless provider job with the work inlined in
+its brief. Interactive sibling skills do their own tracker work by
 reading this same file — not just its heading, but the whole workflow it
 describes: how to create an issue, apply a label, open and merge a merge
 request. Loom cannot teach them Linear; they are somebody else's skills.
@@ -153,8 +152,8 @@ live in Linear.
 ## New repo bootstrap
 
 Mostly derived, not authored, and it runs itself. The **first `tick` in a
-repo** invokes `scripts/bootstrap.sh all` — seed `~/.loom/config.yml`,
-write `.claude/settings.json`, create the missing ticket-state labels (and,
+repo** invokes `scripts/bootstrap.sh all` — seed `~/.loom/config.yml` and
+create the missing ticket-state labels (and,
 on Linear, the missing ticket-state Statuses) — then proceeds with the wave.
 A sentinel in the repo's state dir makes every later
 tick skip it; a *failed* bootstrap writes no sentinel, so the next tick
@@ -163,8 +162,8 @@ because `tick` is the verb that always runs. Run it by hand any time:
 `bootstrap.sh all` is idempotent.
 
 Underneath, `tick.sh resolve-config` detects the stack and emits the effective
-config — `base`, the gate tiers as literal commands, the runner path, and the
-whole permission surface — resolving repo → derived → global → default. Run it
+config — `base`, the gate tiers as literal commands, the runner path, public
+Loom tiers, and the provider-neutral guardrail surface — resolving repo → derived → global → default. Run it
 *before* writing bootstrap tickets and only ticket what it could not derive.
 Because the allowlist is generated from the same commands the gates and probes
 run, it cannot drift from them.

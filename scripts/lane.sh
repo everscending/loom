@@ -121,6 +121,9 @@
 # Every verb is safe to re-run; nothing here deletes.
 set -euo pipefail
 
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AGENT_SH="${LOOM_AGENT_CMD:-$SELF_DIR/agent.sh}"
+
 # P73: the derivations this file used to keep its own copy of — the
 # base-branch rule, the lockfile→installer table, `die` — live in lib.sh
 # beside this script. This is NOT the thing "lane.sh deliberately stands
@@ -654,15 +657,7 @@ cmd_model_tier() { # <iid> <tier>
     if _automated_caller; then
         die "model-tier is refused in an automated session (${LOOM_LANE_ID:-wave}): escalating a ticket's model is a human's judgement about why the last round failed, never a lane's or a wave's."
     fi
-    case "$tier" in *[!A-Za-z0-9._-]*|'') die "model-tier: '$tier' is not a label-safe tier (letters, digits, . _ -)" ;; esac
-    # Deliberately NOT restricted to the four `model_rank` knows: that ranking
-    # exists only to break the two-labels case, and its comment is explicit
-    # that a human may name any model the CLI accepts. An unknown tier resolves
-    # and ranks below the known ones, so the only thing worth doing here is
-    # saying so out loud.
-    case "$tier" in haiku|sonnet|fable|opus) ;; *)
-        echo "lane.sh: note — '$tier' is not one of haiku|sonnet|fable|opus; it will resolve but ranks below all of them" >&2 ;;
-    esac
+    case "$tier" in medium|high) ;; *) die "model-tier: '$tier' is not a Loom tier (medium|high)";; esac
     # One `model::` label at a time. Two would resolve (the higher rank wins)
     # but the board would show a ticket claiming both, and the next human to
     # read it cannot tell which one is the live decision.
@@ -674,6 +669,31 @@ cmd_model_tier() { # <iid> <tier>
     _forget_issue
     _lane_ev ticket_model_tier ticket "$iid" tier "$tier"
     echo "lane.sh: issue $iid → model::$tier"
+}
+
+cmd_build_provider() { # <provider> — human-only Build N mutation
+    local provider="${1:-}" raw build labels count current available
+    [ -x "$AGENT_SH" ] || die "build-provider: provider runtime missing: $AGENT_SH"
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "build-provider: no registered adapter for '$provider'"
+    _automated_caller && die "build-provider is human-only: waves and lanes consume the Build issue's provider and may not change it"
+    available=$("$TRACKER" labels | jq -r '.[].name') || die "build-provider: could not read labels"
+    printf '%s\n' "$available" | grep -qxF "provider::$provider" \
+      || die "build-provider: provider::$provider does not exist; run bootstrap.sh provider-label $provider first"
+    raw=$("$TRACKER" issues-open) || die "build-provider: could not read open issues"
+    build=$(printf '%s' "$raw" | jq -r '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
+    [ -n "$build" ] || die "build-provider: no open Build N issue"
+    labels=$(printf '%s' "$raw" | jq -r --argjson id "$build" '.[]|select(.id==$id)|[.labels[]?|select(startswith("provider::"))]|join(",")')
+    count=$(printf '%s' "$raw" | jq -r --argjson id "$build" '.[]|select(.id==$id)|[.labels[]?|select(startswith("provider::"))]|length')
+    [ "$count" -le 1 ] || die "build-provider: Build #$build carries multiple provider labels ($labels); repair it in the tracker before starting"
+    current="${labels#provider::}"
+    if [ -n "$current" ] && [ "$current" != "$provider" ]; then
+      die "build-provider: Build #$build is already bound to '$current'; refusing a silent switch to '$provider'"
+    fi
+    if [ "$current" = "$provider" ]; then echo "lane.sh: Build #$build already uses provider::$provider"; return 0; fi
+    "$TRACKER" issue-relabel "$build" --add "provider::$provider"
+    _lane_ev build_provider build "$build" provider "$provider"
+    echo "lane.sh: Build #$build → provider::$provider"
 }
 
 cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F]
@@ -1235,7 +1255,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <tier> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1269,6 +1289,7 @@ case "${1:-}" in
     merge-failed) shift; cmd_merge_failed "$@" ;;
     blocked-report) shift; cmd_blocked_report "$@" ;;
     model-tier) shift; cmd_model_tier "$@" ;;
+    build-provider) shift; cmd_build_provider "$@" ;;
     base-check) shift; cmd_base_check "$@" ;;
     wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;

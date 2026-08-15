@@ -26,8 +26,8 @@ cat > "$FX/snap.json" <<'EOF'
   "logs_dir": "/home/logs",
   "config": {"max_lanes": 4, "max_aux_lanes": 4, "rejection_cap": 2, "crash_cap": 2,
              "merge_attempt_cap": 2, "lane_turn_cap": 150, "heartbeat_stale_minutes": 30,
-             "lane_model": "sonnet", "rework_model": "opus", "base": "develop"},
-  "build": {"id": 1, "label": "build-2", "title": "Build 2", "url": "https://x/1"},
+             "lane_tier": "medium", "rework_tier": "high", "base": "develop"},
+  "build": {"id": 1, "label": "build-2", "title": "Build 2", "url": "https://x/1", "provider":"claude"},
   "epics": [
     {"name": "Ledger core", "milestone": "Ledger core", "acceptance": "- [ ] a ledger balances",
      "needs_probe": true, "complete": true, "open_tickets": 0, "accepted": false},
@@ -36,62 +36,62 @@ cat > "$FX/snap.json" <<'EOF'
   ],
   "tickets": [
     {"id": 40, "title": "pregate rejected", "state": "review", "tier": "logic", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null,
      "related_merge_requests": [{"id": 90, "state": "open", "branch": "t40", "sha": "aaaa111"}],
      "gate": {"eligible": true, "reason": null, "head": "aaaa111", "last_verdict": null}},
     {"id": 41, "title": "wedged lane", "state": "in-progress", "tier": "api", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "opus", "source": "rework_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
      "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 43, "title": "stranded, two same class", "state": "in-progress", "tier": "logic", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "opus", "source": "rework_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
      "rejections": {"total": 2, "last_class": "marks-attribution", "same_class_tail": 2},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 44, "title": "ready, but a repair stands against it", "state": "ready-for-agent",
      "tier": "api", "fix": false,
-     "unblocked": true, "assignees": [], "model": {"effective": null, "source": "session-default"},
+     "unblocked": true, "assignees": [], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 45, "title": "ready, fix", "state": "ready-for-agent", "tier": "logic", "fix": true,
-     "unblocked": true, "assignees": [], "model": {"effective": "haiku", "source": "label"},
+     "unblocked": true, "assignees": [], "tier_selection": {"effective": "high", "source": "label"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 46, "title": "ready, blocked by an open blocker", "state": "ready-for-agent", "tier": "ui",
-     "fix": false, "unblocked": false, "assignees": [], "model": {"effective": null, "source": "session-default"},
+     "fix": false, "unblocked": false, "assignees": [], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 47, "title": "merge-queue, held", "state": "merge-queue", "tier": "api", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 1, "merge_hold": {"checks": ["pytest::x"], "fixes": [70]},
      "related_merge_requests": [{"id": 97, "state": "open", "branch": "t47", "sha": "cccc333"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 48, "title": "merge-queue, free", "state": "merge-queue", "tier": "api", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null,
      "related_merge_requests": [{"id": 98, "state": "open", "branch": "t48", "sha": "dddd444"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 49, "title": "merge-queue, cap spent", "state": "merge-queue", "tier": "api", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 2, "merge_hold": null,
      "related_merge_requests": [{"id": 99, "state": "open", "branch": "t49", "sha": "eeee555"}],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 50, "title": "running past the turn cap", "state": "in-progress", "tier": "logic", "fix": false,
-     "unblocked": true, "assignees": ["a"], "model": {"effective": "sonnet", "source": "lane_model"},
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}}
@@ -126,6 +126,12 @@ if [ "$rc" = 0 ] && jq -e . "$T/plan.json" >/dev/null 2>&1; then
 else
     bad "plan: rc=$rc, $(head -2 "$T/plan.err")"
 fi
+
+jq '.tickets[0].tier_selection.invalid_labels = ["opus"]' "$FX/snap.json" > "$FX/snap-legacy-model.json"
+PLAN "$FX/snap-legacy-model.json" > "$T/plan-legacy-model.json" 2>/dev/null
+jq -e '.actions == [] and (.reason | test("legacy model:: label"))' "$T/plan-legacy-model.json" >/dev/null \
+  && ok "plan: a provider-native model label blocks scheduling until a human chooses a Loom tier" \
+  || bad "plan: legacy model label silently fell back to a configured tier"
 
 # --- 28a. One case per step of SKILL.md's `tick` ---------------------------
 # Each of these is a rule the wave used to apply by reading prose. The
@@ -169,9 +175,9 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(act fill transition)" = "43" ] \
     && ok "plan: two same-class rejections block for a design decision instead of a third guess" \
     || bad "plan: same-class stop wrong ($(act fill transition))"
-[ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.model')" = "opus" ] \
-    && ok "plan: a rework respawn carries .model.effective, not lane_model" \
-    || bad "plan: rework model wrong ($(p '.actions[] | select(.lane=="impl-42") | .spawn.model'))"
+[ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.tier')" = "high" ] \
+    && ok "plan: a rework respawn carries .tier_selection.effective, not lane_tier" \
+    || bad "plan: rework tier wrong ($(p '.actions[] | select(.lane=="impl-42") | .spawn.tier'))"
 # Step 5: the oldest merge-queue ticket whose hold is null. #47 is held, #49
 # has spent its attempt cap and is blocked so the queue ADVANCES, #48 merges.
 [ "$(act merge spawn)" = "merge-48" ] \

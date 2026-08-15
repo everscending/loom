@@ -376,10 +376,20 @@ separate verb.
 
 ## `start` — the trigger (and resume)
 
-`start` kicks the loop: `tick.sh install` generates this repo's launchd agent
+`start` first runs `scripts/agent.sh detect`. Strong adapter-owned interactive
+signals must identify exactly one provider; otherwise stop and ask the human
+to retry once with `--provider <id>`. Binary presence is never
+identity. Ensure that provider's label exists with `bootstrap.sh
+provider-label`, bind it to the active Build issue through the human-only
+`lane.sh build-provider`, sync its guardrails, and run preflight. An existing
+same-provider label is resume; an unlabeled build is bound here. A different,
+multiple, or unknown label is a refusal, never a silent migration.
+
+Then `tick.sh install --provider <id>` generates this repo's launchd agent
 (label + state dir + logs all derived from the repo path → unique per repo),
 clears the loop switch a previous `stop` left, and loads it. One agent, firing
-every 60s: it watches on every firing and starts a wave only when the switch is
+every 60s with the provider argument explicit. Each firing cross-checks that
+transport against the Build issue before model invocation, watches, and starts a wave only when the switch is
 on and `min_wave_gap_minutes` (default 10) has elapsed. `RunAtLoad` fires wave 1,
 and lane handoffs carry it from there. This is the *only* thing the human runs
 to go unattended — no `launchctl`, no plist, no cron.

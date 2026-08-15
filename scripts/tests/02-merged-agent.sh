@@ -203,7 +203,7 @@ export WATCH_PANES_CMD="$WP_GLOBAL_STUB"; export HERDR_ENV=
 # start a wave must still leave a fresh progress stamp behind.
 rm -rf "$MT/home/lanes" "$MT/home/tick.lock.d"; mkdir -p "$MT/home/lanes"
 MENV "$TICK" spawn-lane impl-7 --no-tick -- sleep 5 >/dev/null 2>&1
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}' \
+printf '%s\n' '{"schema":1,"type":"assistant_progress","provider":"claude","job":"implementation","text":"working"}' \
     > "$MT/home/logs/lane-impl-7.jsonl"
 mkdir -p "$MT/home/tick.lock.d"; echo $$ > "$MT/home/tick.lock.d/pid"   # a wave holds it
 # No recent wave in the log, so the GAP cannot be what stops this tick — the

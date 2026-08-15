@@ -11,18 +11,11 @@
 # file, one JSON object per input line. The prelude include is uniform across
 # every jq program here (P72), not a dependency this one has yet.
 include "lib";
-        select(.type == "assistant" or .type == "result"
-               or (.type == "system" and (.subtype // "") == "init"))
-        | if .type == "system" then
-              "── model \(.model // "?") · permission \(.permissionMode // "?") ──"
-          elif .type == "result" then
-              (if (.is_error // false) or ((.subtype // "success") != "success")
-               then "\n[lane failed: \(.subtype // "error")] \(.result // "")"
-               else empty end)
-          else
-              (.message.content[]?
-               | if .type == "text" then .text
-                 elif .type == "tool_use" then
-                     "  $ \(.name): \(((.input.command // .input.file_path // .input.pattern // "") | tostring)[0:200])"
-                 else empty end)
-          end
+select((.schema // 0) == 1)
+| if .type == "session_start" then
+    "── provider \(.provider) · \(.job) · tier \(.requested_tier) · model \(.resolved_profile.model // "?")\(if .resolved_profile.reasoning_effort then " · reasoning " + .resolved_profile.reasoning_effort else "" end) ──"
+  elif .type == "assistant_progress" then (.text // empty)
+  elif .type == "tool_progress" then "  $ \(.tool // "tool"): \((.summary // "")[0:200])"
+  elif .type == "error" then "\n[session error: \(.category // "error")] \(.message // "")"
+  elif .type == "session_end" and .status != "success" then "\n[session ended: \(.status), rc \(.rc)]"
+  else empty end
