@@ -77,6 +77,7 @@ sweep-merged-rmrf	tick.sh	sub	rm -rf "$dir"	true
 merge-attempt-cap	plan.jq	sub	>= $merge_cap	< $merge_cap
 merge-attempt-anchor	lib.jq	sub	<!-- orch-merge-attempt \\d+ -->	orch-merge-attempt
 merge-reset-cutoff	lib.jq	sub	$reset == null	true
+merge-hold-anchor	lib.jq	sub	<!-- orch-merge-attempt \\d+ base-red=(\\S+) fix=(\\d+) -->	orch-merge-attempt \\d+ base-red=(\\S+) fix=(\\d+)
 rejection-same-class-cap	plan.jq	sub	>= 2	> 999
 wave-prefix-strip	render-events.jq	sub	(?i)^	^
 EOF
