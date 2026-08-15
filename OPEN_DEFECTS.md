@@ -31,7 +31,7 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-68 open, counted from the table below, which is the live set. Most were verified against the
+69 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
 D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
@@ -40,7 +40,8 @@ closed; D-LIN-03 was a defect in D-LIN-01's fix, found the day after it shipped,
 second one that fix produced. D-TICK-20 was filed on **2026-08-14**, confirmed live against a real
 build (triggers-api build-2), and fixed and closed the same day. D-SNAP-10 and D-SKILL-13,
 both halves of one wound in the merge-attempt count, were closed together by P96 on
-**2026-08-15**. Severity is a same-pass judgment
+**2026-08-15**; D-SNAP-18 was filed the same day, out of P96's own review of the code it
+left behind. Severity is a same-pass judgment
 call, not part of the original review:
 
 - **Critical** — silently corrupts build/scheduling state, reports a build done/complete
@@ -85,6 +86,7 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SNAP-11 | Medium | `impl_slots_free` can go negative |
 | D-SNAP-12 | Medium | `merge_in_flight` is the one summary field not derived from the document |
 | D-SNAP-15 | Medium | cross-project blockers fall back to the home open-set |
+| D-SNAP-18 | Medium | `merge_hold_of` parks a ticket on a trailer quoted in prose |
 | D-LANE-05 | Medium | `verdict` posts its note before the blocked guard runs |
 | D-LANE-06 | Medium | a dirty worktree is reported as a merge conflict |
 | D-PANE-01 | Medium | the EXIT trap closes no panes, then releases the singleton |
@@ -285,6 +287,23 @@ issue #5 in another project then falls to `($open_iids | index(5)) == null`, so 
 blocker whose iid does not exist locally reports `closed: true` → `unblocked: true` → the ticket is
 scheduled. Body-sourced blockers (`:199`) take this path by design; this one is an accident of
 `$bi` being absent.
+
+### D-SNAP-18 · `merge_hold_of` parks a ticket on a trailer quoted in prose
+`scripts/lib.jq` `merge_hold_of` — the park is derived with jq's `scan()` over
+`orch-merge-attempt\\s+[0-9]+\\s+base-red=([A-Za-z0-9._:/#-]+)\\s+fix=([0-9]+)`, which matches that
+text **anywhere in a note body**, not only inside the `<!-- … -->` trailer `lane.sh merge-failed`
+writes. Its sibling `merge_attempts_of` was anchored on the trailer's full form by P96; this half of
+the same mechanism was not, so the two now read the same marker two different ways.
+**Failure:** any note reproducing the trailer's text — a blocked report or a merge-failed body
+explaining *why the ticket is parked*, which has every reason to quote the trailer it is explaining
+— gives the ticket a `merge_hold` naming a check and a fix issue no lane ever recorded. While that
+issue is open the wave skips the ticket in the merge queue. It is not silent: `plan.jq` emits a
+deferred item reading "parked behind an open base-red fix (#N)", and the hold self-releases when
+that issue closes. Narrower than D-SKILL-13, which needed only the marker's name: this needs the
+whole `base-red=<check> fix=<n>` shape, and the named issue must be open. Same family as D-SNAP-16
+(`orch_verdict_scan`), which is the last unanchored scan left after this one.
+**Test:** none. `07-snapshot.sh` block 7a7b builds base-red holds from real trailers only; no
+fixture carries a note that merely quotes one.
 
 ### D-SNAP-16 · one verdict note stamped twice counts as two rejections
 `snapshot.jq` `rejections_of` → `lib.jq:42-43` `orch_verdict_scan` — the scan is jq's `scan()`,
