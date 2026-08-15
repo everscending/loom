@@ -343,14 +343,20 @@ jq -e '[.warnings[] | select(test("#30") and test("still assigned"))] | length =
 cat > "$FX/open-basered.json" <<'EOF'
 [
  {"iid":1,"title":"Build 2","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],
-  "description":"**Selected epics**:\n- Ledger core (#50, #51)\n"},
+  "description":"**Selected epics**:\n- Ledger core (#50, #51, #52)\n"},
  {"iid":50,"title":"Held behind an open base fix","project_id":1,"web_url":"https://x/50",
   "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
  {"iid":51,"title":"Fix merged, hold released","project_id":1,"web_url":"https://x/51",
   "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":52,"title":"Only ever quoted the trailer in prose","project_id":1,"web_url":"https://x/52",
+  "labels":["build-2","merge-queue"],"assignees":[{"username":"agent-a"}],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
  {"iid":60,"title":"Fix: model-literal guard over-matches","project_id":1,"web_url":"https://x/60",
+  "labels":["build-2","fix","ready-for-agent"],"assignees":[],
+  "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"},
+ {"iid":62,"title":"Fix: the other guard","project_id":1,"web_url":"https://x/62",
   "labels":["build-2","fix","ready-for-agent"],"assignees":[],
   "milestone":{"title":"Ledger core"},"description":"## Risk tier\n\nlogic\n"}
 ]
@@ -367,9 +373,19 @@ cat > "$FX/notes-51.json" <<'EOF'
  {"system":false,"created_at":"2026-08-07T03:00:00Z","author":{"username":"merge"},
   "body":"guard red on base; fix filed\n\n<!-- orch-merge-attempt 51 base-red=model-literal-guard fix=61 -->"}]
 EOF
+# D-SNAP-18: #52 has no base-red trailer at all — one note merely QUOTES the
+# marker while explaining that this failure is not the base-red kind. Markdown
+# renders a raw `<!-- ... -->` as nothing, so prose about a trailer quotes its
+# inside, which is exactly the shape the unanchored scan matched.
+cat > "$FX/notes-52.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-07T05:00:00Z","author":{"username":"merge"},
+  "body":"real conflict in ledger.ts, aborted\n\n<!-- orch-merge-attempt 52 -->"},
+ {"system":false,"created_at":"2026-08-07T05:30:00Z","author":{"username":"merge"},
+  "body":"Blocked: a real conflict, not a base defect — the guard is green on clean main, so nothing here carries `orch-merge-attempt 52 base-red=model-literal-guard fix=62` the way the parked ticket #50 does.\n\n<!-- orch-blocked-report category=merge-conflict -->"}]
+EOF
 GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-basered.json" STUB_LOG="$T/calls-basered" \
     "$TICK" snapshot > "$T/snap-basered.json" 2>/dev/null
-rm -f "$FX/notes-50.json" "$FX/notes-51.json"
+rm -f "$FX/notes-50.json" "$FX/notes-51.json" "$FX/notes-52.json"
 br() { jq -r "$1" "$T/snap-basered.json"; }
 # Planted violation: the shipped count took ANY orch-merge-attempt trailer, so
 # #50 would read 2 — at the default cap — and the wave would block a ticket
@@ -385,6 +401,14 @@ br() { jq -r "$1" "$T/snap-basered.json"; }
 [ "$(br '.tickets[] | select(.id==51) | .merge_hold')" = "null" ] \
     && ok "snapshot: a closed fix releases the hold with no write" \
     || bad "snapshot: hold survived its fix closing ($(br '.tickets[] | select(.id==51) | .merge_hold | @json'))"
+# Planted violation (D-SNAP-18): the hold matched the marker's inner text
+# anywhere in a note, so #52's blocked report — which quotes the trailer it is
+# explaining — parked the ticket behind fix #62, an issue no lane ever linked
+# to it. The wave then skipped #52 in the merge queue for as long as #62 stayed
+# open, and plan.jq reported it as "parked behind an open base-red fix (#62)".
+[ "$(br '.tickets[] | select(.id==52) | .merge_hold')" = "null" ] \
+    && ok "snapshot: prose quoting a base-red trailer does not park the ticket" \
+    || bad "snapshot: quoted trailer parked #52 ($(br '.tickets[] | select(.id==52) | .merge_hold | @json')) — a hold no lane recorded"
 [ "$(br '.tickets[] | select(.id==51) | .merge_attempts')" = "1" ] \
     && ok "snapshot: a real attempt beside a base-red one still counts" \
     || bad "snapshot: mixed history miscounted ($(br '.tickets[] | select(.id==51) | .merge_attempts'), want 1)"

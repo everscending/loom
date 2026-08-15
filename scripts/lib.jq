@@ -114,9 +114,25 @@ def merge_attempts_of($notes):
 # inference is valid here because fix tickets are filed in this project
 # (lane.sh fix-ticket). P93: moved here for merge-queue.jq. Consumers:
 # snapshot.jq and merge-queue.jq.
+# D-SNAP-18: the match is the trailer's FULL form — `<!-- … -->` and all —
+# exactly as `merge_attempts_of` above was anchored by P96. The scan used to
+# read the marker's INNER text anywhere in a note body, so any prose quoting
+# it parked the ticket: the note that most wants to quote a trailer is the
+# blocked report explaining WHY the ticket is parked, and markdown renders a
+# raw `<!-- … -->` as nothing, so a writer quotes the inside of it in
+# backticks. That gave a merge_hold naming a check and a fix issue no lane
+# ever recorded, and the wave skipped the ticket for as long as that issue
+# stayed open. Both halves of one mechanism now read the marker the same way.
+# (A note quoting the whole trailer verbatim, delimiters included, still
+# counts — the same limit `merge_attempts_of` accepts, and the same answer:
+# the trailer is machinery, prose about it should name it, not reproduce it.)
+# The check id is `\S+` rather than its character class because the anchors
+# already bound it — and because a pattern with no `[…]` in it is one
+# scripts/mutate.sh can substitute whole (registry: merge-hold-anchor); the
+# writer side still validates the class, in lane.sh merge-failed.
 def merge_hold_of($notes; $open_iids):
     ([$notes[] | (.body // "")
-      | scan("orch-merge-attempt\\s+[0-9]+\\s+base-red=([A-Za-z0-9._:/#-]+)\\s+fix=([0-9]+)")
+      | scan("<!-- orch-merge-attempt \\d+ base-red=(\\S+) fix=(\\d+) -->")  # mutate:merge-hold-anchor
       | {check: .[0], fix: (.[1] | tonumber)}]
      | map(select(.fix as $f | ($open_iids | index($f)) != null))) as $held
   | if ($held | length) == 0 then null
