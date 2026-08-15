@@ -303,6 +303,13 @@ frontier that merges, over a wider one that collides.
   defaults and loaders), because a suite that borrows the host's exported
   credentials passes on the lane's machine and fails on the gate's.
 
+## `replan` — the PRD was amended
+
+Diff the amended PRD against the spec issue. For each changed requirement:
+affected open tickets are regenerated under the phase-4 rules above; affected
+*closed* tickets spawn delta tickets; untouched tickets are never rewritten.
+The PRD stays frozen otherwise.
+
 ## Phase 5 · `build` — define or adjust the build (never starts it)
 
 `build` shapes the build plan and spends nothing. Two modes, auto-detected:

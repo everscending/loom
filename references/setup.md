@@ -16,6 +16,28 @@ lane, no bootstrap — ever writes `.loom.yml`; the one exception is a human
 answering the forge question below through an interactive verb, and even
 then it is the human's answer being recorded, never a guess.
 
+## Choosing the permission mode
+
+`permission_mode` (default `dontAsk`) is what every spawned session runs
+under; `SKILL.md`'s "Headless permissions" says how a wave reads and passes
+it. Which value to set is a config decision, made here.
+
+`dontAsk` is deterministic: allowlist or immediate denial, never a hang.
+`auto` sends the long tail to the classifier instead of hard-denying it;
+denials still return to the model. Both honor the repo's `permissions.allow`,
+and the deny guardrails bind in every mode. `dontAsk`'s brittleness is paid
+for three ways *(a compound command denied wholesale and misread as "never
+bootstrapped"; `$VAR` defeating prefix match; worktree-frozen allowlists going
+stale)* — prefer `auto` where the machine's global config says so, and treat
+"auto aborts after repeated classifier blocks" as a claim to re-verify per
+Claude Code version, not settled fact.
+
+The repo's allowlist and denylist (hard guardrails: force-push,
+`reset --hard`, `rm -rf`) are a bootstrap-epic artifact, committed so every
+worktree and CI inherit them. Never spawn a loop session with
+`bypassPermissions` (no guardrails — legitimate only inside a real sandbox) or
+`acceptEdits` (hangs on bash).
+
 ## Before anything: declare the tracker
 
 A repo must say which issue tracker it uses, in
