@@ -267,6 +267,9 @@ at the cap names `orch-merge-attempt` in its prose, so the scan now returns **3*
 hand-merge outside the queue, or raising `merge_attempt_cap` past the inflated count.
 **Test:** `tick-test.sh:1547` tests rescope against `rejections` only. Nothing asserts that a note
 merely *mentioning* the trailer is not counted, which is the case that bit #26.
+**Covered by:** P96 — the reset marker it adds needs the same newest-marker cutoff `rejections_of`
+uses, and takes `orch-scope-reset` as a merge reset too. Note the citation above is stale: P93
+moved `merge_attempts_of` out of `snapshot.jq` into `scripts/lib.jq`.
 
 ### D-SNAP-11 · `impl_slots_free` can go negative
 `snapshot.jq:364-366` — no clamp. `max_lanes: 2` with three alive impl lanes → `-1`. Reachable by
@@ -635,6 +638,9 @@ the second is a workaround that every writer must remember.
 only against a *verdict* trailer leaking in — no fixture carries a note that merely mentions the
 merge-attempt marker.
 **Related:** D-SNAP-10 (same bare `test()`, reached from the rescope side).
+**Covered by:** P96 — takes the first of the two fix shapes above, anchoring the scan on the
+trailer's full form as part of the same rewrite of `merge_attempts_of`. Note the citation above is
+stale: P93 moved that function out of `snapshot.jq` into `scripts/lib.jq`.
 
 ---
 
