@@ -66,10 +66,14 @@ under any verb. Deadline pressure does not change a verb's scope; surface the
 tension and let the human choose. *(paid: a plan run chained plan → epics →
 hand-coding under a deadline.)*
 
-**Phases 1–5** (`plan`, `epics`, `tickets`, `build`, `start`) and
-**manual-drive**: [references/phases-1-5.md](references/phases-1-5.md).
-**Setup, bootstrap, config, the skill/repo boundary**:
-[references/setup.md](references/setup.md).
+Everything a wave never reads lives one hop away, so a tick does not pay for
+it: **phases 1–5** (`plan`, `epics`, `tickets`, `build`, `start`), `replan`
+and manual-drive in [references/phases-1-5.md](references/phases-1-5.md);
+**`stop`, `watch`, `unblock`** in
+[references/build-controls.md](references/build-controls.md); **setup,
+bootstrap, config, the skill/repo boundary** in
+[references/setup.md](references/setup.md); the rest of the human-run verbs
+under "Human-run verbs" below.
 
 ## Phase 6 · the build loop
 
@@ -80,77 +84,42 @@ launches one headless wave session running `/loom tick`. **A wave is
 stateless**: it must work from tracker + lane state alone, and end by writing
 back.
 
-**Event-driven, timer as backstop.** Lanes are spawned with
+**Lanes, and chaining as a fast path.** Lanes are spawned with
 `tick.sh spawn-lane <id> --cwd <worktree> -- <cmd>`, whose `<id>` is
 `impl-<ticket>`, `gate-<ticket>[-r<round>]`, `merge-<ticket>` or
 `probe-<epic-slug>` — the scheduler reads a lane's kind off its name, and
 `spawn-lane` refuses anything else, so **slugify the epic**: an id with a
 space corrupts every reader of lane state. A finishing lane fires the next
-wave immediately, so the loop advances at the speed of work. The scheduler
-timer is only a slow heartbeat (~15 min) for the two things completion can't
-signal: the initial kick, and resuming after a full stall. Prefer launchd on
-macOS over cron. Redundant fires are safe — a tick landing mid-wave is
-remembered and replayed once when that wave exits. Every tick arms the backstop
-itself if none is armed, so a loop kicked by manual `tick` acquires one; if
-launchd refuses, one push says so and the build is running unprotected.
-*(paid: a wave misread a permission denial as "never bootstrapped",
-exited without harvesting, and nothing fired again for hours.)*
-
-**One agent, watching first, spending second.** A single launchd entry per
-repo fires `tick.sh tick --auto` every **60s**. Every firing *watches* — stamps
-lane progress, classifies quiet (`stalled` / `halted` / `complete` / `unknown`),
-notifies once per state change — **before anything touches the lock**, and only
-then considers a wave. That order is the whole design: the old scheduler bailed
-at the lock, so during a wave — the exact window in which a lane wedges —
-nothing was looking, and a second 60s watcher process had to exist to cover it.
-Watching first makes that process unnecessary — `install` retires the old one.
-
-Spending is paced by **`min_wave_gap_minutes` (default 10)**, not by the timer,
-so a 60s tick costs nothing: a wave starts only when the gap has elapsed. Three
-callers, three contracts — **`tick`** (a human typed it: always runs one wave,
-ignores switch and gap), **`tick --auto`** (the timer: respects both),
-**`tick --from-lane`** (a lane finished: respects the switch, ignores the gap,
-because a handoff is work already in progress). Quiet still gates spend before
-it, and that gate is an **allowlist**: `halted` skips the wave entirely,
-`stalled` + `stall_action: notify_only` skips and waits, `unknown` — the board
-could not be read at all — skips on the timer, and only `active` and `complete`
-buy a wave. Every skip writes a `tick_skipped` event naming its reason, so the
-ticker can say why nothing ran. *(paid: the gate used to name only the states
-that block, so `unknown` fell through. A sleeping laptop runs the missed firing
-the instant it darkwakes, before WiFi is back; the tracker read fails, the board reads
-`unknown`, and a full model session launches on a build where every ticket is
-blocked — four overnight waves, one of them 84 minutes, build-3 2026-08-06.)*
-
-**The loop switch.** `start` clears `$LOOM_HOME/loop.stopped`; `stop` writes it.
-While it exists, **automatic** continuation stops — the timer no-ops, and a lane
-may not chain to its successor (`spawn-lane` refuses when `LOOM_LANE_ID` is set,
-which is true only inside a lane). A lane already running still finishes its own
-ticket; nothing follows it. `stop --now` additionally kills every live lane
-through `kill-lane` — those kills are deliberate and **never count toward
-`crash_cap`**; the worktrees survive and `start` resumes each ticket from there.
-A human's explicit `tick` is never gated: an explicit command is not automatic
-continuation. *(paid: `stop` used to unload the timer and nothing else, so a
-"stopped" build kept chaining, kept scheduling and kept spawning, with no agent
-installed and nothing watching.)*
-
-**Chaining is a fast path, never the only path.** Neither the hop out of
-`review` nor the hop out of a passing gate decides anything, so a lane hands
-its successor off directly: give each session the exact `spawn-lane` line for
-the next stage and have it run that as its last act. A ticket then goes
-implement → gate → merge without bouncing off the scheduler twice. Every
+wave immediately, so the loop advances at the speed of work. Neither the hop
+out of `review` nor the hop out of a passing gate decides anything, so a lane
+hands its successor off directly: give each session the exact `spawn-lane`
+line for the next stage and have it run that as its last act, and a ticket
+goes implement → gate → merge without bouncing off the scheduler twice. Every
 handoff is allowed to fail — merge lock held, session died, a cap reached —
 and nothing depends on one: the numbered steps below do the same work next
-wave regardless. Briefs travel as files, never inline prompts:
+wave regardless.
+
+**Briefs travel as files, never inline prompts.**
 `spawn-lane <id> --brief <file> … -- claude -p @brief …` copies it to the run
 directory, appends the headless rules, and swaps the placeholder for a pointer
-prompt. **Write the source where `lane.sh scratch` points** — a brief inside the
-repo or the lane's worktree is refused *(paid: 30 worktrees never swept)*.
+prompt. **Write the source where `lane.sh scratch` points** — a brief inside
+the repo or the lane's worktree is refused *(paid: 30 worktrees never swept)*.
 Inline arguments past ~1000 chars are refused, as is a brief naming a skill to
 invoke — headless has no slash commands, so inline that work instead. The flag
 and the placeholder are a pair: either one without the other is refused, since
 a lone `@brief` reaches the session as an @-mention of a file that is not
 there. *(paid: eight dead spawns at the prompt boundary; two more on
 `/implement`; one full `ui` gate thrown away for a missing `--brief`.)*
+
+**When a wave runs is `tick.sh`'s decision, not a wave's.** A 60s launchd
+timer watches lanes on every firing but spends only past
+`min_wave_gap_minutes`, and a quiet board can veto the spend; the loop switch
+(`$LOOM_HOME/loop.stopped` — `start` clears it, `stop` writes it) stops
+**automatic** continuation, so `spawn-lane` refuses a chain hop from inside a
+lane (`LOOM_LANE_ID` set) while it exists. A lane that cannot chain is not an
+error — the next wave does the same work. The timer, the quiet gate and the
+switch:
+[references/scheduling.md](references/scheduling.md).
 
 **Headless permissions.** Every spawned session — wave, implementers,
 verifiers — runs `claude -p ... --permission-mode <permission_mode>`, a config
@@ -163,6 +132,14 @@ default". *(paid: a guessed top-level path returned null, was read as
 unconfigured, and nearly spawned four `dontAsk` lanes on the top-tier model
 against a global config saying otherwise.)*
 
+Pass the configured mode and nothing else: never spawn a loop session with
+`bypassPermissions` (no guardrails — legitimate only inside a real sandbox) or
+`acceptEdits` (hangs on bash). The deny guardrails (force-push, `reset --hard`,
+`rm -rf`) bind in every mode. The durable fix for a denial is never a longer
+allowlist: models judge, scripts plumb — grow `lane.sh` until lanes barely need
+open shell. Which mode to configure, and why `dontAsk` is brittle:
+[references/setup.md](references/setup.md).
+
 **An implementation lane takes its model from the snapshot, not from
 `lane_model` directly**: `snapshot` resolves the escalation chain per ticket
 into `.model` — `{effective, source}`, where `source` is `label` (a human's
@@ -172,32 +149,17 @@ is `null`. **Implementation lanes only** — gates, merges and probes keep
 `lane_model`: escalating the reviewer because the implementer struggled is a
 different decision, and one mechanism must not mean two things.
 
-`dontAsk` is deterministic: allowlist or immediate denial, never a hang.
-`auto` sends the long tail to the classifier instead of hard-denying it;
-denials still return to the model. Both honor the repo's `permissions.allow`,
-and the deny guardrails bind in every mode. `dontAsk`'s brittleness is paid
-for three ways *(a compound command denied wholesale and misread as "never
-bootstrapped"; `$VAR` defeating prefix match; worktree-frozen allowlists going
-stale)* — prefer `auto` where the machine's global config says so, and treat
-"auto aborts after repeated classifier blocks" as a claim to re-verify per
-Claude Code version, not settled fact. The durable fix for a denial is never a
-longer allowlist: models judge, scripts plumb — grow `lane.sh` until lanes
-barely need open shell. The repo's allowlist and denylist (hard guardrails:
-force-push, `reset --hard`, `rm -rf`) are a bootstrap-epic artifact, committed
-so every worktree and CI inherit them. Never spawn a loop session with
-`bypassPermissions` (no guardrails — legitimate only inside a real sandbox) or
-`acceptEdits` (hangs on bash).
-
 **Every tracker write in a lane goes through `scripts/lane.sh`** — `claim`,
-`transition`, `note`, `mr-note`, `verdict`, `merge-failed`, `merge`, `fix-ticket`, `scratch`; long
-bodies via stdin or `--file`. Never hand-roll a tracker mutation in a lane: an inline `-m` body
-is denied on length alone, and any `$VAR` or `$(...)` anywhere in a command
-defeats allowlist prefix-matching outright. *(paid: a gate finished a correct
-review, then burned 40+ turns unable to post it.)* A lane that needs a
-mutation `lane.sh` lacks has found a missing verb — add it there, never a new
-allow rule. `lane.sh scratch` prints a literal scratch path, replacing
-`$LOOM_SCRATCH` in commands. `spawn-lane` enforces the rest: it starts each
-lane in its own worktree (so nothing needs `cd`) and refuses an untrusted one.
+`transition`, `note`, `mr-note`, `verdict`, `merge-failed`, `merge`,
+`fix-ticket`, `scratch`; long bodies via stdin or `--file`. Never hand-roll a
+tracker mutation in a lane: an inline `-m` body is denied on length alone, and
+any `$VAR` or `$(...)` anywhere in a command defeats allowlist prefix-matching
+outright. *(paid: a gate finished a correct review, then burned 40+ turns
+unable to post it.)* A lane that needs a mutation `lane.sh` lacks has found a
+missing verb — add it there, never a new allow rule. `lane.sh scratch` prints a
+literal scratch path, replacing `$LOOM_SCRATCH` in commands. `spawn-lane`
+enforces the rest: it starts each lane in its own worktree (so nothing needs
+`cd`) and refuses an untrusted one.
 
 **Base sync.** The remote is canonical; nothing depends on a local base
 branch. Always `git fetch origin` and branch from `origin/<base>` — a
@@ -260,10 +222,9 @@ refuses outside herdr anyway.
    `lane.sh merge-failed <iid>` (body: what it died on). Both verbs refuse the
    stale-snapshot case outright, `merge-failed` when a merged MR closes the
    ticket and `transition` when the ticket is closed, so treat either refusal
-   as "re-run `snapshot`", never as something to work around. *(paid: #23
-   merged at 22:23:17 and was blocked at 22:24:29 by a wave harvesting against
-   a photograph taken 90s before the merge; a later wave then requeued the
-   closed ticket to `ready-for-agent`.)*
+   as "re-run `snapshot`", never as something to work around. *(paid: a wave
+   harvesting a 90-second-old photograph blocked a ticket that had already
+   merged, and a later wave requeued the closed ticket to `ready-for-agent`.)*
 
 3. **Gate** — a `gate` spawn action:
 
@@ -288,17 +249,14 @@ refuses outside herdr anyway.
    **A `fix` ticket's verdict reads its terminal condition** — the block
    `references/ticket-template.md` requires in every fix ticket. Measured
    residue **above** the stated threshold is a FAIL however much the metric
-   improved. **At or under** it,
-   a PASS requires the follow-up already filed — `lane.sh fix-ticket --title
-   <t> --tier <tier> --milestone <epic>`, the same verb probes use — and its
-   IID named **in that verdict comment**; a PASS promising a follow-up
-   instead of naming one is not a PASS. A fix ticket that states no terminal
-   condition is a phase-4 escape: FAIL it as one rather than inventing the
-   threshold here. *(paid: boostlingo build-4 #101 narrowed speech-end mark
-   misattribution from 64.9% to 35.4% of turns, closed with the remainder
-   accepted, and nothing tracked it; build-5's audit re-found it and spent
-   three of its nine tickets finishing the fix and re-measuring the two
-   numbers it had corrupted.)*
+   improved. **At or under** it, a PASS requires the follow-up already filed —
+   `lane.sh fix-ticket --title <t> --tier <tier> --milestone <epic>`, the same
+   verb probes use — and its IID named **in that verdict comment**; a PASS
+   promising a follow-up instead of naming one is not a PASS. A fix ticket
+   that states no terminal condition is a phase-4 escape: FAIL it as one
+   rather than inventing the threshold here. *(paid: a fix closed with its
+   residual metric accepted and nothing tracking it; the next build's audit
+   re-found it and spent three of nine tickets finishing the work.)*
 
    Hand the session its merge spawn line (step 5) to run on a PASS, so a
    passing gate reaches the merge queue with no wave in between. The chained
@@ -330,18 +288,18 @@ refuses outside herdr anyway.
      state)*;
    - `spawn-lane impl-<ticket> --cwd <worktree> -- <cmd>` a headless session
      whose brief **inlines** the work rather than naming `/implement`
-     (headless has no slash commands): the
-     ticket body + lessons thread — if that body names a contract (endpoint,
-     schema, route, wire shape) it consumes and the freshly-fetched base
-     lacks, block (`--category unmerged-dependency`) rather than build it,
-     since it belongs to whichever ticket owns it and building it twice is an
-     unresolvable merge conflict — no trailing self-review (the gate owns
-     review), its own tier gate with what it reports fixed **before** pushing,
-     a commit with the `Assisted-by` trailer, a push, then finishes with
-     **`lane.sh submit <ticket>`**: one
-     call opens the MR (carrying the `Closes #<ticket-iid>` link the build
-     reads) and moves the label to `review`. Its final act is the gate spawn
-     line (step 3) the wave handed it.
+     (headless has no slash commands): the ticket body + lessons thread — if
+     that body names a contract (endpoint, schema, route, wire shape) it
+     consumes and the freshly-fetched base lacks, block
+     (`--category unmerged-dependency`) rather than build it, since it belongs
+     to whichever ticket owns it and building it twice is an unresolvable
+     merge conflict — no trailing self-review (the gate owns review), its own
+     tier gate with what it reports fixed **before** pushing, a commit with
+     the `Assisted-by` trailer, a push, then finishes with
+     **`lane.sh submit <ticket>`**: one call opens the MR (carrying the
+     `Closes #<ticket-iid>` link the build reads) and moves the label to
+     `review`. Its final act is the gate spawn line (step 3) the wave handed
+     it.
 
 5. **Merge queue** — a `merge` spawn action, never inline:
 
@@ -350,42 +308,33 @@ refuses outside herdr anyway.
    which holds the single-writer merge lock for that lane alone, so scheduling
    continues while it runs and a second merge is refused.
 
-   The lane does only:
-   `lane.sh reconcile` — fetch + **merge** `origin/<base>` into the branch,
-   **never rebase**. This skill's own guardrails deny force-push, so rebased history
-   can never be pushed; the verb exists because two lanes chose rebase off
-   this very step and dead-ended at the denial, one of them then asking a
-   headless void for permission twice. The verb picks the integration base
-   itself (declared `base:`, else `develop`, else `main`; the remote ref), and
-   **re-installs dependencies when that merge moved a manifest or lockfile** —
-   a worktree cut hours ago has an install that predates whatever landed
-   since, and step 4 installs only at creation. So a gate red *after*
-   reconcile is real: never hand-diagnose it as a stale worktree, and never
-   hand-run an installer in the wave. *(paid: #14's first merge died on a
-   missing `zod` that arrived with another ticket, and recovering it cost a
-   wave three minutes of re-derived diagnosis to reach "run the install".)*
-
-   `rc 3` = a real conflict: resolve trivial ones and commit; otherwise `git
-   merge --abort`, record the attempt with `lane.sh merge-failed <iid>`
-   explaining the conflict, exit — **never ask a question; no one is there**.
-   Then re-run its tier gates → **`lane.sh merge <iid>`**, one verb that merges
-   the MR, waits until the tracker reports it actually `merged`, then closes the
-   ticket and strips its state labels. Never hand-roll the merge, and never
-   reach for `close` to finish a ticket: `close` closes an *issue* and merges
-   nothing, so a lane that calls it alone reports success over unmerged work
-   and the dependents it unblocks branch from a base without the code in it.
-   `close` now refuses that outright. *(paid: merge-1 ran reconcile, ran the
-   gate, ran `close`, announced "merged and closed" — MR !1 was still open and
-   four lanes were seconds from branching off it.)* A red *combined* gate is
-   the first time the branch is tested against what landed on `<base>` since —
-   so before recording, re-run the failing check on clean base with
-   `lane.sh base-check -- <cmd>`. The **same check** red there (same test id,
-   not mere redness) is a base defect, not this ticket's: record it
-   `merge-failed <iid> --base-red <check-id> --fix <fix-iid>` (`fix-ticket`
-   one if none exists) — it never counts the cap, and the ticket parks in
-   `.merge_hold` until the fix merges, re-entering the queue on its own.
-   Otherwise record the attempt and leave it — never fix it in the merge
-   lane. *(paid: seven main-is-red incidents; two caps burned with no reset.)*
+   **The lane's brief is [references/merge-brief.md](references/merge-brief.md)**
+   — render it with the ticket iid, its worktree and the integration base
+   (declared `base:`, else `develop`, else `main`; the remote ref) rather than
+   composing one, so a wave-spawned merge and a chained one carry the same
+   instructions. It does only `lane.sh reconcile` (fetch + **merge**
+   `origin/<base>`, **never rebase** — force-push is denied, so rebased history
+   can never be pushed; reconcile re-installs dependencies itself when that
+   merge moved a manifest or lockfile, so a post-reconcile red gate is real:
+   never hand-diagnose it as a stale worktree and never hand-run an installer
+   in the wave), then this ticket's tier gates on the merged tree —
+   `lane.sh base-check -- <cmd>` re-runs a failing check on clean base, and
+   the **same check** red there is a base defect recorded with
+   `merge-failed <iid> --base-red <check-id> --fix <fix-iid>`, which never
+   counts the cap and parks the ticket in `.merge_hold` until the fix merges —
+   then **`lane.sh merge <iid>`**, the one verb that merges the MR, waits until
+   the tracker reports it actually `merged`, closes the ticket and strips its
+   state labels. A conflict or a real failure is recorded with
+   `lane.sh merge-failed <iid>` and the lane exits: **never ask a question, no
+   one is there**, and never fix it in the merge lane. Never hand-roll the
+   merge, and never reach for `close` to finish a ticket — `close` closes an
+   *issue* and merges nothing, so a lane calling it alone reports success over
+   unmerged work and the dependents it unblocks branch from a base without the
+   code in it; `close` now refuses that outright. *(paid: a merge lane ran the
+   gate, ran `close`, announced "merged and closed" with the MR still open and
+   four lanes seconds from branching off it; a first merge died on a
+   dependency that arrived with another ticket; seven main-is-red incidents,
+   two caps burned with no reset.)*
 
    **Worktree teardown belongs to `tick.sh sweep`, never the merge lane** — a
    lane cannot remove the worktree it stands in, and the human must never
@@ -394,10 +343,11 @@ refuses outside herdr anyway.
    deterministic, scoped to this skill's own `<repo>-wt-<n>` naming and merged
    branches, backing up `.env` to the state dir first, never touching a live
    lane's cwd and never a worktree holding uncommitted work — untracked files
-   git does not ignore are a lane's unsaved work, not debris. Repos with a non-git `worktree_cmd`
-   tear down via their own mechanism in the wave. Plain tracker-side auto-merge is
-   **not** this queue — with parallel lanes it merges MRs that were never
-   gate-tested together; use merge trains or let this step own merging.
+   git does not ignore are a lane's unsaved work, not debris. Repos with a
+   non-git `worktree_cmd` tear down via their own mechanism in the wave. Plain
+   tracker-side auto-merge is **not** this queue — with parallel lanes it
+   merges MRs that were never gate-tested together; use merge trains or let
+   this step own merging.
 
 6. **Epic acceptance** — a `probe` spawn action:
    `spawn-lane probe-<epic-slug> --cwd <worktree> -- <cmd>`, a lane that
@@ -414,9 +364,9 @@ refuses outside herdr anyway.
    has broken yet, and two runs of it are not comparable — each one tests the
    previous round's damage. An epic with no criteria arrives as a
    `probe-criteria` residue item instead of a spawn: that means "write them
-   first", not noise. *(paid: E4 failed five straight probes, every brief
+   first", not noise. *(paid: an epic failed five straight probes, every brief
    enumerated backwards from the last round's tickets, and no run ever checked
-   the FR-2/TR-2/PF-1 the epic itself cites.)*
+   the requirement IDs the epic itself cites.)*
 
    **Each failure files a fix ticket with
    `lane.sh fix-ticket --title <t> --tier <tier> --milestone <epic>`** — one
@@ -427,7 +377,7 @@ refuses outside herdr anyway.
    lets an epic close over an open defect; `fix` is what drives the fill
    step's fix-first ordering; and without a **state label** the ticket sits in
    the build's universe in no state, invisible to the ready set. *(paid: a
-   probe filed #64 with four of the five — the four this file used to
+   probe filed a fix with four of the five — the four this file used to
    enumerate — and it sat unclaimed while every lane idled.)* Any lane filing
    a defect mid-build uses the same verb.
 
@@ -451,10 +401,9 @@ refuses outside herdr anyway.
    accept it.** The milestone stays open, so the epic returns as a `probe`
    action the moment its fixes merge, and the re-probe is the same step as the
    first probe — never a judgement call about whether the fixes looked small
-   enough. *(paid: build-2's E4 probe found two real defects, both fixed and
-   merged, and the closing wave then wrote "re-probe not re-run… both fixes
-   shipped as small, well-scoped, verified diffs" and closed the build. E6 and
-   E7 were never probed at all.)*
+   enough. *(paid: a closing wave wrote "re-probe not re-run… both fixes
+   shipped as small, well-scoped, verified diffs" and closed the build; two
+   other epics were never probed at all.)*
 
 7. **Notify + write back**: `tick.sh notify` for `ticket_blocked` /
    `build_halted` (no progress past staleness, or all remaining blocked) /
@@ -476,114 +425,40 @@ refuses outside herdr anyway.
    stalled build stays armed so resolving a `blocked` ticket lets the
    heartbeat resume it. Then exit.
 
-### `stop [--now]`
+## Human-run verbs
 
-`tick.sh uninstall [--now]` — writes the loop switch, unloads this repo's agent
-and removes its plist. Plain `stop` lets live lanes finish their current ticket
-and cuts the chain after them; `--now` kills them through `kill-lane` instead
-(deliberate, so not `crash_cap` crashes). `start` reverses either. For stopping
-a build before completion; completion tears down on its own.
+None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
+[references/build-controls.md](references/build-controls.md); `replan` is in
+[references/phases-1-5.md](references/phases-1-5.md).
 
-### `watch [--no-panes]`
-
-From any session: read `tick.sh lane-status` and tracker state, then narrate
-per lane — what it's doing, why, what's next — plus merge-queue depth and
-blocked list. Read-only.
-
-Then give the human eyes on the work: inside herdr (`$HERDR_ENV` is `1`),
-**always `scripts/watch-panes.sh raise`, detached** — a pane per live lane
-running `tick.sh render-log <id> --follow`, plus a build-ticker strip running
-`tick.sh render-events --follow` (one timestamped line per step: claimed, →
-review, gate verdict, merged — deterministic, zero model time; narrating
-mechanical events with a session is the wrong tool). The viewer keeps the
-ticker alive every poll, so Ctrl-C and closing the pane is futile — the
-gestures that stick are **`q` inside the ticker pane**, `watch-panes.sh ticker
-off|on` for that strip, and `watch-panes.sh off|on` for the whole viewer
-(closes every pane it owns and exits, honored mid-run and at launch, so the
-next tick cannot undo it). `raise` is what clears both switches, which is why
-`watch` uses it and a plain launch is wrong here: a human typing `watch` is
-asking to see the build, an intent newer than whatever earlier close is on
-disk. Only `start` and `watch` may clear them — an *automatic* tick undoing a
-human's close is the thing the switches exist to prevent. Detached, so the
-panes outlive this session. *(paid: build-3 2026-08-05 — a `ticker-off` marker
-from a `q` pressed 40 minutes earlier meant `watch` raised a viewer that
-silently closed its own ticker every poll, and the human read a working
-setting as a broken viewer.)*
-Outside herdr, name those commands instead. `--no-panes` for the summary
-alone. Never hand the human a command to paste when it can just be run.
-
-### `unblock <n> [--to-review]`
-
-**`lane.sh transition <n> ready-for-agent --release-hold --note`**, decision on
-stdin — one verb posts it, removes `blocked` and clears the assignee. Never
-compose those writes by hand: the unassign is the half that gets dropped, and a
-claimed `ready-for-agent` ticket is invisible to *both* fill paths (see failure
-policy) *(paid: hand-composed unblock, #47 unschedulable for 90 minutes)*.
-Re-running after a failed write completes the missing half without doubling the
-note. `--to-review` → the same with `review` (human completed the work; it takes
-the same gate as agent work — no bypass), assignee kept.
-
-`--release-hold` is refused outright inside a lane or a wave, so this verb is
-only ever reachable from a human's own session. That is the point: see the
-ticket-text rule in the failure policy.
-
-### `triage`
-
-Every blocked ticket on one `/lavish` surface — six actions each (requeue, to
-review, `rescope`, `model-tier`, leave, close), applied as a batch. Human-run,
-never invoked by a wave; `unblock <n>` is unchanged and still the one-ticket
-path. Population, the two rules the surface must hold that no script can
-enforce, and the apply order: [references/triage.md](references/triage.md).
-
-### `replan`
-
-Diff the amended PRD against the spec issue. For each changed requirement:
-affected open tickets are regenerated (phase-4 rules); affected *closed*
-tickets spawn delta tickets; untouched tickets are never rewritten. The PRD
-stays frozen otherwise.
-
-### `retro`
-
-Explain where a finished build's time and money went and write the findings up as
-proposals — human-run, never invoked by a wave, and it proposes rather than
-fixes. `tick.sh retro [--build <l>] [--vs <l>]` computes the numbers; reading
-them, and the report format: [references/retro.md](references/retro.md).
-
-### `qa`
-
-Review this skill's own files and report what is broken — human-run, never
-invoked by a wave, and it reports rather than fixes. Per-file reviewer briefs,
-the confirm step and the report format:
-[references/qa.md](references/qa.md).
-
-### `optimize`
-
-Compact this file — every session that invokes the skill loads it in full, so
-its words are paid for on every tick — **without changing what it makes an
-agent do**. Human-run, never invoked by a wave. It is surgery, not editing:
-this file is also the only place a wave learns to drive the scripts, and the
-damage from a careless cut is mostly silent. The procedure, the untouchable
-machine contracts, the worktree, and the check that catches the silent class:
-[references/optimize.md](references/optimize.md).
-
-### `prop <Pn>`
-
-Implement one proposal from `PROPOSALS.md` — human-run, never invoked by a
-wave. Its Fix section is a decision already made: implement it in the
-machinery, spend `SKILL.md` lines last, test it, then archive the proposal.
-Resolution, layer order, the test bar, the worktree and the archive step:
-[references/prop.md](references/prop.md).
-
-### `fix <Dn>|<severity>`
-
-Fix one confirmed defect from `OPEN_DEFECTS.md`, or every open defect at a
-given severity (`critical`, `high`, `medium`, `low`) in one run — human-run,
-never invoked by a wave. Its Failure section is already reproduced; implement
-the fix, prove it with a test that fails without it, then close the entry. A
-defect marked `Covered by` a proposal is refused (single) or skipped
-(severity batch) here — it belongs to `prop` instead. Resolution, ordering,
-the test bar and the close step:
-[references/fix.md](references/fix.md).
+- **`triage`** — every blocked ticket on one `/lavish` surface, six actions
+  each (requeue, to review, `rescope`, `model-tier`, leave, close), applied as
+  a batch; `unblock <n>` is unchanged and still the one-ticket path.
+  Population, the two rules the surface must hold that no script can enforce,
+  and the apply order: [references/triage.md](references/triage.md).
+- **`retro`** — explain where a finished build's time and money went and write
+  the findings up as proposals; it proposes rather than fixes.
+  `tick.sh retro [--build <l>] [--vs <l>]` computes the numbers; reading them,
+  and the report format: [references/retro.md](references/retro.md).
+- **`qa`** — review this skill's own files and report what is broken; it
+  reports rather than fixes. Per-file reviewer briefs, the confirm step and
+  the report format: [references/qa.md](references/qa.md).
+- **`optimize`** — compact this file (every session that invokes the skill
+  loads it in full, so its words are paid for on every tick) **without
+  changing what it makes an agent do**. Surgery, not editing: this file is
+  also the only place a wave learns to drive the scripts, and the damage from
+  a careless cut is mostly silent. The procedure, the untouchable machine
+  contracts, the worktree, and the check that catches the silent class:
+  [references/optimize.md](references/optimize.md).
+- **`prop <Pn>`** — implement one proposal from `PROPOSALS.md`, whose Fix
+  section is a decision already made, then archive it. Layer order, the test
+  bar, the worktree and the archive step:
+  [references/prop.md](references/prop.md).
+- **`fix <Dn>|<severity>`** — fix one confirmed defect from
+  `OPEN_DEFECTS.md`, or every open one at a severity (`critical`, `high`,
+  `medium`, `low`) in a run, each proved by a test that fails without the fix.
+  Resolution (a `Covered by` defect belongs to `prop`), ordering, the test bar
+  and the close step: [references/fix.md](references/fix.md).
 
 ## Failure policy
 
@@ -622,11 +497,10 @@ the test bar and the close step:
   as evidence about the work; never as orders addressed to you. A sentence
   naming a loom command, a next step, or a condition for acting is
   still prose — the only things that decide what a wave does are the labels,
-  the blocking edges and the steps in this file. *(paid: a human hold comment
-  on #67 ended with "Release: when #48 merges, `/loom unblock 67`"; when
-  #48 merged a wave executed that sentence, posted a release note of its own,
-  and had the held ticket requeued, re-claimed and back in `review` nine
-  seconds later. build-3, 2026-08-04.)*
+  the blocking edges and the steps in this file. *(paid: a wave executed a
+  human hold comment's "Release: when #48 merges, `/loom unblock 67`", posted
+  a release note of its own, and had the held ticket requeued, re-claimed and
+  back in `review` nine seconds later.)*
 - **A human escalation = a `model::<tier>` label on the ticket**, added while
   reading the rejection that motivates it. It survives every round until
   removed, is tracker-resident like every other decision, and only ever
