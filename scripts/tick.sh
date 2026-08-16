@@ -109,6 +109,11 @@ BRIEFS_DIR="$LOOM_HOME/briefs"
 # launch requests here. A safe host wrapper, normally the scheduler heartbeat,
 # drains them only after the provider has returned.
 LANE_LAUNCH_DIR="$LOOM_HOME/lane-launch-queue"
+# A Codex provider session cannot unload sibling launchd jobs from its sandbox.
+# Stale-lane kills and dead-lane clears therefore cross the same durable-host
+# boundary as deferred launches. Cleanup is drained first so a replacement can
+# never collide with the service or lock left by the worker it replaces.
+LANE_CLEANUP_DIR="$LOOM_HOME/lane-cleanup-queue"
 # P85: what the last sweep pass could not remove, and why. Sweep said all of
 # this to stdout inside a wave session for five builds — the right message,
 # addressed to a human, into a file no human reads.
@@ -135,7 +140,8 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 AGENT_SH="${LOOM_AGENT_CMD:-${SELF_PATH%/*}/agent.sh}"
 
-mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR" "$LANE_LAUNCH_DIR"
+mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR" \
+         "$LANE_LAUNCH_DIR" "$LANE_CLEANUP_DIR"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -1331,6 +1337,8 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # happen before the auto-wave gap so an interactive Codex tick can hand
     # workers to the very next durable heartbeat without waiting 10–20m.
     if ! _codex_host_is_ephemeral; then
+        _drain_lane_cleanups \
+          || die "tick: one or more queued lane cleanups failed at the durable host boundary"
         _drain_lane_launches \
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
@@ -1610,7 +1618,9 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
     # Codex owns that outer process scope too and reaps its descendants at turn
     # end. Leave those requests for the next launchd/cron heartbeat instead.
     if ! _codex_host_is_ephemeral; then
-        if ! _drain_lane_launches; then
+        if ! _drain_lane_cleanups; then
+            [ "$rc" -ne 0 ] || rc=26
+        elif ! _drain_lane_launches; then
             [ "$rc" -ne 0 ] || rc=26
         fi
     elif find "$LANE_LAUNCH_DIR" -mindepth 1 -maxdepth 1 -type d -name 'request-*' 2>/dev/null | grep -q .; then
@@ -1691,6 +1701,75 @@ _drain_lane_launches() {
         fi
     done
     return "$rc"
+}
+
+_queue_lane_cleanup() { # <lane-id> kill|clear — provider → durable host
+    local id="$1" action="$2" base request n=0 existing
+    for existing in "$LANE_CLEANUP_DIR"/request-* "$LANE_CLEANUP_DIR"/running-*; do
+        [ -d "$existing" ] || continue
+        if [ "$(cat "$existing/id" 2>/dev/null || true)" = "$id" ]; then
+            # A later kill is stronger than an earlier harvest request. Keep
+            # one queue entry, but never let deduplication downgrade a live
+            # process to metadata-only cleanup.
+            [ "$action" != kill ] || printf '%s\n' kill > "$existing/action"
+            echo "lane $id: durable host cleanup already queued"
+            return 0
+        fi
+    done
+    base="$LANE_CLEANUP_DIR/request-$(date +%Y%m%d-%H%M%S)-$$-$id"
+    request="$base.tmp"
+    while ! mkdir "$request" 2>/dev/null; do
+        n=$((n+1)); request="$base-$n.tmp"
+    done
+    printf '%s\n' "$id" > "$request/id"
+    printf '%s\n' "$action" > "$request/action"
+    cat "$LANES_DIR/$id.pid" > "$request/pid" 2>/dev/null || : > "$request/pid"
+    mv "$request" "${request%.tmp}"
+    _ev lane_cleanup_queued id "$id" action "$action"
+    echo "lane $id: $action queued for the durable host"
+}
+
+_drain_lane_cleanups() {
+    local request name running id action expected current cleanup_rc rc=0
+    for request in "$LANE_CLEANUP_DIR"/request-*; do
+        [ -d "$request" ] || continue
+        name="${request##*/request-}"
+        running="$LANE_CLEANUP_DIR/running-$name"
+        mv "$request" "$running" 2>/dev/null || continue
+        id=$(cat "$running/id" 2>/dev/null || true)
+        action=$(cat "$running/action" 2>/dev/null || true)
+        expected=$(cat "$running/pid" 2>/dev/null || true)
+        current=$(cat "$LANES_DIR/$id.pid" 2>/dev/null || true)
+        # A delayed request must never kill a newer reuse of the same lane id.
+        if [ -n "$expected" ] && [ -n "$current" ] && [ "$current" != "$expected" ]; then
+            rm -rf "$running"
+            _ev lane_cleanup_discarded id "${id:-unknown}" reason pid_changed
+            continue
+        fi
+        cleanup_rc=0
+        case "$action" in
+            kill)  LOOM_HOST_LANE_CLEANUP=1 cmd_kill_lane "$id" >/dev/null || cleanup_rc=$? ;;
+            clear) LOOM_HOST_LANE_CLEANUP=1 cmd_clear_lane "$id" >/dev/null || cleanup_rc=$? ;;
+            *) cleanup_rc=2 ;;
+        esac
+        if [ "$cleanup_rc" -eq 0 ]; then
+            rm -rf "$running"
+        else
+            mv "$running" "$request" 2>/dev/null || true
+            _ev lane_cleanup_failed id "${id:-unknown}" action "${action:-unknown}"
+            echo "tick: durable host cleanup failed for ${id:-unknown}" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+cmd_drain_lane_cleanups() {
+    [ -z "${LOOM_DEFER_LANE_LAUNCH:-}" ] \
+      || die "drain-lane-cleanups: provider sessions cannot drain their own process scope"
+    ! _codex_host_is_ephemeral \
+      || die "drain-lane-cleanups: interactive Codex is not a durable worker host; the scheduler heartbeat will drain this queue"
+    _drain_lane_cleanups
 }
 
 cmd_drain_lane_launches() {
@@ -2717,8 +2796,22 @@ _release_lane_port() { # <lane-id> — reap only a listener owned by this lane c
 
 cmd_clear_lane() {
     local launch_marker="$LANES_DIR/$1.launchd" launch_label="" launch_plist="$LANES_DIR/$1.plist"
+    if _codex_host_is_ephemeral && [ -s "$launch_marker" ] \
+       && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
+        _queue_lane_cleanup "$1" clear
+        return 0
+    fi
     launch_label=$(cat "$launch_marker" 2>/dev/null || true)
-    [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$launch_label" >/dev/null 2>&1 || true
+    if [ -n "$launch_label" ]; then
+        if ! "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$launch_label" >/dev/null 2>&1; then
+            # Do not erase the only recovery metadata while launchd still owns
+            # the service. A later durable heartbeat can retry the cleanup.
+            if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$launch_label" >/dev/null 2>&1; then
+                echo "clear-lane: launchd still owns '$launch_label' — preserving lane '$1' for durable cleanup" >&2
+                return 1
+            fi
+        fi
+    fi
     [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
     _release_lane_port "$1"
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
@@ -2750,12 +2843,32 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
     # human hold (2026-08-02). The tree is snapshotted first so nothing
     # re-parents past the kill.
     local id="${1:-}"; [ -n "$id" ] || die "kill-lane: need a lane id"
+    if _codex_host_is_ephemeral && [ -s "$LANES_DIR/$id.launchd" ] \
+       && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
+        _queue_lane_cleanup "$id" kill
+        return 0
+    fi
     local pid; pid=$(cat "$LANES_DIR/$id.pid" 2>/dev/null || echo "")
     if [ -n "$pid" ] && _lane_process_alive "$id" "$pid"; then
         _kill_tree "$pid"
         _ev lane_kill id "$id"
     fi
-    cmd_clear_lane "$id"
+    cmd_clear_lane "$id" || return $?
+    # A hard kill bypasses the lane epilogue that normally releases its lock.
+    # Remove only locks stamped by this exact process, never another gate or
+    # merge that happens to exist concurrently.
+    if [ -n "$pid" ]; then
+        local lock owner
+        for lock in "$GATE_LOCK_DIR"/*; do
+            [ -d "$lock" ] || continue
+            owner=$(cat "$lock/pid" 2>/dev/null || true)
+            [ "$owner" != "$pid" ] || rm -rf "$lock"
+        done
+        if [ -d "$MERGE_LOCK_DIR" ] \
+           && [ "$(cat "$MERGE_LOCK_DIR/pid" 2>/dev/null || true)" = "$pid" ]; then
+            rm -rf "$MERGE_LOCK_DIR"
+        fi
+    fi
 }
 
 cmd_notify() {
@@ -4323,6 +4436,8 @@ cmd_agent_status() {
 case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
+    drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;
+    drain-lane-kills) shift; cmd_drain_lane_cleanups "$@" ;; # compatibility/readable operator alias
     drain-lane-launches) shift; cmd_drain_lane_launches "$@" ;;
     lane-status)  shift; cmd_lane_status "$@" ;;
     lanes-alive)  shift; _lanes_alive "$@" ;;
