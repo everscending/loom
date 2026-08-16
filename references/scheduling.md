@@ -29,9 +29,11 @@ it raises one pane per active lane.
 **`min_wave_gap_minutes` (default 10)** paces spend, so a 60s tick costs
 nothing: a wave starts only when the gap has elapsed. Three callers, three
 contracts — **`tick`** (a human typed it: always runs one wave, ignores switch
-and gap), **`tick --auto`** (the timer: respects both), **`tick --from-lane`**
-(a lane finished: respects the switch, ignores the gap, because a handoff is
-work already in progress).
+and gap), **`tick --auto`** (the timer: respects both, except the one-shot
+RunAtLoad kick written by `start`), **`tick --from-lane`** (a lane finished:
+respects the switch, ignores the gap, because a handoff is work already in
+progress). The start kick is consumed only when a wave is admitted, so a lock
+or unreadable board cannot silently discard the human's request to resume now.
 
 Quiet gates spend before any of that, and the gate is an **allowlist**:
 `halted` skips the wave entirely, `stalled` + `stall_action: notify_only` skips

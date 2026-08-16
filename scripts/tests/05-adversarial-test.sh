@@ -166,6 +166,68 @@ for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-66.rc" ] && break; sleep 0.
     && ok "adversarial-pregate: a tier whose only path is the gate runner checks nothing" \
     || bad "adversarial-pregate: a runner-only tier rejected every branch in the repo"
 
+# D-TICK-23: one pathless, config-selected test command makes the tier's
+# literal-path approximation incomplete even when sibling commands contribute
+# explicit paths. patient-imaging-portal JOR-284 added a test selected by its
+# Vitest project's include; unrelated explicit Playwright/integration paths
+# must not turn that unknown selection into evidence that the test is absent.
+ADVR4="$T/adv-repo-mixed-indirect"; mkdir -p "$ADVR4/src" "$ADVR4/tests/e2e" "$ADVR4/tests/integration" "$ADVR4/e2e" "$ADVR4/scripts"
+git -c init.defaultBranch=main init -q "$ADVR4" 2>/dev/null
+git -C "$ADVR4" config user.email t@t; git -C "$ADVR4" config user.name t
+printf 'base: main\ngates:\n  ui:\n    - "bash scripts/gate.sh ui"\n    - "npx vitest run --project unit"\n    - "pytest tests/integration"\n    - "npx playwright test e2e/e2-wiring.spec.ts"\n' > "$ADVR4/.loom.yml"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ADVR4/scripts/gate.sh"; chmod +x "$ADVR4/scripts/gate.sh"
+printf 'export default { test: { projects: [{ test: { name: "unit", include: ["tests/**/*.test.ts"] } }] } };\n' > "$ADVR4/vitest.config.ts"
+: > "$ADVR4/src/app.ts"; : > "$ADVR4/tests/integration/.keep"; : > "$ADVR4/e2e/e2-wiring.spec.ts"
+git -C "$ADVR4" add -A >/dev/null 2>&1; git -C "$ADVR4" commit -qm base >/dev/null 2>&1
+git -C "$ADVR4" checkout -qb feat-mixed-indirect 2>/dev/null
+printf 'import { test } from "vitest";\ntest("rejects unavailable imaging", () => {});\n' > "$ADVR4/tests/e2e/availability-fixture.test.ts"
+git -C "$ADVR4" add -A >/dev/null 2>&1; git -C "$ADVR4" commit -qm adv >/dev/null 2>&1
+rm -f "$T/adv-ran-gate-73" "$LOOM_HOME/lanes/gate-73.rc"
+LOOM_REPO="$ADVR4" GLAB_CMD="$ADVG" STUB_BODY="$ADV_MANDATORY" STUB_LOG="$T/adv-calls-73" \
+    "$TICK" spawn-lane gate-73 --no-tick --pregate ui --cwd "$ADVR4" -- touch "$T/adv-ran-gate-73" >/dev/null 2>&1
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-73.rc" ] && break; sleep 0.1; done
+[ -f "$T/adv-ran-gate-73" ] \
+    && ok "adversarial-pregate: a mixed tier with a config-selected test suite reaches the review session" \
+    || bad "adversarial-pregate: FALSE REJECTION — sibling explicit paths hid the config-selected suite (rc=$(cat "$LOOM_HOME/lanes/gate-73.rc" 2>/dev/null))"
+
+# Planted violation: remove only the unknown-selection return. The sibling
+# commands' explicit paths then survive, recreating JOR-284's false rc 7 on
+# the identical branch and proving the holding assertion exercises the fix.
+ADVM3="$T/adv-mixed-known"; mkdir -p "$ADVM3"
+for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq lib.jq; do
+    ln -sf "$(dirname "$TICK")/$jf" "$ADVM3/$jf"
+done
+ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM3/lib.sh"
+ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM3/lane.sh"
+link_trackers "$ADVM3"
+sed 's/^    \[ "$unknown" -eq 0 \] || return 1$/    : # planted D-TICK-23 violation/' \
+    "$TICK" > "$ADVM3/tick.sh"
+if ! diff -q "$TICK" "$ADVM3/tick.sh" >/dev/null 2>&1; then
+    chmod +x "$ADVM3/tick.sh"
+    rm -f "$T/adv-ran-gate-74" "$LOOM_HOME/lanes/gate-74.rc"
+    LOOM_REPO="$ADVR4" GLAB_CMD="$ADVG" STUB_BODY="$ADV_MANDATORY" STUB_LOG="$T/adv-calls-74" \
+        "$ADVM3/tick.sh" spawn-lane gate-74 --no-tick --pregate ui --cwd "$ADVR4" -- touch "$T/adv-ran-gate-74" >/dev/null 2>&1
+    for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-74.rc" ] && break; sleep 0.1; done
+    if [ ! -f "$T/adv-ran-gate-74" ] && [ "$(cat "$LOOM_HOME/lanes/gate-74.rc" 2>/dev/null)" = "7" ]; then
+        ok "adversarial-pregate-violation: treating a mixed tier as fully known recreates the config-selected-suite rejection"
+    else
+        bad "adversarial-pregate-violation: the mutant did not reject, so the mixed-tier guard proves nothing (rc=$(cat "$LOOM_HOME/lanes/gate-74.rc" 2>/dev/null))"
+    fi
+else
+    bad "adversarial-pregate-violation: sed did not match the unknown-selection guard, mutant is identical to the fix"
+fi
+
+# Gate-contract work changes the approximation itself. Literal path tokens no
+# longer prove that a mandatory test is absent when the branch changes the
+# config or runner that selects those tests, so the real gate must decide.
+printf '\n# select the adversarial suite here\n' >> "$ADVR/scripts/gate.sh"
+git -C "$ADVR" add scripts/gate.sh >/dev/null 2>&1
+git -C "$ADVR" commit -qm gate-contract >/dev/null 2>&1
+adv_spawn gate-72 "$T/adv-calls-72" "$ADV_MANDATORY"
+[ -f "$T/adv-ran-gate-72" ] \
+    && ok "adversarial-pregate: a branch changing the gate contract reaches the real gate" \
+    || bad "adversarial-pregate: FALSE REJECTION — gate-contract work was judged from stale literal paths"
+
 # Planted violation: take the path token out of the tier's command list — the
 # mechanism the check reads — and the identical branch, on the identical
 # ticket, spends the review session the guard exists to save.

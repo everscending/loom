@@ -120,6 +120,19 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(q '.tickets[] | select(.id==10) | .rejections | "\(.total)/\(.same_class_tail)"')" = "0/0" ] \
     && ok "snapshot: no verdicts means zero rejections" \
     || bad "snapshot: phantom rejections on a clean ticket"
+# D-SNAP-16: a tracker note is one gate outcome even when its body repeats the
+# same machine trailer. Gate prose can already contain the trailer that
+# `lane.sh verdict` appends, so counting regex matches would spend the cap on
+# one review instead of two independent rejections.
+cp "$FX/notes-12.json" "$FX/notes-12-orig.json"
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"Rejected.\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-duplicate-note" "$TICK" snapshot > "$T/snap-duplicate-note.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-duplicate-note.json")" = "1/marks-attribution/1" ] \
+    && ok "D-SNAP-16: one note with a repeated verdict trailer counts once" \
+    || bad "D-SNAP-16: one repeated trailer inflated rejection history ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-duplicate-note.json"))"
 # 7a5b. P37: the cap belongs to the SCOPE, not the issue number. A ticket
 #      rewritten into different work carries an `orch-scope-reset` marker
 #      (lane.sh rescope), and verdicts older than the newest one stop counting.
@@ -1181,6 +1194,39 @@ if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11c.json")" =
 else
     bad "gate: duplicate dispatch not caught ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11c.json" 2>&1) | err: $(head -2 "$T/p11.err"))"
 fi
+
+# D-SNAP-19: a human can retire a gate outcome that was invalidated without
+# changing the work or fabricating a product commit. The reset is at the same
+# tracker timestamp as the old FAIL, so the arrival-index tiebreak proves
+# verdicts AT the newest marker are retired, not only strictly older ones.
+# Prove the old FAIL really suppresses this HEAD before trusting the reset path.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"gate"},
+  "body":"Rejected.\n\n<!-- orch-verdict FAIL e52b7c1 class=worker-timeout -->"}]
+EOF
+PSNAP > "$T/p11m-before.json"
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11m-before.json")" = "false" ] \
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/p11m-before.json")" = "1" ]; then
+    ok "D-SNAP-19: a current-SHA FAIL stands before a verdict reset"
+else
+    bad "D-SNAP-19: fixture did not establish the standing FAIL ($(jq -c '.tickets[]|select(.id==12)|{gate,rejections}' "$T/p11m-before.json"))"
+fi
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"human"},
+  "body":"Background QoS invalidated this gate.\n\n<!-- orch-verdict-reset 2026-07-28T14:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"gate"},
+  "body":"Rejected.\n\n<!-- orch-verdict FAIL e52b7c1 class=worker-timeout -->"}]
+EOF
+PSNAP > "$T/p11m-after.json"
+if [ "$(jq -r '.tickets[] | select(.id==12) | .gate.eligible' "$T/p11m-after.json")" = "true" ] \
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .gate.last_verdict' "$T/p11m-after.json")" = "null" ]; then
+    ok "D-SNAP-19: a verdict reset makes the unchanged HEAD gateable again"
+else
+    bad "D-SNAP-19: reset left the old verdict standing ($(jq -c '.tickets[]|select(.id==12)|.gate' "$T/p11m-after.json"))"
+fi
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.same_class_tail)"' "$T/p11m-after.json")" = "0/0" ] \
+    && ok "D-SNAP-19: a verdict reset retires old rejections" \
+    || bad "D-SNAP-19: reset left the old rejection cap standing ($(jq -c '.tickets[]|select(.id==12)|.rejections' "$T/p11m-after.json"))"
 
 # 7f4. Planted violation: a verdict against a DIFFERENT commit must not suppress
 #      the gate — otherwise a rejected ticket that was fixed and re-pushed would

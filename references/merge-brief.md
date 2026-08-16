@@ -21,9 +21,14 @@ only this:
    `lane.sh merge-failed {{TICKET_IID}}` explaining the conflict, and exit.
    Never ask a question — no one is there to answer it.
 
-2. Re-run this ticket's tier gates on the merged tree **as one foreground
-   command**. Never background a finite gate and poll a status file in a later
-   tool call: Codex reaps the first call's descendants when that call returns.
+2. Re-run this ticket's configured tier gate on the merged tree **once, as one
+   foreground command**. If the shell tool returns a running-session identifier
+   before the command exits, poll that same running session until it completes.
+   Do not rerun the gate. A shell response window ending is not a test failure
+   and is not evidence for `base-check` or `base-red`. Do not add a `timeout`,
+   alarm, or other synthetic deadline; only the repository gate's own timeouts
+   count. Never background a finite gate and poll a status file in a later tool
+   call: Codex can reap descendants that are detached from the tool session.
    A red check here is
    the first time the branch has been tested against what landed on
    `{{BASE}}` since it was cut — before recording a failure, re-run the same

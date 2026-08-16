@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Loom — make the coding agent replaceable</title>
+
+<style>
+  :root {
+    --ground:   #D6D2C6;
+    --panel:    #E6E3D9;
+    --panel-2:  #EFEDE7;
+    --ink:      #1E2027;
+    --ink-soft: #5A5D64;
+    --ink-faint:#84867F;
+    --rule:     #B1AC9C;
+    --rule-soft:#C4BFB1;
+    --warp:     #26408F;
+    --weft:     #A5451A;
+    --tracker:  #16645A;
+    --halt:     #8C1F26;
+    --gold:     #846514;
+    --shadow:   rgba(30,32,39,.10);
+
+    --font-display: "Avenir Next Condensed", "Roboto Condensed", "Helvetica Neue", "Arial Narrow", sans-serif;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --measure: 70ch;
+    --wide: 1180px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:   #13151B;
+      --panel:    #1A1D25;
+      --panel-2:  #222630;
+      --ink:      #E5E2D9;
+      --ink-soft: #A9ABB2;
+      --ink-faint:#7A7E88;
+      --rule:     #3A4050;
+      --rule-soft:#2C313D;
+      --warp:     #9AAFF4;
+      --weft:     #E8A05C;
+      --tracker:  #60CEB6;
+      --halt:     #F07A81;
+      --gold:     #D8B955;
+      --shadow:   rgba(0,0,0,.45);
+    }
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, h1, h2, h3, h4, li, dd, td, th, code, .pill) { overflow-wrap: anywhere; }
+  :where(svg, iframe) { max-width: 100%; }
+
+  html { background: var(--ground); }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 20px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wide { max-width: var(--wide); margin-inline: auto; }
+  .measure { max-width: var(--measure); }
+
+  header.masthead { max-width: var(--wide); margin: 0 auto; padding: 58px 0 0; }
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(54px, 10vw, 98px);
+    line-height: .9;
+    letter-spacing: -.015em;
+    margin: 0 0 18px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    max-width: 62ch;
+    color: var(--ink-soft);
+    font-size: 21px;
+    line-height: 1.48;
+    margin: 0 0 34px;
+  }
+  .verdict {
+    border-left: 5px solid var(--tracker);
+    background: var(--panel);
+    box-shadow: 0 1px 0 var(--shadow);
+    padding: 18px 22px;
+    max-width: 920px;
+  }
+  .verdict strong { color: var(--tracker); }
+
+  section { margin-top: 74px; }
+  .section-head {
+    max-width: var(--wide);
+    margin: 0 auto 28px;
+    border-top: 2px solid var(--ink);
+    padding-top: 12px;
+  }
+  h2 {
+    font-family: var(--font-display);
+    font-size: 36px;
+    line-height: 1.05;
+    margin: 0 0 7px;
+  }
+  h3 {
+    font-family: var(--font-display);
+    font-size: 23px;
+    line-height: 1.15;
+    margin: 0 0 8px;
+  }
+  h4 {
+    font-family: var(--font-display);
+    font-size: 18px;
+    margin: 0 0 7px;
+  }
+  p { margin: 0 0 14px; }
+  .section-head p { max-width: var(--measure); color: var(--ink-soft); }
+  a { color: var(--warp); }
+  code, .mono {
+    font-family: var(--font-mono);
+    font-size: .86em;
+    background: var(--panel-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    padding: .08em .34em;
+  }
+
+  .stats {
+    max-width: var(--wide);
+    margin: 32px auto 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    gap: 14px;
+  }
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    padding: 17px 19px 15px;
+    box-shadow: 0 1px 0 var(--shadow);
+  }
+  .stat .n {
+    font-family: var(--font-display);
+    font-size: 43px;
+    line-height: 1;
+    color: var(--weft);
+  }
+  .stat .cap {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+    margin-top: 8px;
+  }
+
+  .grid { display: grid; gap: 16px; }
+  .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 820px) {
+    .grid.two, .grid.three { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    box-shadow: 0 1px 0 var(--shadow);
+    padding: 20px 21px;
+  }
+  .card p:last-child, .card ul:last-child { margin-bottom: 0; }
+  .card.recommended { border-top: 5px solid var(--tracker); }
+  .card.warning { border-top: 5px solid var(--gold); }
+  .card.risk { border-top: 5px solid var(--halt); }
+  .pill {
+    display: inline-block;
+    font: 10.5px/1.35 var(--font-mono);
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    border: 1px solid currentColor;
+    padding: 3px 7px;
+    margin-bottom: 9px;
+  }
+  .pill.good { color: var(--tracker); }
+  .pill.warn { color: var(--gold); }
+  .pill.bad { color: var(--halt); }
+  .pill.blue { color: var(--warp); }
+
+  ul.clean { padding-left: 1.1em; margin: 10px 0 0; }
+  ul.clean li { margin: 0 0 7px; }
+
+  .diagram-wrap {
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    padding: 22px;
+    overflow: auto;
+  }
+  .mermaid { min-width: 700px; }
+
+  .compare {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    border: 1px solid var(--rule);
+    background: var(--panel);
+  }
+  .compare > div { padding: 22px; min-width: 0; }
+  .compare > div + div { border-left: 1px solid var(--rule); }
+  .compare .old { border-top: 5px solid var(--halt); }
+  .compare .new { border-top: 5px solid var(--tracker); }
+  @media (max-width: 780px) {
+    .compare { grid-template-columns: 1fr; }
+    .compare > div + div { border-left: 0; border-top: 1px solid var(--rule); }
+  }
+
+  .interface {
+    background: var(--ink);
+    color: var(--ground);
+    border: 1px solid var(--ink);
+    padding: 24px;
+  }
+  .interface h3 { color: inherit; }
+  .verb {
+    display: grid;
+    grid-template-columns: 190px minmax(0, 1fr);
+    gap: 16px;
+    padding: 14px 0;
+    border-top: 1px solid color-mix(in srgb, var(--ground) 28%, transparent);
+  }
+  .verb:first-of-type { border-top: 0; }
+  .verb .name { font: 13px/1.45 var(--font-mono); color: var(--weft); }
+  .verb p { margin: 0; color: color-mix(in srgb, var(--ground) 88%, transparent); }
+  @media (max-width: 650px) { .verb { grid-template-columns: 1fr; gap: 4px; } }
+
+  .table-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+  table { width: 100%; border-collapse: collapse; min-width: 880px; }
+  th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--rule-soft); }
+  th {
+    font: 11px/1.4 var(--font-mono);
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    background: var(--panel-2);
+  }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { font-family: var(--font-mono); font-size: 12px; color: var(--warp); }
+
+  .timeline { counter-reset: phase; }
+  .phase {
+    counter-increment: phase;
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 18px;
+    padding: 22px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .phase::before {
+    content: counter(phase, decimal-leading-zero);
+    font: 31px/1 var(--font-display);
+    color: var(--weft);
+  }
+  .phase:first-child { border-top: 0; }
+  .exit {
+    display: inline-block;
+    font: 11px/1.4 var(--font-mono);
+    color: var(--tracker);
+    margin-top: 7px;
+  }
+
+  .callout {
+    max-width: var(--measure);
+    border-left: 4px solid var(--gold);
+    padding: 5px 0 5px 18px;
+    color: var(--ink-soft);
+  }
+  .risk-list .card { padding-top: 17px; }
+  .risk-list .impact { font: 11px/1.4 var(--font-mono); color: var(--halt); }
+  footer { max-width: var(--wide); margin: 80px auto 0; border-top: 2px solid var(--ink); padding-top: 15px; color: var(--ink-soft); }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <p class="eyebrow">Technical implementation proposal · 15 August 2026</p>
+  <h1>Make the coding agent replaceable.</h1>
+  <p class="standfirst">Loom’s tracker state machine is already mostly agent-neutral. The coupling lives at the execution edge: command construction, prompt transport, permissions, trust, native event streams, usage limits, model names, and setup artifacts. Put one deep module at that seam; keep the scheduler ignorant of vendor CLIs.</p>
+  <div class="verdict">
+    <strong>Recommendation:</strong> add a provider-neutral <code>agent.sh</code> module with Claude and Codex adapters, migrate every Loom-created session to its three-command interface, and normalize both native JSONL streams before the rest of Loom sees them. Keep Claude as the compatibility default; enable Codex only after the shared security and conformance suite passes.
+  </div>
+</header>
+
+<div class="stats">
+  <div class="stat"><div class="n">18</div><div class="cap">tracked files currently name Claude-specific concepts</div></div>
+  <div class="stat"><div class="n">3</div><div class="cap">external interface operations proposed for the agent module</div></div>
+  <div class="stat"><div class="n">2</div><div class="cap">real adapters on day one: Claude and Codex</div></div>
+  <div class="stat"><div class="n">0</div><div class="cap">planned changes to tracker scheduling semantics</div></div>
+</div>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">01 · diagnosis</p>
+    <h2>This is transport coupling, not orchestration coupling.</h2>
+    <p>The board vocabulary, planner, locks, lane ids, pregates, state transitions, merge queue, and probe lifecycle do not need to know which model runs a session. The current implementation leaks Claude through seven distinct contracts.</p>
+  </div>
+  <div class="wide table-wrap">
+    <table>
+      <thead><tr><th>Coupling</th><th>Current evidence</th><th>Why substitution fails</th><th>Target owner</th></tr></thead>
+      <tbody>
+        <tr><td>Launch command</td><td><code>tick.sh</code> builds <code>claude -p</code> commands for waves and merge chaining.</td><td>Codex uses <code>codex exec</code>, different flag ordering, and different unattended controls.</td><td>Agent adapter</td></tr>
+        <tr><td>Prompt transport</td><td><code>-p @brief</code> is detected and rewritten to a file-pointer prompt.</td><td>Codex accepts a prompt from stdin; a future agent may require a flag or API payload.</td><td>Agent adapter</td></tr>
+        <tr><td>Permissions + trust</td><td><code>permission_mode</code>, <code>.claude/settings.json</code>, <code>~/.claude.json</code>, and Claude trust checks.</td><td>Codex separates sandboxing, approvals, project rules, network access, and authentication.</td><td>Adapter setup + doctor</td></tr>
+        <tr><td>Streaming</td><td>Claude-only detection injects <code>stream-json</code>, <code>verbose</code>, and a denied tool.</td><td>Codex emits a different JSONL schema via <code>--json</code>.</td><td>Adapter + canonical events</td></tr>
+        <tr><td>Liveness + rendering</td><td><code>render.jq</code> and <code>_turn_count</code> select Claude event shapes.</td><td>Codex progress arrives as <code>thread.*</code>, <code>turn.*</code>, and <code>item.*</code>.</td><td>Canonical event consumer</td></tr>
+        <tr><td>Usage + limits</td><td><code>usage.jq</code> prices Claude assistant messages; reset time comes from <code>rate_limit_event</code>.</td><td>Codex usage is on <code>turn.completed</code>; dollar cost may be unknowable under ChatGPT auth.</td><td>Adapter normalization</td></tr>
+        <tr><td>Distribution + context</td><td>README assumes <code>~/.claude/skills</code>, <code>CLAUDE.md</code>, and <code>/loom</code>.</td><td>Codex installs and discovers skills/instructions differently.</td><td>Docs + explicit brief context</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">02 · seam</p>
+    <h2>Give callers one semantic agent interface.</h2>
+    <p>The deletion test is decisive: if this module disappeared, vendor checks and flag logic would reappear in wave launch, lane spawn, merge chaining, bootstrap, rendering, liveness, retro, tests, and documentation. That is a deep module earning its seam.</p>
+  </div>
+
+  <div class="wide compare">
+    <div class="old">
+      <span class="pill bad">Current</span>
+      <h3>Callers construct vendor commands</h3>
+      <ul class="clean">
+        <li>The wave must know Claude flags and placeholder syntax.</li>
+        <li><code>spawn-lane</code> inspects the executable basename.</li>
+        <li>Telemetry readers parse a vendor’s native stream directly.</li>
+        <li>Bootstrap owns a single vendor’s policy artifact and trust store.</li>
+      </ul>
+    </div>
+    <div class="new">
+      <span class="pill good">Target</span>
+      <h3>Callers describe an agent run</h3>
+      <ul class="clean">
+        <li>Role, cwd, brief, model intent, and execution profile are inputs.</li>
+        <li>The adapter chooses CLI, prompt channel, flags, and environment.</li>
+        <li>The adapter emits Loom’s canonical JSONL schema.</li>
+        <li>Provider setup and readiness are queried through the same module.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="wide" style="margin-top:18px">
+    <div class="interface">
+      <p class="eyebrow" style="color:var(--ink-faint)">External interface · scripts/agent.sh</p>
+      <h3>Three operations; all provider complexity stays behind them.</h3>
+      <div class="verb"><div class="name">doctor</div><p>Read-only preflight. Returns one JSON document with provider, binary/version, authentication, policy/trust readiness, model support, writable roots, network capability, and actionable failures.</p></div>
+      <div class="verb"><div class="name">run</div><p>Runs one <em>semantic</em> role — wave, implementation, gate, merge, or probe — from a prompt file in a cwd with an optional model intent. Streams canonical Loom JSONL to stdout and preserves the provider process exit status.</p></div>
+      <div class="verb"><div class="name">install-policy</div><p>Idempotently creates or verifies the selected provider’s repo-resident policy artifacts. Refuses to overwrite a differing hand-edited surface without <code>--force</code>.</p></div>
+    </div>
+  </div>
+
+  <div class="wide diagram-wrap" style="margin-top:18px">
+    <div class="mermaid">
+flowchart TD
+  P["snapshot.jq + plan.jq\nprovider-neutral schedule"] --> T["tick.sh\nlocks, pregate, lanes, lifecycle"]
+  T --> A["agent.sh interface\ndoctor · run · install-policy"]
+  A --> C["Claude adapter"]
+  A --> X["Codex adapter"]
+  A -. "future: one new adapter" .-> F["Other coding agent"]
+  C --> CN["Claude CLI + native JSONL"]
+  X --> XN["Codex CLI + native JSONL"]
+  F --> FN["Provider CLI/API + native events"]
+  CN --> E["Canonical Loom JSONL"]
+  XN --> E
+  FN --> E
+  E --> R["render · liveness · limits · retro"]
+  T --> L["lane.sh + tracker/forge drivers"]
+  L --> B["Tracker remains the only build state"]
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">03 · adapter contract</p>
+    <h2>Normalize behavior, not flags.</h2>
+    <p>The common contract is what Loom needs to remain correct. Provider flags are implementation detail. A future adapter is acceptable only if it proves every row below.</p>
+  </div>
+  <div class="wide table-wrap">
+    <table>
+      <thead><tr><th>Contract</th><th>Claude adapter</th><th>Codex adapter</th><th>Core expectation</th></tr></thead>
+      <tbody>
+        <tr><td>Headless run</td><td>Print mode with current permission mode and model flag.</td><td>Non-interactive <code>exec</code>, explicit approval/sandbox settings, ephemeral session.</td><td>No question can block waiting for a human.</td></tr>
+        <tr><td>Prompt file</td><td>Adapter creates the pointer prompt or uses stdin as supported.</td><td>Pass complete prompt through stdin.</td><td>Caller never uses <code>@brief</code> or a provider prompt flag.</td></tr>
+        <tr><td>Working directory</td><td>Launch in lane cwd.</td><td>Set cwd explicitly and launch in lane cwd.</td><td>Every role starts in its declared workspace.</td></tr>
+        <tr><td>Permissions</td><td>Generated allow/deny settings plus trusted workspace.</td><td>Least sandbox for the role, no human approvals, explicit network and extra write roots, project rules for forbidden commands.</td><td>Force push, hard reset, clean, and recursive destructive removal are denied.</td></tr>
+        <tr><td>Progress stream</td><td>Normalize assistant/tool/system/result records.</td><td>Normalize thread/turn/item/error records.</td><td>Canonical events drive rendering and progress timestamps.</td></tr>
+        <tr><td>Usage + model</td><td>Token/cache usage and resolved model when emitted.</td><td>Turn usage; requested model always, resolved model when available.</td><td>Unknown model or cost is <code>null</code>, never guessed.</td></tr>
+        <tr><td>Limit classification</td><td>Translate limit event/reset epoch when available.</td><td>Translate failed-turn/error signals; use bounded recheck when no reset time exists.</td><td>Usage exhaustion never counts as a crash loop.</td></tr>
+        <tr><td>Readiness</td><td>Binary, auth, settings, trust.</td><td>Binary, login, policy trust, sandbox/write roots, network.</td><td>Failure occurs before a paid wave or lane starts.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="wide grid three" style="margin-top:18px">
+    <div class="card recommended"><span class="pill good">Canonical stream</span><h3>One JSONL schema</h3><p>Use a small vocabulary: session start, assistant progress, command/tool progress, usage, limit, error, and session end. Include provider plus requested/resolved model metadata. Preserve unknown native event kinds as ignorable provider events, so a CLI upgrade cannot silently break parsing.</p></div>
+    <div class="card warning"><span class="pill warn">Cost semantics</span><h3>Nullable dollars</h3><p>Codex authenticated through ChatGPT may have tokens but no defensible per-run dollar price. Retro must report tokens and <code>cost unavailable</code>, not convert API list prices into a fictional subscription cost.</p></div>
+    <div class="card"><span class="pill blue">Model semantics</span><h3>Provider-native first</h3><p>Keep <code>wave_model</code>, <code>lane_model</code>, and <code>rework_model</code> as provider-native strings in the first release. Stop pre-creating Claude-only escalation labels; create <code>model::&lt;value&gt;</code> lazily. Semantic cross-provider tiers can follow if hot-switching providers becomes a real requirement.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">04 · implementation sequence</p>
+    <h2>Six phases, each independently shippable.</h2>
+    <p>Do not rewrite the scheduler and the agent transport in one step. Characterize the current Claude behavior, land the seam with two adapters, and move one class of callers at a time.</p>
+  </div>
+  <div class="wide timeline">
+    <article class="phase"><div><h3>Characterize the contracts before moving them</h3><p>Capture representative Claude and Codex JSONL fixtures; enumerate wave/lane command shapes, prompt paths, exit codes, rate-limit cases, auth/trust failures, and policy behavior. Add an adapter conformance test section that can run entirely on fake CLIs.</p><span class="exit">Exit: fixtures fail against a deliberately incomplete adapter.</span></div></article>
+    <article class="phase"><div><h3>Introduce the agent module and both adapters</h3><p>Add <code>scripts/agent.sh</code>, private drivers under <code>scripts/agents/</code>, and provider-specific normalizers. Set <code>agent_provider: claude</code> as the compatibility default. Implement <code>doctor</code>, <code>run</code>, and <code>install-policy</code> without changing existing launch callers yet.</p><span class="exit">Exit: Claude and Codex pass the same black-box interface tests.</span></div></article>
+    <article class="phase"><div><h3>Migrate wave and lane launchers</h3><p>Make <code>_launch_wave</code>, production lane spawns, and <code>chain-merge</code> call the semantic module. Add <code>spawn-agent-lane</code>; retain raw <code>spawn-lane -- &lt;cmd&gt;</code> only as internal plumbing/test seam. Delete executable-basename detection, CLI flag injection, <code>@brief</code> knowledge, and vendor model parsing from <code>tick.sh</code>.</p><span class="exit">Exit: no production path outside an adapter constructs <code>claude</code> or <code>codex</code>.</span></div></article>
+    <article class="phase"><div><h3>Move filesystem plumbing out of the model</h3><p>Add a deterministic worktree-preparation verb so scheduling waves no longer need broad write access to the parent directory merely to create sibling worktrees. Keep env copying, base fetch, path validation, and setup in machinery. This lets the Codex wave run with narrow writable roots instead of granting every sibling repo.</p><span class="exit">Exit: the wave can orchestrate under its least role policy.</span></div></article>
+    <article class="phase"><div><h3>Normalize telemetry and setup</h3><p>Switch rendering, progress counting, usage-limit classification, and retro to canonical events. Delegate policy generation and readiness checks from bootstrap to the adapter. Replace Claude-specific config/docs with <code>agent_provider</code> and the logical <code>unattended</code> execution profile; accept the old <code>permission_mode</code> only as a deprecated Claude compatibility alias.</p><span class="exit">Exit: native provider JSON is never read outside its adapter.</span></div></article>
+    <article class="phase"><div><h3>Documentation, migration, and opt-in rollout</h3><p>Update <code>SKILL.md</code> minimally to show semantic spawn commands. Put provider detail in a new maintenance reference. Make README installation/invocation agent-neutral, explicitly point briefs at <code>docs/agents/issue-tracker.md</code> instead of relying on <code>CLAUDE.md</code>, and document Codex skill installation plus non-interactive prerequisites. Ship Codex opt-in; flip no defaults during this proposal.</p><span class="exit">Exit: a third fake provider is added by one adapter + fixtures, with no scheduler edits.</span></div></article>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">05 · file plan</p>
+    <h2>Concentrate change in machinery; keep the skill small.</h2>
+    <p>This follows Loom’s layer order: scripts first, references second, <code>SKILL.md</code> only where the wave’s callable interface changes.</p>
+  </div>
+  <div class="wide table-wrap">
+    <table>
+      <thead><tr><th>Area</th><th>Files</th><th>Planned change</th><th>Consumer</th></tr></thead>
+      <tbody>
+        <tr><td>New deep module</td><td><code>scripts/agent.sh</code><br><code>scripts/agents/claude.sh</code><br><code>scripts/agents/codex.sh</code><br>normalizer queries</td><td>Stable interface, provider dispatch, command construction, preflight, policy install, native-to-canonical stream.</td><td><code>tick.sh</code>, bootstrap, tests</td></tr>
+        <tr><td>Orchestration plumbing</td><td><code>scripts/tick.sh</code></td><td>Semantic wave/lane launch; provider metadata; generic liveness; worktree-preparation verb; selected binary in scheduler PATH.</td><td>Every unattended run</td></tr>
+        <tr><td>Setup</td><td><code>scripts/bootstrap.sh</code><br><code>scripts/lib.sh</code></td><td>Provider selection/config, delegate policy artifact, provider doctor, remove universal Claude trust assumptions.</td><td>First tick and manual setup</td></tr>
+        <tr><td>Telemetry</td><td><code>scripts/render.jq</code><br><code>scripts/usage.jq</code><br>retro readers</td><td>Consume canonical events; make token and cost fields explicit and nullable.</td><td>Watch, staleness, retro</td></tr>
+        <tr><td>Model escalation</td><td><code>scripts/snapshot.jq</code><br><code>scripts/lane.sh</code><br><code>scripts/bootstrap.sh</code></td><td>Accept provider-native model values; lazily create/validate escalation labels; remove hard-coded Claude label catalog.</td><td>Implementation rework scheduling</td></tr>
+        <tr><td>Tests</td><td><code>scripts/test-lib.sh</code><br>existing spawn/config/bootstrap/usage/render tests<br>new adapter contract section</td><td>Replace the single fake Claude with provider fixtures; assert the interface, not private flag assembly except inside adapter tests.</td><td>Maintainers</td></tr>
+        <tr><td>Documentation</td><td><code>README.md</code><br><code>references/setup.md</code><br><code>references/loom-config.md</code><br>new <code>references/agent-runtime.md</code><br><code>AGENTS.md</code></td><td>Agent-neutral vocabulary, installation matrix, provider prerequisites, migration guide, adapter author checklist.</td><td>Humans and future adapter authors</td></tr>
+        <tr><td>Wave interface only</td><td><code>SKILL.md</code></td><td>Replace concrete Claude commands and permission flags with <code>spawn-agent-lane</code> plus semantic model/policy facts. Delete vendor detail instead of appending parallel instructions.</td><td>Every wave</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">06 · safety and compatibility</p>
+    <h2>Security is part of the adapter interface.</h2>
+    <p>“The command starts” is not compatibility. Loom’s hard denials and unattended behavior must survive the provider swap, or the adapter refuses before spending a session.</p>
+  </div>
+  <div class="wide grid two risk-list">
+    <div class="card risk"><div class="impact">HIGH · CODEX PROJECT RULES ARE EXPERIMENTAL</div><h3>Do not declare Codex GA on syntax alone.</h3><p>Verify that project rules are loaded in a trusted worktree and that forbidden commands are blocked under the exact non-interactive invocation. If stable enforcement is unavailable, keep Codex beta and require an externally hardened runner rather than weakening Loom’s constitution.</p></div>
+    <div class="card risk"><div class="impact">HIGH · WORKSPACE-WRITE DOES NOT COVER SIBLING WORKTREES</div><h3>Avoid granting the whole parent directory.</h3><p>Move worktree creation into deterministic machinery, then grant each session only its worktree and Loom state/scratch. Explicitly enable network only for roles that need tracker, forge, dependency, or probe access.</p></div>
+    <div class="card warning"><div class="impact">MEDIUM · NATIVE EVENT SCHEMAS WILL CHANGE</div><h3>Unknown events must degrade visibly.</h3><p>Adapters preserve an unknown-event marker, conformance fixtures pin required events, and <code>doctor</code> reports tested version ranges. Rendering may degrade; scheduling and exit classification must not silently change.</p></div>
+    <div class="card warning"><div class="impact">MEDIUM · PROVIDER SWITCHES REPRICE MODELS</div><h3>Make the provider explicit.</h3><p>Never auto-select whichever binary happens to be on PATH. <code>agent_provider</code> is read-only config, surfaced by <code>resolve-config</code>, recorded on spawn events, and required in every diagnostic.</p></div>
+    <div class="card"><div class="impact">MEDIUM · PROMPT CONTEXT DIFFERS</div><h3>Pass required context explicitly.</h3><p>The wave brief points at Loom’s own <code>SKILL.md</code>; lane briefs point at the canonical tracker declaration and include their work. Vendor instruction files remain useful repo context, but Loom correctness does not depend on one filename being auto-loaded.</p></div>
+    <div class="card"><div class="impact">LOW · HISTORICAL LEDGERS NAME CLAUDE</div><h3>Do not rewrite evidence.</h3><p>Keep dated defects, proposals, and incident histories intact. The acceptance grep excludes historical ledgers and adapter-specific files; only active core instructions and machinery must become neutral.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">07 · verification and rollout gates</p>
+    <h2>Prove substitution without running a real Loom build.</h2>
+    <p>The repository’s maintenance rule forbids a costly real build as verification. Use fake CLIs, captured native streams, disposable git fixtures, and one narrowly-scoped opt-in CLI smoke test.</p>
+  </div>
+  <div class="wide grid two">
+    <div class="card recommended"><span class="pill good">Required automated gates</span><ul class="clean">
+      <li>Both adapters pass the same black-box conformance cases: prompt, cwd, model set/omitted, success, crash, limit, auth failure, policy refusal, and paths with spaces.</li>
+      <li>Hard-denial planted violations fail for each adapter; tests verify the actual policy evaluator, not generated source text.</li>
+      <li>Canonical fixtures render the same semantic transcript and drive the same progress/limit decisions.</li>
+      <li><code>snapshot → plan</code> output is byte-equivalent across provider selections except explicit provider/model metadata.</li>
+      <li>The full <code>tick-test.sh</code> suite passes twice.</li>
+    </ul></div>
+    <div class="card"><span class="pill blue">Release gates</span><ul class="clean">
+      <li>Claude remains the default and its existing behavior is characterized before refactoring.</li>
+      <li>Codex is opt-in via <code>agent_provider: codex</code>.</li>
+      <li>A disposable repo smoke test runs one no-op wave and one no-op lane through the real installed CLI; it does not touch a real tracker or start a build.</li>
+      <li>Adding a third fake adapter changes only the adapter registry, one adapter directory, and fixtures.</li>
+      <li>Active core files contain no vendor CLI tokens outside provider selection/dispatch.</li>
+    </ul></div>
+  </div>
+  <p class="wide callout" style="margin-top:20px"><strong>Compatibility definition:</strong> Codex support is complete only when a fresh session can reconstruct and advance the same tracker-resident build, under the same failure policy and hard denials, with no Claude files or commands required.</p>
+</section>
+
+<section>
+  <div class="section-head">
+    <p class="eyebrow">08 · decisions</p>
+    <h2>Two scope choices; both have recommendations.</h2>
+    <p>Neither choice blocks the interface design. They determine how much migration lands in the first implementation.</p>
+  </div>
+  <div class="wide grid two">
+    <div class="card recommended"><span class="pill good">Recommend now</span><h3>One provider per repo/build</h3><p>Add one <code>agent_provider</code> setting used by waves and all lane roles. The interface retains a role argument, so provider-per-role routing can be added later without changing callers. Mixed-provider builds add pricing, model, policy, and diagnosis complexity without current evidence that Loom needs them.</p></div>
+    <div class="card recommended"><span class="pill good">Recommend staged</span><h3>Provider-native models first</h3><p>Keep current model config keys and treat their values as native to the selected provider. Remove fixed Claude labels now; postpone universal model tiers until there is a real need to switch providers mid-build. This gets Codex compatibility without inventing a lowest-common-denominator model taxonomy.</p></div>
+  </div>
+</section>
+
+<footer>
+  <p><strong>Design source:</strong> this artifact matches Loom’s existing <code>ARCHITECTURE_DIAGRAM.html</code> visual language — woven neutrals, warp/weft accents, condensed display typography, serif body text — because the repository already has a deliberate design system for architecture artifacts.</p>
+  <p><strong>Primary evidence:</strong> <code>SKILL.md</code>, <code>scripts/tick.sh</code>, <code>scripts/bootstrap.sh</code>, <code>scripts/render.jq</code>, <code>scripts/usage.jq</code>, the test suite, and current official Codex non-interactive CLI documentation.</p>
+</footer>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1); paint.fillStyle = "#000"; paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1); return paint.getImageData(0, 0, 1, 1).data;
+  }
+  function compositeRgba(fg, bg) {
+    const fa = fg[3] / 255, ba = bg[3] / 255, a = fa + ba * (1 - fa);
+    if (a === 0) return [0,0,0,0];
+    return [(fg[0]*fa + bg[0]*ba*(1-fa))/a, (fg[1]*fa + bg[1]*ba*(1-fa))/a, (fg[2]*fa + bg[2]*ba*(1-fa))/a, a*255];
+  }
+  function pageIsDark() {
+    const root = toRgba(getComputedStyle(document.documentElement).backgroundColor);
+    const body = toRgba(getComputedStyle(document.body).backgroundColor);
+    const [r,g,b,a] = compositeRgba(body, root);
+    return a > 0 ? (0.2126*r + 0.7152*g + 0.0722*b)/255 < .5 : darkQuery.matches;
+  }
+  const diagrams = [...document.querySelectorAll(".mermaid")].map(el => ({el, src: el.textContent}));
+  async function render() {
+    mermaid.initialize({startOnLoad:false, theme:pageIsDark()?"dark":"default", securityLevel:"strict", flowchart:{curve:"basis"}});
+    for (const {el,src} of diagrams) { el.removeAttribute("data-processed"); el.textContent = src; }
+    await mermaid.run({nodes: diagrams.map(d => d.el)});
+  }
+  if (document.readyState === "complete") render(); else window.addEventListener("load", render, {once:true});
+  darkQuery.addEventListener("change", render);
+</script>
+</body>
+</html>

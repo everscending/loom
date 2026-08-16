@@ -84,6 +84,13 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 # re-ticks once on its way out (P1). It is a single flag, not a queue, so a burst
 # of finishing lanes costs one extra wave rather than one per lane.
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
+# `start` is a human request to resume now. Its launchd RunAtLoad firing still
+# uses --auto so every later heartbeat keeps the normal pacing contract, but
+# this one-shot marker lets the first eligible firing bypass an old wave gap.
+# It is consumed only when a wave is actually admitted, so a lock or unreadable
+# board cannot lose the kick. (Paid for: patient-imaging Build JOR-267 waited
+# behind a 20m gap immediately after `/loom start`, 2026-08-16.)
+START_KICK_FILE="${LOOM_START_KICK_FILE:-$LOOM_HOME/start.kick}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
 # P82: a lane's brief lives HERE, never in the working tree it is about.
@@ -632,6 +639,18 @@ _lane_launch_label() { # <lane-id> — stable until clear-lane retires the job
     printf 'com.loom.lane.%s.%s\n' "$REPO_KEY" "$1"
 }
 
+# A fixed repository PORT is safe for one checkout and wrong for parallel
+# linked worktrees: Playwright either refuses the occupied port or polls a
+# server from another ticket. Give every lane a stable local port so retries
+# keep their address while concurrent lanes cannot cross-test one another.
+# The public range is deliberately away from the repo default and common DB
+# ports; LOOM_LANE_PORT remains an explicit test/operator override.
+_lane_port() { # <lane-id>
+    local sum
+    sum=$(printf '%s' "$REPO_KEY:$1" | cksum | awk '{print $1}')
+    printf '%s\n' "$((30000 + (sum % 20000)))"
+}
+
 _plist_string() { # <value> — one XML-safe plist string element
     printf '<string>'
     printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
@@ -653,7 +672,8 @@ _write_lane_plist() { # <path> <label> <log> -- <program arguments...>
         # workers and replayed a completed merge every 15–20 seconds. A lane is
         # one build action: its epilogue requests the next scheduler tick, but
         # launchd must never execute that same action a second time.
-        printf '%s\n' '<key>ProcessType</key><string>Background</string>'
+        # Standard avoids Background throttling that tripped Vitest's worker RPC timeout (JOR-262).
+        printf '%s\n' '<key>ProcessType</key><string>Standard</string>'
         printf '%s\n' '<key>StandardOutPath</key>'; _plist_string "$log"
         printf '%s\n' '<key>StandardErrorPath</key>'; _plist_string "$log"
         printf '%s\n' '</dict></plist>'
@@ -1175,7 +1195,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -1201,6 +1221,19 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # before the lock is even reached. (P38: merge-68, build-3 2026-08-04.)
     if [ "$mode" = manual ] && [ -n "${LOOM_LANE_ID:-}" ]; then
         die "tick: refusing a bare 'tick' from inside lane '$LOOM_LANE_ID' — use 'tick --from-lane', which the lane's own epilogue already runs on exit."
+    fi
+    # The provider process tree and its deterministic host epilogue share the
+    # lane id, so agent.sh marks only the provider child. A model following a
+    # bad brief once invoked --from-lane itself; Codex then tried to preflight a wave
+    # against the main repo outside that lane's writable sandbox and blocked
+    # already-submitted JOR-202. Optional continuation is host plumbing, never
+    # ticket work: make a provider-side attempt a successful no-op, while the
+    # unmarked host epilogue still owns the real handoff. Provider-neutral by
+    # construction — Claude lanes cross the same boundary.
+    if [ "$mode" = lane ] && [ -n "${LOOM_LANE_ID:-}" ] \
+       && [ "${LOOM_PROVIDER_SESSION:-}" = 1 ]; then
+        echo "tick: host epilogue already owns --from-lane for '$LOOM_LANE_ID' — no action needed; finish the ticket normally"
+        return 0
     fi
     [ "$mode" != manual ] || _raise_viewer
     # D-TICK-20: before the environment is cleared, because the exiting lane's
@@ -1232,7 +1265,8 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         _drain_lane_launches \
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
-    if [ "$mode" = auto ] && ! _wave_gap_ok; then
+    [ ! -f "$START_KICK_FILE" ] || start_kick=1
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0
@@ -1302,12 +1336,15 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
                 _ev tick_skipped reason unclassified state "$quiet"
                 return 0 ;;
     esac
+    # Consume only at the cost boundary. A start kick that met a lock, a usage
+    # pause, or a quiet-board refusal must survive for the next heartbeat.
+    [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
     tick_go=1
 }
 
 _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing the wave
     local scratch="$1" snapshot="$1/snapshot.json" plan="$1/plan.json" raw="$1/plan.raw.json"
-    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch cwd tmp
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch cwd tmp lane_type has_open_mr
     [ -x "$worktree_sh" ] || die "wave: deterministic worktree helper missing: $worktree_sh"
     "$SELF_PATH" snapshot --brief > "$snapshot" \
       || die "wave: could not capture the tracker snapshot before provider invocation"
@@ -1331,8 +1368,8 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
            | .related_merge_requests[]?
            | select(.state == "open")
            | .branch ] | first // "") as $branch
-      | [.lane, $ticket, $base, $branch] | join("\u001c")' "$raw" \
-      | while IFS="$(printf '\034')" read -r lane ticket base branch; do
+      | [.lane, $ticket, $base, $branch, (.spawn.type // "")] | join("\u001c")' "$raw" \
+      | while IFS="$(printf '\034')" read -r lane ticket base branch lane_type; do
         [ -n "$lane" ] || continue
         # plan.jq uses <base> when the repo has no explicit `base:` key. It is
         # a host-side instruction to apply Loom's shared base rule, not a Git
@@ -1348,13 +1385,33 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
               || exit 1
           fi
         else
-          [ -n "$ticket" ] && [ -n "$branch" ] \
-            || die "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch"
+          [ -n "$ticket" ] \
+            || die "wave: spawn '$lane' needs an existing ticket worktree but has no ticket id"
+          has_open_mr=0
+          [ -z "$branch" ] || has_open_mr=1
+          if [ -z "$branch" ]; then
+            [ "$lane_type" = implementation ] \
+              || die "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch"
+            # A stranded implementation often has no MR because it was killed
+            # before submit. worktree.sh created it on the deterministic local
+            # branch; requiring forge state here loses exactly the dirty work
+            # this recovery action says to resume.
+            branch="loom-$ticket"
+          fi
           cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
           if [ -n "$cwd" ]; then
             cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd") \
               || exit 1
           else
+            # An implementation with no MR may contain uncommitted-only work;
+            # recreating loom-<ticket> from a branch tip would silently lose
+            # it, so that shape still fails closed. Rework WITH an open MR is
+            # different: its reviewed branch is durable forge state, and a
+            # swept local worktree is safe to reconstruct exactly like a gate
+            # or merge checkout.
+            if [ "$lane_type" = implementation ] && [ "$has_open_mr" -eq 0 ]; then
+              die "wave: stranded implementation '$lane' has no surviving worktree on branch '$branch'"
+            fi
             base=$(_detect_base "$REPO_ROOT")
             cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base") \
               || exit 1
@@ -1679,10 +1736,11 @@ _spawn_stage_brief() {
 
 ## Headless execution rules (appended by spawn-lane — they bind every lane)
 - No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns, and ScheduleWakeup is denied on your command line — there is no main loop to resume you, so scheduling a wakeup ends the session with the job unfinished.
-- Finite commands such as builds, tests and gates stay in the foreground in one tool call. Never background a finite command and poll for a status file in a later call: Codex reaps that tool call's descendants when it returns, so the status file is never written.
+- Finite commands such as builds, tests and gates start once in the foreground. If the shell tool returns a running-session identifier before the command exits, poll that same running session until it completes. Do not rerun the command: a shell response window ending is not a command failure. Do not add a \`timeout\`, alarm, or other synthetic deadline; only the command's own timeout counts. Never background a finite command and poll a status file in a later call: Codex can reap descendants detached from the tool session, so the status file may never be written.
 - Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
 - Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
 - There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
+- The host epilogue owns \`tick --from-lane\`; never invoke it from the provider session. A refused optional successor handoff is not a blocked ticket — finish after the ticket's required submit/verdict/merge write and let the epilogue or heartbeat continue.
 - Genuinely blocked? This is one terminal sequence, never two alternatives: first pipe the evidence to $(dirname "$SELF_PATH")/lane.sh blocked-report <iid> --category <slug>, then immediately run $(dirname "$SELF_PATH")/lane.sh transition <iid> blocked. Do not exit after only the report or only the transition. A lane that ends by asking a question is a dead lane.
 BRIEFEOF
     # P31: the implementer's half of the mandatory adversarial test, stated
@@ -1696,8 +1754,17 @@ BRIEFEOF
     # rounds cannot help.
     if [ "$(_lane_type "$id")" = impl ]; then
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- Do not run the repository's full configured tier gate from an implementation provider session. Run focused checks for the files you changed, then submit. The launchd-supervised gate lane runs the full configured gate as its pregate against the pushed HEAD; that host-owned result is authoritative even if ticket prose says to run the same full gate before push. This avoids long UI gates losing their provider shell handle and avoids two worktrees sharing one test server.
 - Answer every bullet under "## Mandatory adversarial tests" by name in the MR description: bullet → the test function that asserts it, committed, named in your tier's command list in .loom.yml, and shown to fail when its subject is broken. A bullet with no test name beside it is unfinished work, not a lane note.
 - A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
+BRIEFEOF
+    fi
+    if [ "$(_lane_type "$id")" = gate ]; then
+        local _verdict_ticket="${id#gate-}" _verdict_head=""
+        _verdict_ticket="${_verdict_ticket%-r[0-9]*}"
+        _verdict_head=$(git -C "$abs" rev-parse HEAD 2>/dev/null || echo HEAD)
+        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- A prose verdict is not a completed gate. Before exit, write the review body to a scratch file and run exactly one tracker verdict for the reviewed HEAD. PASS: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket pass $_verdict_head --file <verdict-body-file>\`. FAIL: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket fail $_verdict_head --class <kebab-defect-class> --file <verdict-body-file>\`. Do not merely print PASS/FAIL in your final response; the verdict verb is the required ticket outcome.
 BRIEFEOF
     fi
     local _hit=0 _prev=""
@@ -1750,15 +1817,30 @@ _spawn_build_epilogue() {
     epi="$epi '$SELF_PATH' drain-lane-launches >>'$LOGS_DIR/lane-launches.log' 2>&1 || true; "
     # P93: a merge lane's own exit tries to spawn its successor directly
     # (chain-merge), released lock and all, INSTEAD of firing a whole wave to
-    # rediscover a decision that is already deterministic. Every other lane
-    # kind keeps firing the wave exactly as before — chain-merge's own
-    # fallback is that same "tick --from-lane" line, for every way the fast
-    # path can decline (empty queue, no worktree, a refused spawn).
+    # rediscover a decision that is already deterministic. Gate exits use the
+    # same narrow queue reader: a wave-authored gate brief can omit its PASS
+    # handoff, but the oldest merge-queue ticket is still deterministic after
+    # the verdict. Every other lane kind fires the ordinary wave. chain-merge's
+    # own fallback is that same "tick --from-lane" line, for every way the fast
+    # path can decline (empty queue, no worktree, a refused spawn). (Paid for:
+    # patient-imaging JOR-191 passed but its gate brief said "End after the
+    # verdict", losing the direct merge handoff, 2026-08-16.)
     if [ "$on_done" -eq 1 ]; then
-        if [ "$merge_lock" -eq 1 ]; then
-            epi="$epi( '$SELF_PATH' chain-merge >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+        if [ "$merge_lock" -eq 1 ] || [ "$(_lane_type "$id")" = gate ]; then
+            if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+                # D-TICK-22: launchd owns the one-shot job's process group and
+                # reaps background descendants when the lane shell exits. Keep
+                # the deterministic successor supervised until it returns.
+                epi="$epi LOOM_LANE_EPILOGUE=1 '$SELF_PATH' chain-merge >>'$LOGS_DIR/self-trigger.log' 2>&1 || true; "
+            else
+                epi="$epi( LOOM_LANE_EPILOGUE=1 '$SELF_PATH' chain-merge >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+            fi
         else
-            epi="$epi( '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+            if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+                epi="$epi LOOM_LANE_EPILOGUE=1 '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 || true; "
+            else
+                epi="$epi( LOOM_LANE_EPILOGUE=1 '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+            fi
         fi
     fi
     # The exit code is recorded FIRST, before the tick fires, or the wave this
@@ -1773,7 +1855,10 @@ _spawn_build_epilogue() {
     # `lane_exit` well past the chained successor's `lane_spawn` — a 17s skew
     # the ticker rendered as "gate started, then implementation ended"
     # (observed by the human, 2026-08-02).
-    epi="printf '%s\\n' \"\$_rc\" > '$LANES_DIR/$id.rc'; '$SELF_PATH' event lane_exit id '$id' type '$(_lane_type "$id")' rc \"\$_rc\" secs \"\$(( \$(date +%s) - \$(cat '$LANES_DIR/$id.start' 2>/dev/null || date +%s) ))\" >/dev/null 2>&1 || true; $epi"
+    # A successful tracker handoff is the lane's semantic outcome. Preserve a
+    # later provider rc in the event, but normalize the lane rc so diagnostics
+    # do not repaint review/verdict/closed work as a red ticket failure.
+    epi="_provider_rc=\$_rc; _outcome=\$(cat '$LANES_DIR/$id.outcome' 2>/dev/null || true); [ -z \"\$_outcome\" ] || _rc=0; printf '%s\\n' \"\$_rc\" > '$LANES_DIR/$id.rc'; '$SELF_PATH' event lane_exit id '$id' type '$(_lane_type "$id")' rc \"\$_rc\" provider_rc \"\$_provider_rc\" outcome \"\${_outcome:-none}\" secs \"\$(( \$(date +%s) - \$(cat '$LANES_DIR/$id.start' 2>/dev/null || date +%s) ))\" >/dev/null 2>&1 || true; $epi"
     _SPAWN_ARGS=("$@")
 }
 
@@ -2006,6 +2091,9 @@ cmd_spawn_lane() {
     # even though the lane runs in a worktree cwd.
     export LOOM_REPO="$REPO_ROOT" LOOM_HOME="$LOOM_HOME"
     [ -z "$provider" ] || export LOOM_PROVIDER="$provider"
+    local lane_port="${LOOM_LANE_PORT:-}"
+    [ -n "$lane_port" ] || lane_port=$(_lane_port "$id")
+    export PORT="$lane_port" APP_BASE_URL="http://localhost:$lane_port"
     LOOM_SCRATCH=$(_new_scratch "lane-$id"); export LOOM_SCRATCH
     # D-TICK-19: put the scripts directory (home of lane.sh and tick.sh) on
     # PATH before spawning, so a handoff a lane composes can say `lane.sh
@@ -2069,7 +2157,9 @@ cmd_spawn_lane() {
     # logs but leaving `<id>.rc` made a freshly respawned, still-working lane
     # report the old code — and a wave harvesting `rc` 7 posts a mechanical
     # rejection against a ticket whose lane is busy.
-    rm -f "$LANES_DIR/$id.rc"
+    rm -f "$LANES_DIR/$id.rc" "$LANES_DIR/$id.outcome"
+    printf '%s\n' "$lane_port" > "$LANES_DIR/$id.port"
+    printf '%s\n' "$abs" > "$LANES_DIR/$id.cwd"
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a
@@ -2101,6 +2191,7 @@ cmd_spawn_lane() {
         _write_lane_plist "$launch_plist" "$launch_label" "$log" \
             /usr/bin/env \
               "HOME=${HOME:-}" "PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}" \
+              "PORT=$PORT" "APP_BASE_URL=$APP_BASE_URL" \
               "LOOM_REPO=$REPO_ROOT" "LOOM_HOME=$LOOM_HOME" "LOOM_PROVIDER=${LOOM_PROVIDER:-}" \
               "LOOM_LANE_ID=$id" "LOOM_LANE_CWD=$abs" "LOOM_SCRATCH=$LOOM_SCRATCH" \
               "LOOM_LANE_JSONL=${LOOM_LANE_JSONL:-}" "LOOM_LANE_LAUNCHER=launchd" \
@@ -2112,7 +2203,7 @@ cmd_spawn_lane() {
         if "$LAUNCHCTL_CMD" bootstrap "$launch_domain" "$launch_plist"; then
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
-            rm -f "$launch_plist"
+            rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
             echo "spawn-lane: launchd refused supervised lane '$id'" >&2
@@ -2458,13 +2549,44 @@ cmd_lane_status() {
 # it, never `cmd_lane_status | awk '$3=="running"'` by hand.
 _lanes_alive() { cmd_lane_status 2>/dev/null | awk '$3=="running"||$3=="stale"'; }
 
+_release_lane_port() { # <lane-id> — reap only a listener owned by this lane cwd
+    local id="$1" port expected pids pid actual
+    port=$(cat "$LANES_DIR/$id.port" 2>/dev/null || true)
+    expected=$(cat "$LANES_DIR/$id.cwd" 2>/dev/null || true)
+    case "$port" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$port" -ge 1 ] 2>/dev/null && [ "$port" -le 65535 ] 2>/dev/null || return 0
+    case "$expected" in /*) ;; *) return 0 ;; esac
+    [ "$expected" != "/" ] || return 0
+    expected=$(cd "$expected" 2>/dev/null && pwd -P) || return 0
+    command -v lsof >/dev/null 2>&1 || return 0
+    pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    for pid in $pids; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        actual=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
+        if [ -d "$actual" ]; then
+            actual=$(cd "$actual" 2>/dev/null && pwd -P) || actual=""
+        fi
+        case "$actual" in
+            "$expected"|"$expected"/*)
+                _kill_tree "$pid"
+                _ev lane_port_reaped id "$id" port "$port" pid "$pid" cwd "$actual"
+                ;;
+            *)
+                echo "clear-lane: refusing to reap pid $pid on port $port — cwd '${actual:-unknown}' is not lane '$id' cwd '$expected'" >&2
+                ;;
+        esac
+    done
+}
+
 cmd_clear_lane() {
     local launch_marker="$LANES_DIR/$1.launchd" launch_label="" launch_plist="$LANES_DIR/$1.plist"
     launch_label=$(cat "$launch_marker" 2>/dev/null || true)
     [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$launch_label" >/dev/null 2>&1 || true
     [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
-    rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.start" \
-          "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$launch_marker" "$launch_plist"
+    _release_lane_port "$1"
+    rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
+          "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
+          "$LANES_DIR/$1.cwd" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
@@ -3390,6 +3512,7 @@ _repo_trees_tsv() { # [<config-file>] — tier <TAB> glob, one line per glob
 # ever declines to reject, and the runner still decides.
 _adv_tier_paths() { # <tier> [<worktree>] → space-separated paths that tier's commands invoke
     local tier="$1" dir="${2:-}" cfg="$CONFIG" gates runner t cmdline tok out="" seen=" "
+    local test_cmd cmd_has_path unknown=0
     [ -n "$dir" ] && [ -f "$dir/.loom.yml" ] && cfg="$dir/.loom.yml"
     runner=$(_yaml_scalar "$cfg" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
     runner="${runner#./}"
@@ -3397,6 +3520,19 @@ _adv_tier_paths() { # <tier> [<worktree>] → space-separated paths that tier's 
     set -f  # a glob token must never expand against the caller's cwd
     while IFS="$(printf '\t')" read -r t cmdline; do
         [ "$t" = "$tier" ] || continue
+        # A test runner with no literal path selects its suite through config,
+        # package metadata, or convention. Sibling commands with explicit
+        # paths do not make that selection known, so the tier as a whole is
+        # unsafe for the one-directional mechanical rejection. This is only a
+        # conservative runner heuristic: an unrecognised command retains the
+        # old behaviour, while a recognised unknown merely reaches the real
+        # gate and provider-neutral review path.
+        test_cmd=0; cmd_has_path=0
+        case " $cmdline " in
+            *" pytest "*|*" py.test "*|*" vitest "*|*" jest "*|*" mocha "*|*" ava "*|*" tap "*|*" rspec "*|*" bats "*|\
+            *" playwright test "*|*" node --test "*|*" go test "*|*" cargo test "*|*" dotnet test "*|*" mvn test "*|*" gradle test "*|\
+            *" npm test "*|*" npm run test"*|*" pnpm test "*|*" pnpm run test"*|*" yarn test "*|*" yarn run test"*|*" bun test "*) test_cmd=1 ;;
+        esac
         for tok in $cmdline; do
             case "$tok" in -*) continue ;; esac
             tok="${tok#./}"; tok="${tok%/}"
@@ -3407,12 +3543,15 @@ _adv_tier_paths() { # <tier> [<worktree>] → space-separated paths that tier's 
                 */*) : ;;
                 *) continue ;;
             esac
+            cmd_has_path=1
             case "$seen" in *" $tok "*) continue ;; esac
             seen="$seen$tok "
             out="$out$tok "
         done
+        [ "$test_cmd" -eq 0 ] || [ "$cmd_has_path" -eq 1 ] || unknown=1
     done < <(printf '%s\n' "$gates")
     set +f
+    [ "$unknown" -eq 0 ] || return 1
     printf '%s' "${out% }"
     return 0
 }
@@ -3427,11 +3566,27 @@ _adv_tier_paths() { # <tier> [<worktree>] → space-separated paths that tier's 
 # The tracker read happens LAST, only once the local checks have found a
 # candidate, so a branch that touches the suite never pays for it.
 _adv_pregate_reject() { # <iid> <tier> <worktree> → prints the paths, 0 = reject
-    local iid="$1" tier="$2" dir="$3" paths ref changed f p body sect
-    paths=$(_adv_tier_paths "$tier" "$dir"); [ -n "$paths" ] || return 1
+    local iid="$1" tier="$2" dir="$3" paths ref changed f p body sect cfg="$CONFIG" runner
+    paths=$(_adv_tier_paths "$tier" "$dir") || return 1
+    [ -n "$paths" ] || return 1
     ref=$(_base_ref "$dir" "$CONFIG"); [ "$ref" != HEAD ] || return 1
     changed=$(git -C "$dir" diff --name-only "$ref...HEAD" 2>/dev/null) || return 1
     [ -n "$changed" ] || return 1
+    # A branch that changes how the gate selects or runs tests makes the
+    # literal command-path approximation incomplete. Defer to the real runner
+    # in that case: rejecting is unsafe because the configuration itself may
+    # be the ticket's adversarial deliverable (patient-imaging-portal #280
+    # split recursive certification specs out of the product project).
+    [ -f "$dir/.loom.yml" ] && cfg="$dir/.loom.yml"
+    runner=$(_yaml_scalar "$cfg" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+    runner="${runner#./}"
+    while IFS= read -r f; do
+        case "$f" in
+            "$runner"|playwright.config.*|vitest.config.*|vite.config.*|jest.config.*|pytest.ini|pyproject.toml|.github/workflows/*) return 1 ;;
+        esac
+    done <<EOF
+$changed
+EOF
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         for p in $paths; do
@@ -3838,10 +3993,14 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
     # `start` is the switch going ON, and it must clear a previous `stop` or
     # the agent would tick forever refusing to do anything.
     rm -f "$LOOP_STOPPED"
+    # Write before bootstrap: launchd may execute RunAtLoad before bootstrap
+    # returns, and that first firing is precisely the one this marker changes.
+    : > "$START_KICK_FILE"
     # `start` verifies the load rather than assuming it. A `bootstrap` that
     # launchd refuses is silent from the human's side, and the whole point of
     # this command is that something is now watching the build.
     if ! _arm_agent "$interval"; then
+        rm -f "$START_KICK_FILE"
         die "loom: launchd REFUSED the build agent ($LOOM_LABEL) — NOTHING is watching this build and no wave will start on its own.
   The plist it rejected: $LOOM_HOME/$LOOM_LABEL.plist.rejected
   Check it loads by hand:  launchctl bootstrap gui/$(id -u) $LOOM_HOME/$LOOM_LABEL.plist.rejected
@@ -3860,6 +4019,7 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
+    rm -f "$START_KICK_FILE"
     local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"

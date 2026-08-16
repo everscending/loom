@@ -42,6 +42,25 @@ def epic_norm:
 def orch_verdict_scan:
     scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})(?:\\s+class=([a-z0-9-]+))?");
 
+# Gate verdicts that still stand after the newest human reset. `verdict-reset`
+# retires an invalid gate outcome without changing the work; `rescope` is the
+# superset for different work. Ordering uses tracker timestamps plus arrival
+# index, so verdicts at the marker timestamp are retired too. Consumers:
+# snapshot.jq (`judged_at`, `rejections_of`) and lane.sh duplicate refusal.
+def verdicts_after_reset($notes):
+    ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-(scope|verdict)-reset "))
+      | {at: (.value.created_at // ""), i: .key}]
+     | sort_by([.at, -.i]) | last) as $reset
+  | [$notes | to_entries[] | .key as $i | .value as $note
+     | [($note.body // "") | orch_verdict_scan] | to_entries[]
+     | {verdict: .value[0], sha: .value[1], class: .value[2],
+        at: ($note.created_at // ""), i: $i, mi: .key}]
+  | group_by([.i, .sha]) | map(max_by(.mi))
+  | sort_by([.at, -.i, .mi])
+  | if $reset == null then .
+    else map(select([.at, -.i] > [$reset.at, -$reset.i])) end;
+
 # Durations, shares and money, formatted the same way wherever they are
 # printed. Consumers: report.jq and retro.jq, which `retro` prints one after
 # the other — two spellings of an hour in one output is a reading error

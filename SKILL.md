@@ -110,6 +110,9 @@ linked worktree plus that repository's shared Git metadata directory, because
 fetch, refs and a linked worktree's index live outside the worktree root.
 Every spawn also receives its absolute linked-worktree path in the immutable
 plan; a provider session never reconstructs a worktree name from convention.
+The host epilogue owns `tick --from-lane`; a provider session never invokes it
+itself. A refused optional successor handoff is not grounds to block completed
+ticket work — the epilogue or heartbeat performs the same continuation.
 
 **Briefs travel as files, never inline prompts.**
 `spawn-lane … --brief <file>` copies it to the run directory, appends the
@@ -258,10 +261,11 @@ refuses outside herdr anyway.
    re-found it and spent three of nine tickets finishing the work.)*
 
    Hand the session its merge spawn line (step 5) to run on a PASS, so a
-   passing gate reaches the merge queue with no wave in between. The chained
-   lane merges **the oldest `merge-queue` ticket**, exactly as step 5 does —
-   the handoff removes a scheduler hop, it does not grant its own ticket
-   cutting rights.
+   passing gate reaches the merge queue with no wave in between. The gate's
+   deterministic epilogue also runs the same narrow `chain-merge` lookup, so
+   an omitted prompt handoff cannot strand the queue. The chained lane merges
+   **the oldest `merge-queue` ticket**, exactly as step 5 does — the handoff
+   removes a scheduler hop, it does not grant its own ticket cutting rights.
 
 4. **Fill lanes** — an `impl` spawn action. A **rework** respawn (its
    `cwd_from` names the *surviving* worktree) reuses that worktree and injects
@@ -288,13 +292,17 @@ refuses outside herdr anyway.
      consumes and the freshly-fetched base lacks, block
      (`--category unmerged-dependency`) rather than build it, since it belongs
      to whichever ticket owns it and building it twice is an unresolvable
-     merge conflict — no trailing self-review (the gate owns review), its own
-     tier gate with what it reports fixed **before** pushing, a commit with
+     merge conflict — no trailing self-review (the gate owns review), focused
+     checks for the changed surface only (never the full configured tier gate
+     inside the provider session), a commit with
      the `Assisted-by` trailer, a push, then finishes with
      **`lane.sh submit <ticket>`**: one call opens the MR (carrying the
      `Closes #<ticket-iid>` link the build reads) and moves the label to
      `review`. Its final act is the gate spawn line (step 3) the wave handed
-     it.
+     it. That launchd-supervised gate lane owns the full configured pregate on
+     the pushed HEAD; this is the provider-neutral definition-of-done boundary
+     for both Claude and Codex, and avoids long UI suites losing a provider
+     shell handle or colliding with another worktree's server.
 
 5. **Merge queue** — a `merge` spawn action, never inline:
 
@@ -312,9 +320,14 @@ refuses outside herdr anyway.
    can never be pushed; reconcile re-installs dependencies itself when that
    merge moved a manifest or lockfile, so a post-reconcile red gate is real:
    never hand-diagnose it as a stale worktree and never hand-run an installer
-   in the wave), then this ticket's tier gates on the merged tree as one
-   **foreground** command (never background a finite gate and poll it from a
-   later tool call; Codex reaps those descendants when the first call returns) —
+   in the wave), then this ticket's configured tier gate on the merged tree
+   **once, as one foreground command**. If the shell tool returns a running-
+   session identifier before the command exits, poll that same running session
+   until completion; do not rerun the gate. A shell response window ending is
+   not a test failure or evidence for base-check/base-red. Never add a timeout,
+   alarm, or other synthetic deadline; only the repository gate's own timeouts
+   count. Never background a finite gate and poll a status file from a later
+   tool call; Codex can reap descendants detached from the tool session —
    `lane.sh base-check -- <cmd>` re-runs a failing check on clean base, and
    the **same check** red there is a base defect recorded with
    `merge-failed <iid> --base-red <check-id> --fix <fix-iid>`, which never
@@ -463,13 +476,13 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 
 - `blocked` = rejection cap exhausted (`rejection_cap`), a product decision
   only the human can make is missing, or an external dependency. Crashes are
-  counted separately (`crash_cap`) and are not rejections. A ticket **rewritten
-  into different work** keeps the old scope's rejections until a human retires
-  them with `lane.sh rescope <n>`, which retires its merge attempts too;
-  `lane.sh merge-reset <n>` retires those alone, when the work is unchanged and
-  what its merges died on is fixed. Both refused inside a lane or a wave, like
-  `--release-hold`. *(paid: a spent cap against deleted code; a merge cap with
-  no reset.)*
+  counted separately (`crash_cap`). Human-only `lane.sh rescope <n>` retires
+  verdict, rejection and merge history for different work; `lane.sh
+  verdict-reset <n>` retires verdict/rejection history when the same work and
+  HEAD had an invalid gate; `lane.sh merge-reset <n>` retires merge history
+  after its cause is fixed. Their tracker markers are provider-neutral; lanes
+  and waves cannot write them. *(paid: stale caps; JOR-262's invalid
+  gate.)*
 - Blocking writes a **blocked report** with
   **`lane.sh blocked-report <n> --category <slug>`** (body on stdin): what each
   attempt tried, branch/MR links, *the single decision or action needed*. Never

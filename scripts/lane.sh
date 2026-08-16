@@ -24,6 +24,11 @@
 #                                            trailer appended, then flip the
 #                                            label: pass → merge-queue,
 #                                            fail → in-progress
+#   lane.sh verdict-reset <iid> [--file F]    same work and HEAD, but the prior
+#                                            gate outcome is invalid: post the
+#                                            mandatory reason and retire prior
+#                                            verdicts/rejections. Human only —
+#                                            refused inside a lane or a wave
 #   lane.sh reconcile [<base>]               fetch + MERGE origin/<base> into
 #                                            the branch — the only sanctioned
 #                                            reconciliation; rc 3 = real
@@ -166,6 +171,21 @@ STATES="ready-for-agent in-progress review merge-queue blocked"
 # tracker write must never fail because the ticker could not be fed.
 TICK_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 _lane_ev() { "$TICK_SH" event "$@" >/dev/null 2>&1 || true; }
+
+# A tracker outcome is stronger than the provider process exit that follows
+# it. The model can complete submit/verdict/close and then lose its execution
+# host (or fail an optional handoff); that raw rc is useful diagnostics, but it
+# must not repaint completed ticket work as a failed lane. The host epilogue
+# consumes this marker and retains both values in the lane_exit event.
+_mark_lane_outcome() { # <review|merge-queue|blocked|gate-verdict|closed|probe-result>
+    [ -n "${LOOM_HOME:-}" ] && [ -n "${LOOM_LANE_ID:-}" ] || return 0
+    case "$LOOM_LANE_ID" in impl-*|gate-*|merge-*|probe-*) ;; *) return 0 ;; esac
+    mkdir -p "$LOOM_HOME/lanes" 2>/dev/null || return 0
+    local tmp="$LOOM_HOME/lanes/$LOOM_LANE_ID.outcome.$$"
+    printf '%s\n' "$1" > "$tmp" 2>/dev/null \
+        && mv "$tmp" "$LOOM_HOME/lanes/$LOOM_LANE_ID.outcome" 2>/dev/null \
+        || rm -f "$tmp"
+}
 
 # Stage stdin/--file into a private temp file so the tracker command the
 # harness sees contains only a literal path this script produced.
@@ -312,6 +332,7 @@ _set_state() { # <iid> <state> [extra -f args...]
     "$TRACKER" issue-relabel "$iid" --add "$state" --remove "${remove#,}" "$@"
     _forget_issue   # the labels just changed; no later guard may read the old set
     echo "lane.sh: issue $iid → $state"
+    case "$state" in review|merge-queue|blocked) _mark_lane_outcome "$state" ;; esac
 }
 
 _check_iid() { case "${1:-}" in ''|*[!0-9]*) die "bad iid: '${1:-}'";; esac; }
@@ -374,7 +395,7 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     # in this refusal.
     local jqd; jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
     if printf '%s' "$_notes" | jq -L "$jqd" -e --arg up "$up" --arg sha "$sha" \
-        'include "lib"; [.[] | (.body // "") | orch_verdict_scan | select(.[0] == $up and .[1] == $sha)] | length > 0' \
+        'include "lib"; verdicts_after_reset(.) | any(.verdict == $up and .sha == $sha)' \
         >/dev/null 2>&1
     then
         die "issue $iid already carries an orch-verdict $up $sha trailer — refusing a duplicate"
@@ -388,6 +409,7 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     if [ "$res" = pass ]; then _set_state "$iid" merge-queue
     else _set_state "$iid" in-progress; fi
     _lane_ev gate_verdict ticket "$iid" verdict "$up" sha "$sha"
+    _mark_lane_outcome gate-verdict
 }
 
 cmd_merge_failed() { # <iid> [--file F]
@@ -584,6 +606,25 @@ cmd_rescope() { # <iid> [--file F]
     _post_note issue "$iid" "$f"
     _lane_ev ticket_rescope ticket "$iid"
     echo "lane.sh: issue $iid re-scoped — rejections and merge attempts recorded before this note no longer count"
+}
+
+cmd_verdict_reset() { # <iid> [--file F]
+    # D-SNAP-19: retire an invalid gate outcome without pretending the ticket
+    # became different work or manufacturing a commit to change its HEAD.
+    # The reason and marker are tracker state so every provider and fresh wave
+    # derives the same active verdict history.
+    local iid="${1:-}"
+    _check_iid "$iid"
+    if _automated_caller; then
+        die "verdict-reset is refused in an automated session (${LOOM_LANE_ID:-wave}): invalidating a gate outcome is a human's decision, never a lane's or a wave's."
+    fi
+    # A body is mandatory: a bare marker would erase an outcome without saying
+    # what invalidated it or why an independent rerun is justified.
+    local f; f=$(_stage_body "${@:2}")
+    printf '\n\n<!-- orch-verdict-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issue "$iid" "$f"
+    _lane_ev ticket_verdict_reset ticket "$iid"
+    echo "lane.sh: issue $iid — verdicts and rejections recorded before this note no longer count"
 }
 
 cmd_merge_reset() { # <iid> [--file F]
@@ -846,6 +887,7 @@ cmd_probe_result() { # <build-iid> <epic-slug> pass|fail [--file F]
     cat "$f" >> "$hdr"
     _post_note issue "$iid" "$hdr"
     _lane_ev probe_result epic "$slug" result "$up"
+    _mark_lane_outcome probe-result
     # A PASS also closes the epic's milestone — completeness stays DERIVED
     # (nothing reads milestone state), but a finished epic left open misleads
     # the human reading the tracker, same argument as closing Build issues
@@ -974,14 +1016,26 @@ EOF
 # the arbiter of whether this branch is mergeable, and it runs next — so this
 # reports loudly and returns, leaving the verdict where it belongs.
 _run_install() { # <cmd> <dir>
-    local cmd="${LANE_INSTALL_CMD:-$1}" d="$2"
+    local cmd="${LANE_INSTALL_CMD:-$1}" d="$2" install_log rc
     echo "lane.sh: the base merge moved a manifest or lockfile under '$d' — running '$cmd' there so the gate tests this worktree, not a stale one"
-    if ( cd "$d" && $cmd >/dev/null 2>&1 ); then
+    install_log=$(mktemp "${TMPDIR:-/tmp}/loom-install.XXXXXX") \
+        || { echo "lane.sh: could not create a dependency-install log — the gate will decide mergeability" >&2; return 0; }
+    if ( cd "$d" && $cmd ) >"$install_log" 2>&1; then
+        rm -f "$install_log"
         echo "lane.sh: dependencies synced in '$d'"
     else
-        # Worth saying twice: this line is what a merge-failed report should
-        # quote when the gate then fails on a missing module.
-        echo "lane.sh: '$cmd' FAILED in '$d' — the gate will likely go red on missing dependencies; say so in the merge-failed report" >&2
+        rc=$?
+        # Build 1 #136 reached this branch after pnpm failed while relinking
+        # merged dependencies. Redirecting both streams to /dev/null erased
+        # the only actionable error and left the lane with missing-module
+        # fallout. Keep successful installs terse; replay failures verbatim.
+        echo "lane.sh: '$cmd' FAILED in '$d' (exit $rc) — installer output follows; the gate will decide mergeability" >&2
+        if [ -s "$install_log" ]; then
+            cat "$install_log" >&2
+        else
+            echo "lane.sh: installer produced no output" >&2
+        fi
+        rm -f "$install_log"
     fi
     return 0
 }
@@ -1286,10 +1340,11 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
     "$TRACKER" issue-close "$iid" --remove "${remove#,}"
     echo "lane.sh: issue $iid closed, state labels stripped"
     _lane_ev ticket_close ticket "$iid"
+    _mark_lane_outcome closed
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1328,6 +1383,7 @@ case "${1:-}" in
     wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
     rescope)    shift; cmd_rescope "$@" ;;
+    verdict-reset) shift; cmd_verdict_reset "$@" ;;
     merge-reset) shift; cmd_merge_reset "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;

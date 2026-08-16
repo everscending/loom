@@ -93,6 +93,21 @@ case "$(tail -1 "$PATH_CAP")" in "/runtime/node/bin:"*)
 case ":$(tail -1 "$PATH_CAP"):" in *":/runtime/pnpm/bin:"*)
   ok "codex adapter: actual pnpm runtime survives Volta removing its shim directory";;
   *) bad "codex adapter: actual pnpm runtime missing from inherited PATH ($(tail -1 "$PATH_CAP"))";; esac
+# Live Codex failure (demand-letter-generator build 1, 2026-08-16): the
+# workspace sandbox denied tsx IPC, local TCP listeners and Chromium Mach
+# services. Keep that safer default, but make a human's explicit opt-in
+# deterministic so repos whose gates require those primitives can run.
+: > "$CAP"; : > "$STDIN_CAP"
+CAP="$CAP" STDIN_CAP="$STDIN_CAP" LOOM_CODEX_CMD="$AR/bin/codex" \
+  LOOM_CODEX_SANDBOX=danger-full-access LOOM_AGENT_NATIVE_LOG="$AR/codex-unsandboxed.native" \
+  "$AGENT" run --provider codex --job gate --tier medium --cwd "$AR/repo" --brief "$AR/brief.md" >/dev/null
+argv=$(tail -1 "$CAP")
+case "$argv" in *"--sandbox danger-full-access"*)
+  ok "codex adapter: explicit socket-capable sandbox opt-in reaches the CLI";;
+  *) bad "codex adapter: explicit sandbox opt-in was ignored ($argv)";; esac
+case "$argv" in *"sandbox_workspace_write.network_access"*|*"--add-dir"*)
+  bad "codex adapter: danger-full-access opt-in retained contradictory workspace grants ($argv)";;
+  *) ok "codex adapter: danger-full-access opt-in emits no contradictory workspace grants";; esac
 printf '%s' "$out" | jq -se 'any(.type=="session_start" and .provider=="codex" and .requested_tier=="high" and .resolved_profile.model=="gpt-5.6-sol") and any(.type=="assistant_progress") and any(.type=="usage" and .cost_usd==null) and any(.type=="session_end" and .status=="success")' >/dev/null \
   && ok "codex adapter: native stream becomes canonical JSONL with unknown cost null" \
   || bad "codex adapter: canonical stream incomplete ($out)"
@@ -103,6 +118,9 @@ CAP="$CAP" STDIN_CAP="$STDIN_CAP" LOOM_CODEX_CMD="$AR/bin/codex" LOOM_AGENT_NATI
 argv=$(tail -1 "$CAP")
 case "$argv" in *"--model gpt-5.6-terra"*"model_reasoning_effort=\"medium\""*)
   ok "codex adapter: medium maps exactly to Terra/medium";; *) bad "codex adapter: medium argv wrong ($argv)";; esac
+case "$argv" in *"--sandbox workspace-write"*"--add-dir $LOOM_HOME"*)
+  ok "codex adapter: scheduling waves retain the narrower workspace sandbox";;
+  *) bad "codex adapter: scheduling wave lost its narrow sandbox ($argv)";; esac
 case "$argv" in *luna*|*xhigh*|*max*) bad "codex adapter: invented a forbidden fallback ($argv)";;
   *) ok "codex adapter: no Luna/xhigh/max fallback";; esac
 
@@ -238,6 +256,9 @@ cat > "$AR/bin/tracker" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   issues-open) cat "${BUILD_JSON:?}" ;;
+  issue-notes)
+    if [ -n "${NOTES_JSON:-}" ] && [ "${2:-}" = "${FIXTURE_TICKET:-}" ]; then cat "$NOTES_JSON"
+    else printf '[]\n'; fi ;;
   labels) printf '[{"name":"provider::claude"},{"name":"provider::codex"}]\n' ;;
   issue-relabel) echo "$*" >> "${MUTATIONS:?}"; printf '{}\n' ;;
   *) printf '[]\n' ;;
@@ -245,7 +266,12 @@ esac
 EOF
 cat > "$AR/bin/forge" <<'EOF'
 #!/usr/bin/env bash
-printf '[]\n'
+case "$1" in
+  issue-mrs)
+    if [ -n "${FORGE_JSON:-}" ] && [ "${2:-}" = "${FIXTURE_TICKET:-}" ]; then cat "$FORGE_JSON"
+    else printf '[]\n'; fi ;;
+  *) printf '[]\n' ;;
+esac
 EOF
 chmod +x "$AR/bin/tracker" "$AR/bin/forge"
 
@@ -371,6 +397,91 @@ if [ "$rc" -eq 0 ] && [ "$prepared_cwd" = "$(cd "$WT/repo" && pwd -P)/.worktrees
   ok "wave preparation: <base> resolves through the shared base rule before worktree creation"
 else
   bad "wave preparation: unresolved <base> stopped the host scheduler (rc=$rc cwd=[$prepared_cwd] $(head -1 "$WT/tick.out"))"
+fi
+
+# A killed implementation can be in-progress with a dirty surviving worktree
+# and no MR yet. That is precisely the work a recovery wave must resume; an
+# open-MR requirement belongs to gate/merge lanes, not stranded implementations.
+stranded_cwd=$(LOOM_WORKTREE_INSTALL_CMD=true \
+  "$WORKTREE" prepare --repo "$WT/repo" --ticket 120 --base main)
+printf 'preserved\n' > "$stranded_cwd/unfinished.txt"
+cat > "$WT/build-stranded.json" <<'EOF'
+[
+  {"id":1,"title":"Build 1","state":"open","labels":["provider::codex"],"assignees":[],"body":"","url":"https://x/build"},
+  {"id":120,"title":"Stranded implementation","state":"open","labels":["build-1","in-progress","tier::logic"],"assignees":["agent"],"body":"Resume the work","url":"https://x/120"}
+]
+EOF
+BUILD_JSON="$WT/build-stranded.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/stranded-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$TICK" tick --provider codex >"$WT/stranded.out" 2>&1
+stranded_rc=$?
+stranded_plan=$(find "$WT/stranded-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+resolved_stranded=$([ -n "$stranded_plan" ] && jq -r '.actions[] | select(.lane == "impl-120") | .spawn.cwd // empty' "$stranded_plan")
+if [ "$stranded_rc" -eq 0 ] && [ "$resolved_stranded" = "$stranded_cwd" ] \
+   && [ -f "$stranded_cwd/unfinished.txt" ]; then
+  ok "wave preparation: stranded implementation reuses its worktree without an open MR"
+else
+  bad "wave preparation: stranded no-MR implementation could not resume (rc=$stranded_rc cwd=[$resolved_stranded])"
+fi
+
+# Rework is also an implementation action, but its open MR makes the branch
+# durable. If sweep removed only the linked checkout, resume must reconstruct
+# that checkout from the MR branch instead of requiring uncommitted local state.
+git -C "$WT/repo" switch -qc rework-121 main
+printf 'rework\n' > "$WT/repo/rework.txt"
+git -C "$WT/repo" add rework.txt
+git -C "$WT/repo" commit -qm rework
+git -C "$WT/repo" push -q -u origin rework-121
+rework_head=$(git -C "$WT/repo" rev-parse HEAD)
+git -C "$WT/repo" switch -q main
+cat > "$WT/build-rework.json" <<'EOF'
+[
+  {"id":1,"title":"Build 1","state":"open","labels":["provider::codex"],"assignees":[],"body":"","url":"https://x/build"},
+  {"id":121,"title":"Swept rework checkout","state":"open","labels":["build-1","in-progress","tier::logic"],"assignees":["agent"],"body":"Resume the rejected work","url":"https://x/121"}
+]
+EOF
+printf '[{"id":77,"title":"Rework 121","state":"open","draft":false,"url":"https://x/pr/77","branch":"rework-121","sha":"%s","body":"Loom-Ticket: 121"}]\n' "$rework_head" > "$WT/rework-mrs.json"
+printf '[{"body":"Gate rejected this head.\\n\\n<!-- orch-verdict FAIL %s class=fixture -->","created_at":"2026-08-16T00:00:00Z","system":false}]\n' "$rework_head" > "$WT/rework-notes.json"
+BUILD_JSON="$WT/build-rework.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=121 FORGE_JSON="$WT/rework-mrs.json" NOTES_JSON="$WT/rework-notes.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/rework-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$TICK" tick --provider codex >"$WT/rework.out" 2>&1
+rework_rc=$?
+rework_plan=$(find "$WT/rework-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+resolved_rework=$([ -n "$rework_plan" ] && jq -r '.actions[] | select(.lane == "impl-121") | .spawn.cwd // empty' "$rework_plan")
+if [ "$rework_rc" -eq 0 ] && [ "$resolved_rework" = "$(cd "$WT/repo" && pwd -P)/.worktrees/121" ] \
+   && [ "$(git -C "$resolved_rework" rev-parse HEAD 2>/dev/null)" = "$rework_head" ]; then
+  ok "wave preparation: swept rework worktree is reconstructed from its open MR branch"
+else
+  bad "wave preparation: open-MR rework could not reconstruct its swept worktree (rc=$rework_rc cwd=[$resolved_rework] $(tail -2 "$WT/rework.out" | tr '\n' ';'))"
+fi
+
+# If that PR lands outside Loom while its tracker ticket remains open, the
+# branch is no longer rework. Preserve a post-merge FAIL as explicit residue
+# and let other ready work proceed; never recreate and edit shipped code under
+# the old ticket.
+sed 's/"state":"open"/"state":"merged"/' "$WT/rework-mrs.json" > "$WT/merged-mrs.json"
+BUILD_JSON="$WT/build-rework.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=121 FORGE_JSON="$WT/merged-mrs.json" NOTES_JSON="$WT/rework-notes.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/merged-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$TICK" tick --provider codex >"$WT/merged.out" 2>&1
+merged_rc=$?
+merged_plan=$(find "$WT/merged-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+if [ "$merged_rc" -eq 0 ] && [ -n "$merged_plan" ] \
+   && jq -e 'any(.residue[]; .kind == "merged-ticket-open" and .ticket == 121 and (.why | contains("file a fix ticket")))
+             and (any(.actions[]; .ticket == 121 and .kind == "spawn") | not)' "$merged_plan" >/dev/null; then
+  ok "wave preparation: merged PR with a standing FAIL becomes follow-up residue, never rework"
+else
+  bad "wave preparation: merged failing PR was respawned or lost (rc=$merged_rc plan=[$merged_plan] $(tail -2 "$WT/merged.out" | tr '\n' ';'))"
 fi
 
 test_finish

@@ -84,9 +84,10 @@ agent_normalize() {
 }
 
 agent_run() {
-    local job="$1" cwd="$3" brief="$4" lane="$5" profile="$6" bin="${LOOM_CODEX_CMD:-codex}" model effort native rc=0
+    local job="$1" cwd="$3" brief="$4" lane="$5" profile="$6" bin="${LOOM_CODEX_CMD:-codex}" model effort native rc=0 sandbox=""
     local state_dir="${LOOM_HOME:-${TMPDIR:-/tmp}}" git_common="" runtime_node="" runtime_node_dir=""
     local pnpm_runtime="" pnpm_runtime_dir=""
+    local -a sandbox_args
     model=$(printf '%s' "$profile" | jq -r .model)
     effort=$(printf '%s' "$profile" | jq -r .reasoning_effort)
     # A linked worktree keeps FETCH_HEAD, refs, locks and its index beneath the
@@ -123,9 +124,23 @@ agent_run() {
     fi
     [ -z "$pnpm_runtime_dir" ] || export PATH="$pnpm_runtime_dir:$PATH"
     [ -z "$runtime_node_dir" ] || export PATH="$runtime_node_dir:$PATH"
+    # workspace-write is the safe default. Some macOS repositories need local
+    # Unix sockets, TCP listeners or Chromium Mach services in their tests;
+    # Codex's workspace sandbox denies those even with network_access enabled.
+    # A human can explicitly opt this build into the broader provider mode.
+    sandbox="${LOOM_CODEX_SANDBOX:-workspace-write}"
+    case "$sandbox" in
+      workspace-write)
+        sandbox_args=(--sandbox workspace-write --add-dir "$state_dir" --add-dir "$git_common" -c 'sandbox_workspace_write.network_access=true') ;;
+      danger-full-access)
+        sandbox_args=(--sandbox danger-full-access) ;;
+      *)
+        _agent_error policy "Invalid LOOM_CODEX_SANDBOX '$sandbox' (expected workspace-write or danger-full-access)" codex
+        return 23 ;;
+    esac
     native="${LOOM_AGENT_NATIVE_LOG:-${TMPDIR:-/tmp}/loom-codex-native-$$.jsonl}"
     LOOM_DEFER_LANE_LAUNCH=1 "$bin" exec --json --ephemeral --model "$model" -c "model_reasoning_effort=\"$effort\"" \
-      -c 'approval_policy="never"' --sandbox workspace-write --add-dir "$state_dir" --add-dir "$git_common" -c 'sandbox_workspace_write.network_access=true' \
+      -c 'approval_policy="never"' "${sandbox_args[@]}" \
       -c 'shell_environment_policy.inherit=all' \
       -C "$cwd" - < "$brief" 2>"$native.stderr" | tee "$native" | agent_normalize "$job" "$lane" || rc=${PIPESTATUS[0]}
     [ "$rc" -eq 0 ] || ! grep -qiE 'usage limit|session limit|rate limit|quota|limit reached' "$native" "$native.stderr" 2>/dev/null || return 42

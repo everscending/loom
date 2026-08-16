@@ -60,10 +60,7 @@ include "lib";
     # Bind the element before comparing: `$head | startswith(.sha)` would
     # evaluate `.sha` against $head — a string — not against the verdict.
     def judged_at($notes; $head):
-        ([$notes | to_entries[] | .key as $i | .value as $note
-          | ($note.body // "")
-          | orch_verdict_scan
-          | {verdict: .[0], sha: .[1], at: ($note.created_at // ""), i: $i}]) as $vs
+        verdicts_after_reset($notes) as $vs
       | if $head == null then null
         else ($vs | map(select(. as $v | ($head | startswith($v.sha))
                                       or ($v.sha | startswith($head))))
@@ -147,10 +144,11 @@ include "lib";
     # decision, not a third same-tier guess (#39 burned round 3 on a class
     # the round-2 verdict had already named, 2026-08-02). A FAIL without a
     # class, or a PASS, breaks the run — conservative by design.
-    # P37: a `<!-- orch-scope-reset … -->` marker (lane.sh rescope) says the
-    # ticket became different work, so the cap is attached to the SCOPE and not
-    # to the issue number: verdicts older than the newest marker count toward
-    # neither `total` nor `same_class_tail`. #67 was rewritten into a bounded
+    # P37: `orch-scope-reset` says the ticket became different work, so the cap
+    # is attached to the scope and not the issue number. D-SNAP-19 adds the
+    # narrower `orch-verdict-reset` for an invalid gate outcome on unchanged
+    # work. `verdicts_after_reset` retires history at/before the newest marker.
+    # #67 was rewritten into a bounded
     # give-up after the race it was rejected over moved to #48 and #48 deleted
     # the code — and it returned to the board with 3 of 3 rejections against
     # machinery that no longer existed (build-3, 2026-08-04). Ordering uses the
@@ -160,17 +158,7 @@ include "lib";
     # comparison key. (No apostrophes in this comment: the whole jq program is a
     # single-quoted shell string, and one would end it mid-word.)
     def rejections_of($notes):
-        ([$notes | to_entries[]
-          | select((.value.body // "") | test("orch-scope-reset"))
-          | {at: (.value.created_at // ""), i: .key}]
-         | sort_by([.at, -.i]) | last) as $reset
-      | ([$notes | to_entries[] | .key as $i | .value as $note
-          | ($note.body // "")
-          | orch_verdict_scan
-          | {verdict: .[0], class: .[2], at: ($note.created_at // ""), i: $i}]
-         | sort_by([.at, -.i])
-         | if $reset == null then .
-           else map(select([.at, -.i] > [$reset.at, -$reset.i])) end) as $vs
+        verdicts_after_reset($notes) as $vs
       | ($vs | reverse
              | reduce .[] as $v ({run: 0, cls: null, stop: false};
                  if .stop then .
@@ -362,6 +350,10 @@ include "lib";
             related: ($lk | map(select((.type // "") == "relates_to") | .id)),
             related_merge_requests: ((($M[$t.id | tostring]) // [])
                 | map({id, title, state, draft, url, branch, sha})),
+            merged_verdict: (([ (($M[$t.id | tostring]) // [])[]
+                                  | select((.state // "") == "merged")
+                                  | .sha ] | first // null) as $merged_head
+                              | judged_at((($N[$t.id | tostring]) // []); $merged_head)),
             rejections: $rej,
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
@@ -606,6 +598,8 @@ include "lib";
             # build-3 2026-08-02 — #11/#12 gate-FAILed and sat unworked.)
             stranded: ($tickets
                        | map(select(.state == "in-progress"
+                              and ([.related_merge_requests[]?
+                                    | select(.state == "merged")] | length) == 0
                               and (((.id | tostring) as $i
                                     | $working | index($i)) | not)))
                        | map(.id)),

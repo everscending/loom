@@ -159,7 +159,11 @@ cmd_run() {
       --arg tier "$tier" --argjson profile "$profile" \
       '{schema:1,type:"session_start",timestamp:$ts,provider:$provider,job:$job,
         lane_id:(if $lane=="" then null else $lane end),requested_tier:$tier,resolved_profile:$profile}'
-    agent_run "$job" "$tier" "$cwd" "$brief" "$lane_id" "$profile" || rc=$?
+    # Marks only the provider process tree, not the lane host shell that calls
+    # us. tick.sh uses the boundary to make a model-authored --from-lane call a
+    # safe no-op while the deterministic host epilogue remains authoritative.
+    # One shared marker keeps Claude and Codex behavior identical.
+    LOOM_PROVIDER_SESSION=1 agent_run "$job" "$tier" "$cwd" "$brief" "$lane_id" "$profile" || rc=$?
     if [ "$rc" -eq 42 ]; then
       jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg job "$job" --arg lane "$lane_id" \
         '{schema:1,type:"limit",timestamp:$ts,provider:$provider,job:$job,lane_id:(if $lane=="" then null else $lane end),reset_at:null,message:"provider usage limit",action:"downshift_or_pause"}'
@@ -170,7 +174,7 @@ cmd_run() {
         agent_preflight "$job" medium "$cwd" "$profile" || return
         jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg provider "$provider" --arg job "$job" --arg lane "$lane_id" --argjson profile "$profile" \
           '{schema:1,type:"session_start",timestamp:$ts,provider:$provider,job:$job,lane_id:(if $lane=="" then null else $lane end),requested_tier:"medium",resolved_profile:$profile,downshifted_from:"high"}'
-        rc=0; agent_run "$job" medium "$cwd" "$brief" "$lane_id" "$profile" || rc=$?
+        rc=0; LOOM_PROVIDER_SESSION=1 agent_run "$job" medium "$cwd" "$brief" "$lane_id" "$profile" || rc=$?
       fi
     fi
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 42 ] && [ "$rc" -ne 25 ]; then

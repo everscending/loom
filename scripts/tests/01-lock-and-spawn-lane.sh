@@ -117,7 +117,9 @@ for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/impl-93.pid" ] && break; sleep 0
 pid=$(cat "$LOOM_HOME/lanes/impl-93.pid" 2>/dev/null || echo "")
 plist="$LOOM_HOME/lanes/impl-93.plist"
 if grep -q '^bootstrap ' "$LAUNCH_CALLS" && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
-   && [ -f "$plist" ] && ! grep -q '<key>KeepAlive</key>' "$plist"; then
+   && [ -f "$plist" ] && ! grep -q '<key>KeepAlive</key>' "$plist" \
+   && grep -q '<key>ProcessType</key><string>Standard</string>' "$plist" \
+   && ! grep -q '<key>ProcessType</key><string>Background</string>' "$plist"; then
   ok "launchd lane: one-shot worker is bootstrapped without KeepAlive"
 else
   bad "launchd lane: spawn did not bootstrap a live one-shot worker"
@@ -147,6 +149,105 @@ grep -q '^bootout ' "$LAUNCH_CALLS" \
   && ok "launchd lane: clear removes the completed per-lane job" \
   || bad "launchd lane: clear left the per-lane launchd job registered"
 kill "$pid" 2>/dev/null
+
+# Playwright's webServer can exit its wrapper while leaving Next reparented to
+# launchd. The port and cwd belong to the lane; clearing that dead lane must
+# reap only a listener still rooted in the lane worktree.
+leak_cwd="$T/leaked-port-worktree"; mkdir -p "$leak_cwd"
+leak_port=$((45000 + ($$ % 1000)))
+while lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1; do
+  leak_port=$((leak_port + 1))
+done
+(cd "$leak_cwd" && python3 -m http.server "$leak_port" >/dev/null 2>&1) & leak_pid=$!
+for _ in $(seq 1 40); do lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.05; done
+if ! lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1; then
+  bad "lane port cleanup: fixture never opened its listener"
+else
+  printf '%s\n' "$leak_port" > "$LOOM_HOME/lanes/impl-port.port"
+  printf '%s\n' "$leak_cwd" > "$LOOM_HOME/lanes/impl-port.cwd"
+  "$TICK" clear-lane impl-port >/dev/null
+  if ! lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1 \
+     && [ ! -e "$LOOM_HOME/lanes/impl-port.port" ] \
+     && [ ! -e "$LOOM_HOME/lanes/impl-port.cwd" ]; then
+    ok "lane port cleanup: clear reaps an orphan listener owned by the lane cwd"
+  else
+    bad "lane port cleanup: dead lane left its test server listening"
+    kill "$leak_pid" 2>/dev/null || true
+  fi
+fi
+
+# D-TICK-22: a one-shot launchd job owns the lane's whole process group. If
+# its completion tick is backgrounded, launchd reaps that descendant when the
+# lane shell exits and an armed build waits for the ordinary heartbeat/gap.
+# The supervised program must keep the successor in the foreground.
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" spawn-lane impl-94 -- sleep 5 >/dev/null
+for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/impl-94.pid" ] && break; sleep 0.05; done
+pid=$(cat "$LOOM_HOME/lanes/impl-94.pid" 2>/dev/null || echo "")
+program=$(plutil -convert json -o - "$LOOM_HOME/lanes/impl-94.plist" \
+  | jq -r '.ProgramArguments | map(select(contains("tick --from-lane"))) | first // ""')
+impl_port=$(plutil -convert json -o - "$LOOM_HOME/lanes/impl-94.plist" \
+  | jq -r '.ProgramArguments | map(select(startswith("PORT="))) | first // ""')
+kill "$pid" 2>/dev/null
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" clear-lane impl-94 >/dev/null
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" spawn-lane merge-94 --merge-lock -- sleep 5 >/dev/null
+for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/merge-94.pid" ] && break; sleep 0.05; done
+merge_pid=$(cat "$LOOM_HOME/lanes/merge-94.pid" 2>/dev/null || echo "")
+merge_program=$(plutil -convert json -o - "$LOOM_HOME/lanes/merge-94.plist" \
+  | jq -r '.ProgramArguments | map(select(contains("chain-merge"))) | first // ""')
+if printf '%s' "$program" | grep -q 'tick --from-lane' \
+   && ! printf '%s' "$program" | grep -Fq '2>&1 &' \
+   && printf '%s' "$merge_program" | grep -q 'chain-merge' \
+   && ! printf '%s' "$merge_program" | grep -Fq '2>&1 &'; then
+  ok "launchd handoff: tick and merge successors stay supervised until they return"
+else
+  bad "launchd handoff: a completion successor is backgrounded and launchd can reap it"
+fi
+kill "$merge_pid" 2>/dev/null
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" clear-lane merge-94 >/dev/null
+rm -rf "$LOOM_HOME/merge.lock.d"
+
+# A wave-authored gate brief can omit its optional handoff line. The gate's
+# deterministic epilogue must still drain the oldest merge-queue ticket
+# directly instead of waiting for another paid scheduler wave.
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" spawn-lane gate-95 -- sleep 5 >/dev/null
+for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/gate-95.pid" ] && break; sleep 0.05; done
+gate_pid=$(cat "$LOOM_HOME/lanes/gate-95.pid" 2>/dev/null || echo "")
+gate_program=$(plutil -convert json -o - "$LOOM_HOME/lanes/gate-95.plist" \
+  | jq -r '.ProgramArguments | map(select(contains("chain-merge"))) | first // ""')
+gate_port=$(plutil -convert json -o - "$LOOM_HOME/lanes/gate-95.plist" \
+  | jq -r '.ProgramArguments | map(select(startswith("PORT="))) | first // ""')
+if printf '%s' "$gate_program" | grep -q 'chain-merge' \
+   && ! printf '%s' "$gate_program" | grep -Fq '2>&1 &'; then
+  ok "gate handoff: deterministic epilogue supervises the merge fast path"
+else
+  bad "gate handoff: a missing brief line falls back to a paid scheduler wave"
+fi
+if [ -n "$impl_port" ] && [ -n "$gate_port" ] && [ "$impl_port" != "$gate_port" ]; then
+  ok "lane ports: concurrent worktrees receive distinct app ports"
+else
+  bad "lane ports: launchd workers can collide on one fixed Playwright port ($impl_port, $gate_port)"
+fi
+
+# A provider can finish the ticket handoff and then return nonzero in optional
+# plumbing (or because its execution host tears down badly). The host epilogue
+# must preserve that raw code for diagnostics without reporting the completed
+# ticket as a failed lane.
+semantic_program=$(plutil -convert json -o - "$LOOM_HOME/lanes/gate-95.plist" 2>/dev/null \
+  | jq -r '.ProgramArguments | map(select(contains("provider_rc"))) | first // ""')
+if printf '%s' "$semantic_program" | grep -q '\.outcome' \
+   && printf '%s' "$semantic_program" | grep -q 'provider_rc'; then
+    ok "lane outcome: semantic handoff suppresses a false red exit while retaining provider rc"
+else
+    bad "lane outcome: epilogue does not distinguish ticket completion from provider rc"
+fi
+kill "$gate_pid" 2>/dev/null
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" clear-lane gate-95 >/dev/null
 
 # 2b. A provider session cannot own the detached worker it creates: Codex
 # reaps that whole process scope when the session exits. Such a spawn is
@@ -179,7 +280,26 @@ if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK" ]; then
 else
   bad "deferred launch: host drain did not start the queued worker"
 fi
+if grep -q "lane.sh verdict 90 pass" "$LOOM_HOME/briefs/gate-90.md" \
+   && grep -q "lane.sh verdict 90 fail" "$LOOM_HOME/briefs/gate-90.md"; then
+  ok "gate brief: mechanism appends the mandatory tracker verdict commands"
+else
+  bad "gate brief: a prose-only verdict can still exit without tracker state"
+fi
 kill "$pid" 2>/dev/null
+
+printf 'implementation provider brief\n' > "$T/impl-provider-brief.md"
+DEFER_MARK="$T/impl-agent-ran" LOOM_AGENT_CMD="$DEFER_AGENT" \
+  "$TICK" spawn-lane impl-89 --no-tick --provider codex --job implementation --tier medium \
+  --brief "$T/impl-provider-brief.md" --cwd "$LOOM_REPO" >/dev/null
+impl_pid=$(cat "$LOOM_HOME/lanes/impl-89.pid" 2>/dev/null || echo "")
+if grep -q "Do not run the repository's full configured tier gate" "$LOOM_HOME/briefs/impl-89.md" \
+   && grep -q "launchd-supervised gate lane" "$LOOM_HOME/briefs/impl-89.md"; then
+  ok "implementation brief: full gate is owned by the supervised gate lane"
+else
+  bad "implementation brief: provider session can still own the long full gate"
+fi
+kill "$impl_pid" 2>/dev/null
 
 # 2c. The ordinary wave wrapper performs that drain itself. This is the exact
 # production boundary: the wave command queues, returns, and the worker is

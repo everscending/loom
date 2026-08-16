@@ -31,7 +31,7 @@ find the test by the string it asserts, which is what the citation was really po
 
 ## Index of open defects
 
-68 open, counted from the table below, which is the live set. Most were verified against the
+67 open, counted from the table below, which is the live set. Most were verified against the
 shipping code on **2026-08-12** (a full re-check, not just a new filing — 6 entries closed as part
 of the same pass, already fixed by earlier proposals but never marked); D-SNAP-16, D-SNAP-17,
 D-LIN-01, D-LIN-02 and D-LIN-03 were filed later, on **2026-08-13**, and verified the same way
@@ -62,7 +62,6 @@ Never add a row for something not also a `### D-<FILE>-<nn>` entry below.
 | D-SNAP-04 | High | an open MR with no `sha` is gate-eligible forever |
 | D-SNAP-06 | High | `### Acceptance criteria` reads as absent |
 | D-SNAP-08 | High | the config-line filter deletes real epic names |
-| D-SNAP-16 | High | one verdict note stamped twice counts as two rejections |
 | D-LANE-02 | High | `close` refuses on "no open MR", not on "a merged MR exists" |
 | D-LANE-03 | High | `merge` takes `.[0]` of the open MRs in unspecified API order |
 | D-BOOT-03 | High | `cmd_settings \|\| true` turns a settings refusal into "bootstrap: done" |
@@ -286,33 +285,6 @@ issue #5 in another project then falls to `($open_iids | index(5)) == null`, so 
 blocker whose iid does not exist locally reports `closed: true` → `unblocked: true` → the ticket is
 scheduled. Body-sourced blockers (`:199`) take this path by design; this one is an accident of
 `$bi` being absent.
-
-### D-SNAP-16 · one verdict note stamped twice counts as two rejections
-`snapshot.jq` `rejections_of` → `lib.jq:42-43` `orch_verdict_scan` — the scan is jq's `scan()`,
-which returns **every** match in a body, and each match becomes its own verdict entry carrying that
-note's `created_at` and index. One comment holding the same trailer twice is therefore two FAILs,
-one apparent rejection round apart, with identical timestamps.
-**Failure:** `same_class_tail` reaches 2 off a single gate failure, which is exactly the cap
-`plan.jq:243` uses to stop reworking and park the ticket for a human design decision. The ticket is
-then re-blocked on every subsequent wave, because the count is re-derived from the thread and never
-from the branch, and the only exit is `lane.sh rescope` — refused for automated callers, so it
-needs a human. Same inflation shape as D-SNAP-10, one layer down: that entry is a bare `test()` over
-notes, this one is a repeated match inside a single note.
-**Confirmed live** (build-2 #62, 2026-08-13): the thread holds exactly one `orch-verdict FAIL`
-comment (the 05:14 gate verdict on `787a64af`), whose trailer is written twice at the end of the
-body. Replaying the shipping `rejections_of` over that note returns
-`{total: 2, last_class: "scope-connection-collision", same_class_tail: 2}`; the same note with the
-trailer written once returns `{total: 1, …, same_class_tail: 1}`. The wave's blocked report opened
-with the words "Two straight gate rejections" — prose generated from the inflated count, describing
-a second rejection that never happened. #62 sat parked for roughly nine hours on a cap it never hit,
-and each later wave re-derived the same verdict and re-blocked it without reading the branch, whose
-diff no longer contained the file the rejection was about.
-**Fix:** collapse verdicts per note before they reach the tail scan — one entry per `(note, sha)`
-at most, so a trailer repeated in one body counts once. Note that a *quoted* trailer inflates the
-count the same way: the pattern needs the sha, so ordinary prose is safe, but any note reproducing
-a full verdict trailer verbatim (a summary, a retro, a hand-written report) reads as a real verdict.
-**Test:** nothing asserts the count for a note carrying two trailers. `tick-test.sh`'s rescope and
-verdict cases each write one trailer per note, which is the only shape ever exercised.
 
 ### D-LANE-02 · `close` refuses on "no open MR", not on "a merged MR exists"
 `lane.sh:529-532` — an abandoned MR (state `closed`, never merged) passes the guard.
@@ -1549,3 +1521,90 @@ one assertion — `snapshot: prose quoting a base-red trailer does not park the 
 the fixture that already builds real base-red holds. A note pasting the COMPLETE trailer,
 delimiters included, still counts: it is byte-identical to the real marker, the same limit
 `merge_attempts_of` accepts. `orch_verdict_scan` (D-SNAP-16) is the last unanchored scan left.
+
+### D-TICK-21 · launchd Background QoS makes pregates exceed Vitest's worker RPC deadline
+*Closed 2026-08-16.*
+
+`_write_lane_plist` emitted `ProcessType=Background` for every macOS lane. A one-file launchd
+reproduction ran `tests/seed/assets.test.ts` in 86.44s under Background and expired Vitest's fixed
+60s worker RPC deadline; the identical one-shot job under Standard finished in 25.92s and exited 0.
+JOR-262 showed the full blast radius: its API gate passed interactively, then passed all 478 unit
+assertions under launchd but exited nonzero on the worker RPC timeout, blocking the only root-ready
+ticket and its 49 dependents.
+
+**Shipped:** `_write_lane_plist` now emits `ProcessType=Standard`. The existing one-shot launchd
+test requires Standard and rejects Background; reverting production alone makes that test red.
+Focused section 01: 79 passed, 0 failed. With D-TEST-16 fixed below, the full suite completed at
+1,106 passed, 0 failed.
+
+### D-TEST-16 · section 16 leaks `set -e` into later intentional-failure assertions
+*Closed 2026-08-16.*
+
+The P104 tracker-create regression enabled `set -e` after capturing an expected failure and never
+restored the shared harness's non-errexit mode. The next P70 counterexample intentionally returned
+nonzero, so the section exited before its assertion or `test_finish`: the focused run reported 0
+passed, 1 failed, and the prior full run stopped at 954 passed, 1 failed.
+
+**Shipped:** removed the leaked `set -e`; P104 still captures and asserts its return code while
+later planted violations execute in the harness's normal shell mode. Focused section 16 now reaches
+all four P70 counterexamples and finishes at 152 passed, 0 failed. Full suite: 1,106 passed, 0
+failed.
+
+### D-SNAP-19 · an invalid gate verdict at unchanged HEAD has no reset path
+*Closed 2026-08-16.*
+
+`judged_at` treated every verdict at the current MR SHA as permanently standing. `rescope` retired
+old rejections but was semantically wrong for unchanged work and did not make the HEAD gateable.
+JOR-262 therefore remained parked behind an invalid infrastructure FAIL after D-TICK-21 fixed the
+launcher and the same SHA passed its API gate.
+
+**Shipped:** human-only, reason-required `lane.sh verdict-reset <iid>` writes a provider-neutral
+`orch-verdict-reset` tracker marker. Shared `verdicts_after_reset` logic now drives gate eligibility,
+rejection counts, and duplicate-verdict refusal, so Claude and Codex derive identical state and a
+fresh independent gate can write a new verdict at the same SHA. Automated callers cannot reset
+their own outcome. Focused sections 07 and 16: 282 passed, 0 failed. Full suite: 1,116 passed, 0
+failed; jq compilation, Bash syntax, and `git diff --check` also passed.
+
+### D-TICK-22 · launchd reaps a lane's background completion trigger before it can tick
+*Closed 2026-08-16.*
+
+`_spawn_build_epilogue` started both successors in a background subshell and immediately exited
+the one-shot lane job. That works under the legacy `nohup` launcher, but macOS launchd tears down
+the job's remaining descendants when its main process exits. JOR-262's implementation lane
+recorded a successful exit and moved the ticket to review, yet emitted neither the promised
+`tick --from-lane` log nor its event; the ordinary heartbeat remained behind the wave gap.
+
+**Shipped:** launchd-owned lanes now run `tick --from-lane` and `chain-merge` synchronously inside
+the supervised epilogue; legacy `nohup` lanes retain their asynchronous behavior. The launchd
+fixture asserts that both successor commands are present and not backgrounded. Reverting the
+production change makes the focused section red at exactly that assertion. Focused section 01 is
+green, and the full suite passes 1,117 tests with 0 failures. The implementation is shared Bash,
+with no Codex- or Claude-specific branch.
+
+### D-SNAP-16 · one verdict note stamped twice counts as two rejections
+*Closed 2026-08-16.*
+
+`verdicts_after_reset` expanded every `orch-verdict` marker in a note into its own history entry.
+Gate prose that already contained the trailer later appended by `lane.sh verdict` therefore made
+one independent failure consume both same-class rejection slots and falsely park the ticket.
+
+**Shipped:** shared `lib.jq` now collapses markers to the final verdict per `(note, SHA)` before
+ordering the history. The existing snapshot section adds the live failure shape and proves one
+note with a repeated trailer reports one rejection. The logic is tracker- and provider-neutral, so
+Claude and Codex derive the same cap state.
+
+### D-TICK-23 · explicit sibling paths hide a config-selected adversarial test
+*Closed 2026-08-16.*
+
+`_adv_tier_paths` treated any explicit path found in a gate tier as a complete approximation of
+everything that tier could select. JOR-284 added a Vitest file selected through the unit project's
+`include`, while sibling commands named integration and Playwright paths explicitly. The pregate
+therefore concluded that the required adversarial test was absent and rejected the valid branch at
+rc 7 before an independent review session could run.
+
+**Shipped:** a recognized test command with no literal path now marks path derivation unknown, so
+the adversarial pregate fails open to the real gate. Fully explicit tiers retain their fast local
+rejection. The mixed config-selected fixture and its planted violation pass 17 focused assertions.
+The full suite reached 1,131 passes with one unrelated, reproducible `lane port cleanup` fixture
+failure. The change is in shared scheduler code; neither provider adapter changed, so Claude and
+Codex use the same behavior.

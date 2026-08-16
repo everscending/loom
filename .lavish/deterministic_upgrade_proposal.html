@@ -1,0 +1,716 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>P81 — the wave stops thinking, starts reading</title>
+
+<style>
+  :root {
+    --ground:   #D6D2C6;
+    --panel:    #E6E3D9;
+    --panel-2:  #EFEDE7;
+    --ink:      #1E2027;
+    --ink-soft: #5A5D64;
+    --ink-faint:#84867F;
+    --rule:     #B1AC9C;
+    --rule-soft:#C4BFB1;
+    --warp:     #26408F;
+    --weft:     #A5451A;
+    --tracker:  #16645A;
+    --halt:     #8C1F26;
+    --shadow:   rgba(30,32,39,.10);
+
+    --font-display: "Avenir Next Condensed", "Roboto Condensed", "Helvetica Neue", "Arial Narrow", sans-serif;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --measure: 66ch;
+    --wide: 1180px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #13151B;
+      --panel:    #1A1D25;
+      --panel-2:  #222630;
+      --ink:      #E5E2D9;
+      --ink-soft: #979AA2;
+      --ink-faint:#6E7178;
+      --rule:     #333846;
+      --rule-soft:#282D38;
+      --warp:     #8CA5F2;
+      --weft:     #E8A05C;
+      --tracker:  #52C6AC;
+      --halt:     #EB6B72;
+      --shadow:   rgba(0,0,0,.45);
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 20px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .col { max-width: var(--wide); margin-inline: auto; }
+  .col > * { max-width: var(--measure); }
+
+  /* ---- header ---- */
+
+  header.masthead {
+    max-width: var(--wide);
+    margin: 0 auto;
+    padding: 56px 0 0;
+  }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(52px, 10vw, 96px);
+    line-height: .88;
+    letter-spacing: -.01em;
+    font-weight: 700;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    max-width: 58ch;
+    font-size: 20px;
+    line-height: 1.45;
+    color: var(--ink-soft);
+    margin: 0 0 34px;
+  }
+
+  .standfirst b { color: var(--ink); font-weight: 600; }
+
+  /* ---- stat strip ---- */
+
+  .stats {
+    max-width: var(--wide);
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 14px;
+  }
+
+  .stat {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 16px 18px 14px;
+    box-shadow: 0 1px 0 var(--shadow);
+  }
+
+  .stat .n {
+    font-family: var(--font-display);
+    font-size: 44px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -.01em;
+  }
+
+  .stat .n.weft { color: var(--weft); }
+  .stat .n.warp { color: var(--warp); }
+
+  .stat .cap {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+    margin-top: 8px;
+  }
+
+  /* ---- sections ---- */
+
+  section { margin-top: 72px; }
+
+  .section-head {
+    max-width: var(--wide);
+    margin: 0 auto 26px;
+    border-top: 2px solid var(--ink);
+    padding-top: 12px;
+  }
+
+  .section-head .eyebrow { margin-bottom: 6px; }
+
+  h2 {
+    font-family: var(--font-display);
+    font-size: 34px;
+    line-height: 1.05;
+    font-weight: 700;
+    letter-spacing: .005em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+
+  .section-head p {
+    max-width: var(--measure);
+    color: var(--ink-soft);
+    margin: 8px 0 0;
+  }
+
+  p { margin: 0 0 16px; }
+
+  code, .m {
+    font-family: var(--font-mono);
+    font-size: .86em;
+    background: var(--panel-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 2px;
+    padding: .08em .32em;
+    white-space: nowrap;
+  }
+
+  /* ---- figures ---- */
+
+  figure {
+    max-width: var(--wide);
+    margin: 26px auto 0;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 18px 18px 0;
+    box-shadow: 0 1px 0 var(--shadow);
+  }
+
+  .fig-scroll { overflow-x: auto; }
+
+  figure svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    min-width: 720px;
+    color: var(--ink);
+  }
+
+  figure svg text { fill: currentColor; }
+
+  figcaption {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--rule-soft);
+    margin-top: 14px;
+    padding: 12px 0 16px;
+  }
+
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* ---- legend ---- */
+
+  .legend {
+    max-width: var(--wide);
+    margin: 18px auto 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 22px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+
+  .legend .key { display: flex; align-items: center; gap: 8px; }
+  .legend .swatch {
+    width: 22px; height: 12px;
+    border-radius: 2px;
+    border: 1.5px solid var(--rule);
+    background: var(--panel-2);
+  }
+  .legend .swatch.script { border-color: var(--warp); }
+  .legend .swatch.model  { border-color: var(--weft); }
+  .legend .swatch.conditional { border-color: var(--weft); border-style: dashed; }
+  .legend .swatch.human  { border-color: var(--halt); }
+
+  /* ---- before/after grid ---- */
+
+  .ba {
+    max-width: var(--wide);
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: 148px minmax(0,1fr) minmax(0,1fr);
+    gap: 10px 14px;
+    align-items: stretch;
+  }
+
+  .ba .head {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 0 2px 2px;
+    align-self: end;
+  }
+
+  .ba .step-name {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--ink);
+    padding: 12px 4px 12px 0;
+    border-top: 1px solid var(--rule-soft);
+  }
+
+  .ba .step-name .no { color: var(--ink-faint); margin-right: 6px; }
+
+  .cell {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-left: 5px solid var(--rule);
+    border-radius: 3px;
+    padding: 11px 14px 10px;
+    font-size: 14.5px;
+    line-height: 1.5;
+    color: var(--ink-soft);
+  }
+
+  .cell.script { border-left-color: var(--warp); }
+  .cell.model  { border-left-color: var(--weft); }
+  .cell.conditional { border-left-color: var(--weft); border-left-style: dashed; }
+
+  .cell .tag {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 9.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    margin-bottom: 5px;
+  }
+
+  .cell.script .tag { color: var(--warp); }
+  .cell.model .tag { color: var(--weft); }
+  .cell.conditional .tag { color: var(--weft); }
+  .cell .tag.same { color: var(--ink-faint); }
+
+  .cell b { color: var(--ink); font-weight: 600; }
+  .cell code { font-size: .84em; }
+
+  .ba .span-note {
+    grid-column: 2 / 4;
+    background: var(--panel-2);
+    border: 1px dashed var(--rule);
+    border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    padding: 10px 14px;
+  }
+
+  .ba .span-note b { color: var(--weft); }
+
+  @media (max-width: 760px) {
+    .ba { grid-template-columns: minmax(0,1fr); }
+    .ba .head { display: none; }
+    .ba .step-name { border-top: none; padding-bottom: 0; }
+    .ba .span-note { grid-column: 1 / 2; }
+    .ba .cell::before {
+      display: block;
+      font-family: var(--font-mono);
+      font-size: 9.5px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+      margin-bottom: 4px;
+    }
+    .ba .cell.b::before { content: "today"; }
+    .ba .cell.a::before { content: "with P81"; }
+  }
+
+  /* ---- card grids ---- */
+
+  .cards {
+    max-width: var(--wide);
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 16px 18px 14px;
+    box-shadow: 0 1px 0 var(--shadow);
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+
+  .card h3 {
+    font-family: var(--font-display);
+    font-size: 19px;
+    font-weight: 700;
+    color: var(--ink);
+    margin: 0 0 6px;
+  }
+
+  .card p { margin: 0; }
+  .card.keep { border-top: 3px solid var(--weft); }
+  .card.guard { border-top: 3px solid var(--warp); }
+  .card.next { border-top: 3px solid var(--tracker); }
+
+  /* ---- callout ---- */
+
+  .callout {
+    max-width: var(--wide);
+    margin: 30px auto;
+    display: grid;
+    grid-template-columns: 8px 1fr;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .callout .stripe { background: var(--weft); }
+  .callout.warp .stripe { background: var(--warp); }
+  .callout .body { padding: 18px 22px; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout .eyebrow { color: var(--weft); }
+  .callout.warp .eyebrow { color: var(--warp); }
+
+  /* ---- footer ---- */
+
+  footer {
+    max-width: var(--wide);
+    margin: 80px auto 0;
+    border-top: 1px solid var(--rule);
+    padding-top: 16px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--ink-faint);
+  }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <p class="eyebrow">loom · proposal P81 · the wave's scheduling is a pure function of the snapshot</p>
+  <h1>The wave stops<br>thinking, starts<br>reading.</h1>
+  <p class="standfirst">
+    Every two and a half minutes, a model session wakes up to decide what the build does next —
+    and every input to that decision <b>already exists</b>, computed deterministically, in the
+    snapshot it begins by reading. P81 compiles that decision table into a script, and lets a
+    model see only the residue a script honestly cannot write.
+  </p>
+  <div class="stats">
+    <div class="stat">
+      <div class="n weft">57.5%</div>
+      <div class="cap">of the build span sat inside wave sessions — 36 waves, 1h29m of a 2h35m build (seat-reservations build-1)</div>
+    </div>
+    <div class="stat">
+      <div class="n weft">2m28s</div>
+      <div class="cap">the average wave — the wait between “a ticket became ready” and “a lane exists for it”</div>
+    </div>
+    <div class="stat">
+      <div class="n weft">20%</div>
+      <div class="cap">of build spend — $683 of $3,404 across 407 sessions averaging 28 turns at 118k context per turn (boostlingo build-1)</div>
+    </div>
+    <div class="stat">
+      <div class="n warp">0</div>
+      <div class="cap">information the scheduling decision adds — every field it reads is one <code>snapshot.jq</code> already derives</div>
+    </div>
+  </div>
+</header>
+
+<!-- ================================================================ -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">the idea in one picture</p>
+    <h2>Same board, same answer — computed instead of interviewed</h2>
+    <p>One <code>tick</code>, before and after. The lanes at the right edge — the implementers,
+    gates, merges and probes that do the actual work — are untouched. Only the decider changes.</p>
+  </div>
+
+  <div class="legend">
+    <span class="key"><span class="swatch script"></span>deterministic — a script, seconds, zero model turns</span>
+    <span class="key"><span class="swatch model"></span>model session — minutes, turns, spend</span>
+    <span class="key"><span class="swatch conditional"></span>conditional model — launches only when residue exists</span>
+  </div>
+
+  <figure>
+    <div class="fig-scroll">
+    <svg viewBox="0 0 1160 452" role="img" aria-label="Before: one model session decides everything. After: a jq planner emits actions, an executor runs them, and a model launches only for residue.">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill:var(--ink-faint)"></path>
+        </marker>
+      </defs>
+
+      <!-- ===== TODAY ===== -->
+      <text x="20" y="28" font-family="ui-monospace, monospace" font-size="11" letter-spacing="1.6" style="fill:var(--ink-faint)">TODAY — EVERY SCHEDULING DECISION RENTS A MODEL SESSION</text>
+
+      <!-- snapshot -->
+      <rect x="20" y="46" width="212" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="126" y="72" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">tick.sh snapshot</text>
+      <text x="126" y="91" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">jq · the whole board as JSON</text>
+      <text x="126" y="108" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">seconds</text>
+      <text x="224" y="58" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+
+      <line x1="232" y1="84" x2="306" y2="84" style="stroke:var(--ink-faint)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- the wave -->
+      <rect x="316" y="36" width="596" height="96" rx="3" style="fill:var(--panel-2);stroke:var(--weft)" stroke-width="2"/>
+      <text x="904" y="50" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--weft)">MODEL</text>
+      <text x="614" y="64" text-anchor="middle" font-family="ui-monospace, monospace" font-size="14" font-weight="bold" style="fill:var(--ink)">the wave — one model session reads a decision table in prose</text>
+      <text x="614" y="86" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" style="fill:var(--ink-soft)">steps 2–6 · harvest lanes → gate → fill → merge queue → epic probes</text>
+      <text x="614" y="104" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" style="fill:var(--ink-soft)">every rule is total, and every input is a field the snapshot already computed</text>
+      <text x="614" y="122" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" font-weight="bold" style="fill:var(--weft)">2m28s average · 28 turns · 118k context per turn</text>
+
+      <line x1="912" y1="84" x2="986" y2="84" style="stroke:var(--ink-faint)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- lanes -->
+      <rect x="996" y="46" width="144" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="1132" y="58" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+      <text x="1068" y="74" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">lanes spawn</text>
+      <text x="1068" y="93" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">impl · gate · merge</text>
+      <text x="1068" y="108" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">· probe</text>
+
+      <text x="614" y="158" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" style="fill:var(--weft)">a ticket that became ready waits out one whole wave before a lane exists for it</text>
+
+      <!-- ===== WITH P81 ===== -->
+      <text x="20" y="212" font-family="ui-monospace, monospace" font-size="11" letter-spacing="1.6" style="fill:var(--ink-faint)">WITH P81 — A SCRIPT COMPUTES THE PLAN; A MODEL SEES ONLY WHAT A SCRIPT CANNOT WRITE</text>
+
+      <!-- snapshot -->
+      <rect x="20" y="230" width="212" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="224" y="242" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+      <text x="126" y="256" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">tick.sh snapshot</text>
+      <text x="126" y="275" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">unchanged</text>
+
+      <line x1="232" y1="268" x2="306" y2="268" style="stroke:var(--ink-faint)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- plan -->
+      <rect x="316" y="230" width="252" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="560" y="242" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+      <text x="442" y="256" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">tick.sh plan</text>
+      <text x="442" y="275" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">jq · read-only · the same rules,</text>
+      <text x="442" y="291" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">compiled: .actions[] + .residue[]</text>
+
+      <line x1="568" y1="268" x2="642" y2="268" style="stroke:var(--ink-faint)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- executor -->
+      <rect x="652" y="230" width="268" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="912" y="242" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+      <text x="786" y="256" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">the executor</text>
+      <text x="786" y="275" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">runs each action through the verb</text>
+      <text x="786" y="291" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">that owns it · seconds, zero turns</text>
+
+      <line x1="920" y1="268" x2="986" y2="268" style="stroke:var(--ink-faint)" stroke-width="1.5" marker-end="url(#arr)"/>
+
+      <!-- lanes -->
+      <rect x="996" y="230" width="144" height="76" rx="3" style="fill:var(--panel-2);stroke:var(--warp)" stroke-width="1.5"/>
+      <text x="1132" y="242" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--warp)">SCRIPT</text>
+      <text x="1068" y="258" text-anchor="middle" font-family="ui-monospace, monospace" font-size="13" font-weight="bold" style="fill:var(--ink)">lanes spawn</text>
+      <text x="1068" y="277" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">the moment the</text>
+      <text x="1068" y="292" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">snapshot says so</text>
+
+      <!-- residue -->
+      <line x1="442" y1="306" x2="442" y2="356" style="stroke:var(--weft)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr)"/>
+      <rect x="316" y="362" width="430" height="66" rx="3" style="fill:var(--panel-2);stroke:var(--weft)" stroke-width="1.5" stroke-dasharray="6 4"/>
+      <text x="738" y="374" text-anchor="end" font-family="ui-monospace, monospace" font-size="9.5" letter-spacing="1.2" style="fill:var(--weft)">MODEL · CONDITIONAL</text>
+      <text x="531" y="388" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" font-weight="bold" style="fill:var(--ink)">residue session — only when .residue[] is non-empty</text>
+      <text x="531" y="407" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11" style="fill:var(--ink-soft)">sees the residue alone, never the whole board</text>
+
+      <text x="786" y="336" text-anchor="middle" font-family="ui-monospace, monospace" font-size="11.5" style="fill:var(--warp)">an empty residue means the wave never launches a model at all</text>
+    </svg>
+    </div>
+    <figcaption>
+      <b>What moves:</b> steps 2–6 of <code>tick</code> — the decision table — move from a model
+      session into <code>tick.sh plan</code>. <b>What does not:</b> the lanes themselves. The gate
+      verdict, the implementation, the probe, conflict surgery — that is judgment work a script
+      cannot do, and P81 removes none of it. It stops paying a model to read a table.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">step by step</p>
+    <h2>Every step of one tick, before and after</h2>
+    <p>Read the left stripe on each card: blue was always a script, orange was a model session.
+    Rows 2–6 are where the 2m28s lives today — and where it goes.</p>
+  </div>
+
+  <div class="ba">
+    <div class="head"></div>
+    <div class="head">today</div>
+    <div class="head">with P81</div>
+
+    <div class="step-name"><span class="no">1</span>Read the board</div>
+    <div class="cell script b"><span class="tag">script · already deterministic</span><br><code>snapshot --brief</code> — one jq document, seconds.</div>
+    <div class="cell script a"><span class="tag same">unchanged</span><br>The planner reads the same document.</div>
+
+    <div class="step-name"><span class="no">2</span>Harvest lanes</div>
+    <div class="cell model b"><span class="tag">model</span><br>A session reads which lanes are dead, stale or verdictless and applies the cap rules from prose.</div>
+    <div class="cell script a"><span class="tag">script</span><br>Planner emits <code>kill-lane</code> · <code>clear-lane</code> · <code>merge-failed</code> · respawn actions. The caps are arithmetic on snapshot fields.</div>
+
+    <div class="step-name"><span class="no">3</span>Gate</div>
+    <div class="cell model b"><span class="tag">model</span><br>A session walks <code>gate.eligible</code> and spawns a reviewer per ticket.</div>
+    <div class="cell script a"><span class="tag">script</span><br>Planner emits one spawn per eligible ticket, pregate tier attached. <b>The review itself is still a model</b> — a gate lane, not a wave.</div>
+
+    <div class="step-name"><span class="no">4</span>Fill lanes</div>
+    <div class="cell model b"><span class="tag">model</span><br>A session orders the work: stranded first, <code>fix:</code> before the rest, slots permitting — then claims and spawns.</div>
+    <div class="cell script a"><span class="tag">script</span><br>The ordering is compiled: rework before backlog, <code>fix:</code> first, oldest first. Claim, worktree and spawn are already <code>lane.sh</code> verbs.</div>
+
+    <div class="step-name"><span class="no">5</span>Merge queue</div>
+    <div class="cell model b"><span class="tag">model</span><br>A session finds the oldest unheld <code>merge-queue</code> ticket and spawns its merge lane.</div>
+    <div class="cell script a"><span class="tag">script</span><br>Planner emits the spawn — or skips when <code>merge_in_flight</code>. Both are fields in the document.</div>
+
+    <div class="step-name"><span class="no">6</span>Epic probes</div>
+    <div class="cell model b"><span class="tag">model</span><br>A session derives which epics await a probe and assembles each brief.</div>
+    <div class="cell script a"><span class="tag">script</span><br><code>epics_awaiting_probe</code> and each epic's acceptance criteria are already snapshot fields — the planner assembles the brief from them. <b>The probe stays a model.</b></div>
+
+    <div class="step-name"><span class="no">7</span>Notify + reports</div>
+    <div class="cell model b"><span class="tag">mixed</span><br><code>tick.sh notify</code> is already a script — but the completion report and wave learnings are model prose inside the wave.</div>
+    <div class="cell conditional a"><span class="tag">script + residue</span><br>Notify unchanged. The report and learnings move to the residue session — the wave no longer carries them.</div>
+
+    <div class="step-name"><span class="no">8</span>Teardown</div>
+    <div class="cell script b"><span class="tag">script · already deterministic</span><br>Unload the agent on <code>build_complete</code>.</div>
+    <div class="cell script a"><span class="tag same">unchanged</span><br>Same script, same trigger.</div>
+
+    <div class="span-note">
+      <b>Rows 2–6: model minutes → script seconds.</b> Row 7: prose moves to the residue session.
+      Rows 1 and 8 never needed a model. The whole wave’s scheduling cost collapses to a jq run —
+      and on a quiet board, to nothing at all.
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">the line the design already draws</p>
+    <h2>What still rents a model — and should</h2>
+    <p><em>Models judge, scripts plumb.</em> Everything below adds information the tracker does not
+    contain. That is the work worth paying for, and P81 removes none of it.</p>
+  </div>
+
+  <div class="cards">
+    <div class="card keep">
+      <h3>The gate verdict</h3>
+      <p>Code review against the PRD is judgment, not lookup. The mechanical half already runs in shell first — <code>--pregate</code> exits 7 in seconds without spending a turn.</p>
+    </div>
+    <div class="card keep">
+      <h3>The implementation</h3>
+      <p>The code does not exist until a model writes it. This is the build.</p>
+    </div>
+    <div class="card keep">
+      <h3>The epic probe</h3>
+      <p>Exercising the product the way a user would is exploration, not table-reading.</p>
+    </div>
+    <div class="card keep">
+      <h3>Merge-conflict surgery</h3>
+      <p>A real conflict has no decision table. Resolve the trivial, report the rest.</p>
+    </div>
+    <div class="card keep">
+      <h3>The blocked report</h3>
+      <p>Names the single decision a human must make. Prose a script cannot write — so it becomes residue, not a template.</p>
+    </div>
+    <div class="card keep">
+      <h3>The completion report</h3>
+      <p>The narrative a human reads at the end. Written once per build, by the residue session.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">why this is safe</p>
+    <h2>The guardrails that keep a planner honest</h2>
+  </div>
+
+  <div class="cards">
+    <div class="card guard">
+      <h3>The plan derives, it never writes</h3>
+      <p><code>tick.sh</code> is read-only against the tracker today, and a test enforces it by scanning every captured argv against a mutating denylist. <code>plan</code> extends the same scan to the new path — shown failing once the guard is removed.</p>
+    </div>
+    <div class="card guard">
+      <h3>The plan is disposable</h3>
+      <p>Like the snapshot, it is never written anywhere a later run reads back as state. A plan file that outlived its wave would be exactly the shadow state constitution rule 1 forbids.</p>
+    </div>
+    <div class="card guard">
+      <h3>Residue sees residue alone</h3>
+      <p>The conditional session gets the leftover items — a blocked report to write, a log tail to classify — never the whole board. Small context, few turns.</p>
+    </div>
+    <div class="card guard">
+      <h3>SKILL.md shrinks</h3>
+      <p>Steps 2–6 stop being prose a wave interprets and become “run the plan, then handle the residue.” A line <em>reduction</em> in the file every session loads.</p>
+    </div>
+  </div>
+
+  <div class="callout warp">
+    <div class="stripe"></div>
+    <div class="body">
+      <p class="eyebrow">the residue is the escape valve</p>
+      <p style="margin:0">A few wave decisions have ragged edges — reading a dead gate’s log tail to tell an API
+      stall from a crash, writing the blocked report a human will act on. P81 does not pretend those
+      are deterministic. Routing them to a small session that sees only the residue is what makes
+      “the plan is a total function” achievable instead of dogma.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ================================================================ -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">the boundary of P81</p>
+    <h2>Deliberately out of scope — the next candidates</h2>
+    <p>P81 stays narrow so its before-and-after is measurable. These two determinizations wait for
+    the <code>retro</code> numbers after it lands.</p>
+  </div>
+
+  <div class="cards">
+    <div class="card next">
+      <h3>The happy-path merge lane</h3>
+      <p>A merge lane is a full model session whose no-conflict path is three script calls: reconcile, re-run gates, merge. A script that escalates to a model only on a real conflict would remove most merge-lane sessions — one per merged ticket.</p>
+    </div>
+    <div class="card next">
+      <h3>Templated blocked reports</h3>
+      <p>When a mechanical cap fires — too many crashes, rejections, or merge attempts — the report’s content is enumerable: the attempts, the counts, the links. A template covers it; prose is only needed for what the human must decide.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="stripe"></div>
+    <div class="body">
+      <p class="eyebrow">measure first</p>
+      <p style="margin:0">What is not yet measured is how much of the 2m28s survives the change — some waves will
+      still have residue to write. Measuring that split is the first job of the implementation, not an
+      assumption to build on. Then <code>retro</code> judges the next candidates with real numbers.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  Evidence: seat-reservations build-1 (2026-08-03 — 36 waves, 1h29m, 57.5% of a 2h35m span, 2m28s average)
+  and boostlingo build-1 (2026-08-01 — waves $683 of $3,404 spend; 407 sessions, 28 turns, 118k context per turn).
+  Both are <span class="m">retro</span> output over real builds, not predictions.
+  P81 supersedes the scheduling half of P18; the cheaper-model config half stays worth doing first — one line, costs nothing to try.
+</footer>
+
+</body>
+</html>

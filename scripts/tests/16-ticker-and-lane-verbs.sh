@@ -58,6 +58,7 @@ case "$out" in *"#4 merged and closed"*) \
 LOOM_HOME="$EVH" "$TICK" event lane_exit id impl-4 type impl rc 0 secs 5
 LOOM_HOME="$EVH" "$TICK" event lane_exit id gate-4 type gate rc 7 secs 5
 LOOM_HOME="$EVH" "$TICK" event lane_exit id probe-audio type probe rc 0 secs 5
+LOOM_HOME="$EVH" "$TICK" event lane_exit id impl-6 type impl rc 0 provider_rc 2 outcome review secs 5
 out=$(LOOM_HOME="$EVH" "$TICK" render-events 2>&1)
 case "$out" in *"implementation ended"*) \
     bad "ticker: clean impl exit rendered (reads backwards after a chained spawn)";; \
@@ -68,6 +69,9 @@ case "$out" in *"#4 — pregate REJECTED"*) \
 case "$out" in *"epic audio — acceptance probe ended (rc 0"*) \
     ok "ticker: a clean probe exit still renders (it has no outcome event)";; \
     *) bad "ticker: probe exit missing ($out)";; esac
+case "$out" in *"#6 — implementation ended"*|*"impl-6"*) \
+    bad "ticker: completed implementation was repainted as a provider failure ($out)";; \
+    *) ok "ticker: semantic completion stays quiet even when raw provider rc is nonzero";; esac
 # A wave's intent line (long silent setup) renders verbatim with the
 # "wave:" prefix — the human watching a quiet ticker during probe prep
 # read the silence as a stall (2026-08-02).
@@ -440,6 +444,23 @@ grep -q "orch-verdict PASS beef0001 -->" "$VCAP9" \
     && ok "verdict: the non-duplicate verdict posted its trailer" \
     || bad "verdict: the non-duplicate verdict posted no trailer ($(cat "$VCAP9"))"
 
+# D-SNAP-19: a human reset retires duplicate detection too. The work and HEAD
+# are unchanged, so a fresh independent gate must be allowed to write the same
+# outcome/SHA after the reset instead of fabricating a product commit.
+cat > "$NOTES_FIXTURE" <<'EOF'
+[{"created_at":"2026-08-07T07:00:00Z","body":"Background QoS invalidated the gate.\n\n<!-- orch-verdict-reset 2026-08-07T07:00:00Z -->"},
+ {"created_at":"2026-08-07T06:00:00Z","body":"Passed on re-review.\n\n<!-- orch-verdict PASS cafe0000 -->"}]
+EOF
+VCAP10="$T/verdict-after-reset-bodies"; : > "$VCAP10"
+echo "independently re-gated after the reset" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-dup-stub.sh" \
+    VCAP="$VCAP10" NOTES_FIXTURE="$NOTES_FIXTURE" \
+    "$LANE" verdict 9 pass cafe0000 >/dev/null 2>&1 \
+    && ok "D-SNAP-19: the same outcome and SHA can be written after a verdict reset" \
+    || bad "D-SNAP-19: a pre-reset duplicate still blocked the new verdict"
+grep -q "orch-verdict PASS cafe0000 -->" "$VCAP10" \
+    && ok "D-SNAP-19: the post-reset verdict wrote its trailer" \
+    || bad "D-SNAP-19: accepted post-reset verdict wrote no trailer ($(cat "$VCAP10"))"
+
 # 16a4d. P72: the two facts the write half and the read half had to spell the
 #        same way, and which nothing in this suite ever compared. Both now come
 #        from lib.jq, the one jq prelude every program includes.
@@ -657,6 +678,33 @@ LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed abc </dev/null >/dev/null 2>&1 \
     && bad "merge-failed: accepted a non-numeric iid" \
     || ok "merge-failed: a bad iid is refused"
+
+# D-SNAP-19: same work and unchanged HEAD, but the prior gate result was
+# invalidated externally. Only a human can retire it, and the reason is the
+# durable decision record beside the reset marker.
+VCAPVR="$T/verdict-reset-bodies"; : > "$VCAPVR"
+echo "Background QoS invalidated the gate; rerun after D-TICK-21" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAPVR" "$LANE" verdict-reset 8 >/dev/null 2>&1
+grep -qE "orch-verdict-reset [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAPVR" \
+    && grep -q "Background QoS invalidated" "$VCAPVR" \
+    && ok "verdict-reset: a human posts the mandatory reason and marker together" \
+    || bad "verdict-reset: marker or reason missing ($(tail -3 "$VCAPVR" 2>/dev/null))"
+ACAPVR="$T/verdict-reset-calls"; : > "$ACAPVR"
+echo "the old gate was invalid, honest" | LOOM_LANE_ID=gate-8 LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAPVR" "$LANE" verdict-reset 8 >/dev/null 2>&1 \
+    && bad "verdict-reset: a lane retired its own verdict" \
+    || ok "verdict-reset: a lane cannot retire its own verdict"
+echo "the old gate was invalid, honest" | LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAPVR" "$LANE" verdict-reset 8 >/dev/null 2>&1 \
+    && bad "verdict-reset: a wave retired a ticket's verdict" \
+    || ok "verdict-reset: a wave cannot retire a ticket's verdict"
+[ -s "$ACAPVR" ] \
+    && bad "verdict-reset: an automated caller still reached the tracker ($(head -1 "$ACAPVR"))" \
+    || ok "verdict-reset: no automated reset write reached the tracker"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAPVR" \
+    "$LANE" verdict-reset 8 </dev/null >/dev/null 2>&1 \
+    && bad "verdict-reset: accepted an empty reason" \
+    || ok "verdict-reset: an empty reason is refused"
 
 # 16a4b-2. P96: `merge-reset` retires the MERGE cap of a ticket whose merges
 #       failed on something since resolved — a conflict a human untangled, a
@@ -999,7 +1047,6 @@ out=$(echo "base is red" | LOOM_HOME="$EVH" \
     "$LANE" fix-ticket --title "fix base timeout" --tier api \
         --milestone "E4 · Realtime mode" 2>&1)
 rc=$?
-set -e
 if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'usage limit exceeded'; then
     ok "fix-ticket: tracker create failure preserves the actionable driver diagnostic"
 else

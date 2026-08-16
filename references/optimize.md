@@ -80,6 +80,7 @@ They are machine contracts. Quote them byte-for-byte.
 
 - `Closes #<ticket-iid>` (the MR-to-ticket link the scheduler reads)
 - `<!-- orch-verdict PASS|FAIL <head-sha> class=<slug> -->`
+- `<!-- orch-verdict-reset <timestamp> -->`
 - lane ids: `impl-<n>`, `gate-<n>[-r<round>]`, `merge-<n>`, `probe-<epic-slug>`
 - labels: `ready-for-agent`, `in-progress`, `review`, `merge-queue`,
   `blocked`, `fix`, `build-N`, `model::<tier>`, `tier::<tier>`

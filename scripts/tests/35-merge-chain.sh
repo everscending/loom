@@ -142,6 +142,20 @@ if [ -f "$LOOM_HOME/briefs/merge-28.md" ] \
 else
     bad "chain-merge: brief substitution incomplete ($(cat "$LOOM_HOME/briefs/merge-28.md" 2>/dev/null | head -3))"
 fi
+# Live failure (demand-letter-generator build 1, ticket #136, 2026-08-16):
+# Codex's shell response window elapsed while the unit gate was still running.
+# The merge lane launched the gate again, then invented a 20-second timeout;
+# concurrent workers made both branch and base cross that synthetic deadline,
+# so a green branch was falsely parked as base-red. The rendered brief is the
+# seam the lane actually reads, so keep the full long-running-command contract
+# here rather than testing only the source template.
+if grep -q 'poll that same running session' "$LOOM_HOME/briefs/merge-28.md" \
+   && grep -q 'Do not rerun the gate' "$LOOM_HOME/briefs/merge-28.md" \
+   && grep -q 'Do not add.*timeout' "$LOOM_HOME/briefs/merge-28.md"; then
+    ok "chain-merge: the rendered brief preserves one gate run across shell response windows"
+else
+    bad "chain-merge: brief permits gate reruns or synthetic timeouts after a shell response window"
+fi
 reap_lanes
 
 # --- C. fallback: an empty queue still fires the ordinary wave -------------

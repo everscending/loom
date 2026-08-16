@@ -96,6 +96,12 @@ else
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_free
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
+| ([ $tickets[]
+     | ([.related_merge_requests[]? | select(.state == "merged")] | first) as $mr
+     | select($mr != null)
+     | { ticket: .id, mr: $mr.id, sha: $mr.sha,
+         verdict: (.merged_verdict.verdict // null),
+         class: (.merged_verdict.class // null) } ]) as $merged_open
 
 # One lookup, so every rule below reads the same row for the same ticket.
 | def ticket($iid): ($tickets | map(select((.id | tostring) == ($iid | tostring))) | first);
@@ -426,6 +432,21 @@ else
          verb: "lane.sh blocked-report \(.ticket) --category <slug> (body on stdin), then the `transition` action above" } ])
   as $res_blocked
 
+# A forge merge is durable code state. An open tracker ticket whose MR already
+# merged must never be sent through rework against a missing local checkout.
+# When a FAIL stands at that merged SHA, closing silently would lose a known
+# shipped defect, so the wave must file the follow-up first; otherwise this is
+# the ordinary half-finished merge shape and only the tracker close is owed.
+| ([ $merged_open[]
+     | (.class // "gate") as $class
+     | { kind: "merged-ticket-open", ticket: .ticket, mr: .mr, sha: .sha,
+         why: (if .verdict == "FAIL"
+               then "MR !\(.mr) is already merged, but a \($class) FAIL stands at its merged head — file a fix ticket for that shipped residue, then close the landed ticket"
+               else "MR !\(.mr) is already merged while its ticket remains open — finish the tracker close; never reconstruct the branch as rework" end),
+         verb: (if .verdict == "FAIL"
+                then "lane.sh fix-ticket --title <shipped-defect> --tier <tier> --milestone <epic> --file <body>, then lane.sh close \(.ticket)"
+                else "lane.sh close \(.ticket)" end) } ]) as $res_merged_open
+
 | (($sum.open_tickets | tonumber?) // ($tickets | length)) as $open_count
 # Halted is tested FIRST because it is the survivable answer: a build where
 # every open ticket is blocked satisfies "ready set empty and no lanes"
@@ -458,7 +479,7 @@ else
 | ($kill_stale + $kill_overrun + $block_overrun + $repairs + $blocked_repairs + $clear_dead
    + $gate_actions + $block_same_class + $fill_actions
    + $block_merge_cap + $merge_actions + $probe_actions) as $actions
-| ($res_pregate + $res_merge_failed + $res_blocked + $res_probe_criteria + $res_build)
+| ($res_pregate + $res_merge_failed + $res_blocked + $res_merged_open + $res_probe_criteria + $res_build)
   as $residue
 | ($gate_deferred + $fill_deferred + $merge_deferred + $probe_deferred) as $deferred
 | { generated_at: $s.generated_at,

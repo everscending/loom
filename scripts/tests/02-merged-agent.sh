@@ -87,13 +87,26 @@ else
     bad "tick: lane self-invoke rc=$rc_lane lock=$([ -d "$MT/home/tick.lock.d" ] && echo held) waves=$(_mwaves) out=$out"
 fi
 
-# ...but the SAME environment through the epilogue's own contract still runs:
-# the refusal must catch the wrong call, not the lane's environment itself.
+# A provider session must not invoke the epilogue contract itself. Its sandbox
+# may not write the main repo, and a failed optional handoff must never turn
+# submitted work into a blocked ticket. The direct call is a successful no-op;
+# the deterministic host epilogue carries an explicit marker and still runs.
 export LOOM_LANE_ID=merge-9
+export LOOM_PROVIDER_SESSION=1
+out=$(MENV "$TICK" tick --from-lane 2>&1); direct_rc=$?
+direct_waves=$(_mwaves)
+unset LOOM_PROVIDER_SESSION
+export LOOM_LANE_EPILOGUE=1
 MTICK tick --from-lane
-unset LOOM_LANE_ID
-[ "$(_mwaves)" != 0 ] && ok "tick: --from-lane still runs from inside a lane's own environment" \
-                       || bad "tick: --from-lane was refused too — the epilogue itself would deadlock"
+epilogue_waves=$(_mwaves)
+unset LOOM_LANE_EPILOGUE LOOM_LANE_ID
+if [ "$direct_rc" = 0 ] && [ "$direct_waves" = 0 ] \
+   && printf '%s' "$out" | grep -q 'host epilogue' \
+   && [ "$epilogue_waves" != 0 ]; then
+    ok "tick: provider handoff is a no-op; marked host epilogue still runs"
+else
+    bad "tick: direct rc=$direct_rc waves=$direct_waves, epilogue waves=$epilogue_waves out=$out"
+fi
 
 # BUT watching still happens on the silenced firings — that is the whole point
 # of merging. A stopped auto-tick must still record that it looked.
@@ -120,6 +133,19 @@ printf '{"t":"old","ts":%s,"ev":"wave_start"}\n' "$(( $(date +%s) - 4000 ))" > "
 MTICK tick --auto
 [ "$(_mwaves)" != 0 ] && ok "wave gap: expires, so the timer still backstops a stalled build" \
                       || bad "wave gap: never expired — the backstop is dead"
+
+# `start` is an explicit request to resume now, not twenty minutes from now.
+# Its RunAtLoad firing still uses automatic mode so later heartbeats remain
+# paced, but the first firing after install must bypass a recent wave gap once.
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+MENV "$TICK" install 60 >/dev/null 2>&1
+MTICK tick --auto; start_first=$(_mwaves)
+MTICK tick --auto; start_second=$(_mwaves)
+if [ "$start_first" != 0 ] && [ "$start_second" = 0 ]; then
+    ok "start kick: RunAtLoad bypasses the old gap once, then timer pacing resumes"
+else
+    bad "start kick: first=$start_first (want non-zero), second=$start_second (want 0)"
+fi
 
 # Decision 4: stop cuts the direct handoffs too. The chain is spawned BY the
 # lanes, so blocking waves alone would carry a ticket all the way to merged

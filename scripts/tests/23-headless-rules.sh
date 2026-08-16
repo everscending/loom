@@ -18,6 +18,9 @@ COMPOSED="$LOOM_HOME/briefs/impl-71.md"
 if [ -f "$COMPOSED" ] && grep -q 'Implement ticket 12' "$COMPOSED" \
    && grep -q 'every step blocks' "$COMPOSED" \
    && grep -q 'Finite commands.*builds, tests and gates.*foreground' "$COMPOSED" \
+   && grep -q 'poll that same running session' "$COMPOSED" \
+   && grep -q 'Do not rerun the command' "$COMPOSED" \
+   && grep -q 'Do not add.*timeout' "$COMPOSED" \
    && grep -q 'wait-ready --timeout' "$COMPOSED" \
    && grep -q 'KillShell' "$COMPOSED" \
    && grep -q 'blocked-report <iid> --category <slug>' "$COMPOSED" \

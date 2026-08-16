@@ -1,0 +1,1138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>loom shape — a web dashboard</title>
+
+<style>
+  :root {
+    --ground:   #D6D2C6;
+    --panel:    #E6E3D9;
+    --panel-2:  #EFEDE7;
+    --ink:      #1E2027;
+    --ink-soft: #5A5D64;
+    --ink-faint:#84867F;
+    --rule:     #B1AC9C;
+    --rule-soft:#C4BFB1;
+    --warp:     #26408F;
+    --weft:     #A5451A;
+    --tracker:  #16645A;
+    --halt:     #8C1F26;
+    --shadow:   rgba(30,32,39,.10);
+
+    --font-display: "Avenir Next Condensed", "Roboto Condensed", "Helvetica Neue", "Arial Narrow", sans-serif;
+    --font-body: Charter, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+    --measure: 68ch;
+    --wide: 1180px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #13151B;
+      --panel:    #1A1D25;
+      --panel-2:  #222630;
+      --ink:      #E5E2D9;
+      --ink-soft: #979AA2;
+      --ink-faint:#6E7178;
+      --rule:     #333846;
+      --rule-soft:#282D38;
+      --warp:     #8CA5F2;
+      --weft:     #E8A05C;
+      --tracker:  #52C6AC;
+      --halt:     #EB6B72;
+      --shadow:   rgba(0,0,0,.45);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #13151B;
+    --panel:    #1A1D25;
+    --panel-2:  #222630;
+    --ink:      #E5E2D9;
+    --ink-soft: #979AA2;
+    --ink-faint:#6E7178;
+    --rule:     #333846;
+    --rule-soft:#282D38;
+    --warp:     #8CA5F2;
+    --weft:     #E8A05C;
+    --tracker:  #52C6AC;
+    --halt:     #EB6B72;
+    --shadow:   rgba(0,0,0,.45);
+  }
+
+  *, *::before, *::after { box-sizing: border-box; }
+  :where(.grid, .flex) > * { min-width: 0; }
+  :where(p, li, dd, td, th, figcaption) { overflow-wrap: anywhere; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    font-size: 17px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0 20px 120px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .col { max-width: var(--wide); margin-inline: auto; }
+  .col > * { max-width: var(--measure); }
+  .wide { max-width: var(--wide); margin-inline: auto; }
+
+  header.masthead { max-width: var(--wide); margin: 0 auto; padding: 56px 0 0; }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--ink-faint); margin: 0 0 10px;
+  }
+
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(48px, 10vw, 92px);
+    line-height: .9; letter-spacing: -.01em; font-weight: 700;
+    margin: 0 0 14px; text-wrap: balance;
+  }
+
+  .standfirst {
+    max-width: 60ch; font-size: 20px; line-height: 1.45;
+    color: var(--ink-soft); margin: 0 0 34px;
+  }
+
+  section { margin-top: 72px; }
+
+  h2 {
+    font-family: var(--font-display); font-size: 34px; line-height: 1.05;
+    font-weight: 700; letter-spacing: .005em; margin: 0 0 6px; text-wrap: balance;
+  }
+
+  h3 {
+    max-width: var(--wide); font-family: var(--font-display);
+    font-size: 22px; font-weight: 600; letter-spacing: .01em;
+    margin: 40px auto 6px;
+  }
+
+  h4 {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--ink-faint);
+    margin: 0 0 8px; font-weight: 600;
+  }
+
+  .section-head {
+    max-width: var(--wide); margin: 0 auto 26px;
+    border-top: 2px solid var(--ink); padding-top: 12px;
+  }
+  .section-head .eyebrow { margin-bottom: 6px; }
+  .section-head p { max-width: var(--measure); color: var(--ink-soft); margin: 8px 0 0; }
+
+  p { margin: 0 0 16px; }
+  a { color: var(--warp); }
+
+  code, .m {
+    font-family: var(--font-mono); font-size: .86em;
+    background: var(--panel-2); border: 1px solid var(--rule-soft);
+    border-radius: 2px; padding: .08em .32em; white-space: nowrap;
+  }
+
+  figure {
+    max-width: var(--wide); margin: 26px auto 0;
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 18px 18px 0;
+    box-shadow: 0 1px 0 var(--shadow);
+  }
+  .fig-scroll { overflow-x: auto; }
+  figcaption {
+    font-family: var(--font-mono); font-size: 12px; line-height: 1.55;
+    color: var(--ink-soft); border-top: 1px solid var(--rule-soft);
+    margin-top: 14px; padding: 12px 0 16px;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .callout {
+    max-width: var(--wide); margin: 30px auto;
+    display: grid; grid-template-columns: 8px 1fr; gap: 0;
+    background: var(--panel-2); border: 1px solid var(--rule-soft); border-radius: 3px;
+  }
+  .callout .bar { background: var(--weft); border-radius: 3px 0 0 3px; }
+  .callout .body { padding: 16px 18px; }
+  .callout .body p:last-child { margin-bottom: 0; }
+  .callout.warp .bar { background: var(--warp); }
+  .callout.halt .bar { background: var(--halt); }
+
+  pre.term {
+    font-family: var(--font-mono); font-size: 12.5px; line-height: 1.45;
+    background: var(--panel-2); border: 1px solid var(--rule-soft);
+    border-radius: 3px; padding: 16px; overflow-x: auto; margin: 0;
+    color: var(--ink);
+  }
+
+  table.grid-t {
+    width: 100%; border-collapse: collapse; font-size: 15px;
+    font-family: var(--font-body);
+  }
+  table.grid-t th, table.grid-t td {
+    text-align: left; vertical-align: top; padding: 10px 14px 10px 0;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  table.grid-t th {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink-faint); font-weight: 600;
+    border-bottom: 1px solid var(--rule);
+  }
+  table.grid-t td.k { font-family: var(--font-mono); font-size: 12.5px; white-space: nowrap; }
+
+  /* ---------------- screen mock chrome ---------------- */
+
+  .mock {
+    background: var(--panel-2); border: 1px solid var(--rule);
+    border-radius: 4px; overflow: hidden; box-shadow: 0 2px 0 var(--shadow);
+  }
+  .mock-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; background: var(--panel);
+    border-bottom: 1px solid var(--rule-soft);
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--rule); flex: none; }
+  .mock-url {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--rule-soft);
+    border-radius: 2px; padding: 2px 8px; color: var(--ink-soft);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .mock-body { display: grid; grid-template-columns: 232px minmax(0,1fr); }
+  @media (max-width: 820px) { .mock-body { grid-template-columns: minmax(0,1fr); } }
+
+  /* project rail */
+  .rail {
+    background: var(--panel); border-right: 1px solid var(--rule-soft);
+    padding: 12px 0; font-family: var(--font-mono); font-size: 12px;
+    min-width: 0;
+  }
+  .rail-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 0 12px 10px; color: var(--ink-faint);
+    font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase;
+  }
+  .rail-search {
+    margin: 0 12px 10px; padding: 5px 8px; border: 1px solid var(--rule-soft);
+    border-radius: 2px; background: var(--panel-2); color: var(--ink-faint);
+  }
+  .proj {
+    display: grid; grid-template-columns: 12px minmax(0,1fr) auto;
+    gap: 8px; align-items: baseline;
+    padding: 7px 12px; border-left: 2px solid transparent; color: var(--ink-soft);
+  }
+  .proj.on { background: var(--panel-2); border-left-color: var(--warp); color: var(--ink); }
+  .proj .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .proj .sub { grid-column: 2 / 4; font-size: 10.5px; color: var(--ink-faint); }
+  .proj .ct { font-size: 11px; }
+  .live { color: var(--warp); }
+  .quiet { color: var(--ink-faint); }
+  .alarm { color: var(--halt); }
+  .rail-group {
+    padding: 12px 12px 6px; color: var(--ink-faint);
+    font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+  }
+
+  /* board */
+  .board { padding: 14px 16px 18px; min-width: 0; }
+  .board-head { border-bottom: 1px solid var(--rule-soft); padding-bottom: 10px; margin-bottom: 14px; }
+  .board-title {
+    font-family: var(--font-display); font-size: 24px; font-weight: 700;
+    letter-spacing: .01em; margin: 0 0 2px;
+  }
+  .board-meta {
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint);
+    display: flex; flex-wrap: wrap; gap: 4px 14px;
+  }
+  .board-meta b { color: var(--ink-soft); font-weight: 600; }
+
+  .gridwrap { overflow-x: auto; }
+  .wxr {
+    display: grid; grid-template-columns: 62px repeat(3, minmax(190px, 1fr));
+    gap: 1px; background: var(--rule-soft); border: 1px solid var(--rule-soft);
+    border-radius: 3px; min-width: 660px;
+  }
+  .wxr > * { background: var(--panel-2); }
+  .wxr .colhead, .wxr .rowhead {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-faint);
+    padding: 7px 9px; background: var(--panel);
+  }
+  .wxr .rowhead { display: flex; align-items: center; }
+  .wxr .bandhead {
+    grid-column: 1 / -1; background: var(--panel);
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-faint); padding: 6px 9px;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .cell { padding: 9px 10px; min-height: 62px; font-family: var(--font-mono); font-size: 12px; }
+  .cell .t { display: flex; gap: 6px; align-items: baseline; color: var(--ink); }
+  .cell .t .id { color: var(--ink-soft); }
+  .cell .t .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cell .why { color: var(--ink-faint); font-size: 11px; margin-top: 3px; }
+  .cell.sel { outline: 2px solid var(--warp); outline-offset: -2px; background: var(--panel); }
+  .cell.empty .t { color: var(--ink-faint); }
+  .g-run  { color: var(--warp); }
+  .g-next { color: var(--tracker); }
+  .g-block{ color: var(--weft); }
+  .g-slot { color: var(--halt); }
+  .g-idle { color: var(--ink-faint); }
+
+  .board-foot {
+    margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--rule-soft);
+    font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-soft);
+    display: flex; flex-wrap: wrap; gap: 6px 20px;
+  }
+
+  /* pills / controls */
+  .pill {
+    display: inline-block; font-family: var(--font-mono); font-size: 10.5px;
+    letter-spacing: .06em; padding: 2px 7px; border-radius: 10px;
+    border: 1px solid var(--rule); color: var(--ink-soft); background: var(--panel);
+    white-space: nowrap;
+  }
+  .pill.on { border-color: var(--warp); color: var(--warp); }
+  .pill.warn { border-color: var(--weft); color: var(--weft); }
+  .pill.bad { border-color: var(--halt); color: var(--halt); }
+
+  .slider-row {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    font-family: var(--font-mono); font-size: 12px; color: var(--ink-soft);
+    margin-top: 12px;
+  }
+  .lanes-scale { display: flex; gap: 3px; }
+  .lanes-scale span {
+    width: 22px; height: 22px; display: grid; place-items: center;
+    border: 1px solid var(--rule-soft); border-radius: 2px;
+    background: var(--panel); color: var(--ink-faint); font-size: 11px;
+  }
+  .lanes-scale span.on { background: var(--warp); border-color: var(--warp); color: var(--ground); }
+
+  /* drawer mock */
+  .drawer-mock { display: grid; grid-template-columns: minmax(0,1fr) 320px; }
+  @media (max-width: 820px) { .drawer-mock { grid-template-columns: minmax(0,1fr); } }
+  .drawer {
+    background: var(--panel); border-left: 1px solid var(--rule);
+    padding: 14px 16px; font-family: var(--font-mono); font-size: 12px; min-width: 0;
+  }
+  .drawer h5 {
+    font-family: var(--font-display); font-size: 19px; font-weight: 700;
+    margin: 0 0 2px; letter-spacing: .01em;
+  }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--rule-soft); margin: 12px 0 12px; }
+  .tabs span {
+    padding: 5px 10px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--ink-faint); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  }
+  .tabs span.on { color: var(--ink); border-bottom-color: var(--warp); }
+  .lifeline { display: grid; grid-template-columns: 14px minmax(0,1fr); gap: 0 10px; }
+  .lifeline .rail-l { border-left: 1px solid var(--rule); margin-left: 6px; }
+  .lifeline .step { padding: 0 0 12px; }
+  .lifeline .step .lbl { color: var(--ink); }
+  .lifeline .step .who { color: var(--ink-faint); font-size: 11px; }
+  .lifeline .mark {
+    font-size: 11px; color: var(--weft); padding-bottom: 12px;
+  }
+
+  .two {
+    display: grid; grid-template-columns: repeat(2, minmax(0,1fr));
+    gap: 18px; max-width: var(--wide); margin: 26px auto 0;
+  }
+  @media (max-width: 820px) { .two { grid-template-columns: minmax(0,1fr); } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-radius: 3px; padding: 16px 18px; min-width: 0;
+  }
+  .card h4 { margin-bottom: 6px; }
+  .card p:last-child { margin-bottom: 0; }
+  .card .lead { font-family: var(--font-display); font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+
+  .mermaid { background: var(--panel); border: 1px solid var(--rule); border-radius: 3px; padding: 16px; overflow-x: auto; }
+  .mermaid svg { max-width: 100%; height: auto; }
+
+  /* decisions */
+  form.q {
+    background: var(--panel); border: 1px solid var(--rule);
+    border-left: 3px solid var(--warp); border-radius: 3px;
+    padding: 16px 18px; margin: 0; min-width: 0;
+  }
+  form.q .qt { font-family: var(--font-display); font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  form.q .qs { color: var(--ink-soft); font-size: 15px; margin: 0 0 12px; }
+  form.q label {
+    display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 8px;
+    align-items: start; padding: 7px 0; border-top: 1px solid var(--rule-soft);
+    font-size: 15px; cursor: pointer;
+  }
+  form.q label .why { display: block; color: var(--ink-faint); font-size: 13px; }
+  form.q input[type=radio] { margin-top: 5px; }
+  form.q button {
+    margin-top: 12px; font-family: var(--font-mono); font-size: 12px;
+    padding: 6px 14px; border: 1px solid var(--warp); border-radius: 2px;
+    background: var(--warp); color: var(--ground); cursor: pointer;
+  }
+  form.q button:hover { filter: brightness(1.1); }
+  .qgrid { display: grid; gap: 18px; max-width: var(--wide); margin: 26px auto 0; }
+
+  ul.tight { margin: 0 0 16px; padding-left: 20px; }
+  ul.tight li { margin-bottom: 6px; }
+  .footnote { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-faint); }
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <p class="eyebrow">loom · proposal · ux screens</p>
+  <h1>The shape board,<br>in a browser</h1>
+  <p class="standfirst">
+    <code>shape.sh</code> answers one question no other loom view answers: <em>is my machine
+    going to idle, and why.</em> It answers it for one repo, in one terminal. This proposes
+    the same answer as a web dashboard that can hold all 28 loom projects on this
+    machine at once — and keeps the read-only discipline that makes the TUI safe.
+  </p>
+</header>
+
+<!-- ============================================================ 1 -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">01 · where we are</p>
+    <h2>What the TUI already does</h2>
+    <p>
+      Every claim below was read out of <code>scripts/shape.sh</code> and
+      <code>scripts/shape.jq</code>, and the board on the right is real output from
+      <code>shape.sh --once --snapshot</code>, not a drawing.
+    </p>
+  </div>
+
+  <figure class="fig-scroll">
+<pre class="term">── loom shape · build-9 · shape-tui · 20:29:54
+   impl 3 · aux 4 · 6 open · 1 impl lane(s) idle now
+   snapshot 0m ago · 0 events applied · r=refresh
+
+         NOW                      +1 round                 +2 rounds
+        ┌────────────────────────┬────────────────────────┬────────────────────────┐
+impl 1  │ ● #11 parser core      │ ⧗ #13 cli flags        │ ⧗ #15 retry backo…     │
+        │   running · 4 turns    │   ←11                  │   ←13                  │
+impl 2  │ ▸ #14 docs pass        │ ○ idle                 │ ○ idle                 │
+        │   starts next wave     │ build drained          │ build drained          │
+impl 3  │ ○ idle                 │ ○ idle                 │ ○ idle                 │
+        │ build drained          │ build drained          │ build drained          │
+        ├── aux pool 4 ──────────┼────────────────────────┼────────────────────────┤
+gate    │ ◆ #12 #11 #14          │ ◆ #13                  │ ◆ #15                  │
+        │   3 of 4 aux           │   1 of 4 aux           │   1 of 4 aux           │
+merge   │ ◈ 3 serial · ~9m       │ ◈ 1 serial · ~3m       │ ◈ 1 serial · ~3m       │
+        │   #12 #11 #14          │   #13                  │   #15                  │
+probe   │ ○ free                 │ ○ free                 │ ○ free                 │
+        └────────────────────────┴────────────────────────┴────────────────────────┘
+
+ beyond +2  0 tickets  b to list
+ ⚠ blocked  1 ticket   #16 blocked thing · needs you
+
+ critical path  #11 → #13 → #15   3 rounds
+ ↑↓←→ move  t track  e edges  b beyond  1-9 what-if  r refresh  q quit</pre>
+    <figcaption>
+      Real render. <b>Rows are workers, columns are rounds.</b> An empty cell is a worker
+      with nothing to do, and the reason line says which kind of nothing:
+      <b>⧗</b> waiting on a blocker (the graph is narrow — more lanes buy nothing),
+      <b>▪</b> waiting on a slot (the graph is wide — <code>max_lanes</code> is too low),
+      <b>○</b> simply spare. From <code>tick.sh lane-status</code> all three look the same: quiet.
+    </figcaption>
+  </figure>
+
+  <div class="wide" style="margin-top:26px">
+    <table class="grid-t">
+      <thead>
+        <tr><th style="width:15%">Today</th><th style="width:32%">What it is</th><th>Carries to the web as</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="k">grid</td><td>The worker × round board, 1–6 columns.</td><td>The main screen. Same rows, same glyphs, same reason lines.</td></tr>
+        <tr><td class="k">t · track</td><td>One ticket's lifeline: which rows have a worker and which are only labels.</td><td>Tab one of the ticket drawer.</td></tr>
+        <tr><td class="k">e · edges</td><td>One ticket's blockers, dependents, cone size, critical-path cost.</td><td>Tab two of the same drawer.</td></tr>
+        <tr><td class="k">b · beyond</td><td>Tickets that cannot start inside the window, and the blocker that gates them.</td><td>A panel under the board, always visible instead of a toggle.</td></tr>
+        <tr><td class="k">1–9</td><td>What-if: re-simulate at a different <code>max_lanes</code>. Writes nothing.</td><td>A lane slider over the board, with the delta called out.</td></tr>
+        <tr><td class="k">o</td><td>Open the cursor ticket's URL — read from the snapshot, never assembled.</td><td>The ticket id is a link. Same rule: no URL, no link.</td></tr>
+        <tr><td class="k">r</td><td>Force a fresh <code>tick.sh snapshot</code>. Costs one tracker call per member.</td><td>An explicit Refresh button. Never on a timer — see §4.</td></tr>
+        <tr><td class="k">—</td><td>One repo per process. <code>shape.sh</code> reads whichever repo you stood in.</td><td class="g-block"><b>New:</b> a project rail across all <code>~/.loom</code> homes.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============================================================ 2 -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">02 · the screens</p>
+    <h2>Five screens, one page</h2>
+    <p>
+      The dashboard is a single route with a persistent project rail. Nothing below
+      navigates away from the board — the drawer, the beyond panel and the what-if
+      control all resolve in place, because the board is the thing you are watching.
+    </p>
+  </div>
+
+  <h3>S1 · The board, with the project rail</h3>
+  <p class="col">
+    The rail is the answer to "switch between projects." It lists every directory under
+    <code>~/.loom</code> — 28 on this machine right now — grouped so the ones with running
+    lanes sit at the top. Each row carries the build label and a live/quiet mark, so the
+    rail doubles as a machine-wide status wall you never have to open.
+  </p>
+
+  <figure class="wide" style="padding:18px">
+    <div class="mock">
+      <div class="mock-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="mock-url">localhost:7717/shape</span>
+        <span>⌘K projects</span>
+      </div>
+      <div class="mock-body">
+
+        <aside class="rail">
+          <div class="rail-head"><span>projects</span><span>28</span></div>
+          <div class="rail-search">⌘K  filter…</div>
+
+          <div class="rail-group">running · 4</div>
+          <div class="proj">
+            <span class="live">●</span><span class="nm">triggers-api</span><span class="ct live">4</span>
+            <span class="sub">build-2 · 12 open · 0m</span>
+          </div>
+          <div class="proj on">
+            <span class="live">●</span><span class="nm">ai-workout-generator</span><span class="ct live">4</span>
+            <span class="sub">wt-8 · build-1 · 6 open · 0m</span>
+          </div>
+          <div class="proj">
+            <span class="alarm">▲</span><span class="nm">isle-multiply</span><span class="ct live">1</span>
+            <span class="sub">build-4 · 1 blocked · needs you</span>
+          </div>
+          <div class="proj">
+            <span class="live">●</span><span class="nm">seat-reservations</span><span class="ct live">1</span>
+            <span class="sub">build-1 · 3 open · 2m</span>
+          </div>
+
+          <div class="rail-group">quiet · 24</div>
+          <div class="proj">
+            <span class="quiet">○</span><span class="nm">ai-interpreter-workbench</span><span class="ct quiet">–</span>
+            <span class="sub">build-6 · last event 4h ago</span>
+          </div>
+          <div class="proj">
+            <span class="quiet">○</span><span class="nm">crucible</span><span class="ct quiet">–</span>
+            <span class="sub">build-2 · last event 2d ago</span>
+          </div>
+          <div class="proj">
+            <span class="quiet">○</span><span class="nm">demand-letter-generator</span><span class="ct quiet">–</span>
+            <span class="sub">build-1 · last event 9d ago</span>
+          </div>
+        </aside>
+
+        <main class="board">
+          <div class="board-head">
+            <p class="board-title">ai-workout-generator-copilot · wt-8</p>
+            <div class="board-meta">
+              <span><b>build-1</b></span>
+              <span>impl <b>3</b> · aux <b>4</b></span>
+              <span><b>6</b> open</span>
+              <span class="g-block"><b>1</b> impl lane idle now</span>
+              <span>snapshot <b>0m</b> ago · <b>7</b> events applied</span>
+              <span class="pill">↻ refresh</span>
+            </div>
+          </div>
+
+          <div class="gridwrap">
+            <div class="wxr">
+              <div class="colhead"></div>
+              <div class="colhead">now</div>
+              <div class="colhead">+1 round</div>
+              <div class="colhead">+2 rounds</div>
+
+              <div class="rowhead">impl 1</div>
+              <div class="cell sel">
+                <div class="t"><span class="g-run">●</span><span class="id">#11</span><span class="nm">parser core</span></div>
+                <div class="why">running · 4 turns</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-block">⧗</span><span class="id">#13</span><span class="nm">cli flags</span></div>
+                <div class="why">waiting on #11 to close</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-block">⧗</span><span class="id">#15</span><span class="nm">retry backoff</span></div>
+                <div class="why">waiting on #13 to close</div>
+              </div>
+
+              <div class="rowhead">impl 2</div>
+              <div class="cell">
+                <div class="t"><span class="g-next">▸</span><span class="id">#14</span><span class="nm">docs pass</span></div>
+                <div class="why">starts next wave</div>
+              </div>
+              <div class="cell empty">
+                <div class="t"><span class="g-idle">○</span><span>idle</span></div>
+                <div class="why">build drained</div>
+              </div>
+              <div class="cell empty">
+                <div class="t"><span class="g-idle">○</span><span>idle</span></div>
+                <div class="why">build drained</div>
+              </div>
+
+              <div class="rowhead">impl 3</div>
+              <div class="cell empty">
+                <div class="t"><span class="g-idle">○</span><span>idle</span></div>
+                <div class="why">build drained</div>
+              </div>
+              <div class="cell empty">
+                <div class="t"><span class="g-idle">○</span><span>idle</span></div>
+                <div class="why">build drained</div>
+              </div>
+              <div class="cell empty">
+                <div class="t"><span class="g-idle">○</span><span>idle</span></div>
+                <div class="why">build drained</div>
+              </div>
+
+              <div class="bandhead">aux pool 4 — gate, merge and probe lanes; not capped by max_lanes</div>
+
+              <div class="rowhead">gate</div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◆</span><span class="id">#12 #11 #14</span></div>
+                <div class="why">3 of 4 aux</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◆</span><span class="id">#13</span></div>
+                <div class="why">1 of 4 aux</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◆</span><span class="id">#15</span></div>
+                <div class="why">1 of 4 aux</div>
+              </div>
+
+              <div class="rowhead">merge</div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◈</span><span>3 serial · ~9m</span></div>
+                <div class="why">#12 #11 #14</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◈</span><span>1 serial · ~3m</span></div>
+                <div class="why">#13</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-next">◈</span><span>1 serial · ~3m</span></div>
+                <div class="why">#15</div>
+              </div>
+
+              <div class="rowhead">probe</div>
+              <div class="cell empty"><div class="t"><span class="g-idle">○</span><span>free</span></div></div>
+              <div class="cell empty"><div class="t"><span class="g-idle">○</span><span>free</span></div></div>
+              <div class="cell empty"><div class="t"><span class="g-idle">○</span><span>free</span></div></div>
+            </div>
+          </div>
+
+          <div class="slider-row">
+            <span>what-if · max_lanes</span>
+            <span class="lanes-scale">
+              <span>1</span><span>2</span><span class="on">3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span>
+            </span>
+            <span class="g-block">at 4 lanes nothing changes — every empty cell here is ⧗, not ▪</span>
+            <span class="pill">reset</span>
+          </div>
+
+          <div class="board-foot">
+            <span>critical path <b>#11 → #13 → #15</b> · 3 rounds</span>
+            <span class="g-block">⚠ blocked 1 · <b>#16</b> needs you</span>
+            <span>beyond +2 · 0 tickets</span>
+          </div>
+        </main>
+      </div>
+    </div>
+    <figcaption>
+      <b>S1.</b> Rail sorted by liveness, not alphabetically — the four projects with running
+      lanes are the four you can still act on. The what-if line does the reading for you:
+      the TUI shows the redrawn grid and leaves you to spot the difference, the web version
+      says <b>nothing changes</b> in words. Cell selection is a click; arrow keys still work.
+    </figcaption>
+  </figure>
+
+  <h3>S2 · Ticket drawer — track and edges, side by side</h3>
+  <p class="col">
+    In the TUI, <code>t</code> and <code>e</code> are full-screen overlays that hide the board.
+    A browser has the room to keep both: click a cell, the drawer opens beside the grid, and
+    the grid stays live behind it. The two overlays become two tabs on one surface.
+  </p>
+
+  <figure class="wide" style="padding:18px">
+    <div class="mock">
+      <div class="mock-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="mock-url">localhost:7717/shape?project=ai-workout-generator-copilot-wt-8&amp;ticket=11</span>
+      </div>
+      <div class="drawer-mock">
+        <div class="board" style="border-right:1px solid var(--rule-soft)">
+          <div class="board-head">
+            <p class="board-title" style="font-size:19px">the board stays live behind the drawer</p>
+            <div class="board-meta"><span>impl 1 · now · <b>#11</b> selected</span></div>
+          </div>
+          <div class="gridwrap">
+            <div class="wxr" style="grid-template-columns:62px repeat(2, minmax(150px,1fr)); min-width:380px">
+              <div class="colhead"></div><div class="colhead">now</div><div class="colhead">+1</div>
+              <div class="rowhead">impl 1</div>
+              <div class="cell sel">
+                <div class="t"><span class="g-run">●</span><span class="id">#11</span><span class="nm">parser core</span></div>
+                <div class="why">running · 4 turns</div>
+              </div>
+              <div class="cell">
+                <div class="t"><span class="g-block">⧗</span><span class="id">#13</span><span class="nm">cli flags</span></div>
+                <div class="why">waiting on #11</div>
+              </div>
+              <div class="rowhead">impl 2</div>
+              <div class="cell">
+                <div class="t"><span class="g-next">▸</span><span class="id">#14</span><span class="nm">docs pass</span></div>
+                <div class="why">starts next wave</div>
+              </div>
+              <div class="cell empty"><div class="t"><span class="g-idle">○</span><span>idle</span></div><div class="why">build drained</div></div>
+            </div>
+          </div>
+        </div>
+
+        <aside class="drawer">
+          <h5>#11 parser core</h5>
+          <div style="color:var(--ink-faint);font-size:11px">tier api · implementation round 1 · <span class="g-block">on the critical path</span></div>
+
+          <div class="tabs"><span class="on">track</span><span>edges</span><span>events</span></div>
+
+          <div class="lifeline">
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">in-progress <span class="g-run">● impl-11</span></div>
+              <div class="who">running now · writes code, opens the MR</div>
+            </div>
+            <div class="rail-l"></div>
+            <div class="mark">◄ the impl slot frees HERE, at the MR — not at close</div>
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">review <span class="g-idle">○ nobody</span></div>
+              <div class="who">⌛ queued for a gate — a label, no process</div>
+            </div>
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">review <span class="g-next">◆ gate-11-r1</span></div>
+              <div class="who">runs the api tier's gate commands</div>
+              <div class="who g-slot">✗ FAIL relabels in-progress and starts round 2</div>
+            </div>
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">merge-queue <span class="g-idle">○ nobody</span></div>
+              <div class="who">⌛ waiting for the merge lock — one, globally</div>
+            </div>
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">merge-queue <span class="g-next">◈ merge-11</span></div>
+              <div class="who">rebase onto the base, then merge</div>
+            </div>
+            <div class="rail-l"></div>
+            <div class="step">
+              <div class="lbl">closed</div>
+              <div class="who">the edges into this ticket clear here</div>
+            </div>
+          </div>
+
+          <div style="border-top:1px solid var(--rule-soft);margin-top:6px;padding-top:10px;color:var(--ink-faint);font-size:11px">
+            two rows have no worker at all. review and merge-queue are labels, not
+            activities. Only in-progress always has a process on it.
+          </div>
+
+          <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+            <span class="pill">↗ open in tracker</span>
+            <span class="pill">⌥ tail lane log</span>
+          </div>
+        </aside>
+      </div>
+    </div>
+    <figcaption>
+      <b>S2.</b> The <b>events</b> tab is new and free: <code>events.jsonl</code> is already being
+      tailed for the replay, so filtering it to one ticket costs nothing. It is the answer to
+      "why did this get rejected twice," which today means grepping the log by hand.
+      <b>open in tracker</b> keeps the TUI's rule — the URL comes from the snapshot, and a
+      ticket without one shows no button rather than a guessed link that 404s.
+    </figcaption>
+  </figure>
+
+  <h3>S3 · Beyond the window, and the blocked inbox</h3>
+  <p class="col">
+    Two lists the TUI compresses to one line each. On the web they sit under the board
+    permanently, because both are things you act on and neither is big.
+  </p>
+
+  <div class="two">
+    <div class="card">
+      <h4>beyond +2</h4>
+      <p class="lead">Sorted by the round they would land in</p>
+      <table class="grid-t" style="font-size:14px">
+        <thead><tr><th>rd</th><th>ticket</th><th>blocked by</th></tr></thead>
+        <tbody>
+          <tr><td class="k">+3</td><td>#21 export csv</td><td class="k">#15</td></tr>
+          <tr><td class="k">+4</td><td>#22 billing hooks</td><td class="k">#21</td></tr>
+          <tr><td class="k">far</td><td>#30 cross-repo auth</td><td class="k g-block">#7 (other project)</td></tr>
+        </tbody>
+      </table>
+      <p class="footnote" style="margin-top:10px">
+        A blocker outside this build never closes inside it, so its dependent never floats
+        to round 1 — it surfaces here instead. The simulation already runs four rounds past
+        the window so it can name the round, not just say "later."
+      </p>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--halt)">
+      <h4>blocked · needs you</h4>
+      <p class="lead">Out of the machine's hands</p>
+      <table class="grid-t" style="font-size:14px">
+        <thead><tr><th>ticket</th><th>waiting since</th><th></th></tr></thead>
+        <tbody>
+          <tr><td>#16 blocked thing</td><td class="k">2h 40m</td><td><span class="pill bad">open</span></td></tr>
+        </tbody>
+      </table>
+      <p class="footnote" style="margin-top:10px">
+        Blocked tickets take no part in the round simulation — counting them as future work
+        would make every column after the first a lie. The board excludes them; this panel
+        is the only place they appear, which is why it is always on screen.
+      </p>
+    </div>
+  </div>
+
+  <h3>S4 · The machine wall</h3>
+  <p class="col">
+    One extra screen the TUI cannot have: every project's board condensed to a single row,
+    so "which of my 28 builds is idling right now" is one glance rather than 28 terminals.
+    This is the screen that justifies the project switcher — see the open question in §5.
+  </p>
+
+  <figure class="wide" style="padding:18px">
+    <div class="mock">
+      <div class="mock-bar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="mock-url">localhost:7717/wall</span>
+      </div>
+      <div class="board">
+        <div class="gridwrap">
+          <table class="grid-t" style="min-width:640px">
+            <thead>
+              <tr><th>project</th><th>build</th><th>lanes now</th><th>next round</th><th>idle reason</th><th>snapshot</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>triggers-api</td><td class="k">build-2</td>
+                <td class="k g-run">●●●● 4/4</td><td class="k">4 start</td>
+                <td class="k">—</td><td class="k">0m</td>
+              </tr>
+              <tr>
+                <td>ai-workout-generator · wt-8</td><td class="k">build-1</td>
+                <td class="k g-run">●○○ 1/3</td><td class="k">1 start</td>
+                <td class="k g-block">⧗ graph is narrow</td><td class="k">0m</td>
+              </tr>
+              <tr>
+                <td>isle-multiply</td><td class="k">build-4</td>
+                <td class="k g-run">● 1/4</td><td class="k">0 start</td>
+                <td class="k g-slot">▲ 1 blocked · needs you</td><td class="k">6m</td>
+              </tr>
+              <tr>
+                <td>seat-reservations</td><td class="k">build-1</td>
+                <td class="k g-run">●○ 1/2</td><td class="k">2 start</td>
+                <td class="k g-slot">▪ max_lanes too low</td><td class="k">2m</td>
+              </tr>
+              <tr>
+                <td>crucible</td><td class="k">build-2</td>
+                <td class="k g-idle">○ 0/4</td><td class="k">—</td>
+                <td class="k g-idle">quiet · last event 2d ago</td><td class="k g-idle">stale</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <figcaption>
+      <b>S4.</b> The <b>idle reason</b> column is the whole point, and it is the one column
+      that needs a snapshot per project. See the cost warning in §4 — this screen is the
+      reason that warning exists.
+    </figcaption>
+  </figure>
+</section>
+
+<!-- ============================================================ 3 -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">03 · how it is fed</p>
+    <h2>Three data paths, unchanged</h2>
+    <p>
+      The dashboard reuses <code>shape.jq</code>'s simulation rather than reimplementing it.
+      A thin reader process shells the same commands <code>shape.sh</code> shells, and pushes
+      the result over Server-Sent Events so the browser holds no polling logic.
+    </p>
+  </div>
+
+  <div class="wide">
+    <pre class="mermaid">
+flowchart TD
+  B["browser<br/>board · drawer · wall"]
+  S["reader daemon<br/>localhost only, read-only"]
+  T["tick.sh snapshot<br/>EXPENSIVE — one tracker call per member"]
+  L["tick.sh lane-status<br/>free — pid files on disk"]
+  E["events.jsonl<br/>free — tail -c +N"]
+  J["shape.jq + shape-apply.jq<br/>the same simulation the TUI runs"]
+  C[("per-project cache<br/>scratch/shape.json")]
+
+  B -- "click Refresh (explicit)" --> S
+  S -- "on open, and on Refresh only" --> T
+  S -- "every 2s" --> L
+  S -- "every 2s, byte offset" --> E
+  T --> C
+  E -- "replayed onto" --> C
+  C --> J
+  L -- "overlaid at render, never cached" --> J
+  J -- "SSE: one JSON board per project" --> B
+    </pre>
+  </div>
+
+  <div class="callout warp">
+    <div class="bar"></div>
+    <div class="body">
+      <p><b>Why the daemon renders JSON, not text.</b> <code>shape.jq</code> today emits a drawn
+      board and a <code>--mode cells</code> JSON map that the cursor navigates by. The web
+      version needs the cell map for every cell, not just positions — so this adds one mode,
+      <code>--mode json</code>, emitting the same simulation as structured data. The drawing
+      code stays untouched, the TUI keeps working, and the two views cannot drift because
+      they run the same reduce.</p>
+    </div>
+  </div>
+
+  <div class="callout">
+    <div class="bar"></div>
+    <div class="body">
+      <p><b>Read-only, by construction.</b> <code>shape.sh</code>'s header states it: writes no
+      label, takes no lock, emits no event, spawns no lane — delete the file and nothing about
+      a build changes. The daemon inherits that rule exactly. It runs <code>snapshot</code> and
+      <code>lane-status</code> and it reads <code>events.jsonl</code>. It does not tick, pause,
+      retry or merge. That is what makes it safe to leave open in a tab for a week.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 4 -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">04 · what will bite</p>
+    <h2>Risks, honestly</h2>
+  </div>
+
+  <div class="two">
+    <div class="card" style="border-left:3px solid var(--halt)">
+      <h4>risk · blocking</h4>
+      <p class="lead">Nothing maps a project back to its repo</p>
+      <p>The state directory is <code>~/.loom/&lt;basename&gt;-&lt;cksum of the repo path&gt;</code>
+      (<code>tick.sh:52</code>). A checksum is one-way — from <code>crucible-2014258785</code> you
+      cannot recover <code>/Users/…/crucible</code>, and the dashboard needs that path to run
+      <code>tick.sh</code> at all.</p>
+      <p><b>Fix:</b> write the repo root into <code>$LOOM_HOME/.repo</code> at bootstrap, and
+      backfill the 28 existing homes by scanning for git repos whose path checksums to a
+      known key. Small, but it must land first.</p>
+    </div>
+
+    <div class="card" style="border-left:3px solid var(--weft)">
+      <h4>risk · high</h4>
+      <p class="lead">28 projects × one snapshot each</p>
+      <p>A snapshot costs one tracker call per member plus a batched fan-out. The TUI protects
+      the rate limit by never putting it on a timer. A wall over 28 projects that refreshed
+      them all would spend the build's rate limit drawing pictures of the build.</p>
+      <p><b>Fix:</b> the wall refreshes only projects with a running lane (4 of 28 here), reuses
+      each project's cached <code>scratch/shape.json</code> for the rest, and labels stale rows
+      <span class="pill">stale</span> rather than hiding them.</p>
+    </div>
+
+    <div class="card">
+      <h4>risk · medium</h4>
+      <p class="lead">A board that lies quietly is worse than none</p>
+      <p>The TUI prints snapshot age and applied-event count in its header for exactly this
+      reason. A browser tab left open overnight is a much better liar than a terminal.</p>
+      <p><b>Fix:</b> carry age and event count into every screen including the wall, and grey
+      the whole board past a threshold instead of showing confident-looking stale cells.</p>
+    </div>
+
+    <div class="card">
+      <h4>risk · medium</h4>
+      <p class="lead">A local HTTP server on a dev box</p>
+      <p>The daemon can shell <code>tick.sh</code> for any project on the machine. That is a lot
+      of reach for something listening on a port.</p>
+      <p><b>Fix:</b> bind <code>127.0.0.1</code> only, no auth but no external interface, and the
+      project list is fixed to what exists under <code>~/.loom</code> — the project id is never
+      interpolated into a shell command as a path.</p>
+    </div>
+  </div>
+
+  <div class="callout halt" style="margin-top:26px">
+    <div class="bar"></div>
+    <div class="body">
+      <p><b>Scope note.</b> Everything above is read-only. Buttons that would <em>change</em> a
+      build — pause the loop, retry a gate, unblock a ticket — are deliberately absent from
+      these screens. They are a real product question, not an oversight, and the third
+      question below asks it directly.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 5 -->
+<section>
+  <div class="section-head">
+    <p class="eyebrow">05 · your call</p>
+    <h2>Three decisions before code</h2>
+    <p>Pick one per question and queue it. Anything else, annotate the screen directly.</p>
+  </div>
+
+  <div class="qgrid">
+
+    <form class="q" data-lavish-question="scope" onsubmit="event.preventDefault(); const v = new FormData(event.currentTarget).get('scope'); if (v) window.lavish.queuePrompt('Shape dashboard scope: ' + v, { tag: 'choice', text: 'Scope: ' + v, element: event.currentTarget, data: { question: 'scope', answer: v } });">
+      <p class="qt">1 · How much of the machine does it show?</p>
+      <p class="qs">This decides whether the wall (S4) is built at all, and how hard the snapshot-cost problem bites.</p>
+      <label><input type="radio" name="scope" value="one project at a time, rail switches">
+        <span><b>One project at a time</b>
+        <span class="why">The rail switches the board. Closest to the TUI, cheapest, one snapshot in flight. No wall.</span></span></label>
+      <label><input type="radio" name="scope" value="board plus the machine wall">
+        <span><b>Board plus the wall</b> — recommended
+        <span class="why">S4 is the reason to leave it open. Cost is contained by only refreshing live projects.</span></span></label>
+      <label><input type="radio" name="scope" value="wall first, board second">
+        <span><b>Wall first</b>
+        <span class="why">The wall is the landing page and the board is a drill-down. Bigger build, more snapshot pressure.</span></span></label>
+      <button type="submit">Queue this answer</button>
+    </form>
+
+    <form class="q" data-lavish-question="backend" onsubmit="event.preventDefault(); const v = new FormData(event.currentTarget).get('backend'); if (v) window.lavish.queuePrompt('Shape dashboard backend: ' + v, { tag: 'choice', text: 'Backend: ' + v, element: event.currentTarget, data: { question: 'backend', answer: v } });">
+      <p class="qt">2 · What renders the board?</p>
+      <p class="qs">The simulation is 456 lines of jq that the tests already pin. The question is whether the web version runs it or reimplements it.</p>
+      <label><input type="radio" name="backend" value="add --mode json to shape.jq, daemon shells it">
+        <span><b>Add <code>--mode json</code></b> — recommended
+        <span class="why">One simulation, one test suite. The daemon is a thin shell wrapper plus SSE. The TUI and the web cannot drift.</span></span></label>
+      <label><input type="radio" name="backend" value="port the simulation to the web server language">
+        <span><b>Port the simulation</b>
+        <span class="why">No jq dependency at runtime, easier to extend. Two copies of the round rules, and the copies diverge.</span></span></label>
+      <label><input type="radio" name="backend" value="serve the ANSI board and render it in the browser">
+        <span><b>Serve the drawn board</b>
+        <span class="why">Fastest to ship — pipe the existing text into a terminal renderer. No clicking, no drawer, no wall.</span></span></label>
+      <button type="submit">Queue this answer</button>
+    </form>
+
+    <form class="q" data-lavish-question="writes" onsubmit="event.preventDefault(); const v = new FormData(event.currentTarget).get('writes'); if (v) window.lavish.queuePrompt('Shape dashboard write policy: ' + v, { tag: 'choice', text: 'Writes: ' + v, element: event.currentTarget, data: { question: 'writes', answer: v } });">
+      <p class="qt">3 · Can it change a build?</p>
+      <p class="qs"><code>shape.sh</code> is deletable by design. A dashboard with buttons is a different kind of thing, with a different blast radius.</p>
+      <label><input type="radio" name="writes" value="strictly read-only, same as shape.sh">
+        <span><b>Strictly read-only</b> — recommended for v1
+        <span class="why">Keeps the "delete it and nothing changes" property. Acting still means the terminal.</span></span></label>
+      <label><input type="radio" name="writes" value="read-only plus force refresh and open in tracker">
+        <span><b>Read-only plus refresh</b>
+        <span class="why">Refresh already shells <code>snapshot</code>, which is a tracker read. Honest middle ground.</span></span></label>
+      <label><input type="radio" name="writes" value="allow pause, resume, retry gate and unblock">
+        <span><b>Let it act</b>
+        <span class="why">Pause, resume, retry, unblock from the browser. Needs locking, an audit trail, and a much harder security story.</span></span></label>
+      <button type="submit">Queue this answer</button>
+    </form>
+
+  </div>
+
+  <p class="footnote wide" style="margin-top:26px">
+    Sources: <code>scripts/shape.sh</code> (modes, keys, data paths, read-only contract),
+    <code>scripts/shape.jq</code> (round simulation, band split, beyond list),
+    <code>scripts/tick.sh:52-53</code> (state directory key), <code>ls ~/.loom</code> (28 projects,
+    4 with live lanes at time of writing). Design tokens taken from this repo's own
+    <code>ARCHITECTURE_DIAGRAM.html</code>.
+  </p>
+</section>
+
+<script type="module">
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+
+  const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+  const paint = document.createElement("canvas").getContext("2d");
+  function toRgba(color) {
+    paint.clearRect(0, 0, 1, 1);
+    paint.fillStyle = "#000";
+    paint.fillStyle = color;
+    paint.fillRect(0, 0, 1, 1);
+    return paint.getImageData(0, 0, 1, 1).data;
+  }
+
+  function compositeRgba(foreground, background) {
+    const foregroundAlpha = foreground[3] / 255;
+    const backgroundAlpha = background[3] / 255;
+    const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+    if (alpha === 0) return [0, 0, 0, 0];
+    return [
+      (foreground[0] * foregroundAlpha + background[0] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[1] * foregroundAlpha + background[1] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      (foreground[2] * foregroundAlpha + background[2] * backgroundAlpha * (1 - foregroundAlpha)) / alpha,
+      alpha * 255,
+    ];
+  }
+
+  function pageIsDark() {
+    const root = document.documentElement;
+    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    if (a > 0) {
+      return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+    }
+    const colorScheme = getComputedStyle(root).colorScheme;
+    if (colorScheme.includes("dark") && !colorScheme.includes("light")) return true;
+    if (colorScheme.includes("light") && !colorScheme.includes("dark")) return false;
+    return darkQuery.matches;
+  }
+
+  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.textContent }));
+  let applied;
+  let rendering = false;
+  let queued = false;
+  function queueRender() {
+    queued = true;
+    if (rendering) return;
+    void render();
+  }
+  async function render() {
+    rendering = true;
+    try {
+      while (queued) {
+        queued = false;
+        const theme = pageIsDark() ? "dark" : "default";
+        if (theme === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        for (const { el, src } of diagrams) {
+          el.removeAttribute("data-processed");
+          el.textContent = src;
+        }
+        try {
+          await mermaid.run({ nodes: diagrams.map((d) => d.el) });
+        } catch (error) {
+          console.error("Mermaid diagram render failed:", error);
+          return;
+        }
+        applied = theme;
+      }
+    } finally {
+      rendering = false;
+      if (queued) queueRender();
+    }
+  }
+
+  if (document.readyState === "complete") queueRender();
+  else window.addEventListener("load", queueRender, { once: true });
+  const themeObserver = new MutationObserver(queueRender);
+  for (const el of [document.documentElement, document.body]) {
+    if (!el) continue;
+    themeObserver.observe(el, { attributes: true, attributeFilter: ["data-theme", "class", "style"] });
+  }
+  document.addEventListener("change", queueRender, true);
+  document.addEventListener("transitionend", ({ propertyName }) => {
+    if (propertyName === "background-color") queueRender();
+  }, true);
+  darkQuery.addEventListener("change", queueRender);
+</script>
+
+</body>
+</html>
