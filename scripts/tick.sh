@@ -2339,8 +2339,8 @@ cmd_chain_merge() {
 # watching), takes no lock, writes no pid file and records no event (P24).
 _follow_stream() { # _follow_stream <id>
     local id="$1"
-    local jsonl="$LOGS_DIR/lane-$id.jsonl" pidfile="$LANES_DIR/$id.pid"
-    local n=0 total pid gone=0
+    local jsonl="$LOGS_DIR/lane-$id.jsonl" log="$LOGS_DIR/lane-$id.log" pidfile="$LANES_DIR/$id.pid"
+    local n=0 total log_n=0 log_total stream_started=0 pid gone=0
     command -v jq >/dev/null 2>&1 || die "render-log --follow: jq is required"
     local jqd; jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"   # P72: jq -L, the prelude every program includes
     RENDER_JQ="$jqd/render.jq"
@@ -2349,7 +2349,20 @@ _follow_stream() { # _follow_stream <id>
         || die "render-log --follow: no lane '$id' — nothing at $jsonl"
     printf -- '── lane %s ──\n' "$id"
     while :; do
+        # A provider lane's plain-text pregate runs before agent.sh and writes
+        # to .log. Follow it until the canonical stream begins, then use JSONL
+        # exclusively: the exit epilogue later appends that rendered stream to
+        # .log, and continuing to read both would print every provider turn
+        # twice in the pane.
+        if [ "$stream_started" -eq 0 ] && [ -s "$log" ]; then
+            log_total=$(wc -l < "$log" | tr -d ' ')
+            if [ "$log_total" -gt "$log_n" ]; then
+                sed -n "$((log_n + 1)),${log_total}p" "$log"
+                log_n=$log_total
+            fi
+        fi
         if [ -s "$jsonl" ]; then
+            stream_started=1
             total=$(wc -l < "$jsonl" | tr -d ' ')
             if [ "$total" -gt "$n" ]; then
                 sed -n "$((n + 1)),${total}p" "$jsonl" | jq -L "$jqd" -r -f "$RENDER_JQ" 2>/dev/null || :

@@ -55,6 +55,67 @@ grep -q "gpt-5.6-sol" "$WT/out.txt" \
     && ok "follow: the model shown is the one the session resolved" \
     || bad "follow: resolved model missing from the render"
 
+# A gate starts with a plain-text pregate in lane-<id>.log, then changes over
+# to canonical JSONL when the provider review starts. The viewer must span
+# that handoff. The one-shot render below models the exit epilogue appending
+# the rendered JSONL to .log; a follower that keeps reading both sources would
+# print the provider turn twice.
+sleep 30 & PREGATEPID=$!
+echo "$PREGATEPID" > "$WT/home/lanes/gate-284.pid"
+PREGATELOG="$WT/home/logs/lane-gate-284.log"
+PREGATEJSONL="$WT/home/logs/lane-gate-284.jsonl"
+printf '%s\n' '--- pregate: bash scripts/gate.sh unit ---' > "$PREGATELOG"
+: > "$PREGATEJSONL"
+( FENV "$TICK" render-log gate-284 --follow > "$WT/pregate-out.txt" 2>&1 ) & PREGATEFOLLOWER=$!
+sleep 0.4
+printf '%s\n' 'pregate checks are still running' >> "$PREGATELOG"
+sleep 0.4
+printf '%s\n' \
+    '{"schema":1,"type":"assistant_progress","provider":"claude","job":"gate","text":"provider review is now live"}' \
+    >> "$PREGATEJSONL"
+sleep 0.4
+FENV "$TICK" render-log gate-284
+kill "$PREGATEPID" 2>/dev/null || :
+wait "$PREGATEFOLLOWER" 2>/dev/null || :
+rm -f "$WT/home/lanes/gate-284.pid"
+if grep -q 'pregate: bash scripts/gate.sh unit' "$WT/pregate-out.txt" \
+   && grep -q 'pregate checks are still running' "$WT/pregate-out.txt" \
+   && [ "$(grep -c 'provider review is now live' "$WT/pregate-out.txt")" -eq 1 ]; then
+    ok "follow: a gate pane spans pregate log and provider stream without duplicate review output"
+else
+    bad "follow: gate handoff lost or duplicated output ($(tr '\n' '|' < "$WT/pregate-out.txt"))"
+fi
+
+# Planted violation: remove only the plain-log read from a private tick.sh.
+# The same public follower then reproduces the empty pregate pane while still
+# proving that the mutant ran through its normal header and exit.
+FOLLOWMUT=$(mirror_scripts "$WT/follow-mutant")
+sed 's/^        if \[ "\$stream_started" -eq 0 \] && \[ -s "\$log" \]; then$/        if false; then/' \
+    "$TICK" > "$FOLLOWMUT/tick.sh"
+chmod +x "$FOLLOWMUT/tick.sh"
+if cmp -s "$TICK" "$FOLLOWMUT/tick.sh"; then
+    bad "follow-violation: sed did not match the pregate-log guard, mutant is identical to the fix"
+else
+    sleep 30 & MUTPID=$!
+    echo "$MUTPID" > "$WT/home/lanes/gate-285.pid"
+    printf '%s\n' 'pregate visible only through the plain log' > "$WT/home/logs/lane-gate-285.log"
+    : > "$WT/home/logs/lane-gate-285.jsonl"
+    ( FENV "$FOLLOWMUT/tick.sh" render-log gate-285 --follow > "$WT/mutant-out.txt" 2>&1 ) & MUTFOLLOWER=$!
+    sleep 0.4
+    kill "$MUTPID" 2>/dev/null || :
+    wait "$MUTFOLLOWER" 2>/dev/null; mut_rc=$?
+    rm -f "$WT/home/lanes/gate-285.pid"
+    mut_out=$(cat "$WT/mutant-out.txt")
+    if assert_mutant_ran "$mut_rc" "$mut_out" "follow-violation"; then
+        if ! grep -q 'pregate visible only through the plain log' "$WT/mutant-out.txt" \
+           && grep -q 'lane gate-285 ended' "$WT/mutant-out.txt"; then
+            ok "follow-violation: without the log handoff a live pregate pane is empty"
+        else
+            bad "follow-violation: removing the log handoff did not reproduce the empty pane ($mut_out)"
+        fi
+    fi
+fi
+
 # 13a. Planted violation: the exit epilogue owns lane-<id>.log. A follower that
 #      appended to it would corrupt the very artifact it is watching, so a
 #      viewer writes to stdout and nothing else.

@@ -1608,3 +1608,18 @@ rejection. The mixed config-selected fixture and its planted violation pass 17 f
 The full suite reached 1,131 passes with one unrelated, reproducible `lane port cleanup` fixture
 failure. The change is in shared scheduler code; neither provider adapter changed, so Claude and
 Codex use the same behavior.
+
+### D-TICK-24 · gate panes are blank throughout the pregate
+*Closed 2026-08-16.*
+
+`spawn-lane` writes a gate's plain-text pregate output to `lane-<id>.log` before the provider
+session creates canonical JSONL, but `_follow_stream` watched only `lane-<id>.jsonl`. Every live
+viewer pane therefore showed only its header while long UI/API gates were running, even though the
+raw logs were growing normally. The pane began moving only after the paid review session started.
+
+**Shipped:** `_follow_stream` now follows the plain log until the first canonical record appears,
+then switches permanently to JSONL so the exit epilogue's rendered-log append cannot duplicate
+provider output. The public `render-log <id> --follow` fixture spans the pregate-to-provider
+handoff and a planted violation recreates the empty pane. Focused section 14 passes 58 assertions.
+The full suite reached 1,133 passes with the same unrelated, reproducible `lane port cleanup`
+fixture failure. Shared rendering code serves Claude and Codex; neither adapter changed.
