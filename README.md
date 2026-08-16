@@ -72,7 +72,7 @@ time and money went and writes up proposals for improving the next one.
 | Dependency | Why Loom needs it |
 |---|---|
 | **Claude Code or Codex** | The interactive provider starts the build; every headless job then runs through Loom's matching adapter. Provider identity is recorded on the Build issue. |
-| **A git repository** | Each in-flight ticket gets its own git worktree, cut as a sibling directory of the repo. Local-only repos will not work — lanes always branch from the remote. |
+| **A git repository** | Each in-flight ticket gets its own linked worktree under the ignored `.worktrees/` directory. Local-only repos will not work — lanes always branch from the remote. |
 | **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. Loom scripts and every provider job read that file directly, so there is no second tracker setting that can drift. Without it, every Loom verb refuses. |
 | **A board Loom drives** — GitLab or Linear | Epics, issues, labels, blocking links and comments are where **all** build state lives. Loom needs a board it can create labels in. Every board call goes through `scripts/trackers/<name>.sh`, the one file that knows that tracker; a repo declaring anything else is refused by name until a driver for it exists. |
 | **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom **derives** it rather than asking: a board that is itself a code host is its own forge, and otherwise your `origin` remote decides. |

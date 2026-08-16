@@ -44,8 +44,9 @@ So loom reads that file's `# Issue tracker: <Name>` heading and **halts**
 without it — in `bootstrap.sh` before any write, in `cmd_tick` before any wave
 is paid for, in `cmd_snapshot` (the read every other read verb funnels
 through), and at `lane.sh`'s verb dispatch. The declaration must also be
-**tracked by git**: worktrees sit beside the repo and each is a checkout, so an
-untracked file is visible to the human and absent from every lane.
+**tracked by git**: worktrees live under the ignored `.worktrees/` directory
+and each is a checkout, so an untracked file in the main clone is visible to
+the human and absent from every lane.
 
 A tracker loom has no driver for halts too, by name. Resolving the declaration
 and then ignoring it is the failure the declaration exists to prevent.

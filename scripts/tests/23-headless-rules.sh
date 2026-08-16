@@ -17,12 +17,23 @@ printf 'Implement ticket 12 in this worktree. Run the tier gate before pushing.\
 COMPOSED="$LOOM_HOME/briefs/impl-71.md"
 if [ -f "$COMPOSED" ] && grep -q 'Implement ticket 12' "$COMPOSED" \
    && grep -q 'every step blocks' "$COMPOSED" \
+   && grep -q 'Finite commands.*builds, tests and gates.*foreground' "$COMPOSED" \
    && grep -q 'wait-ready --timeout' "$COMPOSED" \
-   && grep -q 'KillShell' "$COMPOSED"; then
+   && grep -q 'KillShell' "$COMPOSED" \
+   && grep -q 'blocked-report <iid> --category <slug>' "$COMPOSED" \
+   && grep -q 'transition <iid> blocked' "$COMPOSED" \
+   && grep -q 'Do not exit after only the report or only the transition' "$COMPOSED"; then
     ok "P68: an impl brief is composed with the headless rules appended to it"
 else
     bad "P68: impl brief lacks the headless rules ($(cat "$COMPOSED" 2>/dev/null | tr '\n' ' ' | cut -c1-120))"
 fi
+# P106: #130 reproduced #136's half-transition from a non-merge lane: the
+# report landed, the state did not. Every lane kind receives this sequence
+# from the common append, so recovery is immediate rather than waiting for a
+# later planner wave to notice and repair it.
+grep -q 'blocked-report <iid>.*then immediately run .*transition <iid> blocked' "$COMPOSED" \
+    && ok "P106: every headless lane is told that blocked report + transition is one terminal sequence" \
+    || bad "P106: a lane may still exit after only half of the blocked transition"
 # D-TICK-16: the rule names the tool it is about. "I backgrounded it and will be
 # notified" was already forbidden, but a lane that thinks of it as "I'll schedule
 # a wakeup" sails past a rule it technically read — two lanes did, in one day.

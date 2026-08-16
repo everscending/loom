@@ -91,6 +91,12 @@ LOGS_DIR="$LOOM_HOME/logs"
 # lane worktree hold an untracked file by construction, so sweep's
 # unsaved-work guard (D-TICK-17) kept all 30 of them across five builds.
 BRIEFS_DIR="$LOOM_HOME/briefs"
+# Codex owns the whole process scope beneath `codex exec`: a worker started by
+# a shell command inside that session is reaped when the session exits, even
+# when the shell used nohup. Provider sessions therefore leave validated
+# launch requests here. A safe host wrapper, normally the scheduler heartbeat,
+# drains them only after the provider has returned.
+LANE_LAUNCH_DIR="$LOOM_HOME/lane-launch-queue"
 # P85: what the last sweep pass could not remove, and why. Sweep said all of
 # this to stdout inside a wave session for five builds — the right message,
 # addressed to a human, into a file no human reads.
@@ -117,7 +123,7 @@ SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
 WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 AGENT_SH="${LOOM_AGENT_CMD:-${SELF_PATH%/*}/agent.sh}"
 
-mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR"
+mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR" "$LANE_LAUNCH_DIR"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -182,9 +188,11 @@ _prune_scratch() {
 
 # Worktree sweep — the build cleans up after itself, on the same trust model
 # as _prune_scratch: deterministic plumbing with provable scope, approved by
-# the human 2026-08-02. A candidate must be named exactly "<repo>-wt-<digits>"
-# (this skill's own lane-worktree naming) AND either be a registered worktree
-# of this repo whose branch is fully contained in origin/<base>, or an
+# the human 2026-08-02. A candidate must live at
+# `.worktrees/<digits|probe-slug>` (current layout) or be named exactly
+# `<repo>-wt-<digits|probe-slug>` (legacy sibling layout), AND either be a
+# registered worktree of this repo whose branch is fully contained in
+# origin/<base>, or an
 # orphaned corpse whose .git file points into this repo's pruned metadata.
 # A live lane's cwd is never touched; a tree with modified TRACKED files is
 # never deleted (possible human work) — untracked droppings (chain briefs,
@@ -283,9 +291,12 @@ cmd_sweep() {
         rm -f "$SWEEP_HELD_FILE.new"   # a skipped pass observed nothing; keep the last real inventory
         return 0
     fi
-    for dir in "$REPO_ROOT"-wt-*; do
+    for dir in "$REPO_ROOT/.worktrees/"* "$REPO_ROOT"-wt-*; do
         [ -e "$dir" ] || continue
-        name="${dir##*-wt-}"
+        case "$dir" in
+            "$REPO_ROOT/.worktrees/"*) name="${dir##*/}" ;;
+            *)                          name="${dir##*-wt-}" ;;
+        esac
         case "$name" in
             ''  ) continue ;;
             *[!0-9]*) case "$name" in probe-*) ;; *) continue ;; esac ;;
@@ -615,6 +626,63 @@ _worktree_for_branch() { # <repo-dir> <branch> → prints the worktree path, or 
         /^worktree / { w = substr($0, 10) }
         $0 == "branch " b { print w; exit }
     '
+}
+
+_lane_launch_label() { # <lane-id> — stable until clear-lane retires the job
+    printf 'com.loom.lane.%s.%s\n' "$REPO_KEY" "$1"
+}
+
+_plist_string() { # <value> — one XML-safe plist string element
+    printf '<string>'
+    printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+    printf '</string>\n'
+}
+
+_write_lane_plist() { # <path> <label> <log> -- <program arguments...>
+    local path="$1" label="$2" log="$3"; shift 3
+    {
+        printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+        printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+        printf '%s\n' '<plist version="1.0"><dict>'
+        printf '%s\n' '<key>Label</key>'; _plist_string "$label"
+        printf '%s\n' '<key>ProgramArguments</key><array>'
+        while [ $# -gt 0 ]; do _plist_string "$1"; shift; done
+        printf '%s\n' '</array>'
+        printf '%s\n' '<key>RunAtLoad</key><true/>'
+        # Deliberately omit KeepAlive. `launchctl submit` inferred it for these
+        # workers and replayed a completed merge every 15–20 seconds. A lane is
+        # one build action: its epilogue requests the next scheduler tick, but
+        # launchd must never execute that same action a second time.
+        printf '%s\n' '<key>ProcessType</key><string>Background</string>'
+        printf '%s\n' '<key>StandardOutPath</key>'; _plist_string "$log"
+        printf '%s\n' '<key>StandardErrorPath</key>'; _plist_string "$log"
+        printf '%s\n' '</dict></plist>'
+    } > "$path"
+}
+
+_lane_launchd_pid() { # <lane-id> — authoritative pid when launchd says active
+    local id="$1" marker="$LANES_DIR/$1.launchd" label info
+    [ -s "$marker" ] || return 1
+    label=$(cat "$marker" 2>/dev/null || true); [ -n "$label" ] || return 1
+    info=$("$LAUNCHCTL_CMD" print "gui/$(id -u)/$label" 2>/dev/null) || return 1
+    printf '%s\n' "$info" | sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)$/\1/p' | head -1
+}
+
+_lane_process_alive() { # <lane-id> <recorded-pid>
+    local id="$1" pid="$2" launch_pid marker="$LANES_DIR/$1.launchd"
+    [ -n "$pid" ] || return 1
+    if [ -s "$marker" ]; then
+        # The launchd record is authoritative for a launchd-owned one-shot.
+        # After the job exits, its numeric pid can be reused by an unrelated
+        # process; trusting kill -0 first then resurrects a completed lane in
+        # the ticker. This also covers Codex sandboxes that cannot signal-probe
+        # a live sibling job: active launchd jobs expose a pid, exited jobs do
+        # not, regardless of the recorded pid file.
+        launch_pid=$(_lane_launchd_pid "$id" 2>/dev/null || true)
+        [ -n "$launch_pid" ]
+        return
+    fi
+    kill -0 "$pid" 2>/dev/null
 }
 
 # The question the walk above asks is the FILESYSTEM one, and Claude Code answers
@@ -1134,6 +1202,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     if [ "$mode" = manual ] && [ -n "${LOOM_LANE_ID:-}" ]; then
         die "tick: refusing a bare 'tick' from inside lane '$LOOM_LANE_ID' — use 'tick --from-lane', which the lane's own epilogue already runs on exit."
     fi
+    [ "$mode" != manual ] || _raise_viewer
     # D-TICK-20: before the environment is cleared, because the exiting lane's
     # id is the only way to find its transcript — and before `_usage_gate`
     # below, which is what actually refuses. A handoff from a lane the account's
@@ -1156,6 +1225,13 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # the firing after which nothing else may fire. Cheap: one file test once
     # armed.
     _ensure_armed
+    # Queue draining is work already scheduled, not a new paid wave. It must
+    # happen before the auto-wave gap so an interactive Codex tick can hand
+    # workers to the very next durable heartbeat without waiting 10–20m.
+    if ! _codex_host_is_ephemeral; then
+        _drain_lane_launches \
+          || die "tick: one or more queued lanes failed at the durable host boundary"
+    fi
     if [ "$mode" = auto ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
@@ -1229,9 +1305,9 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     tick_go=1
 }
 
-_prepare_wave_plan() { # <scratch> — resolve every new-worktree cwd before sandboxing the wave
+_prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing the wave
     local scratch="$1" snapshot="$1/snapshot.json" plan="$1/plan.json" raw="$1/plan.raw.json"
-    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base cwd tmp
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch cwd tmp
     [ -x "$worktree_sh" ] || die "wave: deterministic worktree helper missing: $worktree_sh"
     "$SELF_PATH" snapshot --brief > "$snapshot" \
       || die "wave: could not capture the tracker snapshot before provider invocation"
@@ -1244,22 +1320,53 @@ _prepare_wave_plan() { # <scratch> — resolve every new-worktree cwd before san
         || die "wave: provider changed while deriving the schedule (transport '$provider', snapshot '${planned_provider:-none}') — refusing before provider invocation"
     fi
     cp "$raw" "$plan"
-    jq -r '.actions[] | select(.spawn.prepare != null)
-      | [.lane, ((.ticket // "")|tostring),
-         (.spawn.prepare.argv as $a | ($a|index("--base")) as $i | $a[$i+1])]
-      | @tsv' "$raw" | while IFS="$(printf '\t')" read -r lane ticket base; do
+    jq -r --slurpfile snap "$snapshot" '
+      .actions[] | select(.spawn != null and .spawn.cwd == null)
+      | ((.ticket // "") | tostring) as $ticket
+      | ((.spawn.prepare.argv // []) as $a
+         | ($a | index("--base")) as $i
+         | if $i == null then "" else ($a[$i + 1] // "") end) as $base
+      | ([ $snap[0].tickets[]?
+           | select((.id | tostring) == $ticket)
+           | .related_merge_requests[]?
+           | select(.state == "open")
+           | .branch ] | first // "") as $branch
+      | [.lane, $ticket, $base, $branch] | join("\u001c")' "$raw" \
+      | while IFS="$(printf '\034')" read -r lane ticket base branch; do
         [ -n "$lane" ] || continue
-        if [ -n "$ticket" ]; then
-          cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --base "$base")
+        # plan.jq uses <base> when the repo has no explicit `base:` key. It is
+        # a host-side instruction to apply Loom's shared base rule, not a Git
+        # ref. Leaving it literal makes worktree.sh look for origin/<base> and
+        # aborts the entire wave before the provider can spawn any lane.
+        [ "$base" = '<base>' ] && base=$(_detect_base "$REPO_ROOT" "$CONFIG")
+        if [ -n "$base" ]; then
+          if [ -n "$ticket" ]; then
+            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --base "$base") \
+              || exit 1
+          else
+            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --key "$lane" --base "$base") \
+              || exit 1
+          fi
         else
-          cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --key "$lane" --base "$base")
+          [ -n "$ticket" ] && [ -n "$branch" ] \
+            || die "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch"
+          cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
+          if [ -n "$cwd" ]; then
+            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd") \
+              || exit 1
+          else
+            base=$(_detect_base "$REPO_ROOT")
+            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base") \
+              || exit 1
+          fi
         fi
         tmp="$plan.tmp.$$"
         jq --arg lane "$lane" --arg cwd "$cwd" '
           (.actions[] | select(.lane == $lane) | .spawn) |=
-            ((. + {cwd:$cwd, cwd_from:"the worktree prepared by tick.sh before this wave"}) | del(.prepare))' \
+            ((. + {cwd:$cwd, cwd_from:"the linked worktree resolved by tick.sh before this wave"}) | del(.prepare))' \
           "$plan" > "$tmp" && mv "$tmp" "$plan"
-      done
+      done \
+      || die "wave: could not resolve every spawn worktree before provider invocation"
     printf '%s\n' "$plan"
 }
 
@@ -1372,8 +1479,97 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
           >"$LOGS_DIR/$stem.jsonl" 2>"$LOGS_DIR/$stem.err.log" || rc=$?
         _render_stream "$LOGS_DIR/$stem.jsonl" "$LOGS_DIR/$stem.log"
     fi
+    # An actual scheduler process is a durable host once the inner provider
+    # session is gone. A human-typed tick beneath interactive Codex is not:
+    # Codex owns that outer process scope too and reaps its descendants at turn
+    # end. Leave those requests for the next launchd/cron heartbeat instead.
+    if ! _codex_host_is_ephemeral; then
+        if ! _drain_lane_launches; then
+            [ "$rc" -ne 0 ] || rc=26
+        fi
+    elif find "$LANE_LAUNCH_DIR" -mindepth 1 -maxdepth 1 -type d -name 'request-*' 2>/dev/null | grep -q .; then
+        echo "tick: Codex-hosted wave left lane launches queued for the durable scheduler"
+    fi
     _ev wave_end stem "$stem" rc "$rc" secs "$(( $(_now) - t0 ))" provider "$provider" tier "$tier"
     return $rc
+}
+
+_queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/locks
+    local base request n=0 existing
+    # Do not let two commands in one provider session enqueue the same lane id.
+    # There is no pid yet for the ordinary live-lane guard to see.
+    for existing in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
+        [ -d "$existing" ] || continue
+        [ "$(cat "$existing/id" 2>/dev/null || true)" != "$id" ] \
+          || die "spawn-lane: lane '$id' already has a deferred host launch pending"
+    done
+    base="$LANE_LAUNCH_DIR/request-$(date +%Y%m%d-%H%M%S)-$$-$id"
+    request="$base.tmp"
+    while ! mkdir "$request" 2>/dev/null; do
+        n=$((n+1)); request="$base-$n.tmp"
+        [ "$n" -le 200 ] || die "spawn-lane: cannot allocate a deferred launch request"
+    done
+    printf '%s\n' "$id" > "$request/id"
+    printf '%s\n' "$provider" > "$request/provider"
+    printf '%s\n' "$job" > "$request/job"
+    printf '%s\n' "$agent_tier" > "$request/tier"
+    printf '%s\n' "$abs" > "$request/cwd"
+    printf '%s\n' "$pregate" > "$request/pregate"
+    printf '%s\n' "$merge_lock" > "$request/merge-lock"
+    printf '%s\n' "$on_done" > "$request/on-done"
+    cp "$brief" "$request/brief.md" \
+      || { rm -rf "$request"; die "spawn-lane: cannot stage deferred brief '$brief'"; }
+    local ready="${request%.tmp}"
+    mv "$request" "$ready"
+    _ev lane_queued id "$id" type "$(_lane_type "$id")" job "$job" \
+        provider "$provider" tier "$agent_tier" cwd "$abs"
+    echo "lane $id: queued for host launch after the provider session exits"
+}
+
+_drain_lane_launches() {
+    local request name launching id provider job tier cwd pregate merge_lock on_done rc=0
+    for request in "$LANE_LAUNCH_DIR"/request-*; do
+        [ -d "$request" ] || continue
+        name="${request##*/request-}"
+        launching="$LANE_LAUNCH_DIR/launching-$name"
+        # Another host wrapper may be draining concurrently. Atomic rename
+        # gives exactly one of them ownership of this request.
+        mv "$request" "$launching" 2>/dev/null || continue
+        id=$(cat "$launching/id" 2>/dev/null || true)
+        provider=$(cat "$launching/provider" 2>/dev/null || true)
+        job=$(cat "$launching/job" 2>/dev/null || true)
+        tier=$(cat "$launching/tier" 2>/dev/null || true)
+        cwd=$(cat "$launching/cwd" 2>/dev/null || true)
+        pregate=$(cat "$launching/pregate" 2>/dev/null || true)
+        merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
+        on_done=$(cat "$launching/on-done" 2>/dev/null || true)
+        local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
+                    --brief "$launching/brief.md" --cwd "$cwd")
+        [ -z "$pregate" ] || args+=(--pregate "$pregate")
+        [ "$merge_lock" = 1 ] && args+=(--merge-lock)
+        [ "$on_done" = 0 ] && args+=(--no-tick)
+        if LOOM_DEFER_LANE_LAUNCH= "$SELF_PATH" spawn-lane "${args[@]}"; then
+            rm -rf "$launching"
+        else
+            mv "$launching" "$LANE_LAUNCH_DIR/failed-$name" 2>/dev/null || true
+            _ev lane_launch_failed id "${id:-unknown}" provider "${provider:-unknown}" job "${job:-unknown}"
+            echo "tick: deferred host launch failed for ${id:-unknown}" >&2
+            rc=1
+        fi
+    done
+    return "$rc"
+}
+
+cmd_drain_lane_launches() {
+    [ -z "${LOOM_DEFER_LANE_LAUNCH:-}" ] \
+      || die "drain-lane-launches: provider sessions cannot drain their own process scope"
+    ! _codex_host_is_ephemeral \
+      || die "drain-lane-launches: interactive Codex is not a durable worker host; the scheduler heartbeat will drain this queue"
+    _drain_lane_launches
+}
+
+_codex_host_is_ephemeral() {
+    [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_SESSION_ID:-}" ] || [ -n "${CODEX_CI:-}" ]
 }
 
 # Flag parsing for spawn-lane, accepting the flags before OR after the id
@@ -1483,10 +1679,11 @@ _spawn_stage_brief() {
 
 ## Headless execution rules (appended by spawn-lane — they bind every lane)
 - No human will read a question and nothing will ever wake you: every step blocks. "I backgrounded it and will be notified" never returns, and ScheduleWakeup is denied on your command line — there is no main loop to resume you, so scheduling a wakeup ends the session with the job unfinished.
+- Finite commands such as builds, tests and gates stay in the foreground in one tool call. Never background a finite command and poll for a status file in a later call: Codex reaps that tool call's descendants when it returns, so the status file is never written.
 - Poll, never await: start a long-running stack as a background shell, then wait on it with one call — $(dirname "$SELF_PATH")/lane.sh wait-ready --timeout <secs> (--url <url> | -- <cmd...>) — never a hand-rolled curl+sleep turn loop. A timeout is a failure to report, not a reason to wait longer.
 - Kill every background shell you started before you exit (KillShell). Ephemeral files go in the directory $(dirname "$SELF_PATH")/lane.sh scratch prints, and are never cleaned up by hand.
 - There are no slash commands in a headless session: never invoke or expect a skill by name. Do that work inline.
-- Genuinely blocked? Record it with the matching lane.sh verb and exit. A lane that ends by asking a question is a dead lane.
+- Genuinely blocked? This is one terminal sequence, never two alternatives: first pipe the evidence to $(dirname "$SELF_PATH")/lane.sh blocked-report <iid> --category <slug>, then immediately run $(dirname "$SELF_PATH")/lane.sh transition <iid> blocked. Do not exit after only the report or only the transition. A lane that ends by asking a question is a dead lane.
 BRIEFEOF
     # P31: the implementer's half of the mandatory adversarial test, stated
     # where the implementer reads it rather than trusted to a wave. Two
@@ -1546,6 +1743,11 @@ _spawn_build_epilogue() {
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
+    # A provider lane may have queued its successor. Its host shell reaches
+    # this epilogue only after the provider session exits, so the successor is
+    # safe to detach here. Do this after releasing locks and before firing the
+    # ordinary next wave.
+    epi="$epi '$SELF_PATH' drain-lane-launches >>'$LOGS_DIR/lane-launches.log' 2>&1 || true; "
     # P93: a merge lane's own exit tries to spawn its successor directly
     # (chain-merge), released lock and all, INSTEAD of firing a whole wave to
     # rediscover a decision that is already deterministic. Every other lane
@@ -1714,6 +1916,13 @@ cmd_spawn_lane() {
     local dir="${cwd:-$REPO_ROOT}"
     [ -d "$dir" ] || die "spawn-lane: --cwd '$dir' is not a directory"
     local abs; abs=$(cd "$dir" && pwd)
+    if [ -n "$provider" ]; then
+        local _repo_main _cwd_main
+        _repo_main=$(_git_main_root "$REPO_ROOT")
+        _cwd_main=$(_git_main_root "$abs")
+        [ -n "$_repo_main" ] && [ "$_cwd_main" = "$_repo_main" ] \
+          || die "spawn-lane: provider cwd '$abs' is not the main clone or a linked worktree of '$REPO_ROOT'"
+    fi
     if [ -n "$provider" ] && [ -z "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ]; then
         [ -x "$AGENT_SH" ] || die "spawn-lane: provider runtime missing: $AGENT_SH"
         "$AGENT_SH" preflight --provider "$provider" --job "$job" --tier "$agent_tier" --cwd "$abs" >/dev/null \
@@ -1748,10 +1957,27 @@ cmd_spawn_lane() {
     # than the bug.
     local _old
     _old=$(cat "$LANES_DIR/$id.pid" 2>/dev/null || echo "")
-    if [ -n "$_old" ] && kill -0 "$_old" 2>/dev/null; then
+    # A provider lane records rc before its host epilogue drains any queued
+    # successor. Under load that small, synchronous epilogue can still be
+    # running when a deterministic retry immediately reuses the id. Once rc
+    # exists the worker has finished its actual job, so give only that
+    # completed process a short grace period to exit; a live worker with no rc
+    # still hits the refusal below immediately.
+    if [ -n "$_old" ] && [ -f "$LANES_DIR/$id.rc" ] && _lane_process_alive "$id" "$_old"; then
+        local _exit_wait
+        for _exit_wait in $(seq 1 40); do
+            _lane_process_alive "$id" "$_old" || break
+            sleep 0.05
+        done
+    fi
+    if [ -n "$_old" ] && _lane_process_alive "$id" "$_old"; then
         die "spawn-lane: lane '$id' is already running as pid $_old — harvest or
   kill it first. Reusing a live lane id would overwrite its pid file and rotate
   its log away, losing the work in progress."
+    fi
+    if [ -n "$provider" ] && [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ]; then
+        _queue_lane_launch
+        return 0
     fi
     # Brief staging (P28/P68/P31) — validates, copies and appends in
     # _spawn_stage_brief, which hands the rewritten command back in _SPAWN_ARGS.
@@ -1856,14 +2082,56 @@ cmd_spawn_lane() {
     # reported failure for a lane that had run fine. Worse, if another merge had
     # reserved in between, the stamp would have overwritten ITS ownership with a
     # dead pid. Stamping from inside closes the window entirely.
-    local stamp=""
-    [ "$merge_lock" -eq 1 ] && stamp="printf '%s\\n' \$\$ > '$MERGE_LOCK_DIR/pid'; "
+    local stamp="" program=""
+    stamp="printf '%s\\n' \$\$ > '$LANES_DIR/$id.pid'; "
+    [ "$merge_lock" -eq 1 ] && stamp="${stamp}printf '%s\\n' \$\$ > '$MERGE_LOCK_DIR/pid'; "
     [ -n "$gate_lock_key" ] && stamp="${stamp}printf '%s\\n' \$\$ > '$GATE_LOCK_DIR/$gate_lock_key/pid'; "
-    ( cd "$dir" && exec nohup bash -c \
-        '_rc=0; '"$stamp$pre"'if [ "$_rc" -eq 0 ]; then "$@"'"$redirect"'; _rc=$?; fi; '"$epi"' exit $_rc' \
-        _lane "$@" ) >>"$log" 2>&1 &
-    echo $! > "$LANES_DIR/$id.pid"
+    program='cd "$LOOM_LANE_CWD" || exit 1; _rc=0; '"$stamp$pre"'if [ "$_rc" -eq 0 ]; then "$@"'"$redirect"'; _rc=$?; fi; '"$epi"' exit $_rc'
+    rm -f "$LANES_DIR/$id.pid"
     _now > "$LANES_DIR/$id.start"
+    export LOOM_LANE_CWD="$abs"
+    if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+        local launch_label launch_domain launch_plist
+        launch_label=$(_lane_launch_label "$id")
+        launch_domain="gui/$(id -u)"
+        launch_plist="$LANES_DIR/$id.plist"
+        "$LAUNCHCTL_CMD" bootout "$launch_domain/$launch_label" >/dev/null 2>&1 || true
+        # Retire a job left by the short-lived `launchctl submit` implementation.
+        "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
+        _write_lane_plist "$launch_plist" "$launch_label" "$log" \
+            /usr/bin/env \
+              "HOME=${HOME:-}" "PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}" \
+              "LOOM_REPO=$REPO_ROOT" "LOOM_HOME=$LOOM_HOME" "LOOM_PROVIDER=${LOOM_PROVIDER:-}" \
+              "LOOM_LANE_ID=$id" "LOOM_LANE_CWD=$abs" "LOOM_SCRATCH=$LOOM_SCRATCH" \
+              "LOOM_LANE_JSONL=${LOOM_LANE_JSONL:-}" "LOOM_LANE_LAUNCHER=launchd" \
+              "LOOM_GLOBAL_CONFIG=${LOOM_GLOBAL_CONFIG:-}" "LOOM_CONFIG=${LOOM_CONFIG:-}" \
+              "LOOM_PREGATE_TIER=${LOOM_PREGATE_TIER:-}" "LOOM_PREGATE_RUNNER=${LOOM_PREGATE_RUNNER:-}" \
+              "LOOM_PREGATE_ADV=${LOOM_PREGATE_ADV:-}" "LOOM_PREGATE_SCOPE=${LOOM_PREGATE_SCOPE:-}" \
+              "LOOM_PREGATE_TREES=${LOOM_PREGATE_TREES:-}" \
+              /bin/bash -c "$program" _lane "$@"
+        if "$LAUNCHCTL_CMD" bootstrap "$launch_domain" "$launch_plist"; then
+            printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
+        else
+            rm -f "$launch_plist"
+            [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
+            [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
+            echo "spawn-lane: launchd refused supervised lane '$id'" >&2
+            return 1
+        fi
+    else
+        ( exec nohup /bin/bash -c "$program" _lane "$@" ) >>"$log" 2>&1 &
+    fi
+    local _pid_wait
+    for _pid_wait in $(seq 1 40); do
+        [ -s "$LANES_DIR/$id.pid" ] && break
+        sleep 0.05
+    done
+    if [ ! -s "$LANES_DIR/$id.pid" ]; then
+        [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
+        [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
+        echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
+        return 1
+    fi
     _ev lane_spawn id "$id" type "$(_lane_type "$id")" job "${job:-custom}" \
         provider "${provider:-custom}" tier "$lane_tier" \
         pregate "${pregate:-}" merge_lock "$merge_lock" log "$log"
@@ -2163,7 +2431,7 @@ cmd_lane_status() {
         # gate-1-r2). quiet-tick maintains <id>.progress, touched only when
         # the assistant-event count grows; when present it IS the clock.
         [ -f "$LANES_DIR/$id.progress" ] && log="$LANES_DIR/$id.progress"
-        if ! kill -0 "$pid" 2>/dev/null; then
+        if ! _lane_process_alive "$id" "$pid"; then
             state="dead"
         elif [ -f "$log" ] && [ -n "$(find "$log" -mmin +"$stale_min" 2>/dev/null)" ]; then
             state="stale"                 # alive but silent past the window —
@@ -2191,8 +2459,12 @@ cmd_lane_status() {
 _lanes_alive() { cmd_lane_status 2>/dev/null | awk '$3=="running"||$3=="stale"'; }
 
 cmd_clear_lane() {
+    local launch_marker="$LANES_DIR/$1.launchd" launch_label="" launch_plist="$LANES_DIR/$1.plist"
+    launch_label=$(cat "$launch_marker" 2>/dev/null || true)
+    [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$launch_label" >/dev/null 2>&1 || true
+    [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.start" \
-          "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified"
+          "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
@@ -2220,7 +2492,7 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
     # re-parents past the kill.
     local id="${1:-}"; [ -n "$id" ] || die "kill-lane: need a lane id"
     local pid; pid=$(cat "$LANES_DIR/$id.pid" 2>/dev/null || echo "")
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if [ -n "$pid" ] && _lane_process_alive "$id" "$pid"; then
         _kill_tree "$pid"
         _ev lane_kill id "$id"
     fi
@@ -2853,7 +3125,7 @@ _write_plist() {  # _write_plist <path> <interval>
     # launchd starts with a bare environment; bake a PATH covering the real
     # tool locations (the interactive provider may be a shell alias — resolve
     # its binary via PATH here, at install time).
-    for b in "$provider" uv glab gh jq git node bash; do
+    for b in "$provider" uv glab gh jq git node npm npx pnpm yarn bun corepack bash; do
         d="$(command -v "$b" 2>/dev/null)" && toolpath="$toolpath:$(dirname "$d")"
     done
     local pathval="${toolpath#:}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -2869,6 +3141,7 @@ _write_plist() {  # _write_plist <path> <interval>
     <dict>
         <key>LOOM_REPO</key><string>$REPO_ROOT</string>
         <key>LOOM_HOME</key><string>$LOOM_HOME</string>
+        <key>LOOM_LANE_LAUNCHER</key><string>launchd</string>
         <key>HOME</key><string>$HOME</string>
         <key>PATH</key><string>$pathval</string>
     </dict>
@@ -3753,6 +4026,7 @@ cmd_agent_status() {
 case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
+    drain-lane-launches) shift; cmd_drain_lane_launches "$@" ;;
     lane-status)  shift; cmd_lane_status "$@" ;;
     lanes-alive)  shift; _lanes_alive "$@" ;;
     orch-home)    echo "$LOOM_HOME" ;;   # the repo's state dir — for viewer accessories that need a pidfile home

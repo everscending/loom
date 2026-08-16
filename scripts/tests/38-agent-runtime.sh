@@ -33,6 +33,8 @@ case "$1" in
   login) echo 'Logged in using test' ;;
   debug) printf '{"models":[{"slug":"gpt-5.6-terra"},{"slug":"gpt-5.6-sol"}]}\n' ;;
   exec)
+    [ -z "${ENV_CAP:-}" ] || printf '%s\n' "${LOOM_DEFER_LANE_LAUNCH:-}" >> "$ENV_CAP"
+    [ -z "${PATH_CAP:-}" ] || printf '%s\n' "$PATH" >> "$PATH_CAP"
     while IFS= read -r line; do printf '%s\n' "$line" >> "${STDIN_CAP:?}"; done
     case "${NATIVE_MODE:-success}" in
       success)
@@ -44,16 +46,53 @@ case "$1" in
 esac
 EOF
 chmod +x "$AR/bin/codex"
-CAP="$AR/codex.argv"; STDIN_CAP="$AR/codex.stdin"; : > "$CAP"; : > "$STDIN_CAP"
-out=$(CAP="$CAP" STDIN_CAP="$STDIN_CAP" LOOM_CODEX_CMD="$AR/bin/codex" \
+cat > "$AR/bin/node" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = -p ] && { printf '/runtime/node/bin/node\n'; exit 0; }
+exit 91
+EOF
+cat > "$AR/bin/pnpm" <<'EOF'
+#!/usr/bin/env bash
+exit 92
+EOF
+cat > "$AR/bin/volta" <<'EOF'
+#!/usr/bin/env bash
+[ "$1 $2" = "which pnpm" ] && { printf '/runtime/pnpm/bin/pnpm\n'; exit 0; }
+exit 93
+EOF
+chmod +x "$AR/bin/node" "$AR/bin/pnpm" "$AR/bin/volta"
+CAP="$AR/codex.argv"; STDIN_CAP="$AR/codex.stdin"; ENV_CAP="$AR/codex.env"; PATH_CAP="$AR/codex.path"
+: > "$CAP"; : > "$STDIN_CAP"; : > "$ENV_CAP"; : > "$PATH_CAP"
+out=$(CAP="$CAP" STDIN_CAP="$STDIN_CAP" ENV_CAP="$ENV_CAP" PATH_CAP="$PATH_CAP" \
+  PATH="$AR/bin:$PATH" LOOM_CODEX_CMD="$AR/bin/codex" \
   LOOM_AGENT_NATIVE_LOG="$AR/codex.native" "$AGENT" run --provider codex --job implementation \
   --tier high --cwd "$AR/repo" --brief "$AR/brief.md" --lane-id impl-7)
 argv=$(tail -1 "$CAP")
-case "$argv" in *"exec --json --ephemeral --model gpt-5.6-sol"*"model_reasoning_effort=\"high\""*"approval_policy=\"never\""*"--sandbox workspace-write --add-dir $LOOM_HOME"*)
+git_common=$(git -C "$AR/repo" rev-parse --path-format=absolute --git-common-dir)
+git_common=$(cd "$git_common" && pwd -P)
+case "$argv" in *"exec --json --ephemeral --model gpt-5.6-sol"*"model_reasoning_effort=\"high\""*"approval_policy=\"never\""*"--sandbox workspace-write --add-dir $LOOM_HOME --add-dir $git_common"*)
   ok "codex adapter: high maps to Sol/high with explicit non-interactive safety flags";;
   *) bad "codex adapter: high argv wrong ($argv)";; esac
+case "$argv" in *"--add-dir "*"/agent-runtime/repo/.git"*)
+  ok "codex adapter: shared Git metadata is writable for fetch and merge";;
+  *) bad "codex adapter: shared Git metadata missing from sandbox ($argv)";; esac
+case "$argv" in *"shell_environment_policy.inherit=all"*)
+  ok "codex adapter: nested headless shells inherit the scheduler toolchain PATH";;
+  *) bad "codex adapter: full scheduler environment inheritance missing from Codex shell policy ($argv)";; esac
+case "$argv" in *"shell_environment_policy.set.PATH="*)
+  bad "codex adapter: ineffective PATH-only shell override remains ($argv)";;
+  *) ok "codex adapter: does not rely on the ineffective PATH-only override";; esac
 [ "$(cat "$STDIN_CAP")" = "runtime brief" ] \
   && ok "codex adapter: brief travels on stdin" || bad "codex adapter: stdin brief missing"
+[ "$(tail -1 "$ENV_CAP")" = 1 ] \
+  && ok "codex adapter: provider sessions defer lane launch to the host scheduler" \
+  || bad "codex adapter: provider session did not carry the deferred-launch boundary"
+case "$(tail -1 "$PATH_CAP")" in "/runtime/node/bin:"*)
+  ok "codex adapter: real Node runtime precedes the Volta shim for nested tool shells";;
+  *) bad "codex adapter: real Node runtime did not lead PATH ($(tail -1 "$PATH_CAP"))";; esac
+case ":$(tail -1 "$PATH_CAP"):" in *":/runtime/pnpm/bin:"*)
+  ok "codex adapter: actual pnpm runtime survives Volta removing its shim directory";;
+  *) bad "codex adapter: actual pnpm runtime missing from inherited PATH ($(tail -1 "$PATH_CAP"))";; esac
 printf '%s' "$out" | jq -se 'any(.type=="session_start" and .provider=="codex" and .requested_tier=="high" and .resolved_profile.model=="gpt-5.6-sol") and any(.type=="assistant_progress") and any(.type=="usage" and .cost_usd==null) and any(.type=="session_end" and .status=="success")' >/dev/null \
   && ok "codex adapter: native stream becomes canonical JSONL with unknown cost null" \
   || bad "codex adapter: canonical stream incomplete ($out)"
@@ -155,6 +194,44 @@ else
   bad "guardrails: Codex CLI unavailable, so the lane.sh policy path is unproven"
 fi
 
+# Linked worktrees live beneath the main clone so workspace-write covers both
+# creation and lane execution without granting access to sibling repositories.
+WT="$AR/worktrees"; mkdir -p "$WT"
+git -c init.defaultBranch=main init -q --bare "$WT/origin.git"
+git clone -q "$WT/origin.git" "$WT/repo" 2>/dev/null
+git -C "$WT/repo" config user.email loom@test
+git -C "$WT/repo" config user.name loom
+printf 'base\n' > "$WT/repo/base.txt"
+git -C "$WT/repo" add base.txt
+git -C "$WT/repo" commit -qm base
+git -C "$WT/repo" push -q origin main
+mkdir -p "$WT/repo/.codex/rules"
+printf 'prefix_rule(pattern=["git", "reset", "--hard"], decision="forbidden")\n' > "$WT/repo/.codex/rules/loom.rules"
+wt_repo=$(cd "$WT/repo" && pwd -P)
+made=$("$WORKTREE" prepare --repo "$WT/repo" --ticket 7 --branch ticket-7 --base main)
+if [ "$made" = "$wt_repo/.worktrees/7" ] \
+  && [ -f "$made/.codex/rules/loom.rules" ] \
+  && grep -qxF '/.worktrees/' "$wt_repo/.git/info/exclude" \
+  && grep -qxF '/.codex/rules/loom.rules' "$wt_repo/.git/info/exclude"; then
+  ok "worktree: prepare creates ignored linked trees beneath the main clone with Codex guardrails"
+else
+  bad "worktree: nested prepare contract failed (made=$made)"
+fi
+
+# Codex trust is a repository decision: an explicitly trusted main clone also
+# covers a linked worktree Git reports for that clone.
+mkdir -p "$WT/codex-home"
+cat > "$WT/codex-home/config.toml" <<EOF
+[projects."$wt_repo"]
+trust_level = "trusted"
+EOF
+out=$(CODEX_HOME="$WT/codex-home" CAP="$CAP" STDIN_CAP="$STDIN_CAP" LOOM_CODEX_CMD="$AR/bin/codex" \
+  LOOM_AGENT_SKIP_AUTH=1 LOOM_AGENT_SKIP_MODEL_CHECK=1 \
+  "$AGENT" preflight --provider codex --job implementation --tier medium --cwd "$made" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && printf '%s' "$out" | jq -e '.ok == true and .provider == "codex"' >/dev/null \
+  && ok "codex adapter: a trusted main clone covers its linked worktrees" \
+  || bad "codex adapter: linked worktree did not inherit main-clone trust (rc=$rc, $out)"
+
 # Provider identity is tracker state, while each scheduler carries an explicit
 # transport value. Invalid or stale transport must fail before the wave command.
 cat > "$AR/bin/tracker" <<'EOF'
@@ -249,5 +326,51 @@ out2=$("$WORKTREE" prepare --repo "$WT/repo" --ticket 7 --base main)
   || bad "worktree: repeat preparation did not preserve reuse"
 "$WORKTREE" prepare --repo "$WT/repo" --key '../escape' --base main >/dev/null 2>&1 \
   && bad "worktree: path traversal key was accepted" || ok "worktree: path traversal key is refused"
+
+# A new lane must receive a runnable checkout, not merely a Git checkout.
+# Keep the package-manager call deterministic here; the production command is
+# derived from the same shared lockfile table used by reconcile/base-check.
+printf 'lockfileVersion: 9.0\n' > "$WT/repo/pnpm-lock.yaml"
+printf '{"private":true}\n' > "$WT/repo/package.json"
+git -C "$WT/repo" add pnpm-lock.yaml package.json
+git -C "$WT/repo" commit -qm 'add package contract'
+git -C "$WT/repo" push -q origin main
+install_mark="$WT/worktree-install-ran"
+made8=$(LOOM_WORKTREE_INSTALL_CMD="touch $install_mark" \
+  "$WORKTREE" prepare --repo "$WT/repo" --ticket 8 --base main)
+if [ -f "$install_mark" ] && [ -d "$made8" ]; then
+  ok "worktree: prepare installs lockfile dependencies before returning the lane cwd"
+else
+  bad "worktree: prepare returned an unrunnable checkout without installing dependencies"
+fi
+
+# A plan deliberately carries <base> when no base is configured: that token
+# means "apply the shared base rule on the host", not a branch literally named
+# <base>. Exercise the production preparation path so a provider can never be
+# handed a plan whose worktree failed before the session even started.
+seed_tracker_decl "$WT/repo"
+git -C "$WT/repo" commit -qm 'declare tracker'
+git -C "$WT/repo" push -q origin main
+cat > "$WT/build-ready.json" <<'EOF'
+[
+  {"id":1,"title":"Build 1","state":"open","labels":["provider::codex"],"assignees":[],"body":"","url":"https://x/build"},
+  {"id":119,"title":"Ready work","state":"open","labels":["build-1","ready-for-agent","tier::logic"],"assignees":[],"body":"Do the work","url":"https://x/119"}
+]
+EOF
+rm -f "$WT/repo/.loom.yml"
+BUILD_JSON="$WT/build-ready.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/tick-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$TICK" tick --provider codex >"$WT/tick.out" 2>&1
+rc=$?
+prepared_plan=$(find "$WT/tick-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+prepared_cwd=$([ -n "$prepared_plan" ] && jq -r '.actions[] | select(.lane == "impl-119") | .spawn.cwd // empty' "$prepared_plan")
+if [ "$rc" -eq 0 ] && [ "$prepared_cwd" = "$(cd "$WT/repo" && pwd -P)/.worktrees/119" ]; then
+  ok "wave preparation: <base> resolves through the shared base rule before worktree creation"
+else
+  bad "wave preparation: unresolved <base> stopped the host scheduler (rc=$rc cwd=[$prepared_cwd] $(head -1 "$WT/tick.out"))"
+fi
 
 test_finish

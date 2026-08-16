@@ -100,6 +100,18 @@ else
 # One lookup, so every rule below reads the same row for the same ticket.
 | def ticket($iid): ($tickets | map(select((.id | tostring) == ($iid | tostring))) | first);
 
+# `blocked-report` and `transition … blocked` are two tracker writes. If the
+# first lands and the lane dies (or a provider stops after reporting), the
+# report itself is durable proof that the second write is still owed. Treat
+# that half-transition like the other repairable shapes, never like a fresh
+# merge failure or another runnable ticket. (paid: #136 reported a Linear
+# rate-limit base defect, exited rc 0 in merge-queue, and was scheduled to run
+# the same six-minute gate again.)
+  ([ $tickets[]
+     | select(.state != "blocked" and .blocked_report != null
+              and ((.blocked_report.released // false) == false)) ]) as $reported_blocks
+| ([ $reported_blocks[] | .id ]) as $reported_block_ids
+
 # =========================================================================
 # Step 2 — harvest. The lane states are already classified by `lane-status`
 # (running / stale / dead) and carried in `.lanes[]` with their rc and turn
@@ -111,7 +123,7 @@ else
 # merged through a human hold that way.) The ticket it held becomes stranded,
 # and the rework path picks it up on the next plan — after the write, when the
 # snapshot has been re-read.
-  ([ $lanes[] | select(.state == "stale")
+| ([ $lanes[] | select(.state == "stale")
      | { step: "harvest", kind: "kill-lane", lane: .id, ticket: (lane_ticket(.id)),
          via: "tick.sh", argv: ["kill-lane", .id],
          why: "lane is stale — alive but no real progress; a bare kill would orphan the session inside it" } ])
@@ -155,6 +167,12 @@ else
          via: "lane.sh", argv: (.fix | ltrimstr("lane.sh ") | split(" ")),
          why: "\(.shape) — a lane died between its two writes" } ])
   as $repairs
+| ([ $reported_blocks[]
+     | { step: "harvest", kind: "repair", ticket: .id,
+         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
+         report_already_present: true,
+         why: "an unreleased blocked report landed while the ticket stayed `\(.state // "unlabeled")` — finish the second half of that tracker transition" } ])
+  as $blocked_repairs
 
 # rc 7 is its pregate's rejection, not a crash: the verdict is posted straight
 # from the lane log, with no verifier spawned. The log is prose only a reader
@@ -175,6 +193,7 @@ else
 | ([ $lanes[] | select(.state == "dead" and .type == "merge")
      | select((ticket(lane_ticket(.id)).state // "") == "merge-queue")
      | (lane_ticket(.id) | tonumber) as $iid
+     | select(($reported_block_ids | index($iid)) == null)
      | { kind: "merge-failed", ticket: $iid, lane: .id,
          log: "\($logs)/lane-\(.id).log",
          attempts: (ticket($iid).merge_attempts // 0), cap: $merge_cap,
@@ -239,7 +258,7 @@ else
 # really in — and a lane spawned from the stale label would be working on a
 # ticket that has already left this step. (paid: the P63 shapes, four
 # stranded finishes in one build.)
-| ([ ($sum.repairs // [])[] | .id ]) as $repairing
+| (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids) as $repairing
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
      | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded
 
@@ -309,7 +328,9 @@ else
 # while one is in flight.
 # =========================================================================
 
-| ([ $tickets[] | select(.state == "merge-queue") ] | sort_by(.id)) as $queue
+| ([ $tickets[] | select(.state == "merge-queue")
+                   | select(.id as $i | ($reported_block_ids | index($i)) == null) ]
+   | sort_by(.id)) as $queue
 # At `merge_attempt_cap` recorded attempts, stop retrying that ticket: block
 # it so the queue ADVANCES to the next-oldest instead of feeding every later
 # lane into the same wall. (paid: three consecutive lanes wedged on one ticket
@@ -434,7 +455,7 @@ else
 # so a consumer that reorders them is visibly wrong rather than quietly so.
 # =========================================================================
 
-| ($kill_stale + $kill_overrun + $block_overrun + $repairs + $clear_dead
+| ($kill_stale + $kill_overrun + $block_overrun + $repairs + $blocked_repairs + $clear_dead
    + $gate_actions + $block_same_class + $fill_actions
    + $block_merge_cap + $merge_actions + $probe_actions) as $actions
 | ($res_pregate + $res_merge_failed + $res_blocked + $res_probe_criteria + $res_build)

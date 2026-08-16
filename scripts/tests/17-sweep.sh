@@ -51,6 +51,21 @@ if [ "$rc_sw" = 0 ] && [ ! -e "$SW/repo-wt-7" ]; then
 else
     bad "sweep: rc=$rc_sw, worktree still present=$([ -e "$SW/repo-wt-7" ] && echo yes || echo no) ($(head -1 "$SW/out"))"
 fi
+
+# New Loom worktrees are nested under the writable main clone. Sweep must own
+# those paths while retaining compatibility with legacy sibling worktrees.
+git -C "$SW/repo" checkout -qb done-work-nested main
+echo nested > "$SW/repo/nested"; git -C "$SW/repo" add nested; git -C "$SW/repo" commit -qm nested
+git -C "$SW/repo" checkout -q main
+git -C "$SW/repo" merge -q --no-edit done-work-nested; git -C "$SW/repo" push -q origin main
+mkdir -p "$SW/repo/.worktrees"
+git -C "$SW/repo" worktree add -q "$SW/repo/.worktrees/11" done-work-nested 2>/dev/null
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/home" "$TICK" sweep >"$SW/out-nested" 2>&1
+if [ ! -e "$SW/repo/.worktrees/11" ]; then
+    ok "sweep: removes a merged nested .worktrees lane"
+else
+    bad "sweep: left a merged nested .worktrees lane behind"
+fi
 # The safety boundary: unmerged work is never ours to delete. Fixing the crash
 # above ARMED a deletion path that had never executed, so prove it still stops.
 git -C "$SW/repo" checkout -qb live-work origin/main

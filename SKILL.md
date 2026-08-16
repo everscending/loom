@@ -100,7 +100,16 @@ line for the next stage and have it run that as its last act, and a ticket
 goes implement → gate → merge without bouncing off the scheduler twice. Every
 handoff is allowed to fail — merge lock held, session died, a cap reached —
 and nothing depends on one: the numbered steps below do the same work next
-wave regardless.
+wave regardless. Codex provider sessions do not detach workers directly:
+`spawn-lane` records the validated request under Loom state, and the durable
+scheduler heartbeat launches it after `codex exec` returns. On macOS each
+worker is a one-shot launchd job (never KeepAlive); on other hosts the durable
+scheduler uses the detached fallback. This boundary is intentional — Codex
+reaps background descendants when its session exits. Codex lanes grant their
+linked worktree plus that repository's shared Git metadata directory, because
+fetch, refs and a linked worktree's index live outside the worktree root.
+Every spawn also receives its absolute linked-worktree path in the immutable
+plan; a provider session never reconstructs a worktree name from convention.
 
 **Briefs travel as files, never inline prompts.**
 `spawn-lane … --brief <file>` copies it to the run directory, appends the
@@ -265,8 +274,10 @@ refuses outside herdr anyway.
 
    - `tick.sh` has already run the action's `worktree.sh prepare` operation
      before opening the provider sandbox. It fetched `origin/<base>`, created
-     or reused the sibling worktree through the repo's declared mechanism, and
-     copied root `.env` only when the target lacked one. Claim (assignee +
+     or reused the linked worktree under `.worktrees/` through the repo's
+     declared mechanism, and
+     copied root `.env` only when the target lacked one, then ran the installer
+     selected by the repository lockfile before returning the cwd. Claim (assignee +
      `in-progress`, the first tracker write), then use the action's absolute
      `.spawn.cwd`;
    - `spawn-lane impl-<ticket> --provider <id> --job implementation --tier
@@ -301,7 +312,9 @@ refuses outside herdr anyway.
    can never be pushed; reconcile re-installs dependencies itself when that
    merge moved a manifest or lockfile, so a post-reconcile red gate is real:
    never hand-diagnose it as a stale worktree and never hand-run an installer
-   in the wave), then this ticket's tier gates on the merged tree —
+   in the wave), then this ticket's tier gates on the merged tree as one
+   **foreground** command (never background a finite gate and poll it from a
+   later tool call; Codex reaps those descendants when the first call returns) —
    `lane.sh base-check -- <cmd>` re-runs a failing check on clean base, and
    the **same check** red there is a base defect recorded with
    `merge-failed <iid> --base-red <check-id> --fix <fix-iid>`, which never
@@ -324,8 +337,9 @@ refuses outside herdr anyway.
    lane cannot remove the worktree it stands in, and the human must never
    inherit cleanup chores *(paid: merged worktrees' artifact dirs became
    standing `rm -rf` to-dos)*. The sweeper runs inside every tick:
-   deterministic, scoped to this skill's own `<repo>-wt-<n>` naming and merged
-   branches, backing up `.env` to the state dir first, never touching a live
+   deterministic, scoped to this skill's own `.worktrees/<key>` naming (plus
+   legacy `<repo>-wt-<key>` trees) and merged branches, backing up `.env` to
+   the state dir first, never touching a live
    lane's cwd and never a worktree holding uncommitted work — untracked files
    git does not ignore are a lane's unsaved work, not debris. Repos with a
    non-git `worktree_cmd` tear down via their own mechanism in the wave. Plain

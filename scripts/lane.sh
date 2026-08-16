@@ -474,10 +474,30 @@ cmd_base_check() { # [--] <cmd...> — run <cmd> against clean origin/<base>
     base=$(_detect_base .)
     git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null \
         || die "base-check: origin/$base does not exist"
-    local wtp rc=0
+    local wtp rc=0 resolved="" install_dir="" install_cmd="" prep_rc=0
     wtp=$(mktemp -d "${TMPDIR:-/tmp}/lane-base-check.XXXXXX")
     git worktree add --detach "$wtp/base" "origin/$base" >/dev/null 2>&1 \
         || { rmdir "$wtp" 2>/dev/null || true; die "base-check: could not create a worktree at origin/$base"; }
+    # A detached worktree contains tracked source only. Running a configured
+    # gate before deriving its dependencies makes every missing compiler or
+    # test runner look like proof that base is red. Resolve setup from the
+    # base tree's own lockfile/manifest, using the same shared toolchain table
+    # as reconcile, and fail distinctly before the requested comparison when
+    # setup itself cannot be reproduced.
+    if [ "${LANE_BASE_CHECK_PREPARE:-1}" = 1 ]; then
+        resolved=$(_install_cmd_for "$wtp/base")
+    fi
+    if [ -n "$resolved" ]; then
+        install_dir=${resolved%%	*}; install_cmd=${resolved#*	}
+        echo "lane.sh: base-check preparing dependencies with '$install_cmd' in '$install_dir'" >&2
+        ( cd "$install_dir" && $install_cmd ) || prep_rc=$?
+        if [ "$prep_rc" -ne 0 ]; then
+            git worktree remove --force "$wtp/base" >/dev/null 2>&1 || true
+            rmdir "$wtp" 2>/dev/null || true
+            echo "lane.sh: base-check dependency preparation failed rc=$prep_rc — no base-red comparison was made" >&2
+            return 86
+        fi
+    fi
     ( cd "$wtp/base" && "$@" ) && rc=0 || rc=$?
     git worktree remove --force "$wtp/base" >/dev/null 2>&1 || true
     rmdir "$wtp" 2>/dev/null || true
@@ -786,11 +806,25 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
             die "fix-ticket: near-duplicate open fix ticket(s) in milestone '$ms' — $hits — refile with --force if this is genuinely separate work"
         fi
     fi
-    local iid
+    # P104: do not hide the reason a tracker refused the write. `set -e`
+    # exits immediately when a command substitution assignment is red, so
+    # the old `iid=$(... 2>/dev/null)` never reached its intended diagnostic.
+    # That made a Linear usage-limit failure look like a silent successful
+    # lane exit and left the parent merge ticket stranded in Merge Queue
+    # (#136, demand-letter-generator build-1, 2026-08-15). Capture the
+    # driver's stderr, preserve its safe diagnostic, and fail loudly.
+    local iid err rc detail
+    err=$(mktemp "${TMPDIR:-/tmp}/lane-fix-ticket.XXXXXX")
     iid=$("$TRACKER" issue-create --title "$title" --body-file "$f" \
         --labels "$blabel,fix,tier::$tier,ready-for-agent" \
-        --milestone-id "$mid" 2>/dev/null)
-    [ -n "$iid" ] || die "fix-ticket: create failed"
+        --milestone-id "$mid" 2>"$err") && rc=0 || rc=$?
+    if [ "$rc" != 0 ] || [ -z "$iid" ]; then
+        detail=$(head -5 "$err" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+        rm -f "$err"
+        [ -n "$detail" ] || detail="tracker exited ${rc:-0} without a diagnostic"
+        die "fix-ticket: create failed — $detail"
+    fi
+    rm -f "$err"
     echo "lane.sh: filed #$iid — $blabel, fix, tier::$tier, ready-for-agent, milestone '$ms'${blockedby:+, blocked by $blockedby}"
     _lane_ev fix_filed ticket "$iid" tier "$tier"
 }

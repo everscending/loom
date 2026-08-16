@@ -979,6 +979,33 @@ echo x | LOOM_HOME="$EVH" GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
     && bad "fix-ticket: accepted a tier outside docs|logic|api|ui" \
     || ok "fix-ticket: an unknown tier is refused"
 
+# P104: a tracker-side create refusal must retain the driver's reason. The
+# former command-substitution assignment was subject to `set -e` and also
+# redirected stderr to /dev/null, so Linear's `usage limit exceeded` vanished
+# and a merge lane could only disappear with an unexplained rc=1.
+cat > "$FX/fixtkt-fail-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"milestones"*)          echo '[{"id":31,"title":"E4 · Realtime mode"}]' ;;
+  *"issues?state=opened"*) echo '[{"iid":36,"title":"Build 3"}]' ;;
+  *"POST"*"issues"*)       echo 'graphql: usage limit exceeded' >&2; exit 1 ;;
+  *) echo '{}' ;;
+esac
+EOF
+chmod +x "$FX/fixtkt-fail-stub.sh"
+set +e
+out=$(echo "base is red" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$FX/fixtkt-fail-stub.sh" \
+    "$LANE" fix-ticket --title "fix base timeout" --tier api \
+        --milestone "E4 · Realtime mode" 2>&1)
+rc=$?
+set -e
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'usage limit exceeded'; then
+    ok "fix-ticket: tracker create failure preserves the actionable driver diagnostic"
+else
+    bad "fix-ticket: tracker create failure was silent (rc=$rc, out='$out')"
+fi
+
 # 16a-3b. P65: a probe-filed fix ticket used to enter the graph edgeless —
 #      `fix-ticket` now takes `--blocked-by`, writing the `## Blocked by`
 #      section the scheduler already parses (snapshot.jq's
@@ -1203,6 +1230,31 @@ GITW merge --abort 2>/dev/null || :
 ( cd "$RG/work" && GLAB_CMD=/usr/bin/true "$LANE" base-check ) >/dev/null 2>&1 \
     && bad "base-check: ran with no command" \
     || ok "base-check: no command is refused"
+
+# A clean detached worktree has no derived dependencies. Comparing a gate
+# there before installing turns every missing compiler/test runner into a
+# false "base is red" result. The installer is resolved from the base tree's
+# own lockfile/manifest and must complete before the requested check runs.
+BC="$T/base-check-install"; mkdir -p "$BC/bin"
+git init -q --bare "$BC/origin.git"
+git clone -q "$BC/origin.git" "$BC/work"
+git -C "$BC/work" config user.email t@t
+git -C "$BC/work" config user.name t
+printf '{"name":"base-check-install","private":true}\n' > "$BC/work/package.json"
+git -C "$BC/work" add package.json
+git -C "$BC/work" commit -qm init
+git -C "$BC/work" push -qu origin HEAD:main
+cat > "$BC/bin/npm" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = install ] || exit 94
+mkdir -p node_modules
+: > node_modules/.base-check-ready
+EOF
+chmod +x "$BC/bin/npm"
+( cd "$BC/work" && PATH="$BC/bin:$PATH" LANE_BASE_CHECK_PREPARE=1 GLAB_CMD=/usr/bin/true \
+    "$LANE" base-check -- test -f node_modules/.base-check-ready ) >/dev/null 2>&1 \
+    && ok "base-check: prepares the clean base's derived dependencies before comparison" \
+    || bad "base-check: compared against a dependency-less checkout and invented base-red"
 
 # 16b3. P56: `wait-ready` replaces a probe's hand-rolled curl+sleep turn loop
 #       with one deterministic call — ready/not-ready, never a hang past its

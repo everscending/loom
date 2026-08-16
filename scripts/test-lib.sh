@@ -90,6 +90,11 @@ export LOOM_GLOBAL_CONFIG="$T/global.yml"
 export LOOM_WAVE_CMD="true"
 export LOOM_SKIP_BOOTSTRAP=1
 export LOOM_PROVIDER=claude LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT=1
+# Most fixture base-checks assert Git tree selection with tiny synthetic repos;
+# they must not contact real package managers merely because a fixture happens
+# to contain a manifest. Section 16 explicitly enables preparation for the
+# dependency-reproduction contract.
+export LANE_BASE_CHECK_PREPARE=0
 # launchd is stubbed GLOBALLY, like glab: any test path that reaches
 # watcher-arm or install must capture argv, never mutate real launchd.
 # (Paid for: 2026-08-02 — the suite armed a real watcher agent per run;
@@ -121,6 +126,10 @@ printf '#!/bin/sh\necho "$@" >> "%s"\n' "$WP_GLOBAL_CALLS" > "$WATCH_PANES_CMD"
 chmod +x "$WATCH_PANES_CMD"
 WP_GLOBAL_STUB="$WATCH_PANES_CMD"
 export HERDR_ENV=
+# Provider identity is an input each adapter test sets deliberately. Letting
+# the surrounding developer session leak Codex identity into every fixture
+# makes host-boundary tests depend on which agent happened to run the suite.
+export CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI=
 PASS=0; FAIL=0
 ok()   { echo "PASS: $1"; PASS=$((PASS+1)); }
 bad()  { echo "FAIL: $1"; FAIL=$((FAIL+1)); }

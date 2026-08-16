@@ -28,6 +28,20 @@ else
     bad "merged agent: wrong interval or mode in $mplist"
 fi
 
+# The scheduler is the durable host for Codex-deferred lanes, and launchd
+# starts it with only the PATH baked into this plist. A repo gate invokes its
+# package manager by name, so resolving node alone is insufficient when node
+# and pnpm are installed in different directories.
+mkdir -p "$MT/package-bin"
+printf '#!/bin/sh\nexit 0\n' > "$MT/package-bin/pnpm"; chmod +x "$MT/package-bin/pnpm"
+out=$(PATH="$MT/package-bin:$PATH" MENV "$TICK" install --dry-run 2>&1)
+path_plist=$(echo "$out" | sed -n 's/^generated (dry-run): //p')
+if [ -n "$path_plist" ] && grep -qF "$MT/package-bin" "$path_plist"; then
+    ok "scheduler PATH: carries the repo package manager into detached lanes"
+else
+    bad "scheduler PATH: pnpm directory was omitted from the launchd environment"
+fi
+
 # stop writes the switch, start clears it. Without the clear, a started build
 # would tick forever refusing to do anything.
 MENV "$TICK" uninstall >/dev/null 2>&1
@@ -183,6 +197,16 @@ else
     bad "off-switches: a tick undid the human's close"
 fi
 rm -f "$MT/home/ticker-off" "$MT/home/viewer-off"
+
+# SKILL.md promises the same visibility for a human-typed tick as for start.
+# This is especially important for Codex: a manual wave may queue work for the
+# next heartbeat, and the waiting viewer must already be present when it lands.
+: > "$WPCAP"; export HERDR_ENV=1
+MENV "$TICK" tick --provider claude >/dev/null 2>&1
+sleep 0.2
+[ -s "$WPCAP" ] && ok "manual tick: raises the singleton worker viewer in herdr" \
+                || bad "manual tick: ran in herdr without raising the viewer"
+export HERDR_ENV=
 
 # A dry run generates the plist and touches nothing else.
 : > "$WPCAP"; touch "$MT/home/ticker-off"

@@ -94,13 +94,21 @@ cat > "$FX/snap.json" <<'EOF'
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
-     "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}}
+     "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
+    {"id": 51, "title": "blocked report landed, label did not", "state": "merge-queue", "tier": "api", "fix": false,
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
+     "blocked_report": {"at": "2026-08-10T09:59:00Z", "category": "tracker-rate-limit", "body": "Fix creation was rate limited.", "ticket_state": "merge-queue", "released": false},
+     "merge_attempts": 0, "merge_hold": null,
+     "related_merge_requests": [{"id": 101, "state": "open", "branch": "t51", "sha": "ffff666"}],
+     "gate": {"eligible": false, "reason": "not in review", "head": "ffff666", "last_verdict": null}}
   ],
   "other_iids": [],
   "lanes": [
     {"id": "gate-40", "pid": "111", "state": "dead", "type": "gate", "rc": "7", "turns": "3"},
     {"id": "impl-41", "pid": "112", "state": "stale", "type": "impl", "rc": "-", "turns": "9"},
     {"id": "merge-49", "pid": "113", "state": "dead", "type": "merge", "rc": "1", "turns": "12"},
+    {"id": "merge-51", "pid": "115", "state": "dead", "type": "merge", "rc": "0", "turns": "8"},
     {"id": "impl-50", "pid": "114", "state": "running", "type": "impl", "rc": "-", "turns": "301"}
   ],
   "lessons_tail": [],
@@ -144,16 +152,17 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(act harvest kill-lane)" = "impl-41,impl-50" ] \
     && ok "plan: a stale lane and a lane past lane_turn_cap are both killed through kill-lane" \
     || bad "plan: kill list wrong ($(act harvest kill-lane))"
-[ "$(act harvest clear-lane)" = "gate-40,merge-49" ] \
+[ "$(act harvest clear-lane)" = "gate-40,merge-49,merge-51" ] \
     && ok "plan: every dead lane is cleared" \
     || bad "plan: clear list wrong ($(act harvest clear-lane))"
 [ "$(jq -r '[.actions[] | select(.step=="harvest" and .kind=="transition") | .ticket] | join(",")' "$T/plan.json")" = "50" ] \
     && ok "plan: the turn-cap lane's ticket is blocked, not respawned" \
     || bad "plan: turn-cap block wrong ($(jq -c '[.actions[]|select(.step=="harvest" and .kind=="transition")]' "$T/plan.json"))"
-[ "$(act harvest repair)" = "44" ] \
-    && [ "$(jq -c '[.actions[] | select(.kind=="repair") | .argv] | .[0]' "$T/plan.json")" \
-         = '["transition","44","review"]' ] \
-    && ok "plan: a P63 repair becomes an action carrying the one command that repairs it" \
+[ "$(act harvest repair)" = "44,51" ] \
+    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==44) | .argv] | .[0]' "$T/plan.json")" = '["transition","44","review"]' ] \
+    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==51) | .argv] | .[0]' "$T/plan.json")" = '["transition","51","blocked"]' ] \
+    && [ "$(jq -r '[.actions[] | select(.kind=="repair" and .ticket==51) | .report_already_present] | .[0]' "$T/plan.json")" = true ] \
+    && ok "plan: half-finished tracker transitions become repair actions" \
     || bad "plan: repair action wrong ($(jq -c '[.actions[]|select(.kind=="repair")]' "$T/plan.json"))"
 # A ticket a repair stands against is left alone by BOTH fill paths: its label
 # is one write behind what already happened, so a lane spawned off it would be
@@ -215,12 +224,16 @@ res() { jq -r --arg k "$1" '[.residue[] | select(.kind == $k) | ((.ticket // .ep
 [ "$(res merge-failed)" = "49" ] \
     && ok "plan: a dead merge lane whose ticket is still merge-queue leaves a merge-failed to record" \
     || bad "plan: merge-failed residue wrong ($(res merge-failed))"
+[ "$(jq '[.actions[] | select(.ticket==51 and .kind=="spawn")] | length' "$T/plan.json")" = 0 ] \
+    && [ "$(jq '[.residue[] | select(.ticket==51 and .kind=="merge-failed")] | length' "$T/plan.json")" = 0 ] \
+    && ok "plan: an unreleased blocked report suppresses retries and duplicate failure accounting" \
+    || bad "plan: half-blocked ticket #51 was retried or double-counted"
 [ "$(res blocked-report)" = "50,43,49" ] \
     && ok "plan: every blocking action carries a blocked report to write" \
     || bad "plan: blocked-report residue wrong ($(res blocked-report))"
 # Every `transition … blocked` says so, so an executor cannot apply the label
 # without the report the human reads to make the decision.
-[ "$(jq '[.actions[] | select(.argv[-1] == "blocked")] | map(.needs_report) | unique | @csv' "$T/plan.json")" \
+[ "$(jq '[.actions[] | select(.kind == "transition" and .argv[-1] == "blocked")] | map(.needs_report) | unique | @csv' "$T/plan.json")" \
     = '"true"' ] \
     && ok "plan: no ticket is blocked without a report being demanded with it" \
     || bad "plan: a blocking action carries no needs_report flag"

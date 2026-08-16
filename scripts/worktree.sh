@@ -7,6 +7,50 @@ SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SELF_DIR/lib.sh"
 DIE_RC=1
 
+_ensure_local_exclude() { # <main-repo> <pattern>
+    local repo="$1" pattern="$2" exclude
+    exclude=$(git -C "$repo" rev-parse --git-path info/exclude 2>/dev/null) \
+      || die "prepare: could not resolve the repository-local exclude file"
+    case "$exclude" in /*) ;; *) exclude="$repo/$exclude";; esac
+    mkdir -p "$(dirname "$exclude")"
+    touch "$exclude"
+    grep -qxF "$pattern" "$exclude" 2>/dev/null || printf '%s\n' "$pattern" >> "$exclude"
+}
+
+_prepare_local_metadata() { # <main-repo> <linked-worktree>
+    local repo="$1" target="$2" rules="$repo/.codex/rules/loom.rules"
+    # These are generated machine-local artifacts. The common exclude file is
+    # shared by every linked worktree, so neither path dirties a ticket branch.
+    _ensure_local_exclude "$repo" '/.worktrees/'
+    _ensure_local_exclude "$repo" '/.codex/rules/loom.rules'
+    if [ -f "$rules" ]; then
+      mkdir -p "$target/.codex/rules"
+      cp "$rules" "$target/.codex/rules/loom.rules"
+    fi
+}
+
+_prepare_dependencies() { # <linked-worktree>
+    local target="$1" stamp resolved install_dir install_cmd
+    # Keep the readiness marker in this linked worktree's Git metadata, not in
+    # the checkout: it survives retries without dirtying the ticket branch.
+    stamp=$(git -C "$target" rev-parse --git-path loom-dependencies-ready 2>/dev/null) \
+      || die "prepare: could not resolve dependency state for $target"
+    [ -f "$stamp" ] && return 0
+
+    resolved=$(_install_cmd_for "$target")
+    if [ -n "$resolved" ]; then
+      IFS=$'\t' read -r install_dir install_cmd <<EOF
+$resolved
+EOF
+      install_cmd="${LOOM_WORKTREE_INSTALL_CMD:-$install_cmd}"
+      echo "prepare: installing dependencies in $install_dir" >&2
+      (cd "$install_dir" && $install_cmd) >&2 \
+        || die "prepare: dependency install failed in $install_dir ($install_cmd)"
+    fi
+    mkdir -p "$(dirname "$stamp")"
+    touch "$stamp"
+}
+
 cmd_prepare() {
     local repo="" ticket="" key="" branch="" base="" reuse=""
     while [ $# -gt 0 ]; do case "$1" in
@@ -32,12 +76,16 @@ cmd_prepare() {
       want=$(git -C "$repo" rev-parse --git-common-dir)
       [ "$(cd "$reuse" && cd "$common" 2>/dev/null && pwd -P)" = "$(cd "$repo" && cd "$want" && pwd -P)" ] \
         || die "prepare: reuse path belongs to another repository"
+      _prepare_local_metadata "$repo" "$reuse"
+      _prepare_dependencies "$reuse"
       printf '%s\n' "$(cd "$reuse" && pwd -P)"; return 0
     fi
 
-    local parent name target custom
-    parent=$(dirname "$repo"); name=$(basename "$repo"); target="$parent/$name-wt-$key"
-    case "$target" in "$repo"|"$repo"/*) die "prepare: target must be a sibling, never nested in the repo";; esac
+    local target custom
+    target="$repo/.worktrees/$key"
+    case "$target" in "$repo/.worktrees/"*) ;; *) die "prepare: target escaped the managed .worktrees directory";; esac
+    _ensure_local_exclude "$repo" '/.worktrees/'
+    mkdir -p "$repo/.worktrees"
     custom=$(_yaml_scalar "$repo/.loom.yml" worktree_cmd)
     git -C "$repo" fetch --quiet origin || die "prepare: fetch origin failed"
     git -C "$repo" rev-parse --verify "origin/$base" >/dev/null 2>&1 || die "prepare: origin/$base does not exist"
@@ -58,7 +106,9 @@ cmd_prepare() {
     else
       git -C "$repo" worktree add --quiet "$target" -b "$branch" "origin/$base" >&2 || die "prepare: could not create worktree"
     fi
+    _prepare_local_metadata "$repo" "$target"
     if [ -f "$repo/.env" ] && [ ! -e "$target/.env" ]; then cp "$repo/.env" "$target/.env"; fi
+    _prepare_dependencies "$target"
     printf '%s\n' "$(cd "$target" && pwd -P)"
 }
 

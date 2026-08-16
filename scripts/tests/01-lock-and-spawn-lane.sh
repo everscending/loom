@@ -86,6 +86,142 @@ else
 fi
 kill "$pid" 2>/dev/null
 
+# 2a2. launchd kills background descendants when the short scheduler job
+# exits. On macOS the lane itself must therefore be submitted as the launchd
+# job, not nohup'd beneath the scheduler. The stub executes the submitted
+# command so the ordinary PID/liveness contract is still exercised.
+LAUNCH_STUB="$T/lane-launchctl.sh"; LAUNCH_CALLS="$T/lane-launchctl.calls"
+cat > "$LAUNCH_STUB" <<'EOF'
+#!/usr/bin/env bash
+echo "$*" >> "${LAUNCH_CALLS:?}"
+case "$1" in
+  bootstrap)
+    plist="$3"
+    args_json=$(plutil -convert json -o - "$plist")
+    args_file="${LAUNCH_CALLS}.args"
+    printf '%s\n' "$args_json" | jq -r '.ProgramArguments[]' > "$args_file"
+    args=()
+    while IFS= read -r arg; do args+=("$arg"); done < "$args_file"
+    "${args[@]}" &
+    ;;
+  print)
+    [ "${LAUNCH_PRINT_PID:-4242}" = none ] || printf '    pid = %s\n' "${LAUNCH_PRINT_PID:-4242}"
+    ;;
+  bootout|remove) exit 0 ;;
+esac
+EOF
+chmod +x "$LAUNCH_STUB"; : > "$LAUNCH_CALLS"
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" spawn-lane impl-93 --no-tick -- sleep 5 >/dev/null
+for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/impl-93.pid" ] && break; sleep 0.05; done
+pid=$(cat "$LOOM_HOME/lanes/impl-93.pid" 2>/dev/null || echo "")
+plist="$LOOM_HOME/lanes/impl-93.plist"
+if grep -q '^bootstrap ' "$LAUNCH_CALLS" && [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+   && [ -f "$plist" ] && ! grep -q '<key>KeepAlive</key>' "$plist"; then
+  ok "launchd lane: one-shot worker is bootstrapped without KeepAlive"
+else
+  bad "launchd lane: spawn did not bootstrap a live one-shot worker"
+fi
+
+# A Codex sandbox cannot necessarily signal-probe a sibling launchd job. The
+# launchd record is authoritative when kill -0 is denied: a loaded job with a
+# live pid is running, while a loaded-but-exited job has no pid line.
+real_pid="$pid"; printf '%s\n' 999999 > "$LOOM_HOME/lanes/impl-93.pid"
+status=$(LAUNCH_PRINT_PID="$real_pid" LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" \
+  "$TICK" lane-status | awk '$1=="impl-93" {print $3}')
+[ "$status" = running ] \
+  && ok "launchd lane: launchd pid keeps sandbox-invisible worker live" \
+  || bad "launchd lane: sandbox-invisible launchd worker reported $status"
+# A stale pid file can point at an unrelated process after the one-shot job
+# exits. For launchd-owned lanes, absence of an active launchd pid must win
+# even when kill -0 happens to succeed for that reused numeric pid.
+printf '%s\n' "$real_pid" > "$LOOM_HOME/lanes/impl-93.pid"
+status=$(LAUNCH_PRINT_PID=none LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" \
+  "$TICK" lane-status | awk '$1=="impl-93" {print $3}')
+[ "$status" = dead ] \
+  && ok "launchd lane: exited one-shot job is dead even when its recorded pid was reused" \
+  || bad "launchd lane: reused pid made exited one-shot job report $status"
+LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" clear-lane impl-93 >/dev/null
+grep -q '^bootout ' "$LAUNCH_CALLS" \
+  && ok "launchd lane: clear removes the completed per-lane job" \
+  || bad "launchd lane: clear left the per-lane launchd job registered"
+kill "$pid" 2>/dev/null
+
+# 2b. A provider session cannot own the detached worker it creates: Codex
+# reaps that whole process scope when the session exits. Such a spawn is
+# therefore queued, and the host scheduler drains it only after control has
+# returned outside the provider session.
+DEFER_AGENT="$T/defer-agent.sh"; DEFER_MARK="$T/defer-agent-ran"
+cat > "$DEFER_AGENT" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  detect|preflight) exit 0 ;;
+  run) touch "${DEFER_MARK:?}"; sleep 5 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$DEFER_AGENT"
+printf 'deferred provider brief\n' > "$T/deferred-brief.md"
+LOOM_AGENT_CMD="$DEFER_AGENT" LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" spawn-lane gate-90 --no-tick --provider codex --job gate --tier medium \
+  --brief "$T/deferred-brief.md" --cwd "$LOOM_REPO" >/dev/null
+if [ ! -f "$LOOM_HOME/lanes/gate-90.pid" ] \
+   && find "$LOOM_HOME/lane-launch-queue" -name 'request-*' -type d 2>/dev/null | grep -q .; then
+  ok "deferred launch: provider session queues without owning a worker"
+else
+  bad "deferred launch: provider session spawned directly or lost its request"
+fi
+DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" "$TICK" drain-lane-launches >/dev/null
+pid=$(cat "$LOOM_HOME/lanes/gate-90.pid" 2>/dev/null || echo "")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK" ]; then
+  ok "deferred launch: host drain starts a surviving worker"
+else
+  bad "deferred launch: host drain did not start the queued worker"
+fi
+kill "$pid" 2>/dev/null
+
+# 2c. The ordinary wave wrapper performs that drain itself. This is the exact
+# production boundary: the wave command queues, returns, and the worker is
+# alive before wave_end is recorded.
+DEFER_MARK_WAVE="$T/defer-wave-agent-ran"
+rm -rf "$LOOM_HOME/tick.lock.d"
+LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_WAVE" \
+  LOOM_WAVE_CMD="LOOM_DEFER_LANE_LAUNCH=1 '$TICK' spawn-lane gate-91 --no-tick --provider codex --job gate --tier medium --brief '$T/deferred-brief.md' --cwd '$LOOM_REPO'" \
+  "$TICK" tick --provider claude >/dev/null
+pid=$(cat "$LOOM_HOME/lanes/gate-91.pid" 2>/dev/null || echo "")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK_WAVE" ]; then
+  ok "deferred launch: wave return drains requests from the host boundary"
+else
+  bad "deferred launch: wave ended without a surviving queued worker"
+fi
+kill "$pid" 2>/dev/null
+
+# 2d. A manual wave running beneath interactive Codex is not a durable host:
+# Codex reaps every descendant when the outer turn ends. It must leave the
+# request queued for the already-armed heartbeat, whose next cheap auto pass
+# drains launches before applying the wave-spend gap.
+DEFER_MARK_CODEX="$T/defer-codex-agent-ran"
+rm -rf "$LOOM_HOME/tick.lock.d"
+CODEX_THREAD_ID=interactive LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
+  LOOM_WAVE_CMD="LOOM_DEFER_LANE_LAUNCH=1 '$TICK' spawn-lane gate-92 --no-tick --provider codex --job gate --tier medium --brief '$T/deferred-brief.md' --cwd '$LOOM_REPO'" \
+  "$TICK" tick --provider claude >/dev/null
+if [ ! -f "$LOOM_HOME/lanes/gate-92.pid" ] \
+   && find "$LOOM_HOME/lane-launch-queue" -name 'request-*gate-92*' -type d 2>/dev/null | grep -q .; then
+  ok "codex host boundary: interactive wave leaves workers for the heartbeat"
+else
+  bad "codex host boundary: interactive wave directly owned or lost the worker"
+fi
+CODEX_THREAD_ID= CODEX_CI= LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
+  LOOM_WAVE_CMD=true "$TICK" tick --auto --provider claude >/dev/null
+pid=$(cat "$LOOM_HOME/lanes/gate-92.pid" 2>/dev/null || echo "")
+if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK_CODEX" ]; then
+  ok "codex host boundary: safe heartbeat drains before the wave gap"
+else
+  bad "codex host boundary: heartbeat did not start the queued worker"
+fi
+kill "$pid" 2>/dev/null
+
 # 3. Dead lane detected (planted: child exits immediately).
 "$TICK" spawn-lane impl-2 -- true >/dev/null; sleep 0.2
 st=$("$TICK" lane-status | awk '$1=="impl-2"{print $3}')
@@ -137,13 +273,14 @@ for _ in $(seq 1 40); do [ -f "$MARK_LEGACY" ] && break; sleep 0.1; done
 rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4c. Order-tolerance: --on-done-tick BEFORE the id (the build-2 wave-1 form)
-#     must now work, not be swallowed as the id.
-rm -rf "$LOOM_HOME/tick.lock.d"
-MARK2="$T/self-trigger-fired-2"
-LOOM_WAVE_CMD="touch $MARK2" "$TICK" spawn-lane --on-done-tick impl-12 -- true >/dev/null 2>&1
-for _ in $(seq 1 40); do [ -f "$MARK2" ] && break; sleep 0.1; done
+#     must now work, not be swallowed as the id. Assert the lane command
+#     directly; 4b3 already proves the legacy flag still triggers a wave, and
+#     waiting for another full tick here made a parser test depend on scheduler
+#     contention from unrelated concurrent sections.
+MARK2="$T/flag-before-id-ran"
+"$TICK" spawn-lane --on-done-tick --no-tick impl-12 -- touch "$MARK2" >/dev/null 2>&1
+for _ in $(seq 1 100); do [ -f "$MARK2" ] && break; sleep 0.1; done
 [ -f "$MARK2" ] && ok "spawn-lane: flag-before-id order works" || bad "spawn-lane: flag-before-id was swallowed (regression)"
-rm -rf "$LOOM_HOME/tick.lock.d"
 
 # 4d. Loud failures: missing id and missing command must abort non-zero, not spawn.
 if "$TICK" spawn-lane --on-done-tick -- true >/dev/null 2>&1; then bad "spawn-lane: missing id did NOT fail"; else ok "spawn-lane: missing id fails loudly"; fi
@@ -369,11 +506,11 @@ rm -rf "$LOOM_HOME/tick.lock.d"
 #     what removes the need for a `cd` allow rule (P4). Planted violation:
 #     the same spawn WITHOUT the flag must land in the repo root instead.
 WT="$T/worktree-a"; mkdir -p "$WT"
-"$TICK" spawn-lane gate-21 --cwd "$WT" -- pwd >/dev/null; sleep 0.5
+"$TICK" spawn-lane gate-21 --no-tick --cwd "$WT" -- pwd >/dev/null; sleep 0.5
 grep -q "^$WT$" "$LOOM_HOME/logs/lane-gate-21.log" \
     && ok "spawn-lane: --cwd starts the lane inside its worktree" \
     || bad "spawn-lane: --cwd ignored (log: $(cat "$LOOM_HOME/logs/lane-gate-21.log"))"
-"$TICK" spawn-lane gate-22 -- pwd >/dev/null; sleep 0.5
+"$TICK" spawn-lane gate-22 --no-tick -- pwd >/dev/null; sleep 0.5
 grep -q "^$LOOM_REPO$" "$LOOM_HOME/logs/lane-gate-22.log" \
     && ok "spawn-lane-violation: without --cwd the lane is in the repo root" \
     || bad "spawn-lane: default cwd is not the repo root"
@@ -383,12 +520,12 @@ grep -q "^$LOOM_REPO$" "$LOOM_HOME/logs/lane-gate-22.log" \
 #      instead of retyping the absolute path. Assert both the PATH entry and
 #      that `command -v lane.sh` actually resolves from inside the lane.
 SCRIPTS_DIR="$(dirname "$TICK")"
-"$TICK" spawn-lane gate-22b -- sh -c 'echo "$PATH"' >/dev/null; sleep 0.5
+"$TICK" spawn-lane gate-22b --no-tick -- sh -c 'echo "$PATH"' >/dev/null; sleep 0.5
 case "$(cat "$LOOM_HOME/logs/lane-gate-22b.log" 2>/dev/null)" in
     "$SCRIPTS_DIR":*) ok "spawn-lane: PATH inside a lane leads with the scripts dir" ;;
     *) bad "spawn-lane: PATH inside a lane has no scripts dir (D-TICK-19) ($(cat "$LOOM_HOME/logs/lane-gate-22b.log" 2>/dev/null))" ;;
 esac
-"$TICK" spawn-lane gate-22c -- sh -c 'command -v lane.sh' >/dev/null; sleep 0.5
+"$TICK" spawn-lane gate-22c --no-tick -- sh -c 'command -v lane.sh' >/dev/null; sleep 0.5
 if grep -q "^$SCRIPTS_DIR/lane.sh$" "$LOOM_HOME/logs/lane-gate-22c.log" 2>/dev/null; then
     ok "spawn-lane: lane.sh resolves by bare name from inside a lane"
 else
@@ -399,7 +536,11 @@ fi
 rm -rf "$LOOM_HOME/tick.lock.d"
 MARK3="$T/self-trigger-fired-3"
 LOOM_WAVE_CMD="touch $MARK3" "$TICK" spawn-lane --cwd "$WT" gate-23 --on-done-tick -- pwd >/dev/null
-for _ in $(seq 1 100); do [ -f "$MARK3" ] && break; sleep 0.1; done
+# The self-trigger starts a full tick process. Under a concurrent live build,
+# process startup can exceed the old 10-second test-only deadline even though
+# the trigger and cwd are both correct. Keep polling bounded, but allow the
+# same 30-second envelope used by other asynchronous lane assertions.
+for _ in $(seq 1 300); do [ -f "$MARK3" ] && break; sleep 0.1; done
 if [ -f "$MARK3" ] && grep -q "^$WT$" "$LOOM_HOME/logs/lane-gate-23.log"; then
     ok "spawn-lane: --cwd before the id composes with --on-done-tick"
 else

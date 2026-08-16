@@ -498,7 +498,10 @@ _install_cmd_for() { # <dir> → "<install dir>\t<command>", or empty
         done <<EOF
 $(_toolchain_table)
 EOF
-        [ "$probe" != "." ] || break
+        # Relative searches terminate at `.`, absolute searches at `/`.
+        # `dirname /` is `/`; checking only `.` loops forever for absolute
+        # throwaway worktrees such as lane.sh base-check.
+        [ "$probe" != "." ] && [ "$probe" != "/" ] || break
         probe=$(dirname "$probe")
     done
     # No lockfile anywhere above it — fall back to the manifest in the

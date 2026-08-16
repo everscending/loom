@@ -21,7 +21,10 @@ only this:
    `lane.sh merge-failed {{TICKET_IID}}` explaining the conflict, and exit.
    Never ask a question — no one is there to answer it.
 
-2. Re-run this ticket's tier gates on the merged tree. A red check here is
+2. Re-run this ticket's tier gates on the merged tree **as one foreground
+   command**. Never background a finite gate and poll a status file in a later
+   tool call: Codex reaps the first call's descendants when that call returns.
+   A red check here is
    the first time the branch has been tested against what landed on
    `{{BASE}}` since it was cut — before recording a failure, re-run the same
    failing check on clean `origin/{{BASE}}` with `lane.sh base-check -- <cmd>`.
@@ -30,7 +33,11 @@ only this:
    `lane.sh merge-failed {{TICKET_IID}} --base-red <check-id> --fix <fix-iid>`
    (`lane.sh fix-ticket` one if none exists yet) — it never counts toward
    the merge attempt cap, and the ticket re-enters the queue on its own once
-   the fix merges. Otherwise (this ticket's own defect) record the attempt
+   the fix merges. If an external tracker failure prevents creating that fix,
+   write the evidence with `lane.sh blocked-report {{TICKET_IID}} --category
+   <slug>`, then immediately run `lane.sh transition {{TICKET_IID}} blocked`.
+   Those two commands are one recovery sequence: do not report success or
+   exit after only the comment lands. Otherwise (this ticket's own defect) record the attempt
    with `lane.sh merge-failed {{TICKET_IID}}` and exit — never fix it from
    the merge lane.
 

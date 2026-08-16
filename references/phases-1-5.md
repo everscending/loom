@@ -424,8 +424,9 @@ sanctioned fast path; freestyle coding outside tickets never is.
 
 *One manual session is serial* — it holds one branch at a time, so it cannot
 exploit a parallel frontier. To parallelize, give each concurrent ticket its
-own worktree and session (`git worktree add ../<repo>-wt-<n> -b <branch>
-<base>`); a lone blocking ticket needs none. The tick loop does this for you
+own worktree and session (`git worktree add .worktrees/<n> -b <branch>
+<base>`); a lone blocking ticket needs none. Add `/.worktrees/` to the main
+clone's `.gitignore`. The tick loop does this for you
 (fill-lanes creates a worktree per lane) — parallelism is the reason to prefer
 it once the frontier widens. *(paid: a manual run did the sole-blocker
 bootstrap in-place, then hit a 2-wide frontier with no worktrees.)*

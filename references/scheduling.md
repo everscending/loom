@@ -16,6 +16,14 @@ at the lock, so during a wave — the exact window in which a lane wedges —
 nothing was looking, and a second 60s watcher process had to exist to cover it.
 Watching first makes that process unnecessary — `install` retires the old one.
 
+The same heartbeat drains validated worker requests left by Codex sessions.
+On macOS it bootstraps each worker as a separate **one-shot** launchd plist,
+with no KeepAlive key: the lane epilogue schedules the next wave, while launchd
+must never repeat a completed implementation, gate, or merge. Lane liveness
+uses launchd's active pid when a sandboxed Codex caller cannot use `kill -0`
+against that sibling job. This is also the source Herdr's viewer follows when
+it raises one pane per active lane.
+
 ## Spending is paced by the gap, not the timer
 
 **`min_wave_gap_minutes` (default 10)** paces spend, so a 60s tick costs
