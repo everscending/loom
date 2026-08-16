@@ -1658,3 +1658,19 @@ control whether intervention happens. The global-config template now defaults to
 runtime and documented default. The planner fixture proves two different classes still block, and
 the planted mutation back to `same_class_tail` recreates the bypass. Focused planner/bootstrap
 sections pass 81 assertions. This is shared planner policy for both Claude and Codex.
+
+### D-TICK-27 · a delayed gate launch can cross a later human hold
+*Closed 2026-08-16.*
+
+A wave queued `gate-220-r7` from an earlier snapshot, then JOR-220 was rejected and placed on a
+human hold. The durable Codex host started that queued request 37 seconds later without rereading
+tracker state, so the blocked ticket spent another API pregate on the already-judged HEAD. Direct
+Claude-style successor handoffs had the same missing precondition at the shared spawn boundary.
+
+**Shipped:** every provider gate now rereads its ticket immediately before auxiliary admission.
+A definite non-Review state discards the stale launch as a successful no-op; a tracker read failure
+fails closed, keeps a durable Codex request retryable, and lets an optional direct handoff fall back
+to the heartbeat. The public seam covers a queued Codex request crossing a hold, a direct Claude
+handoff after a hold, tracker-read failure, and the Review countercondition. Focused gate-state and
+auxiliary-cap sections pass 12 assertions; adjacent planner and runtime sections pass 113. No
+provider adapter changed.

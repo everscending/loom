@@ -908,6 +908,39 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
     return 1
 }
 
+_gate_ticket_in_review() { # <gate-id> → 0 review, 1 definite non-review, 2 unreadable
+    local id="$1" iid issue
+    iid="${id#gate-}"; iid="${iid%%-*}"
+    case "$iid" in ''|*[!0-9]*) return 1 ;; esac
+    issue=$("$TRACKER_SH" issue "$iid" 2>/dev/null) || return 2
+    printf '%s' "$issue" | jq -e '
+      (.state // "open") == "open"
+      and (((.labels // []) | index("review")) != null)
+    ' >/dev/null 2>&1 || return 1
+    return 0
+}
+
+_gate_launch_refusal() { # <id> <from-lane> <reason> — shared direct/queued semantics
+    local id="$1" from="$2" reason="$3"
+    case "$reason" in
+        unreadable)
+            echo "spawn-lane: cannot verify whether '$id' is still in review — failing closed."
+            _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason gate_state_unreadable
+            # A durable request survives a transient tracker outage. A direct
+            # handoff is optional and the heartbeat will derive it again.
+            [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+            [ -n "$from" ] && return 0
+            return 1
+            ;;
+        *)
+            echo "spawn-lane: ticket for '$id' is no longer in review — discarding this stale gate launch."
+            echo "  A later tracker state outranks an earlier wave plan or queued handoff."
+            _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason gate_no_longer_review
+            return 0
+            ;;
+    esac
+}
+
 # --- usage limits (P14) and wave crashes (P15) ----------------------------
 # One session-limit event cost build 2 **57m35s — a quarter of the whole run**.
 # The wave log for it is a single line ("You've hit your session limit · resets
@@ -2070,6 +2103,23 @@ cmd_spawn_lane() {
   never write that flag for you."
     fi
     [ -n "$provider" ] || _notify_trust ""
+    # D-TICK-27: a wave plan and a Codex launch request are disposable
+    # photographs. A human hold, rejection, or merge that lands after either
+    # was created must outrank it. Re-read the ticket at the last shared
+    # provider boundary before any gate is queued or started; this covers
+    # Claude direct handoffs and Codex durable drains without adapter branches.
+    if [ -n "$provider" ] && [ "$job" = gate ]; then
+        local gate_state_rc=0 gate_refusal_rc=0
+        _gate_ticket_in_review "$id" || gate_state_rc=$?
+        if [ "$gate_state_rc" -ne 0 ]; then
+            if [ "$gate_state_rc" -eq 2 ]; then
+                _gate_launch_refusal "$id" "$handoff_from" unreadable || gate_refusal_rc=$?
+            else
+                _gate_launch_refusal "$id" "$handoff_from" stale || gate_refusal_rc=$?
+            fi
+            return "$gate_refusal_rc"
+        fi
+    fi
     # plan.jq owns normal scheduling, but successor handoffs and durable Codex
     # drains bypass it. Recheck the shared aux cap at the one boundary every
     # provider uses. The lock stays held until this short-lived spawn command

@@ -63,6 +63,7 @@ fi
 "$TICK" kill-lane gate-229 >/dev/null 2>&1 || true
 
 AGENT="$T/aux-agent.sh"
+TRACKER="$T/aux-tracker.sh"
 cat > "$AGENT" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -71,7 +72,15 @@ case "$1" in
   *) exit 2 ;;
 esac
 EOF
-chmod +x "$AGENT"
+cat > "$TRACKER" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  issue) printf '{"id":%s,"state":"open","labels":["build-1","review"],"body":""}\n' "$2" ;;
+  *) echo '[]' ;;
+esac
+EOF
+chmod +x "$AGENT" "$TRACKER"
+export TRACKER_CMD="$TRACKER"
 printf 'queued gate brief\n' > "$T/aux-brief.md"
 LOOM_LANE_ID=impl-226 LOOM_DEFER_LANE_LAUNCH=1 LOOM_AGENT_CMD="$AGENT" \
   "$TICK" spawn-lane gate-226 --no-tick --provider codex --job gate --tier medium \
