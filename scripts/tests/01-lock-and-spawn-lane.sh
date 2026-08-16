@@ -152,28 +152,32 @@ kill "$pid" 2>/dev/null
 
 # Playwright's webServer can exit its wrapper while leaving Next reparented to
 # launchd. The port and cwd belong to the lane; clearing that dead lane must
-# reap only a listener still rooted in the lane worktree.
-leak_cwd="$T/leaked-port-worktree"; mkdir -p "$leak_cwd"
-leak_port=$((45000 + ($$ % 1000)))
-while lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1; do
-  leak_port=$((leak_port + 1))
-done
-(cd "$leak_cwd" && python3 -m http.server "$leak_port" >/dev/null 2>&1) & leak_pid=$!
-for _ in $(seq 1 40); do lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1 && break; sleep 0.05; done
-if ! lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1; then
-  bad "lane port cleanup: fixture never opened its listener"
+# reap only a listener still rooted in the lane worktree. Model lsof's two
+# answers around a real process instead of binding a TCP socket: Codex's test
+# sandbox denies listen(2), which made the fixture fail before tick.sh ran.
+leak_cwd="$T/leaked-port-worktree"; mkdir -p "$leak_cwd" "$T/leak-bin"
+(cd "$leak_cwd" && sleep 60) & leak_pid=$!
+leak_port=45123
+LEAK_PID="$leak_pid" LEAK_CWD="$leak_cwd" LEAK_PORT="$leak_port"; export LEAK_PID LEAK_CWD LEAK_PORT
+cat > "$T/leak-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-tiTCP:$LEAK_PORT"*) printf '%s\n' "$LEAK_PID" ;;
+  *"-p $LEAK_PID -d cwd -Fn"*) printf 'p%s\nfcwd\nn%s\n' "$LEAK_PID" "$LEAK_CWD" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$T/leak-bin/lsof"
+printf '%s\n' "$leak_port" > "$LOOM_HOME/lanes/impl-port.port"
+printf '%s\n' "$leak_cwd" > "$LOOM_HOME/lanes/impl-port.cwd"
+PATH="$T/leak-bin:$PATH" "$TICK" clear-lane impl-port >/dev/null
+if ! kill -0 "$leak_pid" 2>/dev/null \
+   && [ ! -e "$LOOM_HOME/lanes/impl-port.port" ] \
+   && [ ! -e "$LOOM_HOME/lanes/impl-port.cwd" ]; then
+  ok "lane port cleanup: clear reaps an orphan listener owned by the lane cwd"
 else
-  printf '%s\n' "$leak_port" > "$LOOM_HOME/lanes/impl-port.port"
-  printf '%s\n' "$leak_cwd" > "$LOOM_HOME/lanes/impl-port.cwd"
-  "$TICK" clear-lane impl-port >/dev/null
-  if ! lsof -nP -iTCP:"$leak_port" -sTCP:LISTEN >/dev/null 2>&1 \
-     && [ ! -e "$LOOM_HOME/lanes/impl-port.port" ] \
-     && [ ! -e "$LOOM_HOME/lanes/impl-port.cwd" ]; then
-    ok "lane port cleanup: clear reaps an orphan listener owned by the lane cwd"
-  else
-    bad "lane port cleanup: dead lane left its test server listening"
-    kill "$leak_pid" 2>/dev/null || true
-  fi
+  bad "lane port cleanup: dead lane left its test server listening"
+  kill "$leak_pid" 2>/dev/null || true
 fi
 
 # D-TICK-22: a one-shot launchd job owns the lane's whole process group. If
