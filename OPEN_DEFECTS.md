@@ -1623,3 +1623,21 @@ provider output. The public `render-log <id> --follow` fixture spans the pregate
 handoff and a planted violation recreates the empty pane. Focused section 14 passes 58 assertions.
 The full suite reached 1,133 passes with the same unrelated, reproducible `lane port cleanup`
 fixture failure. Shared rendering code serves Claude and Codex; neither adapter changed.
+
+### D-TICK-25 · successor handoffs can exceed the auxiliary lane cap
+*Closed 2026-08-16.*
+
+The planner enforced `max_aux_lanes`, but direct Claude-style successor spawns and durable Codex
+launch requests bypassed the planner's capacity decision. In the live build, four gates already
+held all four auxiliary slots when implementation handoffs started gate-218 and gate-214, briefly
+raising the population to five. Concurrent handoffs could also both observe the final slot as
+free, while queued Codex requests were invisible until their host drained them.
+
+**Shipped:** the shared `spawn-lane` boundary now serializes auxiliary admission, counts running
+gates/merges/probes plus queued Codex reservations, and rechecks the configured cap before either
+provider starts work. A direct successor at capacity succeeds as a non-destructive no-op so the
+ordinary heartbeat can schedule it later; a durable drain returns the request to its ready name
+for retry. The new public-seam section covers full-cap direct handoff, simultaneous handoffs,
+queued reservations, and durable drain retry. Focused section 40 passes 7 assertions; adjacent
+planner, merge-chain, and runtime sections pass 131 assertions. No provider adapter changed, so
+Claude and Codex share the admission behavior.

@@ -77,6 +77,11 @@ MERGE_LOCK_DIR="${LOOM_MERGE_LOCK_DIR:-$LOOM_HOME/merge.lock.d}"
 # one global dir like MERGE_LOCK_DIR: unrelated gates must never queue behind
 # each other) gets the same mkdir-atomic, dead-owner-breakable shape.
 GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
+# D-TICK-25: planner capacity is not enough for lane-to-lane handoffs, which
+# never pass through plan.jq. Serialize the small admission window so two
+# finishing lanes cannot both observe the last auxiliary slot as free. Queued
+# Codex launches count as reservations until the durable host starts them.
+AUX_LOCK_DIR="${LOOM_AUX_LOCK_DIR:-$LOOM_HOME/aux-admission.lock.d}"
 # A tick that arrives while a wave holds the lock used to be discarded outright,
 # and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
 # was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
@@ -872,6 +877,37 @@ _gate_lock_owner() { # <key> → prints the live owner pid, or nothing
     _lock_owner "$GATE_LOCK_DIR/$1"
 }
 
+_aux_lane_id() { # <lane-id> → true for the max_aux_lanes population
+    case "$1" in gate-*|merge-*|probe-*) return 0 ;; *) return 1 ;; esac
+}
+
+_aux_capacity_usage() { # live aux lanes + queued reservations, excluding the request being drained
+    local alive reserved=0 request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
+    alive=$(_lanes_alive | awk '$4=="gate"||$4=="merge"||$4=="probe" { n++ } END { print n+0 }')
+    for request in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
+        [ -d "$request" ] || continue
+        queued_id=$(cat "$request/id" 2>/dev/null || true)
+        [ -n "$queued_id" ] || continue
+        [ "$queued_id" != "$drain_id" ] || continue
+        _aux_lane_id "$queued_id" && reserved=$((reserved + 1))
+    done
+    printf '%s\n' "$((alive + reserved))"
+}
+
+_aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
+    local id="$1" from="$2" used="$3" cap="$4"
+    echo "spawn-lane: auxiliary lane cap full ($used of $cap held by gates, merges, probes, or queued handoffs) — not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  Successor handoff from '$from' is optional; the ordinary heartbeat schedules it when a slot is free."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason aux_cap used "$used" cap "$cap"
+    # A durable drain must keep the queued request. 75 is private to this
+    # tick.sh-to-tick.sh boundary; direct lane handoffs remain successful no-ops.
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+    [ -n "$from" ] && return 0
+    return 1
+}
+
 # --- usage limits (P14) and wave crashes (P15) ----------------------------
 # One session-limit event cost build 2 **57m35s — a quarter of the whole run**.
 # The wave log for it is a single line ("You've hit your session limit · resets
@@ -1584,7 +1620,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/lo
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate merge_lock on_done rc=0
+    local request name launching id provider job tier cwd pregate merge_lock on_done launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -1605,8 +1641,15 @@ _drain_lane_launches() {
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
         [ "$merge_lock" = 1 ] && args+=(--merge-lock)
         [ "$on_done" = 0 ] && args+=(--no-tick)
-        if LOOM_DEFER_LANE_LAUNCH= "$SELF_PATH" spawn-lane "${args[@]}"; then
+        launch_rc=0
+        LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
+          "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
+        if [ "$launch_rc" -eq 0 ]; then
             rm -rf "$launching"
+        elif [ "$launch_rc" -eq 75 ]; then
+            # Capacity is temporary, not a broken request. Put it back under
+            # its original ready name for the next ordinary heartbeat.
+            mv "$launching" "$request" 2>/dev/null || true
         else
             mv "$launching" "$LANE_LAUNCH_DIR/failed-$name" 2>/dev/null || true
             _ev lane_launch_failed id "${id:-unknown}" provider "${provider:-unknown}" job "${job:-unknown}"
@@ -1954,6 +1997,7 @@ cmd_spawn_lane() {
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
     local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
     # malformed spawn must abort here, never produce a lane that reads as a
@@ -2026,6 +2070,36 @@ cmd_spawn_lane() {
   never write that flag for you."
     fi
     [ -n "$provider" ] || _notify_trust ""
+    # plan.jq owns normal scheduling, but successor handoffs and durable Codex
+    # drains bypass it. Recheck the shared aux cap at the one boundary every
+    # provider uses. The lock stays held until this short-lived spawn command
+    # exits, after either a queue reservation or a worker pid exists.
+    # Raw custom commands are a test/operator escape hatch, not paid Loom
+    # workers. Production scheduler and handoff lanes use the provider-neutral
+    # interface; direct handoffs are still covered even in a custom-command
+    # fixture because LOOM_LANE_ID identifies the path under test.
+    if _aux_lane_id "$id" \
+       && { [ -n "$provider" ] || [ -n "$handoff_from" ] || [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; }; then
+        if ! _lock_reserve "$AUX_LOCK_DIR"; then
+            if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; then return 75; fi
+            if [ -n "$handoff_from" ]; then
+                echo "spawn-lane: auxiliary admission is busy — not chaining '$id' from '$handoff_from'."
+                echo "  The ordinary heartbeat schedules it later."
+                _ev lane_chain_skipped id "$id" from "$handoff_from" reason aux_admission_busy
+                return 0
+            fi
+            die "spawn-lane: auxiliary admission is busy — retry '$id' on the next heartbeat"
+        fi
+        trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
+        local aux_cap aux_used aux_rc=0
+        aux_cap=$(cfg max_aux_lanes 4)
+        case "$aux_cap" in ''|*[!0-9]*) die "spawn-lane: max_aux_lanes must be a non-negative integer, got '$aux_cap'" ;; esac
+        aux_used=$(_aux_capacity_usage)
+        if [ "$aux_used" -ge "$aux_cap" ]; then
+            _aux_admission_refusal "$id" "$handoff_from" "$aux_used" "$aux_cap" || aux_rc=$?
+            return "$aux_rc"
+        fi
+    fi
     # The lane's own id, inherited by everything it runs — including the
     # `spawn-lane` it calls to hand off to its successor. That inheritance is
     # the seam the stopped-loop check above reads.
