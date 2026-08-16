@@ -45,7 +45,7 @@ agent_sync_guardrails() {
 }
 
 agent_normalize() {
-    jq -Rrc --arg provider claude --arg job "$1" --arg lane "$2" '
+    jq --unbuffered -Rrc --arg provider claude --arg job "$1" --arg lane "$2" '
       (fromjson?) as $e | select($e != null)
       | if $e.type=="assistant" then
           {schema:1,type:"assistant_progress",timestamp:(now|todateiso8601),provider:$provider,job:$job,lane_id:(if $lane=="" then null else $lane end),text:([$e.message.content[]?|select(.type=="text")|.text]|join("\n"))},

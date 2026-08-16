@@ -40,6 +40,11 @@ case "$1" in
       success)
         printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'
         printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}' ;;
+      stream)
+        printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"working"}}'
+        : > "${STREAM_READY:?}"
+        while [ ! -e "${STREAM_RELEASE:?}" ]; do sleep 0.05; done
+        printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":7,"output_tokens":3}}' ;;
       limit) echo 'usage limit reached' >&2; exit 1 ;;
       malformed) echo 'not-json' ;;
     esac ;;
@@ -112,6 +117,23 @@ printf '%s' "$out" | jq -se 'any(.type=="session_start" and .provider=="codex" a
   && ok "codex adapter: native stream becomes canonical JSONL with unknown cost null" \
   || bad "codex adapter: canonical stream incomplete ($out)"
 
+rm -f "$AR/codex.stream.ready" "$AR/codex.stream.release" "$AR/codex.stream.out"
+CAP="$CAP" STDIN_CAP="$STDIN_CAP" NATIVE_MODE=stream \
+  STREAM_READY="$AR/codex.stream.ready" STREAM_RELEASE="$AR/codex.stream.release" \
+  LOOM_CODEX_CMD="$AR/bin/codex" LOOM_AGENT_NATIVE_LOG="$AR/codex-stream.native" \
+  "$AGENT" run --provider codex --job implementation --tier high --cwd "$AR/repo" \
+  --brief "$AR/brief.md" --lane-id impl-stream >"$AR/codex.stream.out" 2>&1 &
+stream_pid=$!
+for _ in {1..100}; do [ -e "$AR/codex.stream.ready" ] && break; sleep 0.02; done
+if [ -e "$AR/codex.stream.ready" ]; then sleep 0.1; fi
+if grep -q '"type":"assistant_progress"' "$AR/codex.stream.out"; then
+  ok "codex adapter: canonical progress flushes before the native session exits"
+else
+  bad "codex adapter: canonical progress stayed buffered during a live native session"
+fi
+: > "$AR/codex.stream.release"
+wait "$stream_pid" || true
+
 : > "$CAP"; : > "$STDIN_CAP"
 CAP="$CAP" STDIN_CAP="$STDIN_CAP" LOOM_CODEX_CMD="$AR/bin/codex" LOOM_AGENT_NATIVE_LOG="$AR/codex-medium.native" \
   "$AGENT" run --provider codex --job wave --tier medium --cwd "$AR/repo" --brief "$AR/brief.md" >/dev/null
@@ -130,8 +152,15 @@ echo "$@" >> "${CLAUDE_CAP:?}"
 case "$1" in
   --version) echo 'claude 99.0' ;;
   auth) echo '{"loggedIn":true}' ;;
-  *) printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"reviewed"}],"usage":{"input_tokens":4,"output_tokens":2}}}' \
-                   '{"type":"result","subtype":"success","is_error":false,"result":"PASS","total_cost_usd":0.01}' ;;
+  *) if [ "${CLAUDE_NATIVE_MODE:-success}" = stream ]; then
+       printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}],"usage":{"input_tokens":4,"output_tokens":2}}}'
+       : > "${STREAM_READY:?}"
+       while [ ! -e "${STREAM_RELEASE:?}" ]; do sleep 0.05; done
+       printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"PASS","total_cost_usd":0.01}'
+     else
+       printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"reviewed"}],"usage":{"input_tokens":4,"output_tokens":2}}}' \
+                      '{"type":"result","subtype":"success","is_error":false,"result":"PASS","total_cost_usd":0.01}'
+     fi ;;
 esac
 EOF
 chmod +x "$AR/bin/claude"; CLAUDE_CAP="$AR/claude.argv"; : > "$CLAUDE_CAP"
@@ -144,6 +173,23 @@ case "$argv" in *"--permission-mode dontAsk"*"--model opus"*"--output-format str
 printf '%s' "$out" | jq -se 'any(.type=="session_start" and .provider=="claude" and .requested_tier=="high") and any(.type=="assistant_progress" and .text=="reviewed") and any(.type=="usage" and .cost_usd==0.01) and any(.type=="session_end" and .status=="success")' >/dev/null \
   && ok "claude adapter: native stream becomes the same canonical vocabulary" \
   || bad "claude adapter: canonical stream incomplete ($out)"
+
+rm -f "$AR/claude.stream.ready" "$AR/claude.stream.release" "$AR/claude.stream.out"
+CLAUDE_CAP="$CLAUDE_CAP" CLAUDE_NATIVE_MODE=stream \
+  STREAM_READY="$AR/claude.stream.ready" STREAM_RELEASE="$AR/claude.stream.release" \
+  LOOM_CLAUDE_CMD="$AR/bin/claude" LOOM_AGENT_NATIVE_LOG="$AR/claude-stream.native" \
+  "$AGENT" run --provider claude --job gate --tier high --cwd "$AR/repo" \
+  --brief "$AR/brief.md" --lane-id gate-stream >"$AR/claude.stream.out" 2>&1 &
+stream_pid=$!
+for _ in {1..100}; do [ -e "$AR/claude.stream.ready" ] && break; sleep 0.02; done
+if [ -e "$AR/claude.stream.ready" ]; then sleep 0.1; fi
+if grep -q '"type":"assistant_progress"' "$AR/claude.stream.out"; then
+  ok "claude adapter: canonical progress flushes before the native session exits"
+else
+  bad "claude adapter: canonical progress stayed buffered during a live native session"
+fi
+: > "$AR/claude.stream.release"
+wait "$stream_pid" || true
 
 out=$(CAP="$CAP" STDIN_CAP="$STDIN_CAP" NATIVE_MODE=malformed LOOM_CODEX_CMD="$AR/bin/codex" \
   LOOM_AGENT_NATIVE_LOG="$AR/codex-bad.native" "$AGENT" run --provider codex --job gate --tier medium \

@@ -68,7 +68,7 @@ RULES
 }
 
 agent_normalize() {
-    jq -Rrc --arg provider codex --arg job "$1" --arg lane "$2" '
+    jq --unbuffered -Rrc --arg provider codex --arg job "$1" --arg lane "$2" '
       (fromjson?) as $e | select($e != null)
       | if ($e.type=="item.completed" and (($e.item.type//"")=="agent_message")) then
           {schema:1,type:"assistant_progress",timestamp:(now|todateiso8601),provider:$provider,job:$job,lane_id:(if $lane=="" then null else $lane end),text:($e.item.text//"")}
