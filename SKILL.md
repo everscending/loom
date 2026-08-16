@@ -246,7 +246,9 @@ refuses outside herdr anyway.
    next wave knows this HEAD is judged. A FAIL also names its defect class:
    `lane.sh verdict <iid> fail <sha> --class <kebab-slug>` folds
    `class=<slug>` into the trailer. Reuse the previous rejection's slug when
-   it is the same class — that match is what stops round 3.
+   it is the same class so the intervention report preserves the recurring
+   cause. Two failed rounds exhaust `rejection_cap`: round 3 requires human
+   diagnosis, rescope, or prerequisite work, even when the classes differ.
 
    **A `fix` ticket's verdict reads its terminal condition** — the block
    `references/ticket-template.md` requires in every fix ticket. Measured

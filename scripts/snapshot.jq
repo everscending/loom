@@ -140,10 +140,9 @@ include "lib";
     # P30: the rejection history as a decision input. A FAIL trailer may name
     # its defect class (class=<slug>, written by lane.sh verdict --class);
     # same_class_tail counts consecutive newest-first FAILs sharing one class.
-    # Consumer: the wave fill step — a tail of 2 means block for a design
-    # decision, not a third same-tier guess (#39 burned round 3 on a class
-    # the round-2 verdict had already named, 2026-08-02). A FAIL without a
-    # class, or a PASS, breaks the run — conservative by design.
+    # The planner caps on total failures before round three; the tail remains
+    # diagnostic evidence for the intervention report. A FAIL without a class,
+    # or a PASS, breaks the run — conservative by design.
     # P37: `orch-scope-reset` says the ticket became different work, so the cap
     # is attached to the scope and not the issue number. D-SNAP-19 adds the
     # narrower `orch-verdict-reset` for an invalid gate outcome on unchanged

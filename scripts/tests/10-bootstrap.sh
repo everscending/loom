@@ -45,6 +45,9 @@ BOOTENV() { LOOM_REPO="$BT/repo" LOOM_HOME="$BT/home" LOOM_GLOBAL_CONFIG="$BT/g.
 # 9a. Seeds the global layer once, then leaves it alone.
 BOOTENV "$BOOT" global-config >/dev/null
 [ -f "$BT/g.yml" ] && ok "bootstrap: seeds the global config" || bad "bootstrap: no global config written"
+grep -q '^rejection_cap: 2 ' "$BT/g.yml" \
+    && ok "bootstrap: two gate failures require help before round three" \
+    || bad "bootstrap: default rejection cap still permits an automatic round three"
 printf 'max_lanes: 6\n' >> "$BT/g.yml"
 BOOTENV "$BOOT" global-config >/dev/null
 grep -q "max_lanes: 6" "$BT/g.yml" \

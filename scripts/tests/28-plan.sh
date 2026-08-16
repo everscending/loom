@@ -15,6 +15,7 @@ FX="$T/fx"; mkdir -p "$FX"
 #   #41 in-progress behind a STALE lane                (step 2)
 #   #42 stranded, one rejection                        (step 4, rework)
 #   #43 stranded, two of the SAME class                (step 4, the stop rule)
+#   #52 stranded, two DIFFERENT classes                (step 4, round-3 help)
 #   #44 ready but carrying a P63 repair                (step 2 repair)
 #   #45 ready and `fix: true`, #46 ready but blocked   (step 4, fix-first)
 #   #47/#48/#49 merge-queue: held, free, cap spent     (step 5)
@@ -54,6 +55,11 @@ cat > "$FX/snap.json" <<'EOF'
     {"id": 43, "title": "stranded, two same class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
      "rejections": {"total": 2, "last_class": "marks-attribution", "same_class_tail": 2},
+     "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
+     "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
+    {"id": 52, "title": "stranded, two different classes", "state": "in-progress", "tier": "logic", "fix": false,
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
+     "rejections": {"total": 2, "last_class": "api-contract", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 44, "title": "ready, but a repair stands against it", "state": "ready-for-agent",
@@ -113,12 +119,12 @@ cat > "$FX/snap.json" <<'EOF'
   ],
   "lessons_tail": [],
   "summary": {
-    "open_tickets": 11, "by_state": {}, "all_blocked": false,
+    "open_tickets": 12, "by_state": {}, "all_blocked": false,
     "epics_awaiting_probe": ["Ledger core", "Reporting surface"],
     "ready_set_empty": false, "lanes_running": 2, "gateable": 1,
     "lanes_running_by_type": {"impl": 2, "gate": 0, "merge": 0, "probe": 0, "unknown": 0},
     "impl_slots_free": 2, "merge_in_flight": false,
-    "stranded": [42, 43],
+    "stranded": [42, 43, 52],
     "repairs": [{"id": 44, "shape": "mr-open-not-in-review", "state": "ready-for-agent", "mr": 91,
                  "fix": "lane.sh transition 44 review"}]
   },
@@ -178,12 +184,12 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate')" = "logic" ] \
     && ok "plan: the gate spawn carries the ticket's own tier as its pregate" \
     || bad "plan: gate pregate wrong ($(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate'))"
-# Step 4: two same-class rejections mean stop, not respawn (#43); one does not
-# (#42), and the rework respawn takes the ticket's OWN resolved model — a
+# Step 4: two rejections mean stop, not respawn, even when their classes differ
+# (#43/#52); one does not (#42), and the rework respawn takes the ticket's OWN resolved model — a
 # rework round is exactly where the escalation chain differs from lane_model.
-[ "$(act fill transition)" = "43" ] \
-    && ok "plan: two same-class rejections block for a design decision instead of a third guess" \
-    || bad "plan: same-class stop wrong ($(act fill transition))"
+[ "$(act fill transition)" = "43,52" ] \
+    && ok "plan: two total rejections require help before round three, even across different classes" \
+    || bad "plan: round-three help stop wrong ($(act fill transition))"
 [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.tier')" = "high" ] \
     && ok "plan: a rework respawn carries .tier_selection.effective, not lane_tier" \
     || bad "plan: rework tier wrong ($(p '.actions[] | select(.lane=="impl-42") | .spawn.tier'))"
@@ -228,7 +234,7 @@ res() { jq -r --arg k "$1" '[.residue[] | select(.kind == $k) | ((.ticket // .ep
     && [ "$(jq '[.residue[] | select(.ticket==51 and .kind=="merge-failed")] | length' "$T/plan.json")" = 0 ] \
     && ok "plan: an unreleased blocked report suppresses retries and duplicate failure accounting" \
     || bad "plan: half-blocked ticket #51 was retried or double-counted"
-[ "$(res blocked-report)" = "50,43,49" ] \
+[ "$(res blocked-report)" = "50,43,52,49" ] \
     && ok "plan: every blocking action carries a blocked report to write" \
     || bad "plan: blocked-report residue wrong ($(res blocked-report))"
 # Every `transition … blocked` says so, so an executor cannot apply the label

@@ -36,7 +36,7 @@ def epic_norm:
 # null when the trailer carries none — a PASS never does (lane.sh strips one
 # that rides along) and a FAIL always does. Consumers: snapshot.jq's
 # `judged_at` ("this HEAD is already judged", which reads the first two) and
-# `rejections_of` (the same-class rejection stop, which reads all three), plus
+# `rejections_of` (the round-three rejection stop, which reads all three), plus
 # lane.sh's duplicate-verdict refusal. A change to the trailer format is one
 # edit here and cannot half-land any more.
 def orch_verdict_scan:

@@ -117,7 +117,7 @@ cmd_global_config() { # global-config [--force]
 # what any repo actually resolves to.
 
 max_lanes: 4                    # 1-6; each lane is a full worktree
-rejection_cap: 3                # gate rejections before a ticket is blocked
+rejection_cap: 2                # two failures stop before automatic round 3
 crash_cap: 2                    # implementer crashes before blocked (not rejections)
 heartbeat_stale_minutes: 30     # PID alive but log silent this long = wedged
 usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_tier

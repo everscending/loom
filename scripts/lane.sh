@@ -359,8 +359,8 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     # move it to `merge-queue` anyway, rc 0.)
     _closed_guard "$iid" "refusing to gate finished work."
     # P30: a FAIL names its defect class in the machine-readable trailer.
-    # Two consecutive same-class FAILs make the wave stop for a design
-    # decision instead of a third same-tier guess (#39, 2026-08-02).
+    # Two FAILs make the wave stop for help before round three. Class remains
+    # mandatory so the intervention report says whether the cause recurred.
     local klass="" bodyargs=()
     set -- "${@:4}"
     while [ $# -gt 0 ]; do case "$1" in
@@ -369,14 +369,14 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     esac; done
     case "$klass" in *[!a-z0-9-]*) die "--class must be a kebab slug (a-z, 0-9, -): '$klass'" ;; esac
     local up; up=$(printf '%s' "$res" | tr 'a-z' 'A-Z')
-    # P69: the same-class rejection stop (P30) and the SKILL.md prose both
+    # P69: the rejection stop (P30) and the SKILL.md prose both
     # assume a FAIL always carries a class and a PASS never does, but the verb
     # itself enforced neither — three builds running produced unclassed FAILs
     # and spurious classes riding along on PASS trailers (ai-workout build-1,
     # 2026-08-07). Machinery, not prose: refuse the first, strip the second.
     if [ "$res" = fail ]; then
         [ -n "$klass" ] \
-            || die "verdict: a FAIL needs --class <slug> — without it the same-class rejection stop (P30) has nothing to match"
+            || die "verdict: a FAIL needs --class <slug> — without it the round-three intervention report loses the failure cause"
     else
         klass=""
     fi

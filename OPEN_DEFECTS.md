@@ -1641,3 +1641,20 @@ for retry. The new public-seam section covers full-cap direct handoff, simultane
 queued reservations, and durable drain retry. Focused section 40 passes 7 assertions; adjacent
 planner, merge-chain, and runtime sections pass 131 assertions. No provider adapter changed, so
 Claude and Codex share the admission behavior.
+
+### D-TICK-26 · alternating rejection classes bypass round-three intervention
+*Closed 2026-08-16.*
+
+The planner blocked a stranded ticket only when two consecutive failures used the same defect
+class. JOR-220 alternated among centralized response, security, API-contract and scope findings,
+so every new label reset `same_class_tail`; Loom automatically reached gate round six even though
+the branch was oscillating between an exact empty-204 contract, the shared envelope guard and its
+declared file surface.
+
+**Shipped:** `rejection_cap` now applies to total failures in the active scope. With the default
+cap of two, any two failed gates block automatic rework before round three and require diagnosis,
+rescope or prerequisite work. Defect classes remain mandatory diagnostic evidence but no longer
+control whether intervention happens. The global-config template now defaults to two, matching the
+runtime and documented default. The planner fixture proves two different classes still block, and
+the planted mutation back to `same_class_tail` recreates the bypass. Focused planner/bootstrap
+sections pass 81 assertions. This is shared planner policy for both Claude and Codex.

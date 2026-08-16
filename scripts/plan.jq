@@ -5,7 +5,7 @@
 # snapshot document, computed deterministically: `gate.eligible` with its
 # `reason`, `summary.stranded`, `summary.impl_slots_free`,
 # `summary.merge_in_flight`, `.merge_hold`, `.merge_attempts`,
-# `rejections.same_class_tail`, `.tier_selection.effective`,
+# `rejections.total`, `.tier_selection.effective`,
 # `summary.epics_awaiting_probe`. Reading those fields and applying the rules
 # adds no information the document does not already carry — and it cost a full
 # model session between "a ticket became ready" and "a lane exists for it"
@@ -93,6 +93,7 @@ else
 | (($cfg.lane_turn_cap | tonumber?) // 150) as $turn_cap
 | (($cfg.merge_attempt_cap | tonumber?) // 2) as $merge_cap
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
+| (($cfg.rejection_cap | tonumber?) // 2) as $rejection_cap
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_free
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
@@ -268,19 +269,19 @@ else
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
      | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded
 
-# Two same-class rejections mean stop, not respawn: block for a design
-# decision instead of a third same-tier guess. The cap stays for DIFFERENT
-# failures. (paid: a ticket burned round 3 on a class the round-2 verdict had
-# already named.)
-| ([ $stranded[] | select((.rejections.same_class_tail // 0) >= 2) ]) as $same_class  # mutate:rejection-same-class-cap
-| ([ $same_class[]
+# Two rejections mean stop, not respawn: round three needs diagnosis even when
+# the failure classes differ. Alternating labels are not evidence of healthy
+# convergence; JOR-220 reached round six by oscillating between an exact 204
+# contract, the central response guard, and ticket scope.
+| ([ $stranded[] | select((.rejections.total // 0) >= $rejection_cap) ]) as $rejection_spent  # mutate:rejection-total-cap
+| ([ $rejection_spent[]
      | { step: "fill", kind: "transition", ticket: .id,
          via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
-         why: "\(.rejections.same_class_tail) consecutive `\(.rejections.last_class)` rejections — a third same-tier guess is not the next step, a design decision is",
+         why: "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three needs diagnosis, rescope, or prerequisite work instead of another automatic guess",
          needs_report: true } ])
-  as $block_same_class
+  as $block_rejections
 
-| ([ $stranded[] | select((.rejections.same_class_tail // 0) < 2) ]) as $rework
+| ([ $stranded[] | select((.rejections.total // 0) < $rejection_cap) ]) as $rework
 # Then the backlog. Ready means unblocked (every blocker issue closed, not
 # merely opened — auto-merge is async), unclaimed, and a member of this build;
 # `fix: true` tickets come first, because every open fix ticket holds an
@@ -426,7 +427,7 @@ else
 # trailer.
 # =========================================================================
 
-| ([ ($block_overrun + $block_same_class + $block_merge_cap)[]
+| ([ ($block_overrun + $block_rejections + $block_merge_cap)[]
      | { kind: "blocked-report", ticket: .ticket,
          why: .why,
          verb: "lane.sh blocked-report \(.ticket) --category <slug> (body on stdin), then the `transition` action above" } ])
@@ -477,7 +478,7 @@ else
 # =========================================================================
 
 | ($kill_stale + $kill_overrun + $block_overrun + $repairs + $blocked_repairs + $clear_dead
-   + $gate_actions + $block_same_class + $fill_actions
+   + $gate_actions + $block_rejections + $fill_actions
    + $block_merge_cap + $merge_actions + $probe_actions) as $actions
 | ($res_pregate + $res_merge_failed + $res_blocked + $res_merged_open + $res_probe_criteria + $res_build)
   as $residue
