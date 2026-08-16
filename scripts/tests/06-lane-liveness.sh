@@ -29,9 +29,16 @@ esac
 STUBEOF
 chmod +x "$T/fx/agent.sh"
 FAKE="$T/fx/agent.sh"; BRIEF="$T/brief.md"; printf 'review this branch\n' > "$BRIEF"
+REVIEW_TRACKER="$T/fx/review-tracker.sh"
+cat > "$REVIEW_TRACKER" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = issue ] || exit 2
+printf '%s\n' '{"state":"open","labels":["review"]}'
+EOF
+chmod +x "$REVIEW_TRACKER"
 
 ARGV="$T/stub-argv"; rm -f "$ARGV"
-LOOM_AGENT_CMD="$FAKE" STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-31 --no-tick \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$FAKE" STUB_ARGV="$ARGV" "$TICK" spawn-lane gate-31 --no-tick \
   --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 40); do [ -s "$ARGV" ] && break; sleep 0.1; done
 case "$(cat "$ARGV")" in *"--provider claude"*"--job gate"*"--tier medium"*)
@@ -51,7 +58,7 @@ case "$(cat "$ARGV")" in *"--provider claude"*"--job gate"*"--tier medium"*)
 #      what liveness judges. (A zero-minute window would make this test turn on
 #      sub-second timing; the scenario it is modelling is a lane 40 minutes into
 #      real work, so the real window is also the honest one.)
-LOOM_AGENT_CMD="$FAKE" STUB_SLEEP=6 "$TICK" spawn-lane gate-33 --no-tick \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$FAKE" STUB_SLEEP=6 "$TICK" spawn-lane gate-33 --no-tick \
   --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 80); do [ -s "$LOOM_HOME/logs/lane-gate-33.jsonl" ] && break; sleep 0.1; done
 touch -t 202001010000 "$LOOM_HOME/logs/lane-gate-33.log"   # the buffered .log, frozen
@@ -478,7 +485,7 @@ fi
 #      commands it ran, because waves and humans read these files for verdicts
 #      and crash triage.
 rm -f "$LOOM_HOME/logs/lane-gate-34.log" "$LOOM_HOME/logs/lane-gate-34.jsonl"
-LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
   --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 40); do grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
 if grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null \
@@ -493,7 +500,7 @@ fi
 #      away: build 2 stacked two to four sessions per file and lost its session
 #      boundaries, and a crashed lane's transcript is what triage needs.
 sleep 1                                    # distinct rotation timestamp
-LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$FAKE" "$TICK" spawn-lane gate-34 --no-tick \
   --provider claude --job gate --tier medium --brief "$BRIEF" --cwd "$LOOM_REPO" >/dev/null
 for _ in $(seq 1 40); do grep -q "reviewing the diff" "$LOOM_HOME/logs/lane-gate-34.log" 2>/dev/null && break; sleep 0.1; done
 if ls "$LOOM_HOME/logs"/lane-gate-34-*.log >/dev/null 2>&1 \

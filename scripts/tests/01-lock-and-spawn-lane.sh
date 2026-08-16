@@ -254,6 +254,13 @@ LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=lau
 # therefore queued, and the host scheduler drains it only after control has
 # returned outside the provider session.
 DEFER_AGENT="$T/defer-agent.sh"; DEFER_MARK="$T/defer-agent-ran"
+REVIEW_TRACKER="$T/review-tracker.sh"
+cat > "$REVIEW_TRACKER" <<'EOF'
+#!/usr/bin/env bash
+[ "$1" = issue ] || exit 2
+printf '%s\n' '{"state":"open","labels":["review"]}'
+EOF
+chmod +x "$REVIEW_TRACKER"
 cat > "$DEFER_AGENT" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -264,7 +271,7 @@ esac
 EOF
 chmod +x "$DEFER_AGENT"
 printf 'deferred provider brief\n' > "$T/deferred-brief.md"
-LOOM_AGENT_CMD="$DEFER_AGENT" LOOM_DEFER_LANE_LAUNCH=1 \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$DEFER_AGENT" LOOM_DEFER_LANE_LAUNCH=1 \
   "$TICK" spawn-lane gate-90 --no-tick --provider codex --job gate --tier medium \
   --brief "$T/deferred-brief.md" --cwd "$LOOM_REPO" >/dev/null
 if [ ! -f "$LOOM_HOME/lanes/gate-90.pid" ] \
@@ -273,7 +280,7 @@ if [ ! -f "$LOOM_HOME/lanes/gate-90.pid" ] \
 else
   bad "deferred launch: provider session spawned directly or lost its request"
 fi
-DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" "$TICK" drain-lane-launches >/dev/null
+TRACKER_CMD="$REVIEW_TRACKER" DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" "$TICK" drain-lane-launches >/dev/null
 pid=$(cat "$LOOM_HOME/lanes/gate-90.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK" ]; then
   ok "deferred launch: host drain starts a surviving worker"
@@ -306,7 +313,7 @@ kill "$impl_pid" 2>/dev/null
 # alive before wave_end is recorded.
 DEFER_MARK_WAVE="$T/defer-wave-agent-ran"
 rm -rf "$LOOM_HOME/tick.lock.d"
-LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_WAVE" \
+TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_WAVE" \
   LOOM_WAVE_CMD="LOOM_DEFER_LANE_LAUNCH=1 '$TICK' spawn-lane gate-91 --no-tick --provider codex --job gate --tier medium --brief '$T/deferred-brief.md' --cwd '$LOOM_REPO'" \
   "$TICK" tick --provider claude >/dev/null
 pid=$(cat "$LOOM_HOME/lanes/gate-91.pid" 2>/dev/null || echo "")
@@ -323,7 +330,7 @@ kill "$pid" 2>/dev/null
 # drains launches before applying the wave-spend gap.
 DEFER_MARK_CODEX="$T/defer-codex-agent-ran"
 rm -rf "$LOOM_HOME/tick.lock.d"
-CODEX_THREAD_ID=interactive LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
+TRACKER_CMD="$REVIEW_TRACKER" CODEX_THREAD_ID=interactive LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
   LOOM_WAVE_CMD="LOOM_DEFER_LANE_LAUNCH=1 '$TICK' spawn-lane gate-92 --no-tick --provider codex --job gate --tier medium --brief '$T/deferred-brief.md' --cwd '$LOOM_REPO'" \
   "$TICK" tick --provider claude >/dev/null
 if [ ! -f "$LOOM_HOME/lanes/gate-92.pid" ] \
@@ -332,7 +339,7 @@ if [ ! -f "$LOOM_HOME/lanes/gate-92.pid" ] \
 else
   bad "codex host boundary: interactive wave directly owned or lost the worker"
 fi
-CODEX_THREAD_ID= CODEX_CI= LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
+TRACKER_CMD="$REVIEW_TRACKER" CODEX_THREAD_ID= CODEX_CI= LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
   LOOM_WAVE_CMD=true "$TICK" tick --auto --provider claude >/dev/null
 pid=$(cat "$LOOM_HOME/lanes/gate-92.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK_CODEX" ]; then
