@@ -86,6 +86,17 @@ the reason. Harvest writes and other safe actions remain in the immutable
 plan and the wave starts. A single dirty or missing checkout must never turn
 the whole pre-provider boundary into an unrecorded build gap.
 
+UI admission protects the scarce host browser phase, not the lifetime of the
+gate or merge worker. A UI lane records durable `.ui-resource` ownership while
+its configured mechanical pregate or host probe is executing. It releases that
+marker as soon as the host command returns, before independent provider review
+or the merge command begins. The separate `.pregate` marker remains for lane
+attribution and reporting until cleanup. This permits multiple independent
+reviews to overlap while Playwright and its mutable fixture remain serialized.
+Direct launches, durable queued launches, merge preflights, and probes all use
+the same admission seam; cleanup is the fail-safe release if the host phase
+does not reach its normal release boundary.
+
 Cleanup also preserves evidence ordering. A gate that exits rc 7 is not
 cleanup-eligible while its ticket remains in Review with no verdict at the
 immutable launch HEAD. Its handoff wave first reads the retained log and posts

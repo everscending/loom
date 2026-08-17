@@ -3,6 +3,19 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
 printf '\nmax_aux_lanes: 4\n' >> "$LOOM_REPO/.loom.yml"
+UI_RUNNER="$T/ui-pregate-runner.sh"
+UI_RELEASE="$T/ui-pregate-release"
+UI_STARTED="$T/ui-pregate-started"
+cat > "$UI_RUNNER" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = ui ] && [ ! -f "$UI_RELEASE" ]; then
+  : > "$UI_STARTED"
+  while [ ! -f "$UI_RELEASE" ]; do sleep 0.05; done
+fi
+exit 0
+EOF
+chmod +x "$UI_RUNNER"
+printf 'runner: %s\n' "$UI_RUNNER" >> "$LOOM_REPO/.loom.yml"
 git -C "$LOOM_REPO" commit -qm fixture
 git init -q --bare "$T/origin.git"
 git -C "$LOOM_REPO" remote add origin "$T/origin.git"
@@ -18,7 +31,9 @@ lane_alive() { # <lane-id>
 # for a second UI gate must fail soft so the finishing implementation is not
 # repainted as failed, while unrelated auxiliary work keeps all of its normal
 # parallelism.
+rm -f "$UI_RELEASE" "$UI_STARTED"
 "$TICK" spawn-lane gate-350 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+for _wait in $(seq 1 100); do [ -f "$UI_STARTED" ] && break; sleep 0.02; done
 out=$(LOOM_LANE_ID=impl-351 "$TICK" spawn-lane gate-351 --no-tick \
   --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1)
 rc=$?
@@ -51,21 +66,24 @@ else
     bad "ui gate admission: resource-specific admission suppressed unrelated auxiliary work"
 fi
 
-live_ui_metadata=$(cat "$LOOM_HOME/lanes/gate-350.pregate" 2>/dev/null || true)
+live_ui_metadata=$(cat "$LOOM_HOME/lanes/gate-350.ui-resource" 2>/dev/null || true)
 for id in gate-350 gate-351 gate-352 merge-349 merge-353 probe-ui-admission; do
     "$TICK" kill-lane "$id" >/dev/null 2>&1 || true
 done
-if [ "$live_ui_metadata" = ui ] && [ ! -e "$LOOM_HOME/lanes/gate-350.pregate" ]; then
+if [ "$live_ui_metadata" = ui ] \
+   && [ ! -e "$LOOM_HOME/lanes/gate-350.pregate" ] \
+   && [ ! -e "$LOOM_HOME/lanes/gate-350.ui-resource" ]; then
     ok "ui gate admission: clearing a live lane retires its resource metadata"
 else
     bad "ui gate admission: clear-lane left stale UI ownership metadata"
 fi
 
 # The reservation is about the pregate, not the review lane kind. A merge can
-# own it in the other direction and hold a gate until its UI preflight and
-# merge worker are finished.
+# own it in the other direction and hold a gate while its UI preflight runs.
+rm -f "$UI_RELEASE" "$UI_STARTED"
 "$TICK" spawn-lane merge-356 --no-tick --pregate ui --merge-lock \
   --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+for _wait in $(seq 1 100); do [ -f "$UI_STARTED" ] && break; sleep 0.02; done
 out=$(LOOM_LANE_ID=impl-357 "$TICK" spawn-lane gate-357 --no-tick \
   --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1)
 rc=$?
@@ -82,6 +100,7 @@ fi
 # Two implementations can finish on the same scheduler beat. The existing
 # auxiliary-admission lock must make the resource decision atomic even with
 # spare general capacity: exactly one handoff may become live.
+rm -f "$UI_RELEASE" "$UI_STARTED"
 LOOM_LANE_ID=impl-354 "$TICK" spawn-lane gate-354 --no-tick --pregate ui \
   --cwd "$LOOM_REPO" -- sleep 30 >/dev/null 2>&1 &
 p354=$!
@@ -143,7 +162,7 @@ fi
 # request was queued. The durable drain must return the request to request-*
 # (private rc 75) rather than destroy it or start a second paid worker.
 printf '%s\n' "$$" > "$LOOM_HOME/lanes/gate-399.pid"
-printf 'ui\n' > "$LOOM_HOME/lanes/gate-399.pregate"
+printf 'ui\n' > "$LOOM_HOME/lanes/gate-399.ui-resource"
 LOOM_AGENT_CMD="$AGENT" "$TICK" drain-lane-launches >/dev/null
 if ! lane_alive gate-360 \
    && find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 -type d \
@@ -155,7 +174,7 @@ else
     bad "ui gate admission: a contended drain launched or destroyed the queued UI gate"
 fi
 
-rm -f "$LOOM_HOME/lanes/gate-399.pid" "$LOOM_HOME/lanes/gate-399.pregate"
+rm -f "$LOOM_HOME/lanes/gate-399.pid" "$LOOM_HOME/lanes/gate-399.ui-resource"
 LOOM_AGENT_CMD="$AGENT" "$TICK" drain-lane-launches >/dev/null
 if lane_alive gate-360 \
    && [ "$(cat "$LOOM_HOME/lanes/gate-360.pregate" 2>/dev/null)" = ui ] \
@@ -166,5 +185,53 @@ else
     bad "ui gate admission: a released UI resource did not admit its queued worker"
 fi
 "$TICK" kill-lane gate-360 >/dev/null 2>&1 || true
+
+# Once the mechanical UI pregate finishes, provider review no longer owns a
+# browser or fixture. The scarce resource must be released while that review
+# lane stays alive, so the next ticket can run its own serialized pregate.
+touch "$UI_RELEASE"
+FIRST_PROVIDER_STARTED="$T/ui-first-provider-started"
+rm -f "$FIRST_PROVIDER_STARTED"
+"$TICK" spawn-lane gate-370 --no-tick --pregate ui --cwd "$LOOM_REPO" -- \
+  sh -c "touch '$FIRST_PROVIDER_STARTED'; sleep 30" >/dev/null
+for _wait in $(seq 1 100); do [ -f "$FIRST_PROVIDER_STARTED" ] && break; sleep 0.02; done
+rc=0
+out=$("$TICK" spawn-lane gate-371 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || rc=$?
+if [ "$rc" -eq 0 ] && lane_alive gate-370 && lane_alive gate-371 \
+   && [ "$(cat "$LOOM_HOME/lanes/gate-370.pregate" 2>/dev/null)" = ui ]; then
+    ok "ui gate admission: completed pregate releases the browser resource before review ends"
+else
+    bad "ui gate admission: provider review retained the browser resource (rc=$rc; out=$out)"
+fi
+"$TICK" kill-lane gate-370 >/dev/null 2>&1 || true
+"$TICK" kill-lane gate-371 >/dev/null 2>&1 || true
+
+# Planted violation: keep the active-browser marker after the host pregate
+# returns. The first provider is still alive, so the public admission seam must
+# recreate the old false serialization and refuse the second UI gate.
+UI_MUT=$(mirror_scripts "$T/ui-release-mutant")
+sed 's/    rm -f "$metadata"/    : # mutate: retain completed UI resource/' \
+  "$UI_MUT/tick.sh" > "$UI_MUT/tick-mutant.sh"
+mv "$UI_MUT/tick-mutant.sh" "$UI_MUT/tick.sh"
+chmod +x "$UI_MUT/tick.sh"
+UI_MUT_HOME="$T/ui-release-mutant-home"
+MUT_PROVIDER_STARTED="$T/ui-mutant-provider-started"
+rm -rf "$UI_MUT_HOME"; mkdir -p "$UI_MUT_HOME"
+rm -f "$MUT_PROVIDER_STARTED"
+LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" spawn-lane gate-380 --no-tick \
+  --pregate ui --cwd "$LOOM_REPO" -- \
+  sh -c "touch '$MUT_PROVIDER_STARTED'; sleep 30" >/dev/null
+for _wait in $(seq 1 100); do [ -f "$MUT_PROVIDER_STARTED" ] && break; sleep 0.02; done
+mut_rc=0
+mut_out=$(LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" spawn-lane gate-381 \
+  --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || mut_rc=$?
+if [ "$mut_rc" -ne 0 ] && ! LOOM_HOME="$UI_MUT_HOME" lane_alive gate-381 \
+   && printf '%s' "$mut_out" | grep -q 'UI pregate'; then
+    ok "ui-release-violation: retaining the marker recreates review-time browser serialization"
+else
+    bad "ui-release-violation: planted marker retention did not block the second UI gate (rc=$mut_rc; out=$mut_out)"
+fi
+LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-380 >/dev/null 2>&1 || true
+LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-381 >/dev/null 2>&1 || true
 
 test_finish

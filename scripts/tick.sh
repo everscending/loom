@@ -997,12 +997,12 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
-_ui_pregate_occupied() { # one shared UI host: live pregate/probe metadata or durable reservation
+_ui_pregate_occupied() { # one shared UI host: active browser phase or durable reservation
     local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
-    for metadata in "$LANES_DIR"/*.pregate; do
+    for metadata in "$LANES_DIR"/*.ui-resource; do
         [ -f "$metadata" ] || continue
         [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || continue
-        live_id="${metadata##*/}"; live_id="${live_id%.pregate}"
+        live_id="${metadata##*/}"; live_id="${live_id%.ui-resource}"
         pid=$(cat "$LANES_DIR/$live_id.pid" 2>/dev/null || true)
         if _lane_process_alive "$live_id" "$pid"; then
             return 0
@@ -1022,6 +1022,18 @@ _ui_pregate_occupied() { # one shared UI host: live pregate/probe metadata or du
         fi
     done
     return 1
+}
+
+cmd_release_ui_resource() { # <lane-id>; called by that lane after host UI work
+    local id="${1:-}" metadata
+    case "$id" in ''|*[!A-Za-z0-9_-]*) die "release-ui-resource: invalid lane id '$id'" ;; esac
+    _lane_type "$id" >/dev/null || die "release-ui-resource: unstructured lane id '$id'"
+    [ -n "${LOOM_LANE_ID:-}" ] && [ "$LOOM_LANE_ID" = "$id" ] \
+        || die "release-ui-resource: only lane '$id' may release its UI host resource"
+    metadata="$LANES_DIR/$id.ui-resource"
+    [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || return 0
+    rm -f "$metadata"
+    _ev ui_resource_released id "$id" phase host-pregate-complete
 }
 
 _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
@@ -2550,7 +2562,7 @@ _spawn_build_epilogue() {
     # Release the host-scoped pregate reservation before draining a queued
     # successor, so the next UI gate can launch immediately rather than wait
     # for a heartbeat. clear-lane owns the hard-kill path for the same file.
-    epi="$epi rm -f '$LANES_DIR/$id.pregate'; "
+    epi="$epi rm -f '$LANES_DIR/$id.pregate' '$LANES_DIR/$id.ui-resource'; "
     # A provider lane may have queued its successor. Its host shell reaches
     # this epilogue only after the provider session exits, so the successor is
     # safe to detach here. Do this after releasing locks and before firing the
@@ -2732,6 +2744,12 @@ ui"
             fi
         fi
     fi
+    # The shared UI host resource protects only deterministic host work. Once
+    # the pregate returns, Chromium/the fixture are gone; provider review does
+    # not own them and must not serialize the next ticket's browser phase.
+    if [ "$pregate" = ui ]; then
+        pre="$pre"" '$SELF_PATH' release-ui-resource '$id' >/dev/null 2>&1 || true; "
+    fi
     return 0
 }
 
@@ -2801,7 +2819,7 @@ _spawn_build_host_probe() {
     export LOOM_HOST_PROBE_ID="$host_probe"
     export LOOM_HOST_PROBE_HEAD="$lane_head"
     export LOOM_HOST_PROBE_ARTIFACT="$LANES_DIR/$id.host-probe.json"
-    pre="'$SELF_PATH' run-host-probe \"\$LOOM_HOST_PROBE_ID\" \"\$LOOM_HOST_PROBE_HEAD\"; _host_probe_rc=\$?; if [ \"\$_host_probe_rc\" -ne 0 ]; then _rc=\$_host_probe_rc; fi; $pre"
+    pre="'$SELF_PATH' run-host-probe \"\$LOOM_HOST_PROBE_ID\" \"\$LOOM_HOST_PROBE_HEAD\"; _host_probe_rc=\$?; if [ \"\$_host_probe_rc\" -ne 0 ]; then _rc=\$_host_probe_rc; fi; '$SELF_PATH' release-ui-resource '$id' >/dev/null 2>&1 || true; $pre"
 }
 
 _cmd_spawn_lane() {
@@ -3147,6 +3165,11 @@ _cmd_spawn_lane() {
     else
         rm -f "$LANES_DIR/$id.pregate"
     fi
+    if [ "$pregate" = ui ] || [ -n "$host_probe" ]; then
+        printf '%s\n' ui > "$LANES_DIR/$id.ui-resource"
+    else
+        rm -f "$LANES_DIR/$id.ui-resource"
+    fi
     _rotate_log "$log"; : > "$log"
     if [ "$stream" -eq 1 ]; then
         _rotate_log "$jsonl"; : > "$jsonl"
@@ -3215,7 +3238,7 @@ _cmd_spawn_lane() {
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
             rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
-                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head" \
+                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
                   "$LANES_DIR/$id.host-probe.json"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
@@ -3233,7 +3256,7 @@ _cmd_spawn_lane() {
     if [ ! -s "$LANES_DIR/$id.pid" ]; then
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
-        rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head" \
+        rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
               "$LANES_DIR/$id.host-probe.json"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
@@ -3813,7 +3836,7 @@ cmd_clear_lane() {
     _release_lane_port "$1" || return $?
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
-          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.head" \
+          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.ui-resource" "$LANES_DIR/$1.head" \
           "$LANES_DIR/$1.host-probe.json" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
@@ -5495,6 +5518,7 @@ case "${1:-}" in
     retro)        shift; cmd_retro "$@" ;;
     resume)       shift; cmd_resume "$@" ;;
     request-continuation) shift; cmd_request_continuation "$@" ;;
+    release-ui-resource) shift; cmd_release_ui_resource "$@" ;;
     clear-lane)   shift; cmd_clear_lane "$@" ;;
     kill-lane)    shift; cmd_kill_lane "$@" ;;
     snapshot)     shift; cmd_snapshot "$@" ;;
@@ -5513,5 +5537,5 @@ case "${1:-}" in
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac
