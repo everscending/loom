@@ -2526,6 +2526,22 @@ _render_stream() { # _render_stream <jsonl> <log>
     return 0
 }
 
+# Fire chain-merge's ordinary-wave fallback with the same ownership rule as
+# the lane epilogue that called it. launchd owns and reaps the exiting lane's
+# whole process group, so a background grandchild cannot outlive that lane;
+# keep it supervised there. The legacy nohup launcher does not have that
+# boundary and retains the detached fallback it has always used.
+_chain_merge_fallback() {
+    if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+        LOOM_LANE_EPILOGUE=1 "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1 || true
+    else
+        ( "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1 & )
+    fi
+    return 0
+}
+
 # P93: the merge lane's post-exit hook calls this INSTEAD of firing a wave,
 # so a queue of merge-ready tickets drains at the speed of the merge lane
 # itself rather than one ticket per wave. Runs as its own fresh process
@@ -2541,12 +2557,11 @@ _render_stream() { # _render_stream <jsonl> <log>
 # holding this id). Nothing here depends on the fast path succeeding — the
 # numbered steps in SKILL.md do the same merge, next wave, regardless.
 cmd_chain_merge() {
-    local fallback="( '$SELF_PATH' tick --from-lane --provider '${LOOM_PROVIDER:-}' >>'$LOGS_DIR/self-trigger.log' 2>&1 & )"
     # Cheap and early: a stopped loop is refused by spawn-lane too (P30's
     # LOOM_LANE_ID guard, inherited into this process the same way it is
     # inherited by every other epilogue child), but there is no reason to
     # spend the queue read and the API calls behind it just to be told so.
-    if _loop_stopped; then eval "$fallback"; return 0; fi
+    if _loop_stopped; then _chain_merge_fallback; return 0; fi
     # D-TICK-20: the fast path is the tightest loop in the program — a merge
     # lane killed by the account's usage limit chains straight into an identical
     # merge lane, with no wave and therefore no gate in between. Read the
@@ -2557,19 +2572,19 @@ cmd_chain_merge() {
     # up once capacity returns.
     _pause_on_lane_limit || :
     _usage_gate || return 0
-    command -v jq >/dev/null 2>&1 || { eval "$fallback"; return 0; }
+    command -v jq >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
     local queue_json head_id head_branch
     queue_json="$(cmd_snapshot --merge-queue 2>>"$LOGS_DIR/self-trigger.log")" || queue_json="[]"
     head_id="$(printf '%s' "$queue_json" | jq -r '.[0].id // empty' 2>/dev/null)"
     head_branch="$(printf '%s' "$queue_json" | jq -r '.[0].branch // empty' 2>/dev/null)"
-    if [ -z "$head_id" ] || [ -z "$head_branch" ]; then eval "$fallback"; return 0; fi
+    if [ -z "$head_id" ] || [ -z "$head_branch" ]; then _chain_merge_fallback; return 0; fi
     local wt; wt="$(_worktree_for_branch "$REPO_ROOT" "$head_branch")"
-    if [ -z "$wt" ] || [ ! -d "$wt" ]; then eval "$fallback"; return 0; fi
+    if [ -z "$wt" ] || [ ! -d "$wt" ]; then _chain_merge_fallback; return 0; fi
     local base; base="$(_detect_base "$REPO_ROOT")"
     local scratch; scratch="$(_new_scratch "merge-chain-$head_id")"
     local briefpath="$scratch/brief.md"
     local briefsrc; briefsrc="$(dirname "$SELF_PATH")/../references/merge-brief.md"
-    [ -f "$briefsrc" ] || { eval "$fallback"; return 0; }
+    [ -f "$briefsrc" ] || { _chain_merge_fallback; return 0; }
     sed -e "s/{{TICKET_IID}}/$head_id/g" -e "s#{{WORKTREE}}#$wt#g" -e "s/{{BASE}}/$base/g" \
         "$briefsrc" > "$briefpath"
     local tier defer_launch="${LOOM_DEFER_LANE_LAUNCH:-}"; tier="$(cfg lane_tier medium)"
@@ -2582,7 +2597,7 @@ cmd_chain_merge() {
     LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
       "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
         --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" \
-        >>"$LOGS_DIR/self-trigger.log" 2>&1 || eval "$fallback"
+        >>"$LOGS_DIR/self-trigger.log" 2>&1 || _chain_merge_fallback
 }
 
 # Render new events to STDOUT as they arrive, and stop when the lane is gone.

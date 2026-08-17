@@ -193,6 +193,43 @@ for _ in $(seq 1 60); do [ -f "$WAVE_MARK_C" ] && break; sleep 0.1; done
     || ok "chain-merge: nothing spawned from an empty queue"
 reap_lanes
 
+# C2. D-TICK-28: launchd owns the exiting lane's whole process group. The
+# outer epilogue supervises chain-merge, but an empty/declined fast path used
+# to background its fallback tick one level deeper. chain-merge then returned,
+# launchd reaped that grandchild, and the build waited for the timer. At the
+# public verb seam, a launchd epilogue must not return until its fallback wave
+# has completed. A delayed mark distinguishes supervision from a child that is
+# merely started before the parent exits.
+WAVE_MARK_C2="$T/wave-fired-c2"
+start_c2=$(date +%s)
+GLAB_CMD="$FX/glab-stub.sh" LOOM_WAVE_CMD="sleep 1; touch $WAVE_MARK_C2" \
+  LOOM_LANE_ID=gate-208 LOOM_LANE_EPILOGUE=1 LOOM_LANE_LAUNCHER=launchd \
+  "$TICK" chain-merge >/dev/null 2>&1
+end_c2=$(date +%s)
+if [ -f "$WAVE_MARK_C2" ] && [ "$((end_c2 - start_c2))" -ge 1 ]; then
+    ok "chain-merge: launchd supervises a declined fast path through the fallback wave"
+else
+    bad "chain-merge: launchd epilogue returned before its nested fallback wave completed"
+fi
+reap_lanes
+
+# Planted violation: remove only the launchd supervision branch from a private
+# copy. The same public command must again return before the delayed mark,
+# proving the assertion above is held by that lifecycle guard.
+MUT35=$(mirror_scripts "$T/mut35")
+sed -i.bak 's/if \[ "${LOOM_LANE_LAUNCHER:-}" = launchd \]; then/if false; then/' "$MUT35/tick.sh"
+WAVE_MARK_C2_MUT="$T/wave-fired-c2-mut"
+GLAB_CMD="$FX/glab-stub.sh" LOOM_WAVE_CMD="sleep 1; touch $WAVE_MARK_C2_MUT" \
+  LOOM_LANE_ID=gate-208 LOOM_LANE_EPILOGUE=1 LOOM_LANE_LAUNCHER=launchd \
+  "$MUT35/tick.sh" chain-merge >/dev/null 2>&1
+if [ ! -f "$WAVE_MARK_C2_MUT" ]; then
+    ok "chain-merge-violation: backgrounding the nested launchd fallback recreates the lost handoff"
+else
+    bad "chain-merge-violation: the planted background fallback remained supervised"
+fi
+for _ in $(seq 1 30); do [ -f "$WAVE_MARK_C2_MUT" ] && break; sleep 0.1; done
+reap_lanes
+
 # --- D. fallback: a queue head with no checked-out worktree also falls back,
 #     rather than spawning a merge lane with nowhere to run -----------------
 
