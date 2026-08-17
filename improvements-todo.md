@@ -112,11 +112,11 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   Patient Imaging Portal Build JOR-267 found 134 UI gates consuming 8.13 hours;
   54 rejected gates consumed 4.22 hours, while the single host reservation was
   incorrectly retained through independent provider review after Chromium and
-  its fixture had exited. Implemented provider-neutrally in `a35c4fb`
+  its fixture had exited. Implemented provider-neutrally in `ad82441`
   (`fix(gates): release UI host after pregate`): `.ui-resource` now owns only
   the active host pregate/probe, while `.pregate` remains durable attribution.
   Direct and queued gates, merge preflights, probes, cleanup, and atomic
-  admission share the same boundary. Snapshot fixture correction `a16b214`
+  admission share the same boundary. Snapshot fixture correction `05a8957`
   models a genuinely active host phase. Verification: focused/adjacent UI,
   gate, probe, planner, and mend suites 53/53; full suite 1,356/1,356; retaining
   the resource marker recreates false review-time serialization.
@@ -125,7 +125,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 - [x] **DONE — Detect missing workers per flow stage.** A live implementation
   previously made Mend look healthy even when Review or Merge Queue work had
   no gate/merge owner, so the human had to identify the idle stage. Implemented
-  provider-neutrally in `eb626db` (`fix(mend): detect unowned flow stages`):
+  provider-neutrally in `5fc885a` (`fix(mend): detect unowned flow stages`):
   `mend-status` emits `MEND-FLOW-01/unowned-stage` for an In Progress, Review,
   or Merge Queue ticket without its matching implementation, gate, or merge
   lane, and includes its scheduled, deferred, and residue disposition. The
