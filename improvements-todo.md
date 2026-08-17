@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 05:06 America/Chicago
+Last updated: 2026-08-17 05:10 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -12,7 +12,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Classify probe infrastructure separately from product failures.** Implemented provider-neutrally in `4940b52` (`fix(probes): classify infrastructure failures`): probe briefs require proof of product contact before `fix-ticket`; sandbox, browser launch, OS permission, and local bind failures instead emit typed `probe-result ... infrastructure`, keep the epic open, and render without claiming a product defect. Claude and Codex adapters remain unchanged. Verification: ticker/verbs, staged-brief mutant, and runtime suites passed 235/235; the isolated full suite passed 1,240/1,240. Extending this typed distinction to ordinary gate retry policy remains future work.
 
-- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206, JOR-214, JOR-218, JOR-236, JOR-251, JOR-283, and JOR-203 completed this recovery path and merged. JOR-257's CI contract repair is back in Review at `3565488`; JOR-193's bounded crash-lease repair passed independent review and is merging at `6071cca`; JOR-199's POST repair passed mechanically but review found the same forged-session ordering gap on sibling routes, now covered by a supervised cross-route repair. JOR-240 is recovered at `286f092` without inventing a defect or verdict reset. Machine-enforced round-three routing itself is still TODO.
+- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206, JOR-214, JOR-218, JOR-236, JOR-251, JOR-283, JOR-203, and JOR-193 completed this recovery path and merged. JOR-257's CI contract repair is back in Review at `3565488`; JOR-199's POST repair passed mechanically but review found the same forged-session ordering gap on sibling routes, now covered by a supervised cross-route repair. JOR-240 is recovered at `286f092` without inventing a defect or verdict reset. Machine-enforced round-three routing itself is still TODO.
 
 - [x] **DONE — Complete a valid supervised repair without falsifying history.** JOR-251 exposed a missing tracker action after the rejection cap: `verdict-reset` truthfully means an invalid gate, while `rescope` truthfully means different work. Implemented provider-neutrally in `45f8308` (`fix(recovery): complete supervised repairs`): human-only `lane.sh supervised-repair` requires a reason, refuses lane and wave callers before tracker writes, retires only prior verdict/rejection history, preserves merge history, exposes immutable repair evidence through snapshot and plan, and carries it into the next gate action for both Claude and Codex. Verification: focused sections 07/16/28/29 passed 380/380 and a planted cutoff mutant restored the stale rejection history and was caught.
 
@@ -71,6 +71,8 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 - [ ] **IN PROGRESS — Provision the deployed application schema before performance work.** JOR-221 is correctly blocked on environment readiness, not product code: the configured Supabase project authenticates the demo user, but both authenticated and service-role PostgREST reads return `PGRST205` for `patients` and `audit_events`, proving migrations/seed are absent from the exposed schema. JOR-252 owns promotion of the finished build; completion must apply migrations 001–008, align `authenticated`/`app_user` grants, seed demo data/assets, and expose a repeatable verification command before JOR-221 can record honest baselines.
 
 - [ ] **TODO — Deploy live Loom runtime files atomically.** An epilogue parsed `tick.sh` while it was being updated and logged a transient syntax error near `|`; the completed file passed `bash -n`, proving the reader saw a partial write. Stage changed runtime files, run syntax/jq checks on the staged set, then replace them atomically so active Claude and Codex lanes always read a complete version. Develop larger runtime patches in an isolated checkout until this boundary exists.
+
+- [ ] **IN PROGRESS — Canonicalize tick cwd before sweep and provider launch.** After JOR-193 merged, its epilogue started the next wave from `.worktrees/193`; sweep removed that merged worktree, then the same process emitted `getcwd` errors and could not validate the Codex executable, stranding newly unlocked JOR-207/JOR-216 work. A provider-neutral host-boundary repair is under isolated TDD: enter the canonical repository root before sweep or wave startup and fail loudly if it cannot be established. Claude and Codex must share the same boundary.
 
 ## Supporting safety work completed during this build
 
