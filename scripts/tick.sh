@@ -1495,6 +1495,19 @@ _lane_verbs() { # _lane_verbs <lane.sh> → "scratch, note, …"; empty if unrea
       | awk 'NR==1{printf "%s",$0;next}{printf ", %s",$0}'
 }
 
+_enter_tick_repo_root() {
+    # A host epilogue inherits its lane's cwd. Sweep may remove that merged
+    # worktree during this same tick; every later provider/version process then
+    # inherits a deleted cwd before it can honor its explicit --cwd argument.
+    # Enter the already-canonical main checkout at the public tick boundary,
+    # before any sweep or provider launch, and refuse rather than run from an
+    # unprovable fallback. (Paid for: patient-imaging merge-193, 2026-08-17.)
+    [ -d "$REPO_ROOT" ] \
+      || die "tick: canonical repository root is unavailable: $REPO_ROOT"
+    cd "$REPO_ROOT" 2>/dev/null \
+      || die "tick: cannot enter canonical repository root before host handoff: $REPO_ROOT"
+}
+
 cmd_tick() {
     # Three callers, three contracts (see SKILL "one program, one switch"):
     #   tick            a human typed it — always runs one wave, ignores both
@@ -1509,6 +1522,9 @@ cmd_tick() {
     # quiescence — and _launch_wave is every cost. The gates report through
     # tick_go rather than a return code so the call sits outside any condition
     # and `set -e` keeps its teeth inside them.
+    # The epilogue may be standing in the merged worktree this tick will sweep.
+    # Move onto stable ground before even the read-only gates spawn helpers.
+    _enter_tick_repo_root
     # P86: before any gate, because the cheapest wave is the one never launched.
     # `cmd_snapshot` carries the halt for every read verb, but a wave calls that
     # from INSIDE a model session — so without this line an undeclared repo pays

@@ -156,6 +156,115 @@ else
     bad "tick: direct rc=$direct_rc waves=$direct_waves, epilogue waves=$epilogue_waves out=$out"
 fi
 
+# A merge lane's host epilogue inherits the lane worktree as its cwd. The next
+# tick sweeps merged worktrees before provider preflight, so it used to delete
+# the directory beneath itself and then launch the provider/version probe from
+# a cwd that no longer existed. Drive the public handoff seam from a genuinely
+# merged linked worktree: sweep must remove it, while both provider preflight
+# and the wave still start from the canonical main checkout without getcwd
+# diagnostics. (Paid for: patient-imaging merge-193, 2026-08-17.)
+DC="$T/deleted-cwd"; mkdir -p "$DC"
+git -c init.defaultBranch=main init -q --bare "$DC/origin.git"
+git clone -q "$DC/origin.git" "$DC/repo" 2>/dev/null
+git -C "$DC/repo" config user.email loom@test
+git -C "$DC/repo" config user.name loom
+seed_tracker_decl "$DC/repo"
+printf 'heartbeat_stale_minutes: 30\n' > "$DC/repo/.loom.yml"
+printf 'base\n' > "$DC/repo/base.txt"
+git -C "$DC/repo" add .loom.yml base.txt docs/agents/issue-tracker.md
+git -C "$DC/repo" commit -qm base
+git -C "$DC/repo" push -q origin main
+git -C "$DC/repo" checkout -qb loom-193
+printf 'merged\n' > "$DC/repo/merged.txt"
+git -C "$DC/repo" add merged.txt
+git -C "$DC/repo" commit -qm merged
+git -C "$DC/repo" checkout -q main
+git -C "$DC/repo" merge -q --no-edit loom-193
+git -C "$DC/repo" push -q origin main
+mkdir -p "$DC/repo/.worktrees"
+git -C "$DC/repo" worktree add -q "$DC/repo/.worktrees/193" loom-193 2>/dev/null
+
+DC_PROVIDER="$DC/provider-version.sh"
+cat > "$DC_PROVIDER" <<'DCPROVIDER'
+#!/bin/sh
+pwd -P > "$DC_PROVIDER_CWD" || exit 71
+printf 'provider-version 1.0\n'
+DCPROVIDER
+chmod +x "$DC_PROVIDER"
+DC_AGENT="$DC/agent.sh"
+cat > "$DC_AGENT" <<'DCAGENT'
+#!/bin/sh
+verb="$1"; shift
+case "$verb" in
+  preflight)
+    "$DC_PROVIDER" --version >/dev/null || exit $?
+    printf '{"schema":1,"ok":true}\n'
+    ;;
+  run)
+    pwd -P > "$DC_WAVE_CWD" || exit 72
+    printf '{"schema":1,"type":"session_end","status":"success","rc":0}\n'
+    ;;
+  *) exit 2 ;;
+esac
+DCAGENT
+chmod +x "$DC_AGENT"
+DC_OUT="$DC/out"; DC_PROVIDER_CWD="$DC/provider.cwd"; DC_WAVE_CWD="$DC/wave.cwd"
+DC_ROOT=$(cd "$DC/repo" && pwd -P)
+make_glab_fixture "$DC/fx"
+cat > "$DC/open.json" <<'DCOPEN'
+[{"iid":1,"title":"Build 1","project_id":1,"web_url":"https://x/1","labels":["provider::codex"],"assignees":[],"description":"**Selected epics**\n"}]
+DCOPEN
+export DC_PROVIDER DC_PROVIDER_CWD DC_WAVE_CWD
+(
+  cd "$DC/repo/.worktrees/193" || exit 1
+  LOOM_REPO= LOOM_HOME="$DC/home" LOOM_GLOBAL_CONFIG="$T/none.yml" \
+    GLAB_CMD="$DC/fx/glab-stub.sh" STUB_OPEN="$DC/open.json" \
+    LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT= \
+    LOOM_WAVE_CMD= LOOM_AGENT_CMD="$DC_AGENT" LOOM_LANE_ID=merge-193 \
+    LOOM_LANE_EPILOGUE=1 "$TICK" tick --from-lane --provider codex
+) > "$DC_OUT" 2>&1
+dc_rc=$?
+if [ "$dc_rc" -eq 0 ] \
+   && [ ! -e "$DC/repo/.worktrees/193" ] \
+   && [ "$(cat "$DC_PROVIDER_CWD" 2>/dev/null)" = "$DC_ROOT" ] \
+   && [ "$(cat "$DC_WAVE_CWD" 2>/dev/null)" = "$DC_ROOT" ] \
+   && ! grep -Eqi 'getcwd|cannot access parent|shell-init' "$DC_OUT"; then
+    ok "deleted cwd handoff: sweep removes merged lane but provider starts at canonical repo root"
+else
+    bad "deleted cwd handoff: rc=$dc_rc worktree=$([ -e "$DC/repo/.worktrees/193" ] && echo present || echo removed) provider=$(cat "$DC_PROVIDER_CWD" 2>/dev/null) wave=$(cat "$DC_WAVE_CWD" 2>/dev/null) out=$(tail -4 "$DC_OUT" | tr '\n' ' ')"
+fi
+
+# Planted violation: remove only the canonical-entry call from a private copy.
+# The same public handoff must sweep its cwd and recreate the provider preflight
+# failure, proving the new boundary—not an incidental cd in the test stub—is
+# what carries the fix.
+git -C "$DC/repo" worktree add -q "$DC/repo/.worktrees/194" -b loom-194 origin/main 2>/dev/null
+DC_MUT=$(mirror_scripts "$DC/mutant")
+sed 's/^    _enter_tick_repo_root$/: # planted deleted-cwd violation/' \
+    "$DC_MUT/tick.sh" > "$DC_MUT/tick-mutant.sh"
+mv "$DC_MUT/tick-mutant.sh" "$DC_MUT/tick.sh"
+chmod +x "$DC_MUT/tick.sh"
+rm -f "$DC_PROVIDER_CWD" "$DC_WAVE_CWD"
+(
+  cd "$DC/repo/.worktrees/194" || exit 1
+  LOOM_REPO= LOOM_HOME="$DC/mutant-home" LOOM_GLOBAL_CONFIG="$T/none.yml" \
+    GLAB_CMD="$DC/fx/glab-stub.sh" STUB_OPEN="$DC/open.json" \
+    LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT= \
+    LOOM_WAVE_CMD= LOOM_AGENT_CMD="$DC_AGENT" LOOM_LANE_ID=merge-194 \
+    LOOM_LANE_EPILOGUE=1 "$DC_MUT/tick.sh" tick --from-lane --provider codex
+) > "$DC/mutant.out" 2>&1
+dc_mut_rc=$?
+dc_mut_out=$(cat "$DC/mutant.out" 2>/dev/null)
+if assert_mutant_ran "$dc_mut_rc" "$dc_mut_out" "deleted-cwd-handoff-violation"; then
+    if [ "$dc_mut_rc" -ne 0 ] \
+       && [ ! -e "$DC/repo/.worktrees/194" ] \
+       && printf '%s' "$dc_mut_out" | grep -Eqi 'getcwd|cannot access parent|shell-init'; then
+        ok "deleted cwd handoff mutant: removing canonical entry recreates provider preflight failure"
+    else
+        bad "deleted cwd handoff mutant: violation did not recreate failure (rc=$dc_mut_rc worktree=$([ -e "$DC/repo/.worktrees/194" ] && echo present || echo removed) out=$(printf '%s' "$dc_mut_out" | tail -4 | tr '\n' ' '))"
+    fi
+fi
+
 # BUT watching still happens on the silenced firings — that is the whole point
 # of merging. A stopped auto-tick must still record that it looked.
 rm -f "$MT/home/events.jsonl"; : > "$MT/home/loop.stopped"
