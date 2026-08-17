@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 00:42 America/Chicago
+Last updated: 2026-08-17 00:50 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -28,7 +28,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Carry supervisor rescope notes into worker briefs.** JOR-251's second worker repeated the original dependency block because tracker scope-reset notes were discarded between snapshot and the implementation brief. Implemented provider-neutrally in `8bceaf1` (`fix(wave): carry supervisor rescope`): snapshot selects the newest active scope reset, plan freezes it into both new-work and rework actions, direct staging appends it mechanically, and deferred Codex requests freeze it before scratch state expires. Verification: snapshot 125/125, brief staging 22/22, planner 51/51, full isolated suite 1,211/1,211, and the transport mutant was caught.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, and JOR-244 are merged and closed. JOR-206's ownership-safe shared identity lock passed a focused five-suite Playwright contention run 41/41 and is now in a serialized UI gate; it unlocks JOR-230/JOR-212 and removes the infrastructure race that just stopped JOR-214's otherwise-approved merge preflight. JOR-214 is leased so the scheduler cannot repeat that known-bad preflight before #206 lands; it unlocks JOR-224/JOR-221/JOR-231. JOR-251 implemented its supervisor-assigned list/transition seam and is in a fresh API gate at an immutable recorded SHA. JOR-218's portable renderer guard remains pushed and focused-green; its false old-SHA verdict is retired and it will take the next safe UI slot. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Make malformed notification calls fail cleanly.** A recovery wave invoked `tick.sh notify` without arguments and tripped a `set -u` unbound-argument error after its scheduled state changes. Add public-boundary arity validation so missing or partial notification calls return a named usage error with no notification/event side effects; valid notification behavior remains unchanged.
+
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, and JOR-244 are merged and closed. JOR-218 passed its repaired UI gate at `8fcf7ed` (107/107 plus independent PASS) and awaits merge after the current UI work. JOR-206's ownership-safe shared identity/audit lock passed focused concurrency checks and is now actively running its serialized UI gate at `3446fec`; it unlocks JOR-230/JOR-212 and removes the infrastructure race that stopped JOR-214's otherwise-approved merge preflight. JOR-214 remains leased until #206 lands, then will reconcile and merge; it unlocks JOR-224/JOR-221/JOR-231. JOR-251's canonical lifecycle repair is actively running its API gate at `67f449a` and directly unlocks nine tickets. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
