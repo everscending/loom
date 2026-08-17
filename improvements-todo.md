@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 00:08 America/Chicago
+Last updated: 2026-08-17 00:21 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -16,7 +16,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
 
-- [ ] **IN PROGRESS — Pin every gate outcome to its start SHA.** JOR-218's gate pregated `4fdfbcc`, then a supervised repair advanced the branch to `8fcf7ed` before delayed failure classification ran. The classifier incorrectly attached the old `rg ENOENT` failure to the repaired, untested SHA and blocked it. Capture immutable gate/pregate HEAD at launch and use it for every delayed verdict, rejection, and artifact association; never re-read mutable worktree HEAD during epilogue. Provider-neutral shared host fix and holding test are in progress.
+- [x] **DONE — Pin every gate outcome to its start SHA.** JOR-218's gate pregated `4fdfbcc`, then a supervised repair advanced the branch to `8fcf7ed` before delayed failure classification ran. The classifier incorrectly attached the old `rg ENOENT` failure to the repaired, untested SHA and blocked it. Implemented provider-neutrally in `b96abc8` (`fix(gates): pin verdicts to launch head`): the shared launch boundary captures and persists immutable HEAD provenance, snapshot and plan preserve it, delayed rc-7 verdicts name that concrete SHA, and legacy/missing provenance refuses classification instead of rereading a mutable worktree. Focused result: attribution 6/6 and adjacent planner 50/50; the isolated implementation also passed 282 adjacent assertions.
 
 - [ ] **TODO — Right-size the Playwright worker budget.** `playwright.config.ts` does not set `workers`, so Playwright's local default uses 50% of logical CPUs: eight workers on this 16-thread host. Benchmark a fixed four-worker UI gate against the current eight-worker baseline for wall time, timeout rate, and peak host load. Change the configured budget only after the current UI branches finish so the gate fingerprint stays stable during review.
 
