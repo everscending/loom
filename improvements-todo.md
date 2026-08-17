@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-16 23:52 America/Chicago
+Last updated: 2026-08-17 00:02 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -20,7 +20,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Add a supervised-repair lease.** Implemented in `8d41930` (`fix(wave): lease supervised repairs`), with the restricted-filesystem fail-fast follow-up in `7cf559e` (`fix(lock): fail fast on reservation I/O`). `tick.sh supervise acquire/release` writes bounded host-state leases; snapshots and plans expose them; implementation and gate admission rechecks them under a per-ticket lock for stale plans, Claude handoffs, and Codex durable drains. Expiry fails open, ordinary workers cannot self-lease, and reservation I/O denial is named instead of recursing. Verification: lease 11/11, shared-lock mutant 10/10, snapshot 124/124, planner 50/50, gate admission 9/9, and auxiliary admission 9/9. The live build now uses leases for JOR-206 and JOR-218.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, and JOR-244 are merged and closed. JOR-244 released JOR-251, which has moved to implementation; JOR-205 still waits on additional E7 prerequisites. JOR-218's pushed fixture repair remains the next UI verification after the active JOR-206 gate and still unlocks JOR-239/JOR-236/JOR-233. JOR-214 is under focused repair for its confirmed manifest mismatch and still unlocks JOR-224/JOR-221/JOR-231. JOR-206's active UI gate can unlock JOR-230/JOR-212. Planner scoring and holding tests remain TODO.
+- [x] **DONE — Distinguish owned new files from missing prerequisites.** JOR-251 exposed a shared implementation-brief ambiguity: its worker treated two absent route files named in the ticket's own Scope and Files touched as foreign dependencies and blocked instead of creating them. Implemented in `0a7f5bc` (`fix(impl): create ticket-owned surfaces`): the provider-neutral skill contract now requires creation of ticket-owned surfaces and permits `unmerged-dependency` only for a prerequisite owned by a different ticket. Holding coverage in section 22 went RED 6/1 before the clarification and GREEN 7/0 afterward.
+
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, and JOR-244 are merged and closed. JOR-218's reconciled fixture repair passed a focused concurrent UI proof 18/18 and is in its serialized UI gate; it still unlocks JOR-239/JOR-236/JOR-233. JOR-214's confirmed manifest mismatch is repaired and pushed, ready behind JOR-218; it still unlocks JOR-224/JOR-221/JOR-231. JOR-206 is under supervised diagnosis after intra-gate identity-fixture contention and still unlocks JOR-230/JOR-212. JOR-251 was falsely blocked by the implementation-brief ambiguity above and is next to be released with the corrected shared rule. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
