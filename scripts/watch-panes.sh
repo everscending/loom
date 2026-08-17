@@ -49,6 +49,16 @@ LOOM_LIB_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 if [ -f "$LOOM_LIB_SH" ]; then
     . "$LOOM_LIB_SH"
     TRACKER_SH="$(_tracker_cmd "${LOOM_LIB_SH%/*}" "${LOOM_REPO:-.}")"
+    # A directly started or `on`-relaunched viewer is a new long-lived parent,
+    # not a child of tick.sh. Although its resolve-config/lanes-alive children
+    # load the tracker secret, an export cannot travel back up into this
+    # process. The closed-ticket read below therefore failed for Linear and
+    # deliberately kept every merged ticket's pane idle forever (JOR-292,
+    # 2026-08-17). Hydrate the same two non-repo secret layers tick.sh owns so
+    # the viewer's direct driver call has the credential on every launch path.
+    _viewer_home=$("$TICK" orch-home 2>/dev/null)
+    _load_secrets repo-state "$_viewer_home/config.yml" \
+        global "${LOOM_GLOBAL_CONFIG:-$HOME/.loom/config.yml}"
 else
     TRACKER_SH=""
 fi

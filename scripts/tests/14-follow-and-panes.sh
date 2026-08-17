@@ -672,6 +672,69 @@ grep -q "rename .* ticket 96 — idle" "$T/herdr-calls" \
     || bad "watch-panes: blocked-merge pane was not kept"
 rm -f "$T/wp13j-home/lanes"/*.pid
 
+# 13j-2. A directly started or relaunched viewer must hydrate the tracker
+# credential itself. tick.sh loads secrets in its child process, which cannot
+# export them back into this long-lived parent. In the live Patient Imaging
+# build, JOR-292 merged and closed while its pane stayed open because the
+# restarted viewer's Linear state read had no LINEAR_API_KEY (2026-08-17).
+WPCRED=$(mirror_scripts "$T/wpcred-scripts")
+rm -f "$WPCRED/trackers"
+mkdir -p "$WPCRED/trackers" "$T/wpcred-repo" "$T/wpcred-home/lanes"
+cp "$(dirname "$TICK")/trackers/linear.sh" "$WPCRED/trackers/linear-real.sh"
+cat > "$WPCRED/trackers/linear.sh" <<'EOF'
+#!/usr/bin/env bash
+[ "${LINEAR_API_KEY:-}" = "viewer-fixture-key" ] || exit 9
+case "$*" in
+    "issue 97") echo '{"state":"closed"}' ;;
+    *) echo '{}' ;;
+esac
+EOF
+chmod +x "$WPCRED/trackers/linear.sh"
+seed_tracker_decl "$T/wpcred-repo" Linear
+cat > "$T/wpcred-global.yml" <<'EOF'
+secrets:
+  LINEAR_API_KEY: viewer-fixture-key
+EOF
+sleep 1.5 & echo $! > "$T/wpcred-home/lanes/merge-97.pid"
+: > "$T/herdr-calls"
+env -u LINEAR_API_KEY HERDR_CALLS="$T/herdr-calls" HERDR_CMD="$T/herdr-stub" \
+    HERDR_ENV=1 HERDR_PANE_ID=stub:p0 LOOM_REPO="$T/wpcred-repo" \
+    LOOM_HOME="$T/wpcred-home" LOOM_GLOBAL_CONFIG="$T/wpcred-global.yml" \
+    WATCH_TICKER=0 WATCH_MAX_PANES=9 WATCH_POLLS=2 WATCH_POLL_SECONDS=1.7 \
+    bash "$WPCRED/watch-panes.sh" >/dev/null 2>&1 || :
+if grep -q "^pane close " "$T/herdr-calls" \
+   && ! grep -q "rename .* ticket 97 — idle" "$T/herdr-calls"; then
+    ok "watch-panes: a relaunched Linear viewer closes a ticket merged into base"
+else
+    bad "watch-panes: merged Linear ticket pane survived because the viewer did not load its credential"
+fi
+rm -f "$T/wpcred-home/lanes"/*.pid
+
+# Planted violation: remove only the viewer-parent secret hydration. Its tick
+# children still load the key for their own calls, but the direct closed-ticket
+# read loses it and the merged ticket returns to the exact orphaned idle pane.
+sed 's/_load_secrets repo-state/: repo-state/' "$WPCRED/watch-panes.sh" \
+    > "$WPCRED/watch-panes-no-secrets.sh"
+chmod +x "$WPCRED/watch-panes-no-secrets.sh"
+mkdir -p "$T/wpcred-mut-home/lanes"
+sleep 1.5 & echo $! > "$T/wpcred-mut-home/lanes/merge-97.pid"
+: > "$T/herdr-calls"
+wpcred_mut_out=$(env -u LINEAR_API_KEY HERDR_CALLS="$T/herdr-calls" \
+    HERDR_CMD="$T/herdr-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+    LOOM_REPO="$T/wpcred-repo" LOOM_HOME="$T/wpcred-mut-home" \
+    LOOM_GLOBAL_CONFIG="$T/wpcred-global.yml" WATCH_TICKER=0 WATCH_MAX_PANES=9 \
+    WATCH_POLLS=2 WATCH_POLL_SECONDS=1.7 \
+    bash "$WPCRED/watch-panes-no-secrets.sh" 2>&1); wpcred_mut_rc=$?
+if assert_mutant_ran "$wpcred_mut_rc" "$wpcred_mut_out" "watch-panes-linear-secret-violation"; then
+    if ! grep -q "^pane close " "$T/herdr-calls" \
+       && grep -q "rename .* ticket 97 — idle" "$T/herdr-calls"; then
+        ok "watch-panes Linear secret mutant: removing hydration recreates the merged-ticket orphan"
+    else
+        bad "watch-panes Linear secret mutant: planted violation did not recreate the idle pane"
+    fi
+fi
+rm -f "$T/wpcred-mut-home/lanes"/*.pid
+
 # 13q. The right column is evened out when a lane pane opens, and only then
 #      (P44). Every lane pane is split off the newest pane with no ratio, so
 #      herdr halves it and the column decays 1/2, 1/4, 1/8 — measured live
