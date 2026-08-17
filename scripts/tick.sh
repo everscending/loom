@@ -2229,11 +2229,12 @@ _append_active_scope_reset() { # <lane-id> <staged-brief>
     [ "$(printf '%s\n' "$_scope_record" | jq -r '.present')" = true ] || return 0
     _scope_body=$(printf '%s\n' "$_scope_record" | jq -r '.body')
     # Deferred drains may inherit the plan in tests or operator shells. The
-    # queued brief already contains this exact reset, so make composition
-    # idempotent on its unique machine trailer rather than duplicate it.
+    # queued brief already contains this exact scope state, so make composition
+    # idempotent on its newest machine trailer rather than duplicate it. An
+    # extension after a staged replacement must still be appended.
     local _scope_marker=""
     _scope_marker=$(printf '%s\n' "$_scope_body" \
-      | grep -oE '<!-- orch-scope-reset [^>]+-->' | tail -1 || true)
+      | grep -oE '<!-- orch-scope-(reset|extend) [^>]+-->' | tail -1 || true)
     if [ -n "$_scope_marker" ] && grep -Fq "$_scope_marker" "$_scope_brief"; then
         return 0
     fi

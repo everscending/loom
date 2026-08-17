@@ -517,8 +517,10 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 
 - `blocked` = rejection cap exhausted (`rejection_cap`), a product decision
   only the human can make is missing, or an external dependency. Crashes are
-  counted separately (`crash_cap`). Human-only `lane.sh rescope <n>` retires
-  verdict, rejection and merge history for different work; `lane.sh
+  counted separately (`crash_cap`). Human-only `lane.sh rescope <n>` replaces
+  the active scope; add a later amendment with `rescope <n> --extend` so it
+  cannot hide that replacement. Both retire verdict, rejection and merge
+  history for changed work. `lane.sh
   verdict-reset <n>` retires verdict/rejection history when the same work and
   HEAD had an invalid gate; `lane.sh supervised-repair <n>` retires that gate
   history when valid defects were repaired under supervision, preserving

@@ -92,6 +92,39 @@ if grep -q 'availability round-trip only' "$LOOM_HOME/briefs/gate-70.md" 2>/dev/
 else
     bad "D-TICK-38: staged gate brief reused the superseded review contract"
 fi
+# JOR-207: snapshot composes a replacement plus later additive amendments into
+# one immutable active scope. Both direct (Claude-compatible) and durable
+# queued (Codex) staging must carry the whole composite string unchanged.
+cat > "$BR/pre-scope-extend-gate.md" <<'EOF'
+Original gate brief: require fixed port 4310 only.
+
+## Active supervisor rescope (from an earlier immutable wave plan)
+Replacement scope: isolated E8 substrate; no fixed fixture port.
+
+<!-- orch-scope-reset 2026-08-10T09:59:00Z -->
+EOF
+cat > "$BR/gate-scope-extend-plan.json" <<'EOF'
+{"actions":[{"lane":"gate-68","ticket":68,"spawn":{"brief":{"active_scope_reset":{"at":"2026-08-10T10:01:00Z","body":"Replacement scope: isolated E8 substrate; no fixed fixture port.\n\n<!-- orch-scope-reset 2026-08-10T09:59:00Z -->\n\n## Additive supervisor scope amendment\nAudit every successful and failed dispatch.\n\n<!-- orch-scope-extend 2026-08-10T10:01:00Z -->"}}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/gate-scope-extend-plan.json" \
+    "$TICK" spawn-lane gate-68 --no-tick --cwd "$BR/wt" --brief "$BR/pre-scope-extend-gate.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'no fixed fixture port' "$LOOM_HOME/briefs/gate-68.md" 2>/dev/null \
+   && grep -q 'Audit every successful and failed dispatch' "$LOOM_HOME/briefs/gate-68.md" 2>/dev/null; then
+    ok "scope extend: direct provider gate brief preserves replacement plus amendment"
+else
+    bad "scope extend: direct provider gate brief lost part of the active scope"
+fi
+sed 's/gate-68/impl-67/' "$BR/gate-scope-extend-plan.json" > "$BR/gate-scope-extend-queued-plan.json"
+SCOPE_QUEUE_HOME="$T/scope-queue-home"
+scope_queue_out=$(LOOM_HOME="$SCOPE_QUEUE_HOME" LOOM_DEFER_LANE_LAUNCH=1 LOOM_WAVE_PLAN="$BR/gate-scope-extend-queued-plan.json" \
+    "$TICK" spawn-lane impl-67 --no-tick --provider codex --job implementation --tier medium \
+    --cwd "$LOOM_REPO" --brief "$BR/pre-scope-extend-gate.md" 2>&1); scope_queue_rc=$?
+queued_scope_extend=$(find "$SCOPE_QUEUE_HOME/lane-launch-queue" -type f -name brief.md -exec grep -l 'Audit every successful and failed dispatch' {} \; -quit 2>/dev/null)
+if [ "$scope_queue_rc" = 0 ] && [ -n "$queued_scope_extend" ] && grep -q 'no fixed fixture port' "$queued_scope_extend"; then
+    ok "scope extend: deferred provider gate brief preserves replacement plus amendment"
+else
+    bad "scope extend: deferred provider gate brief lost part of the active scope (rc=$scope_queue_rc; $scope_queue_out)"
+fi
 # D-TICK-39: after a completed supervised repair, a later gate rejection can
 # return the ticket to rework. The immutable repair evidence must reach that
 # implementation brief or the worker can delete the exact fix as "out of scope."

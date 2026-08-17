@@ -192,6 +192,37 @@ case "$(jq -r '.tickets[] | select(.id==12) | .active_scope_reset.body // ""' "$
         ok "D-TICK-28: snapshot carries the latest active scope-reset note whole" ;;
     *)  bad "D-TICK-28: snapshot dropped the replacement scope note" ;;
 esac
+# JOR-207: a later additive scope amendment must extend the active replacement,
+# not silently hide it. A later true replacement still supersedes both the old
+# replacement and every amendment attached to it. The extension is also a
+# scope-history cutoff: verdicts and merge attempts against the pre-amendment
+# contract do not count against the amended work.
+cat > "$FX/notes-12-scope-extended.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T10:40:00Z","author":{"username":"human"},"body":"Add audit/body acceptance without changing the replacement substrate.\n\n<!-- orch-scope-extend 2026-07-28T10:40:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T10:35:00Z","author":{"username":"merge"},"body":"merge failed under the pre-amendment contract\n\n<!-- orch-merge-attempt 12 -->"},
+ {"system":false,"created_at":"2026-07-28T10:30:00Z","author":{"username":"gate"},"body":"pre-amendment rejection\n\n<!-- orch-verdict FAIL dddd4444 class=acceptance-gap -->"},
+ {"system":false,"created_at":"2026-07-28T10:20:00Z","author":{"username":"human"},"body":"Replacement C: own the isolated E8 substrate and forbid fixed fixture ports.\n\n<!-- orch-scope-reset 2026-07-28T10:20:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T10:10:00Z","author":{"username":"human"},"body":"Additive B: preserve an obsolete renderer assertion.\n\n<!-- orch-scope-extend 2026-07-28T10:10:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Replacement A: own only the old browser proof.\n\n<!-- orch-scope-reset 2026-07-28T10:00:00Z -->"}]
+EOF
+cp "$FX/notes-12-scope-extended.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-scope-extended" "$TICK" snapshot > "$T/snap-scope-extended.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+scope_extended=$(jq -r '.tickets[] | select(.id==12) | .active_scope_reset.body // ""' "$T/snap-scope-extended.json")
+if [[ "$scope_extended" == *"Replacement C"* ]] \
+   && [[ "$scope_extended" == *"Add audit/body acceptance"* ]] \
+   && [[ "$scope_extended" != *"Replacement A"* ]] \
+   && [[ "$scope_extended" != *"Additive B"* ]]; then
+    ok "snapshot: additive scope amendment extends only the active replacement"
+else
+    bad "snapshot: scope amendment shadowed its replacement or survived a later replacement ($(printf '%s' "$scope_extended" | tr '\n' ' '))"
+fi
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/snap-scope-extended.json")" = "0" ] \
+    && ok "snapshot: a scope extension retires verdicts against the pre-amendment contract" \
+    || bad "snapshot: scope extension left pre-amendment rejection history active"
+[ "$(jq -r '.tickets[] | select(.id==12) | .merge_attempts' "$T/snap-scope-extended.json")" = "0" ] \
+    && ok "snapshot: a scope extension retires pre-amendment merge attempts" \
+    || bad "snapshot: scope extension left pre-amendment merge attempts active"
 # Planted violation: the marker must not eat history NEWER than itself, or a
 # single rescope would make the cap permanently unreachable. Same fixture, the
 # marker moved back between r2 and r3 — r3 still counts.

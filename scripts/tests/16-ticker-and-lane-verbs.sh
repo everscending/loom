@@ -665,6 +665,26 @@ grep -qE "orch-scope-reset [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}
     && grep -q "the race moved to #48" "$VCAP4" \
     && ok "rescope: a human posts the reason and the marker together" \
     || bad "rescope: marker or reason missing ($(tail -3 "$VCAP4" 2>/dev/null))"
+# JOR-207: an additive amendment has an explicit marker. Reusing the default
+# replacement marker made the later audit repair silently hide the earlier E8
+# replacement scope in every fresh snapshot and provider brief.
+VCAP4E="$T/rescope-extend-bodies"; : > "$VCAP4E"
+printf '%s\n' "Extend active E8 scope with the audit/body proof" > "$T/rescope-extend-reason"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4E" \
+    "$LANE" rescope 8 --extend --file "$T/rescope-extend-reason" >/dev/null 2>&1
+grep -qE "orch-scope-extend [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAP4E" \
+    && grep -q "audit/body proof" "$VCAP4E" \
+    && ! grep -q "orch-scope-reset" "$VCAP4E" \
+    && ok "rescope --extend: a human records an additive scope amendment" \
+    || bad "rescope --extend: amendment marker or reason missing ($(tail -3 "$VCAP4E" 2>/dev/null))"
+VCAP4EMPTY="$T/rescope-extend-empty"; : > "$VCAP4EMPTY"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4EMPTY" \
+    "$LANE" rescope 8 --extend </dev/null >/dev/null 2>&1 \
+    && bad "rescope --extend: accepted an empty amendment" \
+    || ok "rescope --extend: amendment reason remains mandatory"
+[ -s "$VCAP4EMPTY" ] \
+    && bad "rescope --extend: an empty amendment reached the tracker" \
+    || ok "rescope --extend: empty amendment posted nothing"
 echo "no body, no record" | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP4" \
     "$LANE" rescope notanumber >/dev/null 2>&1 \
     && bad "rescope: accepted a non-numeric iid" \
@@ -680,6 +700,10 @@ echo "the ticket changed, honest" | LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EV
     GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 >/dev/null 2>&1 \
     && bad "rescope: a wave retired a ticket's rejection history" \
     || ok "rescope: a wave cannot reset a ticket's cap"
+echo "additive amendment" | LOOM_LANE_ID=impl-8 LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAP4" "$LANE" rescope 8 --extend >/dev/null 2>&1 \
+    && bad "rescope --extend: a lane amended its own scope" \
+    || ok "rescope --extend: a lane cannot amend its own scope"
 [ -s "$ACAP4" ] \
     && bad "rescope: an automated caller still reached the tracker ($(head -1 "$ACAP4"))" \
     || ok "rescope: no automated reset write reached the tracker"

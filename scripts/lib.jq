@@ -57,13 +57,14 @@ def orch_verdict_scan:
 
 # Gate verdicts that still stand after the newest human reset. `verdict-reset`
 # retires an invalid gate outcome, `supervised-repair` retires valid defects a
-# human has repaired, and `rescope` is the superset for different work.
+# human has repaired, and replacement or additive rescope is the superset for
+# changed work.
 # Ordering uses tracker timestamps plus arrival index, so verdicts at the
 # marker timestamp are retired too. Consumers:
 # snapshot.jq (`judged_at`, `rejections_of`) and lane.sh duplicate refusal.
 def verdicts_after_reset($notes):
     ([$notes | to_entries[]
-      | select((.value.body // "") | test("<!-- orch-(scope-reset|verdict-reset|supervised-repair) "))
+      | select((.value.body // "") | test("<!-- orch-(scope-(reset|extend)|verdict-reset|supervised-repair) "))
       | {at: (.value.created_at // ""), i: .key}]
      | sort_by([.at, -.i]) | last) as $reset
   | [$notes | to_entries[] | .key as $i | .value as $note
@@ -75,18 +76,33 @@ def verdicts_after_reset($notes):
   | if $reset == null then .
     else map(select([.at, -.i] > [$reset.at, -$reset.i])) end;
 
-# The newest replacement scope itself, not merely the cutoff it creates for
-# old verdicts. A rescope note is executable build input: snapshot.jq carries
-# it into the ticket row, plan.jq freezes it into a fill action, and tick.sh
-# appends it to the implementation brief. Keep the tracker-stamped ordering
-# identical to verdicts_after_reset: notes arrive newest-first, so lower
-# arrival indexes win timestamp ties.
+# The active replacement scope plus every later additive amendment, not merely
+# the cutoff they create for old verdicts. `rescope` is a true replacement;
+# `rescope --extend` adds to that replacement without hiding it. A later true
+# replacement supersedes the old replacement and its amendments. The composed
+# body is executable build input: snapshot.jq carries it into the ticket row,
+# plan.jq freezes it into an action, and tick.sh stages the same string for
+# Claude and Codex. Keep tracker-stamped ordering identical to
+# verdicts_after_reset: notes arrive newest-first, so lower arrival indexes win
+# timestamp ties.
 def active_scope_reset_of($notes):
     ([$notes | to_entries[]
       | select((.value.body // "") | test("<!-- orch-scope-reset "))
       | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
      | sort_by([.at, -.i]) | last) as $reset
-  | if $reset == null then null else ($reset | del(.i)) end;
+  | ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-scope-extend "))  # mutate:scope-extend-accumulate
+      | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
+     | sort_by([.at, -.i])
+     | if $reset == null then .
+       else map(select([.at, -.i] > [$reset.at, -$reset.i])) end) as $extensions
+  | if $reset == null and ($extensions | length) == 0 then null
+    else {
+      at: (if ($extensions | length) > 0 then $extensions[-1].at else $reset.at end),
+      body: ((if $reset == null then [] else [$reset.body] end)
+             + ($extensions | map("## Additive supervisor scope amendment\n" + .body))
+             | join("\n\n"))
+    } end;
 
 # The newest completed supervised repair, carried as evidence rather than as
 # replacement scope. snapshot.jq exposes it on the ticket row and plan.jq
@@ -161,7 +177,7 @@ def state_of($labels):
 #      uses — one clock, the one the tracker stamps.
 def merge_attempts_of($notes):
     ([$notes | to_entries[]
-      | select((.value.body // "") | test("<!-- orch-(merge|scope)-reset "))
+      | select((.value.body // "") | test("<!-- orch-(merge-reset|scope-(reset|extend)) "))
       | {at: (.value.created_at // ""), i: .key}]
      | sort_by([.at, -.i]) | last) as $reset
   | [$notes | to_entries[] | .key as $i | .value as $note

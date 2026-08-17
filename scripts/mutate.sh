@@ -80,6 +80,7 @@ merge-reset-cutoff	lib.jq	sub	$reset == null	true
 merge-hold-anchor	lib.jq	sub	<!-- orch-merge-attempt \\d+ base-red=(\\S+) fix=(\\d+) -->	orch-merge-attempt \\d+ base-red=(\\S+) fix=(\\d+)
 rejection-total-cap	plan.jq	sub	.rejections.total	.rejections.same_class_tail
 scope-reset-transport	snapshot.jq	delete
+scope-extend-accumulate	lib.jq	sub	orch-scope-extend	orch-scope-reset
 finished-lane-capacity	lib.jq	sub	== "-"	!= "-"
 wave-prefix-strip	render-events.jq	sub	(?i)^	^
 EOF

@@ -81,8 +81,12 @@
 #                                            at the deadline — the caller's cue
 #                                            to report the failure, not retry
 #                                            forever
-#   lane.sh rescope <iid> [--file F]          this ticket is now DIFFERENT work:
-#                                            post what changed and retire the
+#   lane.sh rescope <iid> [--extend] [--file F]
+#                                            default: this ticket is now
+#                                            DIFFERENT replacement work;
+#                                            --extend: add scope without hiding
+#                                            the active replacement. Both post
+#                                            what changed and retire the
 #                                            rejections recorded before it —
 #                                            and its merge attempts, since
 #                                            different work has no merge
@@ -586,7 +590,7 @@ cmd_wait_ready() { # --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd
     done
 }
 
-cmd_rescope() { # <iid> [--file F]
+cmd_rescope() { # <iid> [--extend] [--file F]
     # P37: retire the rejection cap when a ticket becomes DIFFERENT WORK.
     # `rejections_of` (tick.sh) derives the whole history by scanning every
     # `orch-verdict FAIL` trailer in the thread, and that scan is deliberately
@@ -609,8 +613,14 @@ cmd_rescope() { # <iid> [--file F]
     # ticket's merge attempts along with its rejections — different work has no
     # merge history either. `merge-reset` below is the narrower verb, for the
     # SAME work whose merges failed on something since resolved.
-    local iid="${1:-}"
+    local iid="${1:-}" extend=0 bodyargs=()
     _check_iid "$iid"
+    set -- "${@:2}"
+    while [ $# -gt 0 ]; do case "$1" in
+        --extend) extend=1; shift ;;
+        --file) bodyargs+=("$1" "${2:-}"); shift 2 ;;
+        *) bodyargs+=("$1"); shift ;;
+    esac; done
     # Refused for automated callers, exactly as `--release-hold` is, and for the
     # same reason: re-scoping is a human's judgement about what a ticket IS. A
     # lane that could reset its own cap has no cap — and the ticket prose that
@@ -622,11 +632,19 @@ cmd_rescope() { # <iid> [--file F]
     # A body is mandatory (_stage_body refuses an empty one): the comment IS the
     # record of what changed, and a bare marker retires a cap while explaining
     # nothing to the next reader.
-    local f; f=$(_stage_body "${@:2}")
-    printf '\n\n<!-- orch-scope-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    local f marker
+    if [ "${#bodyargs[@]}" -gt 0 ]; then f=$(_stage_body "${bodyargs[@]}")
+    else f=$(_stage_body); fi
+    if [ "$extend" = 1 ]; then marker=orch-scope-extend
+    else marker=orch-scope-reset; fi
+    printf '\n\n<!-- %s %s -->\n' "$marker" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
     _post_note issue "$iid" "$f"
-    _lane_ev ticket_rescope ticket "$iid"
-    echo "lane.sh: issue $iid re-scoped — rejections and merge attempts recorded before this note no longer count"
+    _lane_ev ticket_rescope ticket "$iid" mode "$([ "$extend" = 1 ] && printf extend || printf replace)"
+    if [ "$extend" = 1 ]; then
+        echo "lane.sh: issue $iid scope extended — active replacement preserved; earlier rejections and merge attempts no longer count"
+    else
+        echo "lane.sh: issue $iid re-scoped — replacement scope recorded; earlier rejections and merge attempts no longer count"
+    fi
 }
 
 cmd_verdict_reset() { # <iid> [--file F]
@@ -1461,7 +1479,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--extend] [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with

@@ -49,7 +49,7 @@ Six actions per ticket:
 |---|---|
 | Requeue to work | `lane.sh transition <n> ready-for-agent --release-hold --note` |
 | Human finished it → gate | `lane.sh transition <n> review --release-hold --note`; when this completed a supervised repair of valid gate defects, write `lane.sh supervised-repair <n>` first |
-| Retire stale history | `lane.sh verdict-reset <n>` (invalid gate, same work/HEAD), `lane.sh supervised-repair <n>` (valid gate defects repaired, same work, preserves merge attempts), `lane.sh merge-reset <n>` (merge attempts), or `lane.sh rescope <n>` (all histories — different work); each takes the human's reason on stdin or `--file` and writes provider-neutral tracker state |
+| Retire stale history | `lane.sh verdict-reset <n>` (invalid gate, same work/HEAD), `lane.sh supervised-repair <n>` (valid gate defects repaired, same work, preserves merge attempts), `lane.sh merge-reset <n>` (merge attempts), `lane.sh rescope <n>` (replace active scope and all histories), or `lane.sh rescope <n> --extend` (add to active scope and retire pre-amendment histories); each takes the human's reason on stdin or `--file` and writes provider-neutral tracker state |
 | Escalate the model | `lane.sh model-tier <n> <tier>` |
 | Leave blocked | nothing |
 | Close as won't-do | `lane.sh close <n>` |
