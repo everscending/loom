@@ -1945,7 +1945,7 @@ BRIEFEOF
         local _merge_ticket="${id#merge-}"
         _merge_ticket="${_merge_ticket%%-*}"
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
-- The launchd-owned host merge preflight already ran `lane.sh reconcile` and then the configured $pregate tier gate before this provider session started. That host evidence is authoritative and supersedes any source-brief instruction to reconcile or run the full gate here. Do not rerun the configured tier gate inside the provider session; agent sandboxes can deny browser/OS services that the host gate legitimately needs. Run only `$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket` and report its result. If the runner was absent, the lane log explicitly declares that reduction; do not invent a replacement command.
+- The launchd-owned host merge preflight already ran \`lane.sh reconcile\` and then the configured $pregate tier gate before this provider session started. That host evidence is authoritative and supersedes any source-brief instruction to reconcile or run the full gate here. Do not rerun the configured tier gate inside the provider session; agent sandboxes can deny browser/OS services that the host gate legitimately needs. Run only \`$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket\` and report its result. If the runner was absent, the lane log explicitly declares that reduction; do not invent a replacement command.
 BRIEFEOF
     fi
     local _hit=0 _prev=""

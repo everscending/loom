@@ -169,6 +169,13 @@ if grep -q 'host merge preflight' "$LOOM_HOME/briefs/merge-28.md" \
 else
     bad "chain-merge: the merge provider still owns the sandboxed full gate"
 fi
+if [ "$(grep -c 'lane.sh reconcile' "$LOOM_HOME/briefs/merge-28.md")" -ge 2 ] \
+   && grep -qF "$(cd "$(dirname "$TICK")" && pwd)/lane.sh merge 28" "$LOOM_HOME/briefs/merge-28.md" \
+   && ! grep -q 'lane.sh: MR .* merged' "$LOOM_HOME/briefs/merge-28.md"; then
+    ok "merge preflight: staging preserves helper commands as brief text"
+else
+    bad "merge preflight: staging executed a helper command from Markdown backticks"
+fi
 grep -q '"ev":"lane_spawn".*"id":"merge-28".*"pregate":"logic"' "$LOOM_HOME/events.jsonl" \
     && ok "chain-merge: the ticket tier reaches the host merge preflight" \
     || bad "chain-merge: the chained merge lost its host preflight tier"
@@ -202,6 +209,10 @@ reap_lanes
 # directly from it is reaped when the tool call returns, even if its lane
 # bookkeeping was written first. Keep the fast decision, but defer the worker
 # launch to the durable scheduler boundary.
+printf 'must arrive only at host launch\n' > "$LOOM_REPO/base-after-staging.txt"
+git -C "$LOOM_REPO" add base-after-staging.txt
+git -C "$LOOM_REPO" commit -qm 'move base before deferred staging'
+git -C "$LOOM_REPO" push -q origin main
 CODEX_THREAD_ID=interactive-codex GLAB_CMD="$FX/glab-stub.sh" \
     "$TICK" chain-merge >/dev/null 2>&1
 queued_merge=$(find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 \
@@ -211,6 +222,11 @@ if [ -n "$queued_merge" ] && [ ! -e "$LOOM_HOME/lanes/merge-28.pid" ]; then
     ok "chain-merge: interactive Codex defers the worker to the durable host queue"
 else
     bad "chain-merge: interactive Codex launched a disposable worker instead of queuing it"
+fi
+if [ ! -e "$WT28/base-after-staging.txt" ]; then
+    ok "merge preflight: staging a deferred provider brief does not execute reconcile"
+else
+    bad "merge preflight: the provider brief executed reconcile while it was being staged"
 fi
 rm -rf "$LOOM_HOME/lane-launch-queue"/request-*
 reap_lanes
