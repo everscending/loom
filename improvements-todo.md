@@ -92,6 +92,20 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   In Progress, and released the supervised lease. (`MEND-CHAIN-01`,
   `MEND-LEARN-01`, `MEND-STATE-01`)
 
+- [x] **DONE — Deduplicate semantic gate verdict identity.** Linear
+  read-after-write lag let JOR-290's immediate cleanup replay post two comments
+  for the same ticket, immutable HEAD `56b8f8f`, FAIL outcome, and
+  `repo-wide-config-guard` class. The old snapshot counted both transports as
+  two rounds and falsely applied the rejection cap. Implemented
+  provider-neutrally in `6bfcdf2` (`fix(state): dedupe verdict identity`):
+  exact verdict identity collapses after the newest reset marker, while a
+  genuine later review remains distinct after reset. Verification: focused
+  snapshot 139/139, full Loom suite 1,346/1,346, standalone jq/diff checks
+  clean; removing identity grouping recreates the false cap. The old runtime
+  blocked JOR-290 before integration; releasing that one false tracker hold is
+  pending explicit ticket-specific human authorization. (`MEND-STATE-01`,
+  `MEND-LEARN-01`, `MEND-ROUND-01`)
+
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
