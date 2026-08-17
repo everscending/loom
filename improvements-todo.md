@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 06:08 America/Chicago
+Last updated: 2026-08-17 06:19 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -20,7 +20,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Pin every gate outcome to its start SHA.** JOR-218's gate pregated `4fdfbcc`, then a supervised repair advanced the branch to `8fcf7ed` before delayed failure classification ran. The classifier incorrectly attached the old `rg ENOENT` failure to the repaired, untested SHA and blocked it. Implemented provider-neutrally in `b96abc8` (`fix(gates): pin verdicts to launch head`): the shared launch boundary captures and persists immutable HEAD provenance, snapshot and plan preserve it, delayed rc-7 verdicts name that concrete SHA, and legacy/missing provenance refuses classification instead of rereading a mutable worktree. Focused result: attribution 6/6 and adjacent planner 50/50; the isolated implementation also passed 282 adjacent assertions.
 
-- [ ] **IN PROGRESS — Refuse a gate whose worktree is not the reviewed MR HEAD.** JOR-207 was Review-eligible at remote MR SHA `b07039c`, but its standard worktree still tracked `origin/main` at `1f6363c`; the queued gate captured that stale local SHA and began the full API suite. Supervision stopped it before any verdict, fast-forwarded the clean worktree to the reviewed SHA, and requeued a correctly pinned gate. A provider-neutral test-first runtime repair is in progress so direct Claude launches and durable Codex drains reject this mismatch before any pregate or reviewer work. Completion requires a public stale-worktree regression, safe retry semantics, and a planted violation.
+- [x] **DONE — Prepare every gate worktree at the reviewed MR HEAD.** JOR-207 was Review-eligible at remote MR SHA `b07039c`, but its standard worktree still tracked `origin/main` at `1f6363c`; the queued gate captured that stale local SHA and began the full API suite. Implemented provider-neutrally in `705727e` (`fix(gates): prepare immutable MR head`): the plan carries a machine-readable expected SHA, and shared host preparation fetches and fast-forwards only a clean ancestor worktree to that exact commit or fails before either Claude or Codex starts. RED reproduced the stale checkout at 44/1; GREEN is 46/46 focused plus 131/131 adjacent, with a planted tick-to-worktree transport mutant recreating the stale launch. Three unchanged timing assertions failed only in a heavily repeated parallel full run and passed 116/116 immediately in isolation.
 
 - [ ] **TODO — Right-size the Playwright worker budget.** `playwright.config.ts` does not set `workers`, so Playwright's local default uses 50% of logical CPUs: eight workers on this 16-thread host. Benchmark a fixed four-worker UI gate against the current eight-worker baseline for wall time, timeout rate, and peak host load. Change the configured budget only after the current UI branches finish so the gate fingerprint stays stable during review.
 
