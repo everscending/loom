@@ -56,7 +56,10 @@ the ledger and in repair evidence.
 - `MEND-FLOW-01` — a running build with zero active lanes and a non-empty
   deterministic plan has an actionable idle gap. Keep supervision attached
   until the scheduler starts that work or the missed handoff/heartbeat is
-  diagnosed and repaired. An armed timer is recovery plumbing, not progress.
+  diagnosed and repaired. The same invariant applies per flow stage: an
+  `in-progress`, `review`, or `merge-queue` ticket with no matching
+  implementation, gate, or merge owner is an `unowned-stage` finding even
+  while unrelated lanes are busy. An armed timer is recovery plumbing, not progress.
   Host preflight is isolated per spawn: one unsafe worktree may defer that
   lane with an explicit event and plan reason, but it must not suppress safe
   harvest writes or unrelated runnable actions in the same wave.
@@ -122,7 +125,15 @@ the ledger and in repair evidence.
    it never substitutes a manual tick for either.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
-   public seam before calling it a defect.
+   public seam before calling it a defect. Rank pressure before choosing the
+   next repair: first unowned merge/review stages, then shared-resource
+   admission refusals, then rejection time and count by tier/class, then the
+   dependency fan-out of blocked tickets. Start diagnosis of the highest-cost
+   avoidable constraint in the same pass; do not wait for the human to name a
+   busy-looking queue. For each `unowned-stage`, observe through the next
+   handoff or heartbeat. If its expected owner still does not appear, inspect
+   the scheduled/deferred/residue disposition emitted by `mend-status` and
+   repair the owning scheduler seam.
 4. Classify ownership using `MEND-CLASS-01`. Expected cap deferral, dependency
    waiting, deliberate stop, and an active supervised lease are healthy states.
 5. For a ticket intervention, acquire `tick.sh supervise acquire <iid>

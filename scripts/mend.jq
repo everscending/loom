@@ -17,6 +17,39 @@ def actionable_idle_of($s; $p; $stopped):
   else []
   end;
 
+def lane_ticket_of($id):
+  $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
+
+def expected_owner_of($state):
+  if $state == "in-progress" then "impl"
+  elif $state == "review" then "gate"
+  elif $state == "merge-queue" then "merge"
+  else null
+  end;
+
+# A busy build can still have a silent gap in one flow stage. In particular,
+# an unrelated implementation must not hide an eligible review or merge queue
+# whose owning lane never started. This is an observation only: the ordinary
+# scheduler remains the sole owner of launch decisions.
+def unowned_stages_of($s; $p; $stopped):
+  if $stopped then []
+  else
+    [($s.tickets // [])[]
+     | . as $ticket
+     | expected_owner_of(.state) as $owner
+     | select($owner != null and .supervised_lease == null)
+     | select(any(($s.lanes // [])[];
+                  .state == "running"
+                  and .type == $owner
+                  and lane_ticket_of(.id) == ($ticket.id | tostring)) | not)
+     | {kind: "unowned-stage", contract: "MEND-FLOW-01",
+        ticket: .id, state: .state, expected_owner: $owner,
+        scheduled: [($p.actions // [])[] | select(.ticket == $ticket.id)],
+        deferred: [($p.deferred // [])[] | select(.ticket == $ticket.id)],
+        residue: [($p.residue // [])[] | select(.ticket == $ticket.id)],
+        boundary: "observe through the next handoff or scheduler heartbeat; diagnose if the owning lane still has not started"}]
+  end;
+
 def attention_of($s; $p; $stopped):
   ([($s.warnings // [])[] |
       {kind: "snapshot-warning", contract: "MEND-STATE-01", message: .}]
@@ -37,6 +70,7 @@ def attention_of($s; $p; $stopped):
    + [($s.summary.repairs // [])[]
       | {kind: "partial-transition", contract: "MEND-STATE-01", ticket: .id,
          shape: .shape, fix: .fix}]
+   + unowned_stages_of($s; $p; $stopped)
    + actionable_idle_of($s; $p; $stopped));
 
 $snapshot[0] as $s

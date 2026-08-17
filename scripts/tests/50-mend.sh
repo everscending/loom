@@ -78,6 +78,49 @@ else
     bad "mend: runnable idle work was normalized as healthy silence (rc=$idle_rc, $(printf '%s' "$idle" | jq -c '{summary,schedule,attention}' 2>/dev/null))"
 fi
 
+# An unrelated live lane must not make a merge queue look healthy. Mend does
+# not launch the merge itself, but it must identify the missing owner and keep
+# observing through the scheduler boundary.
+jq '
+  .tickets[0].state = "merge-queue"
+  | .tickets[0].merge_attempts = 0
+  | .tickets[0].merge_hold = null
+  | .lanes[0].id = "impl-99"
+  | .summary.by_state = {"merge-queue":1}
+  | .summary.lanes_running_by_type = {"impl":1,"gate":0,"merge":0,"probe":0,"unknown":0}
+  | .summary.merge_in_flight = false
+  ' "$FX/healthy.json" > "$FX/unowned-merge.json"
+unowned_merge=$("$TICK" mend-status "$FX/unowned-merge.json" 2>"$FX/unowned-merge.err")
+unowned_merge_rc=$?
+if [ "$unowned_merge_rc" = 0 ] && printf '%s\n' "$unowned_merge" | jq -e '
+     ([.attention[]
+       | select(.kind == "unowned-stage"
+                and .contract == "MEND-FLOW-01"
+                and .ticket == 10
+                and .state == "merge-queue"
+                and .expected_owner == "merge")] | length) == 1' >/dev/null 2>&1; then
+    ok "mend: unrelated activity cannot hide a merge queue with no merge worker"
+else
+    bad "mend: a merge queue without its owning worker was hidden (rc=$unowned_merge_rc, $(printf '%s' "$unowned_merge" | jq -c '{summary,schedule,attention}' 2>/dev/null))"
+fi
+
+# Planted violation: remove the stage detector call from a private mirror. The
+# merge queue must become invisible while the unrelated implementation remains
+# live, proving the alert comes from the new per-stage invariant.
+OWNER_MD=$(mirror_scripts "$T/mend-owner-mirror")
+sed '/+ unowned_stages_of($s; $p; $stopped)/d' \
+    "$OWNER_MD/mend.jq" > "$OWNER_MD/mend.jq.mutant"
+mv "$OWNER_MD/mend.jq.mutant" "$OWNER_MD/mend.jq"
+owner_mutant=$(LOOM_REPO="$LOOM_REPO" LOOM_HOME="$LOOM_HOME" \
+    "$OWNER_MD/tick.sh" mend-status "$FX/unowned-merge.json" 2>/dev/null)
+if ! printf '%s\n' "$owner_mutant" | jq -e '
+       [.attention[] | select(.kind == "unowned-stage")] | length > 0' \
+       >/dev/null 2>&1; then
+    ok "mend-owner-violation: removing the stage detector recreates the invisible merge queue"
+else
+    bad "mend-owner-violation: unowned merge alert survived without its detector"
+fi
+
 # Planted violation: disable only the runnable-action predicate. The same
 # public status request must then lose MEND-FLOW-01, proving the GREEN result
 # depends on the detector rather than the fixture's partial-transition warning.
@@ -197,6 +240,7 @@ if grep -q '| `mend' "$SKILL" \
    && grep -q 'Codex' "$MEND_REF" 2>/dev/null \
    && grep -q 'never starts or resumes' "$MEND_REF" 2>/dev/null \
    && grep -q 'MEND-FLOW-01' "$MEND_REF" 2>/dev/null \
+   && grep -q 'unowned-stage' "$MEND_REF" 2>/dev/null \
    && grep -q 'Host preflight is isolated per spawn' "$MEND_REF" 2>/dev/null \
    && grep -q 'wave_spawn_deferred' "$MEND_REF" 2>/dev/null \
    && grep -q 'rc-7 gate retains its lane evidence' "$MEND_REF" 2>/dev/null \
