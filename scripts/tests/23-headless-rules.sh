@@ -48,6 +48,34 @@ grep -q 'ScheduleWakeup' "$COMPOSED" \
 grep -q 'KillShell' "$BR/clean.md" \
     && bad "P68: spawn-lane wrote the rules back into the wave's source brief" \
     || ok "P68: the source brief is untouched — only the lane's copy carries the rules"
+# D-TICK-28: a wave may compose from the ticket's original body even after a
+# human rescope. The immutable action is the provider-neutral source of truth;
+# spawn-lane must mechanically carry that later note into the staged brief.
+printf 'Original ticket body: adjust the existing booking UI only.\n' > "$BR/pre-rescope.md"
+cat > "$BR/rescope-plan.json" <<'EOF'
+{"actions":[{"lane":"impl-70","ticket":70,"spawn":{"brief":{"active_scope_reset":{"at":"2026-08-10T09:58:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:58:00Z -->"}}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/rescope-plan.json" \
+    "$TICK" spawn-lane impl-70 --no-tick --cwd "$BR/wt" --brief "$BR/pre-rescope.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'lib/scheduling/booking.ts' "$LOOM_HOME/briefs/impl-70.md" 2>/dev/null \
+   && grep -q 'persisted-transition seam' "$LOOM_HOME/briefs/impl-70.md" 2>/dev/null \
+   && ! grep -q 'lib/scheduling/booking.ts' "$BR/pre-rescope.md"; then
+    ok "D-TICK-28: staged implementation brief carries the immutable active rescope"
+else
+    bad "D-TICK-28: staged brief reused the original pre-rescope scope"
+fi
+# The Codex path crosses a durable queue instead of staging immediately. The
+# plan may be scratch-lifetime state, so its rescope must be frozen into the
+# queue request before the provider session exits.
+LOOM_DEFER_LANE_LAUNCH=1 LOOM_WAVE_PLAN="$BR/rescope-plan.json" \
+    "$TICK" spawn-lane impl-70 --no-tick --provider codex --job implementation --tier medium \
+    --cwd "$LOOM_REPO" --brief "$BR/pre-rescope.md" >/dev/null 2>&1
+queued_rescope=$(find "$LOOM_HOME/lane-launch-queue" -type f -name brief.md -print -quit 2>/dev/null)
+if [ -n "$queued_rescope" ] && grep -q 'lib/scheduling/booking.ts' "$queued_rescope"; then
+    ok "D-TICK-28: deferred provider request freezes the rescope before the plan expires"
+else
+    bad "D-TICK-28: deferred provider request lost the active rescope"
+fi
 # The composed brief itself must be clean of the shape it forbids, or every
 # lane reads an instruction to do the one thing that cannot work.
 if grep -qE '(^|[^A-Za-z0-9_./-])/(implement|loom|code-review|to-tickets)([^A-Za-z0-9-]|$)' "$COMPOSED"; then

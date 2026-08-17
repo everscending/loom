@@ -1692,8 +1692,13 @@ _launch_wave() { # the spend half of cmd_tick: prompt assembly through the
       wave_plan=$(_prepare_wave_plan "$LOOM_SCRATCH")
     fi
     if [ -n "$wave_plan" ]; then
+      # spawn-lane reads the same immutable action the wave reads. This is a
+      # provider-neutral environment contract: direct Claude staging consumes
+      # it immediately; deferred Codex staging freezes it into the queue.
+      LOOM_WAVE_PLAN="$wave_plan"; export LOOM_WAVE_PLAN
       first_action="read $wave_plan — it is the immutable schedule derived from this wave's tracker snapshot. Run its .actions[] in order; every new-worktree spawn already carries .spawn.cwd and no provider session creates a worktree."
     else
+      unset LOOM_WAVE_PLAN
       first_action="run \"$SELF_PATH\" snapshot --brief | \"$SELF_PATH\" plan — the read step and the schedule."
     fi
     # The wave prompt carries the ground truth the spawner already has. A fresh
@@ -1817,6 +1822,11 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/lo
     printf '%s\n' "$on_done" > "$request/on-done"
     cp "$brief" "$request/brief.md" \
       || { rm -rf "$request"; die "spawn-lane: cannot stage deferred brief '$brief'"; }
+    # Codex provider sessions queue their launch for a durable host, so the
+    # immutable wave plan may be gone when that host stages the final brief.
+    # Freeze the active rescope into the queued copy now. Claude/direct
+    # launches use the same helper later in _spawn_stage_brief.
+    _append_active_scope_reset "$id" "$request/brief.md"
     local ready="${request%.tmp}"
     mv "$request" "$ready"
     _ev lane_queued id "$id" type "$(_lane_type "$id")" job "$job" \
@@ -1988,6 +1998,41 @@ _spawn_parse_flags() {
 # "$@"; leaves the command — rewritten to the pointer prompt when a brief
 # travels, untouched otherwise — in _SPAWN_ARGS for the caller to `set --`
 # back. Every die in here fires before anything destructive runs.
+_append_active_scope_reset() { # <lane-id> <staged-brief>
+    local _scope_lane="$1" _scope_brief="$2" _scope_plan="${LOOM_WAVE_PLAN:-}"
+    [ "$(_lane_type "$_scope_lane")" = impl ] || return 0
+    [ -n "$_scope_plan" ] || return 0
+    [ -r "$_scope_plan" ] \
+      || die "spawn-lane: immutable wave plan '$_scope_plan' is unreadable; refusing a possibly pre-rescope brief"
+
+    local _scope_record="" _scope_body=""
+    _scope_record=$(jq -ce --arg lane "$_scope_lane" '
+      [.actions[]? | select(.lane == $lane)] as $actions
+      | if ($actions | length) != 1 then
+          error("immutable wave plan must contain exactly one action for " + $lane)
+        else ($actions[0].spawn.brief.active_scope_reset // null) as $reset
+        | if $reset == null then {present:false}
+          elif (($reset.body // null) | type) != "string" or ($reset.body | length) == 0 then
+            error("active scope reset for " + $lane + " has no note body")
+          else {present:true, body:$reset.body} end
+        end' "$_scope_plan" 2>/dev/null) \
+      || die "spawn-lane: immutable wave plan has no valid brief action for '$_scope_lane'"
+    [ "$(printf '%s\n' "$_scope_record" | jq -r '.present')" = true ] || return 0
+    _scope_body=$(printf '%s\n' "$_scope_record" | jq -r '.body')
+    # Deferred drains may inherit the plan in tests or operator shells. The
+    # queued brief already contains this exact reset, so make composition
+    # idempotent on its unique machine trailer rather than duplicate it.
+    local _scope_marker=""
+    _scope_marker=$(printf '%s\n' "$_scope_body" \
+      | grep -oE '<!-- orch-scope-reset [^>]+-->' | tail -1 || true)
+    if [ -n "$_scope_marker" ] && grep -Fq "$_scope_marker" "$_scope_brief"; then
+        return 0
+    fi
+    printf '\n\n## Active supervisor rescope (from immutable wave plan)\n%s\n' \
+      "$_scope_body" >> "$_scope_brief" \
+      || die "spawn-lane: cannot append active rescope to staged brief '$_scope_brief'"
+}
+
 _spawn_stage_brief() {
     _SPAWN_ARGS=("$@")
     if [ -z "$brief" ]; then
@@ -2043,6 +2088,7 @@ _spawn_stage_brief() {
         esac
     done
     cp "$brief" "$BRIEFS_DIR/$id.md" || die "spawn-lane: cannot copy brief into $BRIEFS_DIR"
+    _append_active_scope_reset "$id" "$BRIEFS_DIR/$id.md"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless
     # survival rules the probe brief alone used to carry. They are facts
     # about the execution environment, not about probing, and a wave asked

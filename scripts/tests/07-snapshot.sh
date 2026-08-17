@@ -139,16 +139,26 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 #      #67 came back to the board with 3 of 3 rejections against code #48 had
 #      deleted; its first gate FAIL would have blocked it (build-3, 2026-08-04).
 cat > "$FX/notes-12-rescoped.json" <<'EOF'
-[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Re-scoped: the pairing race moved to #48, which deleted this code.\n\n<!-- orch-scope-reset 2026-07-28T10:00:00Z -->"},
+[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Re-scoped: the pairing race moved to #48. This ticket now owns lib/scheduling/booking.ts, including the list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-07-28T10:00:00Z -->"},
  {"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"r3\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"},
  {"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=marks-attribution -->"},
- {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"}]
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:05:00Z","author":{"username":"human"},"body":"Earlier scope: only adjust the booking UI.\n\n<!-- orch-scope-reset 2026-07-28T09:05:00Z -->"}]
 EOF
 cp "$FX/notes-12-rescoped.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-rescope" "$TICK" snapshot > "$T/snap-rescope.json" 2>/dev/null
 [ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.same_class_tail)"' "$T/snap-rescope.json")" = "0/0" ] \
     && ok "snapshot: a scope reset retires every rejection older than it" \
     || bad "snapshot: re-scoped ticket still carries its old cap ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-rescope.json"))"
+# D-TICK-28: the reset is not only a rejection-history delimiter. Its note is
+# the human's replacement scope and must survive the snapshot boundary whole;
+# otherwise a fresh wave sees only the original ticket body and repeats the
+# exact work the supervisor just replaced.
+case "$(jq -r '.tickets[] | select(.id==12) | .active_scope_reset.body // ""' "$T/snap-rescope.json")" in
+    *"lib/scheduling/booking.ts"*"persisted-transition seam"*)
+        ok "D-TICK-28: snapshot carries the latest active scope-reset note whole" ;;
+    *)  bad "D-TICK-28: snapshot dropped the replacement scope note" ;;
+esac
 # Planted violation: the marker must not eat history NEWER than itself, or a
 # single rescope would make the cap permanently unreachable. Same fixture, the
 # marker moved back between r2 and r3 — r3 still counts.

@@ -334,7 +334,9 @@ else
                   merge_lock: false,
                   cwd_from: "the ticket's SURVIVING worktree — this is a respawn, not a new lane",
                   brief: { step: 4,
+                           active_scope_reset: (.active_scope_reset // null),
                            inputs: ["ticket #\(.id) body",
+                                    "the active scope reset in this action, when non-null — it overrides conflicting original ticket scope",
                                     "the latest rejection comment on #\(.id)",
                                     "the build lessons thread"] } },
          why: "stranded rework (round \((.rejections.total // 0) + 1), tier source `\(.tier_selection.source)`) — closest to done and its rejection cap is already counting" } ]
@@ -347,7 +349,9 @@ else
                   prepare: {via:"worktree.sh", argv:["prepare","--repo","<repo-root>","--ticket",(.id|tostring),"--base",($cfg.base // "<base>")]},
                   cwd_from: "the absolute path returned by the deterministic prepare operation",
                   brief: { step: 4,
+                           active_scope_reset: (.active_scope_reset // null),
                            inputs: ["ticket #\(.id) body",
+                                    "the active scope reset in this action, when non-null — it overrides conflicting original ticket scope",
                                     "the build lessons thread"] } },
          claim_first: true,
          why: (if .fix then "ready `fix:` ticket — fix tickets outrank the rest of the ready set"

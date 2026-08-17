@@ -349,6 +349,7 @@ include "lib";
                                   | .sha ] | first // null) as $merged_head
                               | judged_at((($N[$t.id | tostring]) // []); $merged_head)),
             rejections: $rej,
+            active_scope_reset: active_scope_reset_of((($N[$t.id | tostring]) // [])), # mutate:scope-reset-transport
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),

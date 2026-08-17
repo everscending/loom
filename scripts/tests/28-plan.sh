@@ -49,6 +49,7 @@ cat > "$FX/snap.json" <<'EOF'
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
+     "active_scope_reset": {"at":"2026-08-10T09:58:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:58:00Z -->"},
      "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
@@ -70,6 +71,7 @@ cat > "$FX/snap.json" <<'EOF'
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 45, "title": "ready, fix", "state": "ready-for-agent", "tier": "logic", "fix": true,
      "unblocked": true, "assignees": [], "tier_selection": {"effective": "high", "source": "label"},
+     "active_scope_reset": {"at":"2026-08-10T09:57:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:57:00Z -->"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
@@ -193,6 +195,16 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.tier')" = "high" ] \
     && ok "plan: a rework respawn carries .tier_selection.effective, not lane_tier" \
     || bad "plan: rework tier wrong ($(p '.actions[] | select(.lane=="impl-42") | .spawn.tier'))"
+# D-TICK-28: both fill paths must put the human's replacement scope in the
+# immutable action. A rework action is not allowed to regress to its original
+# body, and a released/rescoped ticket may re-enter through the ready path.
+if [ "$(jq '[.actions[] | select(.lane=="impl-42" or .lane=="impl-45")
+              | (.spawn.brief.active_scope_reset.body
+                 | contains("lib/scheduling/booking.ts"))] | all' "$T/plan.json")" = true ]; then
+    ok "D-TICK-28: new-work and rework actions both carry the active rescope note"
+else
+    bad "D-TICK-28: a fill action silently fell back to pre-rescope scope"
+fi
 # Step 5: the oldest merge-queue ticket whose hold is null. #47 is held, #49
 # has spent its attempt cap and is blocked so the queue ADVANCES, #48 merges.
 [ "$(act merge spawn)" = "merge-48" ] \

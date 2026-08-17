@@ -74,6 +74,19 @@ def verdicts_after_reset($notes):
   | if $reset == null then .
     else map(select([.at, -.i] > [$reset.at, -$reset.i])) end;
 
+# The newest replacement scope itself, not merely the cutoff it creates for
+# old verdicts. A rescope note is executable build input: snapshot.jq carries
+# it into the ticket row, plan.jq freezes it into a fill action, and tick.sh
+# appends it to the implementation brief. Keep the tracker-stamped ordering
+# identical to verdicts_after_reset: notes arrive newest-first, so lower
+# arrival indexes win timestamp ties.
+def active_scope_reset_of($notes):
+    ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-scope-reset "))
+      | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
+     | sort_by([.at, -.i]) | last) as $reset
+  | if $reset == null then null else ($reset | del(.i)) end;
+
 # Durations, shares and money, formatted the same way wherever they are
 # printed. Consumers: report.jq and retro.jq, which `retro` prints one after
 # the other — two spellings of an hour in one output is a reading error
