@@ -29,6 +29,20 @@ else
     bad "aux cap: direct successor bypassed the cap or damaged prior state (alive=$(aux_alive); out=$out)"
 fi
 
+# rc/outcome means the paid worker is finished even if its host epilogue still
+# owns the pid. That cleanup-eligible process releases capacity, while the
+# ordinary live-lane guard continues to protect its worktree and lane id.
+printf '%s\n' 0 > "$LOOM_HOME/lanes/gate-224.rc"
+printf '%s\n' verdict > "$LOOM_HOME/lanes/gate-224.outcome"
+LOOM_LANE_ID=impl-225 "$TICK" spawn-lane gate-225 --no-tick -- sleep 30 >/dev/null 2>&1 || true
+if [ "$(aux_alive)" = 5 ] && [ -s "$LOOM_HOME/lanes/gate-225.pid" ]; then
+    ok "aux cap: a provider-complete epilogue releases its slot at final admission"
+else
+    bad "aux cap: completed epilogue still blocked replacement admission (alive=$(aux_alive))"
+fi
+"$TICK" kill-lane gate-225 >/dev/null 2>&1 || true
+rm -f "$LOOM_HOME/lanes/gate-224.rc" "$LOOM_HOME/lanes/gate-224.outcome"
+
 # Planted violation: the same fifth lane is admitted when the configured cap
 # is deliberately raised. This proves the holding assertion above reached the
 # capacity guard rather than some unrelated spawn refusal.

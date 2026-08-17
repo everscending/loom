@@ -140,7 +140,7 @@ else
 # merged through a human hold that way.) The ticket it held becomes stranded,
 # and the rework path picks it up on the next plan — after the write, when the
 # snapshot has been re-read.
-| ([ $lanes[] | select(.state == "stale")
+| ([ $lanes[] | select(.state == "stale" and lane_holds_capacity)
      | { step: "harvest", kind: "kill-lane", lane: .id, ticket: (lane_ticket(.id)),
          via: "tick.sh", argv: ["kill-lane", .id],
          why: "lane is stale — alive but no real progress; a bare kill would orphan the session inside it" } ])
@@ -149,7 +149,7 @@ else
 # `running` past `lane_turn_cap` is effort, not progress — treated exactly the
 # way a spent rejection cap is: kill, then block for a human. (paid: impl-43
 # ran 456 turns, ~$300, with nothing watching the cost.)
-| ([ $lanes[] | select(.state == "running"
+| ([ $lanes[] | select(.state == "running" and lane_holds_capacity
                        and ((.turns | tonumber?) // 0) > $turn_cap) ]) as $overrun
 | ([ $overrun[]
      | { step: "harvest", kind: "kill-lane", lane: .id, ticket: (lane_ticket(.id)),
@@ -163,17 +163,18 @@ else
          needs_report: true } ])
   as $block_overrun
 
-# Every `dead` lane is cleared. Clearing is bookkeeping — the pid file and the
-# progress stamp — and it is correct for every death; what the death MEANS is
-# the residue and the steps below.
-| ([ $lanes[] | select(.state == "dead")
+# Every dead or provider-complete lane is cleared. A provider may have written
+# rc/outcome while its host epilogue still owns the pid; that lane is finished
+# work and cleanup-eligible even though process liveness still protects it from
+# duplicate reuse until this ordered clear runs.
+| ([ $lanes[] | select(lane_cleanup_eligible)
      | . as $l | (lane_ticket(.id)) as $tk
      | { step: "harvest", kind: "clear-lane", lane: .id, ticket: $tk,
          via: "tick.sh", argv: ["clear-lane", .id],
          why: (if .rc == "7" then "pregate rejected the branch (rc 7) — the lane is finished with it"
                elif .type == "gate" and .rc == "0" and ((ticket($tk).gate.eligible // false))
                then "gate exited rc 0 with no verdict standing at HEAD — respawn it a round on"
-               else "lane is dead — clear its bookkeeping" end) } ])
+               else "lane is dead or provider-complete — clear its bookkeeping" end) } ])
   as $clear_dead
 
 # The two half-finished shapes, each carrying the ONE command that repairs it.
@@ -199,7 +200,7 @@ else
 # rc 7 is its pregate's rejection, not a crash: the verdict is posted straight
 # from the lane log, with no verifier spawned. The log is prose only a reader
 # can turn into a rejection comment, so it is residue by construction.
-| ([ $lanes[] | select(.state == "dead" and .rc == "7")
+| ([ $lanes[] | select(lane_cleanup_eligible and .rc == "7")
      | select(ticket(lane_ticket(.id)) != null)
      | ((.head // "")
         | if type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$") then . else null end) as $head
@@ -219,7 +220,7 @@ else
 # while a wave is mid-flight, so the ticket is re-read LIVE before anything is
 # written. (paid: #23 merged at 22:23:17 and was blocked at 22:24:29 by a wave
 # harvesting against a photograph taken 90 seconds before the merge.)
-| ([ $lanes[] | select(.state == "dead" and .type == "merge")
+| ([ $lanes[] | select(lane_cleanup_eligible and .type == "merge")
      | select((.outcome // "none") != "merge-failed")
      | select((ticket(lane_ticket(.id)).state // "") == "merge-queue")
      | (lane_ticket(.id) | tonumber) as $iid
@@ -238,7 +239,7 @@ else
 # merged 95 seconds earlier; another ticket was gated twice at one commit.)
 # =========================================================================
 
-| ($lanes | map(select(.state != "dead"
+| ($lanes | map(select(lane_holds_capacity
                        and (.type == "gate" or .type == "merge" or .type == "probe")))
           | length) as $aux_alive
 | (($aux_cap - $aux_alive) | if . < 0 then 0 else . end) as $aux_free

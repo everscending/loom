@@ -562,10 +562,11 @@ include "lib";
             epics_awaiting_probe: [$epics[] | select(.needs_probe) | .name],
             ready_set_empty: (($tickets | map(select(.state == "ready-for-agent" and .unblocked
                                and ((.assignees | length) == 0))) | length) == 0),
-            # Every count in `summary` means ALIVE — running or stale. A stale
-            # lane still holds its process and its worktree, so treating it as
-            # free over-subscribes the caps. Per-lane detail stays in `lanes[]`.
-            lanes_running: ($lanes | map(select(.state != "dead")) | length),
+            # Capacity means paid work still in progress. A stale lane with no
+            # rc still holds its slot; a provider-complete lane with rc/outcome
+            # may retain a host-epilogue pid but is cleanup work, not paid work.
+            # Per-lane process detail stays in `lanes[]` for safe harvesting.
+            lanes_running: ($lanes | map(select(lane_holds_capacity)) | length),
             # How many `review` tickets are actually worth a verifier right now
             # — never simply the count in `review` (P11).
             gateable: ($tickets | map(select(.gate.eligible)) | length),
@@ -574,14 +575,13 @@ include "lib";
             lanes_running_by_type:
               (["impl","gate","merge","probe","unknown"]
                | map(. as $t | {key: $t,
-                     value: ($lanes | map(select(.state != "dead" and .type == $t)) | length)})
+                     value: ($lanes | map(select(lane_holds_capacity and .type == $t)) | length)})
                | from_entries),
-            # Occupancy counts ALIVE lanes, not merely `running` ones: a stale
-            # lane still holds its process and its worktree, so treating it as a
-            # free slot over-subscribes `max_lanes`. Harvest clears it, and the
-            # snapshot is re-run after the wave writes.
+            # Occupancy counts unfinished lanes. Stale work still occupies a
+            # slot, while a lane with durable rc is cleared before same-plan
+            # fills and therefore does not force an otherwise empty wave.
             impl_slots_free: ((($config.max_lanes | tonumber?) // 4)
-                              - ($lanes | map(select(.state != "dead"
+                              - ($lanes | map(select(lane_holds_capacity
                                  and .type == "impl")) | length)),
             # A merge is in flight in its own lane; scheduling continues around
             # it, but a second merge waits (P5).

@@ -956,9 +956,16 @@ _aux_lane_id() { # <lane-id> → true for the max_aux_lanes population
     case "$1" in gate-*|merge-*|probe-*) return 0 ;; *) return 1 ;; esac
 }
 
+_capacity_lanes_alive() { # live processes whose provider work has not finished
+    # rc is written before the host epilogue completes. Keep those processes in
+    # `_lanes_alive` for sweep/worktree safety, but release their worker slot so
+    # an ordered clear+spawn plan can queue its replacement on either provider.
+    _lanes_alive | awk '$5=="-"'
+}
+
 _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the request being drained
     local alive reserved=0 request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
-    alive=$(_lanes_alive | awk '$4=="gate"||$4=="merge"||$4=="probe" { n++ } END { print n+0 }')
+    alive=$(_capacity_lanes_alive | awk '$4=="gate"||$4=="merge"||$4=="probe" { n++ } END { print n+0 }')
     for request in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
         [ -d "$request" ] || continue
         queued_id=$(cat "$request/id" 2>/dev/null || true)

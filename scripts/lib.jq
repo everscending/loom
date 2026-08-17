@@ -98,6 +98,15 @@ def active_supervised_repair_of($notes):
      | sort_by([.at, -.i]) | last) as $repair
   | if $repair == null then null else ($repair | del(.i)) end;
 
+# A lane can finish its paid provider job and durably write rc/outcome while
+# its host epilogue still owns the process id. It is then cleanup-eligible, not
+# capacity-bearing. Keep the two predicates shared because snapshot.jq reports
+# capacity and plan.jq consumes the same lane rows for harvest/admission.
+def lane_cleanup_eligible:
+    .state == "dead" or ((.rc // "-") != "-");
+def lane_holds_capacity:
+    .state != "dead" and ((.rc // "-") == "-"); # mutate:finished-lane-capacity
+
 # Durations, shares and money, formatted the same way wherever they are
 # printed. Consumers: report.jq and retro.jq, which `retro` prints one after
 # the other — two spellings of an hour in one output is a reading error

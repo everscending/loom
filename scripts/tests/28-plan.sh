@@ -512,6 +512,59 @@ fi
     && ok "plan: over a live snapshot it schedules the gate the board actually calls for" \
     || bad "plan: live snapshot planned $("$TICK" plan "$T/live-full.json" | jq -c '[.actions[]|select(.kind=="spawn")|.lane]')"
 
+# A provider can finish its paid job and write rc/outcome while the host
+# epilogue still owns the lane pid. That process needs cleanup, but it is no
+# longer doing implementation/gate work and must not consume either cap. The
+# same immutable plan clears it before filling the released slots. Keep its
+# ticket in-progress to prove the live pid still suppresses a duplicate reuse
+# of that lane id until cleanup actually runs.
+CAP_REPO="$T/cap-repo"; CAP_HOME="$T/cap-home"
+mkdir -p "$CAP_REPO" "$CAP_HOME/lanes"
+seed_tracker_decl "$CAP_REPO"
+cat > "$CAP_REPO/.loom.yml" <<'EOF'
+max_lanes: 1
+max_aux_lanes: 1
+heartbeat_stale_minutes: 30
+EOF
+jq '. += [{
+      "iid":196,"title":"finished implementation epilogue","project_id":1,"web_url":"https://x/196",
+      "labels":["build-2","in-progress"],"assignees":[{"username":"agent-a"}],
+      "updated_at":"2026-07-28T13:00:00Z","milestone":{"title":"Ledger core"},
+      "description":"## Risk tier\n\nlogic\n\n## Blocked by\n\nNone - can start immediately\n"
+    }]' "$PFX/open.json" > "$PFX/open-capacity.json"
+sleep 60 & cap_impl_pid=$!
+sleep 60 & cap_gate_pid=$!
+printf '%s\n' "$cap_impl_pid" > "$CAP_HOME/lanes/impl-196.pid"
+printf '%s\n' 0 > "$CAP_HOME/lanes/impl-196.rc"
+printf '%s\n' blocked > "$CAP_HOME/lanes/impl-196.outcome"
+printf '%s\n' "$cap_gate_pid" > "$CAP_HOME/lanes/gate-99.pid"
+printf '%s\n' 0 > "$CAP_HOME/lanes/gate-99.rc"
+printf '%s\n' verdict > "$CAP_HOME/lanes/gate-99.outcome"
+STUB_OPEN="$PFX/open-capacity.json" GLAB_CMD="$PFX/glab-stub.sh" STUB_LOG="$T/calls-capacity" \
+  LOOM_REPO="$CAP_REPO" LOOM_HOME="$CAP_HOME" "$TICK" snapshot --brief > "$T/capacity-snapshot.json" 2>/dev/null
+LOOM_REPO="$CAP_REPO" LOOM_HOME="$CAP_HOME" "$TICK" plan "$T/capacity-snapshot.json" \
+  > "$T/capacity-plan.json" 2>/dev/null
+kill "$cap_impl_pid" "$cap_gate_pid" 2>/dev/null || true
+wait "$cap_impl_pid" "$cap_gate_pid" 2>/dev/null || true
+if jq -e '
+    .summary.impl_slots_free == 1
+    and .summary.lanes_running_by_type.impl == 0
+    and .summary.lanes_running_by_type.gate == 0
+    and (.summary.stranded | index(196) | not)
+    and ([.lanes[] | select(.id == "impl-196" and .state == "running" and .rc == "0")] | length) == 1
+  ' "$T/capacity-snapshot.json" >/dev/null 2>&1 \
+  && jq -e '
+    ([.actions[] | select(.kind == "clear-lane") | .lane] | sort) == ["gate-99","impl-196"]
+    and ([.actions[] | select(.kind == "spawn") | .lane] | sort) == ["gate-12","impl-10"]
+    and ([.actions[] | select(.kind == "clear-lane") | .order] | max)
+        < ([.actions[] | select(.kind == "spawn") | .order] | min)
+    and ([.actions[] | select(.lane == "impl-196" and .kind == "spawn")] | length) == 0
+  ' "$T/capacity-plan.json" >/dev/null 2>&1; then
+    ok "plan: completed lane epilogues are cleared then their primary/aux slots fill in the same plan without duplicate reuse"
+else
+    bad "plan: completed epilogues still consumed capacity or duplicated work (snapshot=$(jq -c '{lanes,summary}' "$T/capacity-snapshot.json" 2>/dev/null); plan=$(jq -c '{actions,deferred}' "$T/capacity-plan.json" 2>/dev/null))"
+fi
+
 # --- 28l. The program is a file, and a missing one is named ---------------
 # Same contract as every other jq program beside tick.sh (P71/P72): it parses
 # on its own, and a verb whose program is missing says which file is missing
