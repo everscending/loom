@@ -68,6 +68,14 @@ manual `tick` acquires one; if launchd refuses, one push says so and the build
 is running unprotected. *(paid: a wave misread a permission denial as "never
 bootstrapped", exited without harvesting, and nothing fired again for hours.)*
 
+Host worktree preflight is action-scoped. Before the provider starts, each
+spawn is resolved to a safe absolute cwd. If one checkout cannot be created,
+reused, or advanced without losing tracked changes, only that spawn moves to
+`.deferred` with kind `host-preflight-failed`; `wave_spawn_deferred` records
+the reason. Harvest writes and other safe actions remain in the immutable
+plan and the wave starts. A single dirty or missing checkout must never turn
+the whole pre-provider boundary into an unrecorded build gap.
+
 ## The loop switch
 
 `start` clears `$LOOM_HOME/loop.stopped`; `stop` writes it. While it exists,

@@ -57,6 +57,9 @@ the ledger and in repair evidence.
   deterministic plan has an actionable idle gap. Keep supervision attached
   until the scheduler starts that work or the missed handoff/heartbeat is
   diagnosed and repaired. An armed timer is recovery plumbing, not progress.
+  Host preflight is isolated per spawn: one unsafe worktree may defer that
+  lane with an explicit event and plan reason, but it must not suppress safe
+  harvest writes or unrelated runnable actions in the same wave.
 - `MEND-LEARN-01` — every confirmed avoidable progress gap feeds back into
   Loom itself: preserve the live evidence, establish a public reproduction,
   repair the provider-neutral owning seam, and add regression plus planted
@@ -103,7 +106,10 @@ the ledger and in repair evidence.
    lane state; cleanup inherited by the next heartbeat admits that heartbeat
    past the old wave gap. An `orch-base-stale` decision at the current MR HEAD routes
    the ticket to implementation reconciliation instead of the generic
-   MR-open repair back to review.
+   MR-open repair back to review. A host worktree preflight failure becomes a
+   `host-preflight-failed` deferred item plus `wave_spawn_deferred`; the wave
+   still executes every safe action. If it instead dies before `wave_start`,
+   the build has another actionable idle defect, not a healthy deferral.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.

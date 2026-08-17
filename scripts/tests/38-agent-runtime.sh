@@ -586,6 +586,68 @@ if assert_mutant_ran "$gate_mut_rc" "$gate_mut_out" "gate-head-handoff-violation
   fi
 fi
 
+# Host preflight is per spawn, not an all-or-nothing wave gate. A dirty gate
+# checkout cannot safely advance to a newer immutable MR head, but that one
+# local problem must not suppress unrelated runnable work (or harvest actions
+# already present in the same plan). Defer it explicitly and launch the rest.
+printf 'local diagnosis\n' >> "$gate_cwd/supervised.txt"
+cat > "$WT/build-mixed-preflight.json" <<'EOF'
+[
+  {"id":1,"title":"Build 1","state":"open","labels":["provider::codex"],"assignees":[],"body":"","url":"https://x/build"},
+  {"id":122,"title":"Dirty gate checkout","state":"open","labels":["build-1","review","tier::logic"],"assignees":["human"],"body":"Review the pushed repair","url":"https://x/122"},
+  {"id":123,"title":"Independent ready work","state":"open","labels":["build-1","ready-for-agent","tier::logic"],"assignees":[],"body":"Do independent work","url":"https://x/123"}
+]
+EOF
+mixed_plan_cap="$WT/mixed-preflight-plan.json"
+mixed_wave_ran="$WT/mixed-preflight-wave-ran"
+mixed_cmd='cp "$LOOM_WAVE_PLAN" "$MIXED_PLAN_CAP"; : > "$MIXED_WAVE_RAN"'
+BUILD_JSON="$WT/build-mixed-preflight.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=122 FORGE_JSON="$WT/gate-mrs-newer.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/mixed-preflight-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD="$mixed_cmd" LOOM_WORKTREE_INSTALL_CMD=true \
+  MIXED_PLAN_CAP="$mixed_plan_cap" MIXED_WAVE_RAN="$mixed_wave_ran" \
+  "$TICK" tick --provider codex >"$WT/mixed-preflight.out" 2>&1
+mixed_rc=$?
+if [ "$mixed_rc" -eq 0 ] && [ -f "$mixed_wave_ran" ] \
+   && jq -e 'any(.actions[]; .lane == "impl-123" and .spawn.cwd != null)
+             and (any(.actions[]; .lane == "gate-122") | not)
+             and any(.deferred[]; .lane == "gate-122" and .ticket == 122
+                       and .kind == "host-preflight-failed"
+                       and (.why | contains("tracked changes")))' "$mixed_plan_cap" >/dev/null \
+   && jq -e 'select(.ev == "wave_spawn_deferred" and .lane == "gate-122" and .ticket == 122)' \
+        "$WT/mixed-preflight-home/events.jsonl" >/dev/null; then
+  ok "wave preparation: one unsafe spawn is deferred without suppressing the valid wave"
+else
+  bad "wave preparation: one dirty spawn suppressed unrelated work or vanished (rc=$mixed_rc ran=$([ -f "$mixed_wave_ran" ] && echo yes || echo no) plan=[$mixed_plan_cap] $(tail -3 "$WT/mixed-preflight.out" | tr '\n' ';'))"
+fi
+
+# Planted violation: restore the old all-or-nothing return at the exact public
+# boundary. The same dirty gate must now prevent the provider from seeing the
+# independent action, proving the mixed-plan regression pays for the fix.
+PREFLIGHT_MUT=$(mirror_scripts "$WT/spawn-preflight-mutant")
+sed 's/_defer_wave_spawn "$plan" "$lane" "$ticket" "$error_log" || exit 1/exit 1 # mutate:abort-wave-on-spawn-preflight/' \
+  "$PREFLIGHT_MUT/tick.sh" > "$PREFLIGHT_MUT/tick-mutant.sh"
+chmod +x "$PREFLIGHT_MUT/tick-mutant.sh"
+rm -f "$WT/mixed-preflight-mutant-wave-ran"
+mixed_mut_out=$(BUILD_JSON="$WT/build-mixed-preflight.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=122 FORGE_JSON="$WT/gate-mrs-newer.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/mixed-preflight-mutant-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD="$mixed_cmd" LOOM_WORKTREE_INSTALL_CMD=true \
+  MIXED_PLAN_CAP="$WT/mixed-preflight-mutant-plan.json" MIXED_WAVE_RAN="$WT/mixed-preflight-mutant-wave-ran" \
+  "$PREFLIGHT_MUT/tick-mutant.sh" tick --provider codex 2>&1)
+mixed_mut_rc=$?
+if assert_mutant_ran "$mixed_mut_rc" "$mixed_mut_out" "abort-wave-on-spawn-preflight"; then
+  if [ "$mixed_mut_rc" -ne 0 ] && [ ! -e "$WT/mixed-preflight-mutant-wave-ran" ]; then
+    ok "wave preparation violation: all-or-nothing preflight recreates the build gap"
+  else
+    bad "wave preparation violation: abort mutant did not suppress the wave (rc=$mixed_mut_rc ran=$([ -e "$WT/mixed-preflight-mutant-wave-ran" ] && echo yes || echo no))"
+  fi
+fi
+
 # If that PR lands outside Loom while its tracker ticket remains open, the
 # branch is no longer rework. Preserve a post-merge FAIL as explicit residue
 # and let other ready work proceed; never recreate and edit shipped code under

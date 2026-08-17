@@ -489,6 +489,7 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 - **`mend [--once|--observe-only]`** — stay attached to an active build,
   close or diagnose actionable idle gaps, help rejection-cap tickets, and
   turn every confirmed avoidable gap into a regression-backed Loom repair,
+  including any host preflight that suppresses otherwise safe wave actions,
   without becoming another scheduler or resuming a stopped loop:
   [references/mend.md](references/mend.md).
 - **`triage`** — every blocked ticket on one `/lavish` surface, six actions

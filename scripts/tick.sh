@@ -1702,9 +1702,93 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     tick_go=1
 }
 
-_prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing the wave
+_resolve_wave_spawn_cwd() { # <lane> <ticket> <base> <branch> <head> <type>
+    local lane="$1" ticket="$2" base="$3" branch="$4" expected_head="$5" lane_type="$6"
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" cwd has_open_mr=0
+    # plan.jq uses <base> when the repo has no explicit `base:` key. It is a
+    # host-side instruction to apply Loom's shared base rule, not a Git ref.
+    [ "$base" = '<base>' ] && base=$(_detect_base "$REPO_ROOT" "$CONFIG")
+    if [ -n "$base" ]; then
+        if [ -n "$ticket" ]; then
+            "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --base "$base"
+        else
+            "$worktree_sh" prepare --repo "$REPO_ROOT" --key "$lane" --base "$base"
+        fi
+        return
+    fi
+
+    [ -n "$ticket" ] || {
+        echo "wave: spawn '$lane' needs an existing ticket worktree but has no ticket id" >&2
+        return 1
+    }
+    [ -z "$branch" ] || has_open_mr=1
+    if [ -z "$branch" ]; then
+        [ "$lane_type" = implementation ] || {
+            echo "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch" >&2
+            return 1
+        }
+        # A stranded implementation often has no MR because it was killed
+        # before submit. The deterministic branch preserves its dirty work.
+        branch="loom-$ticket"
+    fi
+    cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
+    if [ -n "$cwd" ]; then
+        if [ "$lane_type" = gate ]; then
+            [ -n "$expected_head" ] || {
+                echo "wave: gate '$lane' has no immutable MR head in its planned action" >&2
+                return 1
+            }
+            "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd" --head "$expected_head"
+        else
+            "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd"
+        fi
+        return
+    fi
+
+    # An implementation with no MR may contain uncommitted-only work;
+    # recreating loom-<ticket> from a branch tip would silently lose it. Rework
+    # with an open MR is durable forge state and can be reconstructed.
+    if [ "$lane_type" = implementation ] && [ "$has_open_mr" -eq 0 ]; then
+        echo "wave: stranded implementation '$lane' has no surviving worktree on branch '$branch'" >&2
+        return 1
+    fi
+    base=$(_detect_base "$REPO_ROOT")
+    if [ "$lane_type" = gate ]; then
+        [ -n "$expected_head" ] || {
+            echo "wave: gate '$lane' has no immutable MR head in its planned action" >&2
+            return 1
+        }
+        "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base" --head "$expected_head"
+    else
+        "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base"
+    fi
+}
+
+_defer_wave_spawn() { # <plan> <lane> <ticket> <error-log>
+    local plan="$1" lane="$2" ticket="$3" error_log="$4" tmp detail why
+    detail=$(tail -n 1 "$error_log" 2>/dev/null | tr '\r\n' ' ' | cut -c1-300)
+    why="host worktree preflight failed before provider invocation"
+    [ -z "$detail" ] || why="$why: $detail"
+    tmp="$plan.tmp.$$"
+    jq --arg lane "$lane" --arg ticket "$ticket" --arg why "$why" '
+      ([.actions[] | select(.lane == $lane)] | first) as $failed
+      | if $failed == null then error("spawn action vanished during host preflight")
+        else .actions = [.actions[] | select(.lane != $lane)]
+        | .actions = [.actions | to_entries[] | .value + {order:(.key + 1)}]
+        | .deferred = ((.deferred // []) + [{
+            step: ($failed.step // "spawn"),
+            kind: "host-preflight-failed",
+            lane: $lane,
+            ticket: (try ($ticket | tonumber) catch $ticket),
+            why: $why
+          }])
+        end' "$plan" > "$tmp" && mv "$tmp" "$plan" || return 1
+    _ev wave_spawn_deferred lane "$lane" ticket "${ticket:-none}" reason "$why"
+}
+
+_prepare_wave_plan() { # <scratch> — resolve each safe spawn cwd before sandboxing the wave
     local scratch="$1" snapshot="$1/snapshot.json" plan="$1/plan.json" raw="$1/plan.raw.json"
-    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch expected_head cwd tmp lane_type has_open_mr
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch expected_head cwd tmp lane_type error_log
     [ -x "$worktree_sh" ] || die "wave: deterministic worktree helper missing: $worktree_sh"
     "$SELF_PATH" snapshot --brief > "$snapshot" \
       || die "wave: could not capture the tracker snapshot before provider invocation"
@@ -1731,65 +1815,10 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
       | [.lane, $ticket, $base, $branch, (.spawn.expected_head // ""), (.spawn.type // "")] | join("\u001c")' "$raw" \
       | while IFS="$(printf '\034')" read -r lane ticket base branch expected_head lane_type; do
         [ -n "$lane" ] || continue
-        # plan.jq uses <base> when the repo has no explicit `base:` key. It is
-        # a host-side instruction to apply Loom's shared base rule, not a Git
-        # ref. Leaving it literal makes worktree.sh look for origin/<base> and
-        # aborts the entire wave before the provider can spawn any lane.
-        [ "$base" = '<base>' ] && base=$(_detect_base "$REPO_ROOT" "$CONFIG")
-        if [ -n "$base" ]; then
-          if [ -n "$ticket" ]; then
-            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --base "$base") \
-              || exit 1
-          else
-            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --key "$lane" --base "$base") \
-              || exit 1
-          fi
-        else
-          [ -n "$ticket" ] \
-            || die "wave: spawn '$lane' needs an existing ticket worktree but has no ticket id"
-          has_open_mr=0
-          [ -z "$branch" ] || has_open_mr=1
-          if [ -z "$branch" ]; then
-            [ "$lane_type" = implementation ] \
-              || die "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch"
-            # A stranded implementation often has no MR because it was killed
-            # before submit. worktree.sh created it on the deterministic local
-            # branch; requiring forge state here loses exactly the dirty work
-            # this recovery action says to resume.
-            branch="loom-$ticket"
-          fi
-          cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
-          if [ -n "$cwd" ]; then
-            if [ "$lane_type" = gate ]; then
-              [ -n "$expected_head" ] \
-                || die "wave: gate '$lane' has no immutable MR head in its planned action"
-              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd" --head "$expected_head") \
-                || exit 1
-            else
-              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd") \
-                || exit 1
-            fi
-          else
-            # An implementation with no MR may contain uncommitted-only work;
-            # recreating loom-<ticket> from a branch tip would silently lose
-            # it, so that shape still fails closed. Rework WITH an open MR is
-            # different: its reviewed branch is durable forge state, and a
-            # swept local worktree is safe to reconstruct exactly like a gate
-            # or merge checkout.
-            if [ "$lane_type" = implementation ] && [ "$has_open_mr" -eq 0 ]; then
-              die "wave: stranded implementation '$lane' has no surviving worktree on branch '$branch'"
-            fi
-            base=$(_detect_base "$REPO_ROOT")
-            if [ "$lane_type" = gate ]; then
-              [ -n "$expected_head" ] \
-                || die "wave: gate '$lane' has no immutable MR head in its planned action"
-              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base" --head "$expected_head") \
-                || exit 1
-            else
-              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base") \
-                || exit 1
-            fi
-          fi
+        error_log="$scratch/preflight-$lane.err.log"
+        if ! cwd=$(_resolve_wave_spawn_cwd "$lane" "$ticket" "$base" "$branch" "$expected_head" "$lane_type" 2>"$error_log"); then
+          _defer_wave_spawn "$plan" "$lane" "$ticket" "$error_log" || exit 1
+          continue
         fi
         tmp="$plan.tmp.$$"
         jq --arg lane "$lane" --arg cwd "$cwd" '
@@ -1797,7 +1826,7 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
             ((. + {cwd:$cwd, cwd_from:"the linked worktree resolved by tick.sh before this wave"}) | del(.prepare))' \
           "$plan" > "$tmp" && mv "$tmp" "$plan"
       done \
-      || die "wave: could not resolve every spawn worktree before provider invocation"
+      || die "wave: could not finish host worktree preflight before provider invocation"
     printf '%s\n' "$plan"
 }
 
