@@ -168,6 +168,42 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-rescope-mid.json")" = "1/marks-attribution/1" ] \
     && ok "snapshot: rejections newer than the reset marker still count" \
     || bad "snapshot: the reset swallowed a later rejection ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-rescope-mid.json"))"
+# A completed supervised repair retires valid gate rejections without claiming
+# the gate was invalid or the work was replaced. Its narrower marker must not
+# retire merge-attempt history, and its reason must remain visible to the plan.
+cat > "$FX/notes-12-supervised-repair.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Fixed both valid response-contract defects at a84fcf3 and reconciled main.\n\n<!-- orch-supervised-repair 2026-07-28T10:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=response-contract -->"},
+ {"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"merge"},"body":"combined gate failed\n\n<!-- orch-merge-attempt 1 -->"},
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=response-contract -->"}]
+EOF
+cp "$FX/notes-12-supervised-repair.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-supervised-repair" "$TICK" snapshot > "$T/snap-supervised-repair.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/snap-supervised-repair.json")" = "0" ] \
+    && ok "snapshot: supervised repair retires prior valid gate rejections" \
+    || bad "snapshot: supervised repair left the old rejection cap active"
+[ "$(jq -r '.tickets[] | select(.id==12) | .merge_attempts' "$T/snap-supervised-repair.json")" = "1" ] \
+    && ok "snapshot: supervised repair preserves merge-attempt history" \
+    || bad "snapshot: supervised repair incorrectly retired merge history"
+case "$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.body // ""' "$T/snap-supervised-repair.json")" in
+    *"a84fcf3"*"reconciled main"*)
+        ok "snapshot: supervised repair reason crosses the tracker boundary whole" ;;
+    *)  bad "snapshot: supervised repair reason is missing from the ticket row" ;;
+esac
+# Planted mutant: remove only the supervised-repair marker from the shared
+# verdict cutoff and drive the same public snapshot seam. The two historical
+# rejections must reappear, proving the GREEN result depends on this marker.
+SRM=$(mirror_scripts "$T/supervised-repair-mutant")
+sed 's/|supervised-repair//' "$(dirname "$TICK")/lib.jq" > "$SRM/lib.jq.mut"
+mv "$SRM/lib.jq.mut" "$SRM/lib.jq"
+cp "$FX/notes-12-supervised-repair.json" "$FX/notes-12.json"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-supervised-repair-mutant" \
+    "$SRM/tick.sh" snapshot > "$T/snap-supervised-repair-mutant.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/snap-supervised-repair-mutant.json")" = "2" ] \
+    && ok "snapshot mutant: removing the repair cutoff restores the spent rejection cap" \
+    || bad "snapshot mutant: the planted missing cutoff did not turn the public seam red"
 # 7a5c. P78: the blocked report is located by its `orch-blocked` trailer and
 #      carried WHOLE, so the human triaging a blocked ticket reads why without
 #      opening the tracker. Every other parser here extracts a field; this one

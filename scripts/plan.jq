@@ -262,7 +262,9 @@ else
                   merge_lock: false,
                   cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                   brief: { step: 3,
+                           active_supervised_repair: (.active_supervised_repair // null),
                            inputs: ["ticket #\(.id) body and its `PRD requirement`",
+                                    "the active supervised repair in this action, when non-null — evidence of valid defects repaired since the retired gate history",
                                     "the open MR at HEAD \(.gate.head // "unknown")",
                                     "the merge spawn line to run on a PASS"] } },
          why: "gate.eligible — in `review`, an open MR, and no verdict standing at this HEAD" } ])

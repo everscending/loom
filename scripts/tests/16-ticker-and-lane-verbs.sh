@@ -710,6 +710,34 @@ LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAPVR" \
     && bad "verdict-reset: accepted an empty reason" \
     || ok "verdict-reset: an empty reason is refused"
 
+# A valid gate rejection repaired under human supervision is neither an
+# invalid verdict nor different work. Record that fact with its own marker so
+# the rejection cap can retire without lying about why, while keeping the
+# decision human-only and auditable.
+VCAPSR="$T/supervised-repair-bodies"; : > "$VCAPSR"
+echo "Fixed the response boundary at a84fcf3 and reconciled main" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAPSR" "$LANE" supervised-repair 8 >/dev/null 2>&1
+grep -qE "orch-supervised-repair [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z" "$VCAPSR" \
+    && grep -q "Fixed the response boundary at a84fcf3" "$VCAPSR" \
+    && ok "supervised-repair: a human posts the mandatory reason and marker together" \
+    || bad "supervised-repair: marker or reason missing ($(tail -3 "$VCAPSR" 2>/dev/null))"
+ACAPSR="$T/supervised-repair-calls"; : > "$ACAPSR"
+echo "valid defects repaired" | LOOM_LANE_ID=impl-8 LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAPSR" "$LANE" supervised-repair 8 >/dev/null 2>&1 \
+    && bad "supervised-repair: a lane retired its own rejection history" \
+    || ok "supervised-repair: a lane cannot retire its own rejection history"
+echo "valid defects repaired" | LOOM_WAVE_PROMPT="/loom tick" LOOM_HOME="$EVH" \
+    GLAB_CMD="$T/glab-argv-stub.sh" ACAP="$ACAPSR" "$LANE" supervised-repair 8 >/dev/null 2>&1 \
+    && bad "supervised-repair: a wave retired a ticket's rejection history" \
+    || ok "supervised-repair: a wave cannot retire a ticket's rejection history"
+[ -s "$ACAPSR" ] \
+    && bad "supervised-repair: an automated caller reached the tracker ($(head -1 "$ACAPSR"))" \
+    || ok "supervised-repair: no automated reset write reached the tracker"
+LOOM_HOME="$EVH" GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAPSR" \
+    "$LANE" supervised-repair 8 </dev/null >/dev/null 2>&1 \
+    && bad "supervised-repair: accepted an empty reason" \
+    || ok "supervised-repair: an empty reason is refused"
+
 # 16a4b-2. P96: `merge-reset` retires the MERGE cap of a ticket whose merges
 #       failed on something since resolved — a conflict a human untangled, a
 #       dependency that has landed. Until it existed a spent cap had no reset

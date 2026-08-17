@@ -29,6 +29,12 @@
 #                                            mandatory reason and retire prior
 #                                            verdicts/rejections. Human only —
 #                                            refused inside a lane or a wave
+#   lane.sh supervised-repair <iid> [--file F]
+#                                            same work, valid gate defects now
+#                                            repaired under supervision: post
+#                                            the mandatory reason and retire
+#                                            prior verdicts/rejections, but not
+#                                            merge attempts. Human only
 #   lane.sh reconcile [<base>]               fetch + MERGE origin/<base> into
 #                                            the branch — the only sanctioned
 #                                            reconciliation; rc 3 = real
@@ -640,6 +646,26 @@ cmd_verdict_reset() { # <iid> [--file F]
     _post_note issue "$iid" "$f"
     _lane_ev ticket_verdict_reset ticket "$iid"
     echo "lane.sh: issue $iid — verdicts and rejections recorded before this note no longer count"
+}
+
+cmd_supervised_repair() { # <iid> [--file F]
+    # A valid rejection repaired under supervision is neither an invalid gate
+    # (`verdict-reset`) nor different work (`rescope`). Give that decision its
+    # own tracker marker so a fresh provider-neutral snapshot can retire the
+    # spent rejection cap without falsifying the audit trail. Merge history is
+    # deliberately untouched: `merge_attempts_of` does not read this marker.
+    local iid="${1:-}"
+    _check_iid "$iid"
+    if _automated_caller; then
+        die "supervised-repair is refused in an automated session (${LOOM_LANE_ID:-wave}): declaring valid gate defects repaired is a human supervision decision, never a lane's or a wave's."
+    fi
+    # The reason names the repaired defects and evidence/new HEAD. A bare
+    # marker would erase the cap without leaving the next supervisor a record.
+    local f; f=$(_stage_body "${@:2}")
+    printf '\n\n<!-- orch-supervised-repair %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issue "$iid" "$f"
+    _lane_ev ticket_supervised_repair ticket "$iid"
+    echo "lane.sh: issue $iid — valid gate defects repaired under supervision; prior verdicts and rejections no longer count"
 }
 
 cmd_merge_reset() { # <iid> [--file F]
@@ -1423,7 +1449,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1463,6 +1489,7 @@ case "${1:-}" in
     fix-ticket) shift; cmd_fix_ticket "$@" ;;
     rescope)    shift; cmd_rescope "$@" ;;
     verdict-reset) shift; cmd_verdict_reset "$@" ;;
+    supervised-repair) shift; cmd_supervised_repair "$@" ;;
     merge-reset) shift; cmd_merge_reset "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;

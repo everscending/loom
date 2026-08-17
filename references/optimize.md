@@ -81,11 +81,12 @@ They are machine contracts. Quote them byte-for-byte.
 - `Closes #<ticket-iid>` (the MR-to-ticket link the scheduler reads)
 - `<!-- orch-verdict PASS|FAIL <head-sha> class=<slug> -->`
 - `<!-- orch-verdict-reset <timestamp> -->`
+- `<!-- orch-supervised-repair <timestamp> -->`
 - lane ids: `impl-<n>`, `gate-<n>[-r<round>]`, `merge-<n>`, `probe-<epic-slug>`
 - labels: `ready-for-agent`, `in-progress`, `review`, `merge-queue`,
   `blocked`, `fix`, `build-N`, `model::<tier>`, `tier::<tier>`
 - jq paths: `.scalars.<key>.value`, `.model.effective`, `.gate.eligible`,
-  `.rejections.same_class_tail`, `.summary.stranded`,
+  `.rejections.same_class_tail`, `.active_supervised_repair`, `.summary.stranded`,
   `.summary.impl_slots_free`, `.summary.merge_in_flight`, and the plan
   document's own `.actions[]`, `.residue[]`, `.deferred[]`, `.reason`
 

@@ -56,13 +56,14 @@ def orch_verdict_scan:
     scan("orch-verdict\\s+(PASS|FAIL)\\s+([0-9a-fA-F]{7,40})(?:\\s+class=([a-z0-9-]+))?");
 
 # Gate verdicts that still stand after the newest human reset. `verdict-reset`
-# retires an invalid gate outcome without changing the work; `rescope` is the
-# superset for different work. Ordering uses tracker timestamps plus arrival
-# index, so verdicts at the marker timestamp are retired too. Consumers:
+# retires an invalid gate outcome, `supervised-repair` retires valid defects a
+# human has repaired, and `rescope` is the superset for different work.
+# Ordering uses tracker timestamps plus arrival index, so verdicts at the
+# marker timestamp are retired too. Consumers:
 # snapshot.jq (`judged_at`, `rejections_of`) and lane.sh duplicate refusal.
 def verdicts_after_reset($notes):
     ([$notes | to_entries[]
-      | select((.value.body // "") | test("<!-- orch-(scope|verdict)-reset "))
+      | select((.value.body // "") | test("<!-- orch-(scope-reset|verdict-reset|supervised-repair) "))
       | {at: (.value.created_at // ""), i: .key}]
      | sort_by([.at, -.i]) | last) as $reset
   | [$notes | to_entries[] | .key as $i | .value as $note
@@ -86,6 +87,16 @@ def active_scope_reset_of($notes):
       | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
      | sort_by([.at, -.i]) | last) as $reset
   | if $reset == null then null else ($reset | del(.i)) end;
+
+# The newest completed supervised repair, carried as evidence rather than as
+# replacement scope. snapshot.jq exposes it on the ticket row and plan.jq
+# freezes it into the next gate action. It never participates in merge history.
+def active_supervised_repair_of($notes):
+    ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-supervised-repair "))
+      | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
+     | sort_by([.at, -.i]) | last) as $repair
+  | if $repair == null then null else ($repair | del(.i)) end;
 
 # Durations, shares and money, formatted the same way wherever they are
 # printed. Consumers: report.jq and retro.jq, which `retro` prints one after

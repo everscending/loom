@@ -143,6 +143,56 @@ else
     bad "plan: rc=$rc, $(head -2 "$T/plan.err")"
 fi
 
+# A snapshot-derived supervised repair is the truthful exit from a spent
+# rejection cap. The next plan gates the repaired HEAD and freezes the repair
+# evidence into that immutable action instead of scheduling another impl round.
+jq '.tickets = [{
+      "id": 53, "title": "supervised response repair", "state": "review",
+      "tier": "api", "fix": false, "unblocked": true, "assignees": ["human"],
+      "tier_selection": {"effective": "high", "source": "rework_tier"},
+      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
+      "active_supervised_repair": {
+        "at": "2026-08-10T09:59:00Z",
+        "body": "Fixed valid response defects at a84fcf3.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"
+      },
+      "merge_attempts": 1, "merge_hold": null,
+      "related_merge_requests": [{"id": 103, "state": "open", "branch": "t53", "sha": "ffff777"}],
+      "gate": {"eligible": true, "reason": null, "head": "ffff777", "last_verdict": null}
+    }]
+    | .lanes = [] | .epics = [] | .supervised_leases = []
+    | .config.max_aux_lanes = 1
+    | .summary = {"open_tickets":1,"lanes_running":0,"impl_slots_free":0,
+                  "merge_in_flight":false,"stranded":[],"repairs":[],
+                  "epics_awaiting_probe":[],"ready_set_empty":true}' \
+    "$FX/snap.json" > "$FX/snap-supervised-repair.json"
+PLAN "$FX/snap-supervised-repair.json" > "$T/plan-supervised-repair.json" 2>/dev/null
+if jq -e '.actions | length == 1
+          and .[0].lane == "gate-53"
+          and (.[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+          "$T/plan-supervised-repair.json" >/dev/null 2>&1; then
+    ok "plan: completed supervised repair advances to gate with immutable evidence"
+else
+    bad "plan: supervised repair did not produce the expected gate action ($(jq -c '.actions' "$T/plan-supervised-repair.json"))"
+fi
+# Provider selection changes only the adapter named on the shared action; both
+# Claude and Codex consume the same tracker-derived repair evidence.
+for provider in claude codex; do
+    jq --arg p "$provider" '.build.provider = $p' "$FX/snap-supervised-repair.json" \
+        > "$FX/snap-supervised-repair-$provider.json"
+    PLAN "$FX/snap-supervised-repair-$provider.json" \
+        > "$T/plan-supervised-repair-$provider.json" 2>/dev/null
+done
+if jq -e '.actions[0].spawn.provider == "claude"
+          and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+          "$T/plan-supervised-repair-claude.json" >/dev/null 2>&1 \
+   && jq -e '.actions[0].spawn.provider == "codex"
+             and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+          "$T/plan-supervised-repair-codex.json" >/dev/null 2>&1; then
+    ok "plan: Claude and Codex share the provider-neutral supervised-repair action"
+else
+    bad "plan: provider paths derived different supervised-repair evidence"
+fi
+
 jq '.tickets[0].tier_selection.invalid_labels = ["opus"]' "$FX/snap.json" > "$FX/snap-legacy-model.json"
 PLAN "$FX/snap-legacy-model.json" > "$T/plan-legacy-model.json" 2>/dev/null
 jq -e '.actions == [] and (.reason | test("legacy model:: label"))' "$T/plan-legacy-model.json" >/dev/null \

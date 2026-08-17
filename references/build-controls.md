@@ -50,7 +50,11 @@ claimed `ready-for-agent` ticket is invisible to *both* fill paths (see
 unschedulable for 90 minutes)*. Re-running after a failed write completes the
 missing half without doubling the note. `--to-review` → the same with `review`
 (human completed the work; it takes the same gate as agent work — no bypass),
-assignee kept.
+assignee kept. When that work repaired valid gate defects after a rejection-cap
+hold, first record the truthful cutoff with `lane.sh supervised-repair <n>`
+(mandatory reason on stdin or `--file`), then use `--to-review`. This retires
+the prior gate history without calling it invalid, changing scope, or erasing
+merge attempts.
 
 `--release-hold` is refused outright inside a lane or a wave, so this verb is
 only ever reachable from a human's own session. That is the point: see the

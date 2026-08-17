@@ -479,10 +479,12 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
   counted separately (`crash_cap`). Human-only `lane.sh rescope <n>` retires
   verdict, rejection and merge history for different work; `lane.sh
   verdict-reset <n>` retires verdict/rejection history when the same work and
-  HEAD had an invalid gate; `lane.sh merge-reset <n>` retires merge history
-  after its cause is fixed. Their tracker markers are provider-neutral; lanes
-  and waves cannot write them. *(paid: stale caps; JOR-262's invalid
-  gate.)*
+  HEAD had an invalid gate; `lane.sh supervised-repair <n>` retires that gate
+  history when valid defects were repaired under supervision, preserving
+  merge history; `lane.sh merge-reset <n>` retires merge history after its
+  cause is fixed. Their tracker markers are provider-neutral; lanes and waves
+  cannot write them. *(paid: stale caps; JOR-262's invalid gate; JOR-251's
+  repaired valid defects had no truthful cap exit.)*
 - Blocking writes a **blocked report** with
   **`lane.sh blocked-report <n> --category <slug>`** (body on stdin): what each
   attempt tried, branch/MR links, *the single decision or action needed*. Never
@@ -498,8 +500,9 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
   Next wave auto-requeues; the attempt resumes from the surviving
   worktree/branch.
 - Human hand-fixes: always commit, never leave a worktree dirty. Partial fix →
-  `unblock`. Complete fix → push + `unblock --to-review`; it takes the same
-  gate as agent work.
+  `unblock`. Complete fix after valid gate rejection → push + `lane.sh
+  supervised-repair <n>` with the evidence + `unblock --to-review`; it takes
+  the same gate as agent work.
 - **A human hold = the `blocked` label, applied sticky.** `lane.sh` refuses to
   advance a blocked ticket, so a hold placed mid-flight wins the race against
   in-flight lanes; and stop a lane only with `tick.sh kill-lane`. *(paid: a
