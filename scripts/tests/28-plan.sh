@@ -11,7 +11,8 @@ FX="$T/fx"; mkdir -p "$FX"
 # One fixture snapshot carrying one case per SKILL.md step, so the whole
 # decision table is exercised by a single `plan` run and the ORDER between the
 # steps is assertable at the same time:
-#   #40 review, gateable, its gate lane dead at rc 7   (step 2 + step 3)
+#   #39/#40 review and gateable; #40 unlocks #46        (step 3 priority)
+#   #40's prior gate lane is dead at rc 7               (step 2 + round id)
 #   #41 in-progress behind a STALE lane                (step 2)
 #   #42 stranded, one rejection                        (step 4, rework)
 #   #43 stranded, two of the SAME class                (step 4, the stop rule)
@@ -36,6 +37,12 @@ cat > "$FX/snap.json" <<'EOF'
      "needs_probe": true, "complete": true, "open_tickets": 0, "accepted": false}
   ],
   "tickets": [
+    {"id": 39, "title": "gateable but unlocks nothing", "state": "review", "tier": "logic", "fix": false,
+     "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
+     "merge_attempts": 0, "merge_hold": null,
+     "related_merge_requests": [{"id": 89, "state": "open", "branch": "t39", "sha": "9999aaa"}],
+     "gate": {"eligible": true, "reason": null, "head": "9999aaa", "last_verdict": null}},
     {"id": 40, "title": "pregate rejected", "state": "review", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "active_scope_reset": {"at":"2026-08-10T09:59:00Z","body":"Replacement gate scope: prove only the provider availability round-trip; DST and booking belong to other tickets.\n\n<!-- orch-scope-reset 2026-08-10T09:59:00Z -->"},
@@ -80,6 +87,7 @@ cat > "$FX/snap.json" <<'EOF'
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 46, "title": "ready, blocked by an open blocker", "state": "ready-for-agent", "tier": "ui",
      "fix": false, "unblocked": false, "assignees": [], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "blocked_by": [{"id":40,"source":"native","closed":false}],
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
@@ -124,9 +132,9 @@ cat > "$FX/snap.json" <<'EOF'
   ],
   "lessons_tail": [],
   "summary": {
-    "open_tickets": 12, "by_state": {}, "all_blocked": false,
+    "open_tickets": 13, "by_state": {}, "all_blocked": false,
     "epics_awaiting_probe": ["Ledger core", "Reporting surface"],
-    "ready_set_empty": false, "lanes_running": 2, "gateable": 1,
+    "ready_set_empty": false, "lanes_running": 2, "gateable": 2,
     "lanes_running_by_type": {"impl": 2, "gate": 0, "merge": 0, "probe": 0, "unknown": 0},
     "impl_slots_free": 2, "merge_in_flight": false,
     "stranded": [42, 43, 52],
@@ -233,8 +241,8 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
     || bad "plan: #44 got a lane while its repair was still pending"
 # Step 3: gateable only, and the round comes off the ids already spawned, so a
 # respawn can never overwrite a live lane's pid file.
-[ "$(act gate spawn)" = "gate-40-r2" ] \
-    && ok "plan: the gateable ticket is gated, at the next round number" \
+[ "$(act gate spawn)" = "gate-40-r2,gate-39" ] \
+    && ok "plan: dependency unlock outranks ticket age, and the retry keeps its next round number" \
     || bad "plan: gate spawn wrong ($(act gate spawn))"
 [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate')" = "logic" ] \
     && ok "plan: the gate spawn carries the ticket's own tier as its pregate" \
