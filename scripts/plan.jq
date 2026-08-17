@@ -58,7 +58,7 @@ def spawnable($id):
 def lane_ticket($id): $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
 def lease_why:
-    "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation and gate launches wait for release or expiry";
+    "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation, gate and merge launches wait for release or expiry";
 
 def empty_plan($gen; $build; $reason):
     { generated_at: $gen, build: $build, reason: $reason,
@@ -374,18 +374,20 @@ else
 | ([ $tickets[] | select(.state == "merge-queue")
                    | select(.id as $i | ($reported_block_ids | index($i)) == null) ]
    | sort_by(.id)) as $queue
+| ([ $queue[] | select(.supervised_lease != null) ]) as $merge_leased
+| ([ $queue[] | select(.supervised_lease == null) ]) as $merge_available
 # At `merge_attempt_cap` recorded attempts, stop retrying that ticket: block
 # it so the queue ADVANCES to the next-oldest instead of feeding every later
 # lane into the same wall. (paid: three consecutive lanes wedged on one ticket
 # while two gate-passed tickets waited behind it.) Attempts recorded
 # `base-red` never count — `snapshot.jq` already excludes them.
-| ([ $queue[] | select((.merge_attempts // 0) >= $merge_cap)  # mutate:merge-attempt-cap
+| ([ $merge_available[] | select((.merge_attempts // 0) >= $merge_cap)  # mutate:merge-attempt-cap
      | { step: "merge", kind: "transition", ticket: .id,
          via: "lane.sh", argv: transition_argv(.id; "blocked"),
          why: "\(.merge_attempts) merge attempts against a cap of \($merge_cap) — blocking it advances the queue instead of feeding the next lane into the same wall",
          needs_report: true } ])
   as $block_merge_cap
-| ([ $queue[] | select((.merge_attempts // 0) < $merge_cap and .merge_hold == null) ] | first)
+| ([ $merge_available[] | select((.merge_attempts // 0) < $merge_cap and .merge_hold == null) ] | first)
   as $merge_head
 | (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1 then []
    else [ $merge_head
@@ -400,7 +402,9 @@ else
                                          "the integration base `\($cfg.base // "<declared base, else develop, else main>")`"] } },
               why: "oldest `merge-queue` ticket with no merge hold" } ]
    end) as $merge_actions
-| ([ $queue[] | select(.merge_hold != null)
+| ([ $merge_leased[]
+     | { step: "merge", ticket: .id, why: lease_why } ]
+   + [ $merge_available[] | select(.merge_hold != null)
      | { step: "merge", ticket: .id,
          why: "parked behind an open base-red fix (\(.merge_hold.fixes | map("#\(.)") | join(", "))) — it re-enters the queue on its own when the fix merges" } ]
    + (if ($sum.merge_in_flight // false)

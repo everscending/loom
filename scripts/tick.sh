@@ -1160,11 +1160,12 @@ cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
     esac
 }
 
-_supervised_lane_ticket() { # ordinary impl/gate lane id → ticket iid
+_supervised_lane_ticket() { # ordinary impl/gate/merge lane id → ticket iid
     local id="$1" iid
     case "$id" in
         impl-*) iid="${id#impl-}" ;;
         gate-*) iid="${id#gate-}"; iid="${iid%%-r*}" ;;
+        merge-*) iid="${id#merge-}" ;;
         *) return 1 ;;
     esac
     case "$iid" in ''|*[!0-9]*) return 1 ;; esac

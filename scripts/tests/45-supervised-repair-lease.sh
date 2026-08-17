@@ -83,6 +83,83 @@ else
 fi
 "$TICK" supervise release 12 >/dev/null
 
+# D-TICK-29: a supervised infrastructure repair owns the entire ticket, not
+# only its first two stages. A fresh plan visibly defers a leased merge while
+# preserving queue progress for the next unrelated ticket.
+jq '
+  .tickets |= map(
+    if .id == 10 then
+      .state = "merge-queue" | .merge_attempts = 2 | .merge_hold = null
+      | .gate = {eligible:false,reason:"already passed",head:null,last_verdict:null}
+    elif .id == 12 then
+      .state = "merge-queue" | .merge_attempts = 0 | .merge_hold = null
+      | .supervised_lease = null
+      | .gate = {eligible:false,reason:"already passed",head:null,last_verdict:null}
+    else . end)
+  | .summary.merge_in_flight = false
+  | .summary.stranded = []
+' "$FX/snapshot.json" > "$FX/merge-snapshot.json"
+"$TICK" plan "$FX/merge-snapshot.json" > "$FX/merge-plan.json"
+if ! jq -e '.actions[] | select(.ticket == 10 and .step == "merge")' "$FX/merge-plan.json" >/dev/null \
+   && jq -e '.deferred[] | select(.ticket == 10 and .step == "merge"
+                                      and (.why | contains("root/repair-286")))' "$FX/merge-plan.json" >/dev/null \
+   && jq -e '.actions[] | select(.ticket == 12 and .step == "merge" and .lane == "merge-12")' "$FX/merge-plan.json" >/dev/null; then
+    ok "supervised lease: merge plan defers the held ticket and advances to the next queue entry"
+else
+    bad "supervised lease: merge plan escaped, hid, or stalled behind the held ticket ($(jq -c '{actions,deferred}' "$FX/merge-plan.json"))"
+fi
+
+# The final public admission boundary covers all paths that can outlive a
+# plan: an ordinary stale-plan launch refuses; a Claude/direct handoff and a
+# Codex durable drain consume the now-obsolete successor request softly.
+"$TICK" supervise acquire 10 --owner root/merge-repair --ttl-seconds 60 >/dev/null
+direct_mark="$FX/merge-direct-launched"
+direct_out=$("$TICK" spawn-lane merge-10 --no-tick -- sh -c "touch '$direct_mark'" 2>&1); direct_rc=$?
+for _ in $(seq 1 20); do [ -e "$direct_mark" ] && break; sleep 0.05; done
+if [ "$direct_rc" -ne 0 ] && [ ! -e "$direct_mark" ] && printf '%s' "$direct_out" | grep -qi supervised; then
+    ok "supervised lease: stale merge plan is refused at final admission"
+else
+    bad "supervised lease: stale merge launch escaped (rc=$direct_rc; out=$direct_out)"
+fi
+[ ! -e "$LOOM_HOME/lanes/merge-10.pid" ] || "$TICK" clear-lane merge-10 >/dev/null
+
+handoff_mark="$FX/merge-handoff-launched"
+handoff_out=$(LOOM_LANE_ID=gate-99 "$TICK" spawn-lane merge-10 --no-tick -- sh -c "touch '$handoff_mark'" 2>&1); handoff_rc=$?
+for _ in $(seq 1 20); do [ -e "$handoff_mark" ] && break; sleep 0.05; done
+if [ "$handoff_rc" -eq 0 ] && [ ! -e "$handoff_mark" ] && printf '%s' "$handoff_out" | grep -qi supervised; then
+    ok "supervised lease: direct lane handoff consumes a held merge without launching it"
+else
+    bad "supervised lease: direct merge handoff escaped or became a hard failure (rc=$handoff_rc; out=$handoff_out)"
+fi
+[ ! -e "$LOOM_HOME/lanes/merge-10.pid" ] || "$TICK" clear-lane merge-10 >/dev/null
+
+drain_mark="$FX/merge-drain-launched"
+drain_out=$(LOOM_AUX_DRAIN_ID=merge-10 "$TICK" spawn-lane merge-10 --no-tick -- sh -c "touch '$drain_mark'" 2>&1); drain_rc=$?
+for _ in $(seq 1 20); do [ -e "$drain_mark" ] && break; sleep 0.05; done
+if [ "$drain_rc" -eq 0 ] && [ ! -e "$drain_mark" ] && printf '%s' "$drain_out" | grep -qi supervised; then
+    ok "supervised lease: durable Codex drain consumes a held merge request without launching it"
+else
+    bad "supervised lease: durable merge drain escaped or retained an obsolete request (rc=$drain_rc; out=$drain_out)"
+fi
+[ ! -e "$LOOM_HOME/lanes/merge-10.pid" ] || "$TICK" clear-lane merge-10 >/dev/null
+"$TICK" supervise release 10 >/dev/null
+
+# Planted violation: remove merge recognition from a private copy of the
+# shared lane-to-ticket admission seam. The identical leased launch must
+# escape again, proving the common parser—not provider behavior—holds it.
+MUT=$(mirror_scripts "$FX/mut-no-merge-lease")
+sed -i.bak '/merge-\*) iid="${id#merge-}" ;;/d' "$MUT/tick.sh"
+MUT_HOME="$FX/mut-home"; MUT_MARK="$FX/mut-merge-launched"
+LOOM_HOME="$MUT_HOME" "$MUT/tick.sh" supervise acquire 10 --owner root/mutant --ttl-seconds 60 >/dev/null
+mut_out=$(LOOM_HOME="$MUT_HOME" "$MUT/tick.sh" spawn-lane merge-10 --no-tick -- sh -c "touch '$MUT_MARK'" 2>&1); mut_rc=$?
+for _ in $(seq 1 20); do [ -e "$MUT_MARK" ] && break; sleep 0.05; done
+if [ "$mut_rc" -eq 0 ] && [ -e "$MUT_MARK" ]; then
+    ok "supervised lease violation: removing merge admission recreates the escaped worker"
+else
+    bad "supervised lease violation: parser mutant did not recreate escape (rc=$mut_rc; out=$mut_out)"
+fi
+[ ! -e "$MUT_HOME/lanes/merge-10.pid" ] || LOOM_HOME="$MUT_HOME" "$MUT/tick.sh" clear-lane merge-10 >/dev/null
+
 # The ticket admission lock makes acquire honest at the one remaining race:
 # it cannot report ownership while an already-admitted spawn command is live.
 mkdir -p "$LOOM_HOME/supervised-admission/13.lock.d"
