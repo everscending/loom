@@ -58,7 +58,9 @@ agent_sync_guardrails() {
     cat > "$target.tmp" <<'RULES'
 # Managed by Loom. Consumer: Codex execpolicy.
 prefix_rule(pattern=["git", "push", "--force"], decision="forbidden", justification="Loom never force-pushes; push the existing branch history.")
+prefix_rule(pattern=["git", "push", "--force-with-lease"], decision="forbidden", justification="Loom never rewrites ticket history; reconcile with a merge.")
 prefix_rule(pattern=["git", "push", "-f"], decision="forbidden", justification="Loom never force-pushes; push the existing branch history.")
+prefix_rule(pattern=["git", "rebase"], decision="forbidden", justification="Loom reconciles through lane.sh reconcile; never rewrite ticket history.")
 prefix_rule(pattern=["git", "reset", "--hard"], decision="forbidden", justification="Loom preserves worktree state; use a non-destructive repair.")
 prefix_rule(pattern=["git", "clean", ["-f", "-fd", "-fdx", "-fx"]], decision="forbidden", justification="Loom sweep owns cleanup and preserves unsaved work.")
 prefix_rule(pattern=["rm", ["-rf", "-fr"]], decision="forbidden", justification="Loom denies unscoped recursive deletion; use the scoped Loom cleanup verb.")

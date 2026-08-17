@@ -238,13 +238,13 @@ cmp -s "$AR/codex.rules.before" "$AR/repo/.codex/rules/loom.rules" && grep -q 'e
   && ok "guardrails: Codex sync is idempotent and preserves other rule files" \
   || bad "guardrails: Codex sync changed unrelated state"
 LOOM_REPO="$AR/repo" "$AGENT" sync-guardrails --provider claude --repo "$AR/repo" >/dev/null
-jq -e '.hooks.keep and (.permissions.allow|index("Bash(handwritten *)")) and (.permissions.deny|index("Bash(git push --force*)"))' "$AR/repo/.claude/settings.json" >/dev/null \
+jq -e '.hooks.keep and (.permissions.allow|index("Bash(handwritten *)")) and (.permissions.deny|index("Bash(git push --force*)")) and (.permissions.deny|index("Bash(git rebase*)"))' "$AR/repo/.claude/settings.json" >/dev/null \
   && ok "guardrails: Claude sync preserves unrelated user settings" \
   || bad "guardrails: Claude sync clobbered user settings"
 
 if command -v codex >/dev/null 2>&1; then
   rules="$AR/repo/.codex/rules/loom.rules"; denied=0
-  for cmd in 'git push --force origin x' 'git reset --hard HEAD' 'git clean -fdx' 'rm -rf /tmp/loom-test'; do
+  for cmd in 'git push --force origin x' 'git push --force-with-lease origin x' 'git rebase origin/main' 'git reset --hard HEAD' 'git clean -fdx' 'rm -rf /tmp/loom-test'; do
     decision=$(codex execpolicy check --rules "$rules" $cmd 2>/dev/null | jq -r '.decision // empty')
     [ "$decision" = forbidden ] || denied=1
   done

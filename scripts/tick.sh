@@ -4205,7 +4205,7 @@ _derive_allow() {
 # overridable from a repo. dontAsk auto-approves `allow`; this is what stops it.
 _derive_deny() {
     printf '%s\n' \
-        'Bash(git push --force*)' 'Bash(git push -f*)' 'Bash(git reset --hard*)' \
+        'Bash(git push --force*)' 'Bash(git push -f*)' 'Bash(git rebase*)' 'Bash(git reset --hard*)' \
         'Bash(git clean -f*)' 'Bash(rm -rf *)' 'Bash(rm -fr *)'
 }
 
