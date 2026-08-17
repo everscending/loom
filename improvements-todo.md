@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 02:29 America/Chicago
+Last updated: 2026-08-17 02:34 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -40,11 +40,13 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Resolve the build provider for resumed deterministic handoffs.** Implemented provider-neutrally in `6bc4960` (`fix(chain): recover build provider`): manual `chain-gate` and `chain-merge` recover the active Build's exact single registered `provider::` label when no transport is inherited, while inherited Claude/Codex values are validated and preserved. Ambiguous and unregistered providers fail before spawn. Verification: focused/adjacent suites 93/93, isolated full suite 1,249/1,249, and a deletion mutant recreates the live empty-provider refusal. Live proof: a clean-shell #239 handoff queued `provider=codex` without an explicit environment override.
 
-- [x] **DONE — Make host-state commands linked-worktree safe.** Implemented provider-neutrally in `37a23bd` (`fix(state): canonicalize linked worktrees`): before deriving `LOOM_HOME`, Git common state and porcelain worktree identity resolve linked callers to the main checkout; unprovable or unreadable linked identities fail before state creation. Verification: integrated lease and adjacent suites 106/106; the core resolver's isolated full suite 1,248/1,248; the final fail-loud edge focused 20/20; and a cwd-derived mutant recreates false-success release. Live proof: releasing #251 from `.worktrees/251` removed the canonical lease and created no parallel residue.
+- [x] **DONE — Make host-state commands linked-worktree safe.** Implemented provider-neutrally in `37a23bd` (`fix(state): canonicalize linked worktrees`) with missing-Git fixture compatibility in `4e43677` (`fix(state): distinguish linked gitfiles`): before deriving `LOOM_HOME`, Git common state and porcelain worktree identity resolve linked callers to the main checkout; unprovable or unreadable linked identities fail before state creation. Verification: integrated lease and adjacent suites 106/106; the core resolver's isolated full suite 1,248/1,248; final snapshot/lease coverage 149/149; and a cwd-derived mutant recreates false-success release. Live proof: releasing #251 from `.worktrees/251` removed the canonical lease and created no parallel residue.
 
 - [x] **DONE — Eliminate watcher unbound-state crashes.** Implemented in `8e1a2e5` (`fix(watch): initialize empty wave stream`): the progress watcher initializes `wj` before the fallible empty-glob pipeline used when a tick lock exists without a wave JSONL. Verification: watcher/liveness suites 66/66, isolated full suite 1,247/1,247, and a public planted mutant recreates `wj: unbound variable`. Shared host code only; adapters unchanged.
 
 - [ ] **IN PROGRESS — Run browser acceptance probes at a viable provider boundary.** The E2 probe started its real Next stack and passed API lint, but Codex's workspace sandbox denied Chromium's macOS Mach-port bootstrap before any page opened. `4940b52` now prevents this infrastructure failure from creating another false product ticket and gives it a typed ticker outcome; JOR-290 remains held. The remaining security decision is whether to run a supervised E2 retry with the existing explicit `LOOM_CODEX_SANDBOX=danger-full-access` opt-in or move browser execution to a narrower host-owned boundary. Claude behavior is preserved.
+
+- [ ] **IN PROGRESS — Promote shared UI harness repairs before retrying dependent branches.** JOR-239 and JOR-289 each independently passed their own focused work but lost a full pregate to the same branch-local 30-second cine identity lock. JOR-236 now carries the canonical cine/report lease migration at `2abfe29`; JOR-239, JOR-240, and JOR-289 are explicitly leased until #236 gates and merges. After that merge, reconcile each branch before spending another UI gate. Longer-term planner metadata should be able to express a temporary infrastructure prerequisite without inventing a product dependency.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
