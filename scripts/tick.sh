@@ -1062,6 +1062,23 @@ _ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retry
     return 1
 }
 
+_merge_lock_admission_refusal() { # <id> <from-lane> <owner> — soft for handoff, retryable for drain
+    local id="$1" from="$2" owner="$3"
+    echo "spawn-lane: merge lock held by pid $owner — one merge at a time; not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current merge."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason merge_lock_busy owner "$owner"
+    # JOR-286's Codex gate handoff was already a durable request when JOR-287
+    # won the lock. Treating the collision as a generic launch error moved the
+    # request to failed-* even though nothing was wrong with it. Match the
+    # shared aux/UI admission contract: a durable drain puts the exact request
+    # back for the next heartbeat; a direct lane handoff remains a soft no-op.
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75 # mutate:merge-lock-retry
+    [ -n "$from" ] && return 0
+    return 1
+}
+
 _gate_ticket_in_review() { # <gate-id> → 0 review, 1 definite non-review, 2 unreadable
     local id="$1" iid issue
     iid="${id#gate-}"; iid="${iid%%-*}"
@@ -3115,7 +3132,21 @@ _cmd_spawn_lane() {
     # Reserve the merge lock BEFORE spawning: a refusal must leave no lane and
     # no pid file behind, exactly like the other spawn guards.
     if [ "$merge_lock" -eq 1 ]; then
-        _merge_lock_reserve || die "spawn-lane: merge lock held by pid $(_merge_lock_owner) — one merge at a time"
+        local merge_lock_rc=0 merge_lock_owner=""
+        _merge_lock_reserve || merge_lock_rc=$?
+        case "$merge_lock_rc" in
+            0) ;;
+            1)
+                merge_lock_owner=$(_merge_lock_owner)
+                merge_lock_rc=0
+                _merge_lock_admission_refusal "$id" "$handoff_from" "$merge_lock_owner" \
+                    || merge_lock_rc=$?
+                return "$merge_lock_rc"
+                ;;
+            *)
+                die "spawn-lane: cannot reserve the merge lock safely — refusing '$id'"
+                ;;
+        esac
     fi
     # P67: same guard, for a gate lane against its own ticket+HEAD. Keyed off
     # the worktree's actual commit, read here rather than trusted from the id,
