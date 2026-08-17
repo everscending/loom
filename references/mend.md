@@ -8,6 +8,8 @@ human-facing `start` verb can do that.
 Use `/loom mend` for the continuing supervisory loop, `/loom mend --once` for
 one inspection/repair pass, or `/loom mend --observe-only` for a pass that
 reports findings without changing repositories, tracker state, or lane state.
+The default verb stays attached to the build. A status request is an update
+inside that loop, not a reason to end it.
 
 ## Normative contract
 
@@ -51,6 +53,10 @@ the ledger and in repair evidence.
   local files hold only runtime plumbing; partial transitions are repaired.
 - `MEND-CHAIN-01` — implementation → gate → merge chaining is a fast path;
   durable heartbeat recovery must make every missed handoff eventually move.
+- `MEND-FLOW-01` — a running build with zero active lanes and a non-empty
+  deterministic plan has an actionable idle gap. Keep supervision attached
+  until the scheduler starts that work or the missed handoff/heartbeat is
+  diagnosed and repaired. An armed timer is recovery plumbing, not progress.
 - `MEND-HEAD-01` — gates and merges use the exact immutable MR head, correct
   tier, complete active scope, and a verdict attributed to that head.
 - `MEND-ADMIT-01` — implementation and auxiliary caps, UI serialization,
@@ -78,6 +84,16 @@ the ledger and in repair evidence.
 2. Let healthy work progress. Use configured heartbeat, wave-gap, rejection,
    crash, and cap values rather than ad-hoc elapsed-time guesses. Silence is a
    finding only after the owner has exceeded its declared liveness boundary.
+   When `mend-status` reports `actionable-idle`, do not end the mend turn or
+   describe the build as merely "armed." Keep a bounded wait through the next
+   lane handoff or 60-second scheduler heartbeat, refresh, and confirm the
+   planned action started. A wave-gap may explain an initial timer delay, but
+   it never makes runnable work a terminal mend state; lane completion is
+   specified to bypass that gap. If the action is still idle past its owning
+   boundary, inspect the durable request, `tick_skipped` event, pending replay,
+   and host epilogue, then establish a public RED reproduction and repair the
+   shared scheduler seam. Do not launch the action by hand: scheduler ownership
+   remains intact.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.
@@ -106,8 +122,14 @@ the ledger and in repair evidence.
    tickets or files, but must not overlap runtime or ledger edits.
 9. Refresh `mend-status` and continue until the build completes, the human
    stops it, `--once` finishes, or a missing authority/external prerequisite
-   requires a human decision. Report meaningful transitions and decisions;
-   do not emit unchanged polling noise.
+   prevents all remaining progress and requires a human decision. Do not
+   return a final response merely because no lane is visible, a wave gap is in
+   force, one ticket is held, or the human asks for status while other work is
+   runnable. Use the environment's wait/monitor mechanism, report meaningful
+   transitions and decisions, and suppress unchanged polling noise. *(paid:
+   Patient Imaging Portal Build JOR-267 — mend returned "loop armed" with zero
+   lanes while the deterministic plan already contained the next UI gate; the
+   human had to ask whether supervision was doing anything.)*
 
 ## Safety boundary
 

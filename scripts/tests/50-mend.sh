@@ -53,6 +53,48 @@ else
     bad "mend: healthy status was not emitted (rc=$rc, out=$(printf '%s' "$out" | tr '\n' '|'), err=$(head -2 "$FX/healthy.err" | tr '\n' '|'))"
 fi
 
+# An armed build with no live lane and a non-empty deterministic plan is not a
+# healthy stopping point for the default continuing supervisor. The scheduler
+# still owns launch, but mend must keep observing until the action starts or
+# diagnose a missed handoff/heartbeat instead of returning "loop armed".
+jq '
+  .lanes = []
+  | .summary.lanes_running = 0
+  | .summary.lanes_running_by_type = {"impl":0,"gate":0,"merge":0,"probe":0,"unknown":0}
+  | .summary.repairs = [{"id":10,"shape":"mr-open-not-in-review","fix":"lane.sh transition 10 review"}]
+  ' "$FX/healthy.json" > "$FX/actionable-idle.json"
+idle=$(
+  "$TICK" mend-status "$FX/actionable-idle.json" 2>"$FX/actionable-idle.err"
+); idle_rc=$?
+if [ "$idle_rc" = 0 ] && printf '%s\n' "$idle" | jq -e '
+     (.summary.lanes_running == 0)
+     and (.schedule.actions | length) > 0
+     and ([.attention[]
+           | select(.kind == "actionable-idle"
+                    and .contract == "MEND-FLOW-01"
+                    and .action_count > 0)] | length) == 1' >/dev/null 2>&1; then
+    ok "mend: an armed idle board with runnable work stays visible as a progress gap"
+else
+    bad "mend: runnable idle work was normalized as healthy silence (rc=$idle_rc, $(printf '%s' "$idle" | jq -c '{summary,schedule,attention}' 2>/dev/null))"
+fi
+
+# Planted violation: disable only the runnable-action predicate. The same
+# public status request must then lose MEND-FLOW-01, proving the GREEN result
+# depends on the detector rather than the fixture's partial-transition warning.
+FLOW_MD=$(mirror_scripts "$T/mend-flow-mirror")
+sed 's/(($p.actions \/\/ \[\]) | length) > 0/(($p.actions \/\/ []) | length) < 0/' \
+    "$FLOW_MD/mend.jq" > "$FLOW_MD/mend.jq.mutant"
+mv "$FLOW_MD/mend.jq.mutant" "$FLOW_MD/mend.jq"
+flow_mutant=$(LOOM_REPO="$LOOM_REPO" LOOM_HOME="$LOOM_HOME" \
+    "$FLOW_MD/tick.sh" mend-status "$FX/actionable-idle.json" 2>/dev/null)
+if ! printf '%s\n' "$flow_mutant" | jq -e '
+       [.attention[] | select(.kind == "actionable-idle")] | length > 0' \
+       >/dev/null 2>&1; then
+    ok "mend-flow-violation: disabling the idle detector recreates invisible runnable silence"
+else
+    bad "mend-flow-violation: idle alert survived with its action predicate disabled"
+fi
+
 jq 'del(.config.min_wave_gap_minutes, .config.stall_action)' \
     "$FX/healthy.json" > "$FX/snapshot-config-gap.json"
 configured=$("$TICK" mend-status "$FX/snapshot-config-gap.json" 2>/dev/null)
@@ -153,7 +195,9 @@ if grep -q '| `mend' "$SKILL" \
    && grep -q 'improvements-todo.md' "$MEND_REF" 2>/dev/null \
    && grep -q 'Claude' "$MEND_REF" 2>/dev/null \
    && grep -q 'Codex' "$MEND_REF" 2>/dev/null \
-   && grep -q 'never starts or resumes' "$MEND_REF" 2>/dev/null; then
+   && grep -q 'never starts or resumes' "$MEND_REF" 2>/dev/null \
+   && grep -q 'MEND-FLOW-01' "$MEND_REF" 2>/dev/null \
+   && grep -q 'do not end the mend turn' "$MEND_REF" 2>/dev/null; then
     ok "mend: the human verb is routed to a grounded provider-neutral supervisory contract"
 else
     bad "mend: the skill/reference contract is absent or incomplete"

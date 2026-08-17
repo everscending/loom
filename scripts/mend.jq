@@ -5,7 +5,19 @@
 
 include "lib";
 
-def attention_of($s):
+def actionable_idle_of($s; $p; $stopped):
+  if ($stopped == false)
+     and (($s.summary.lanes_running // 0) == 0)
+     and (($p.actions // []) | length) > 0
+  then [{kind: "actionable-idle", contract: "MEND-FLOW-01",
+         action_count: (($p.actions // []) | length),
+         first_action: (($p.actions[0] // {})
+                        | {step, kind, ticket, lane}),
+         boundary: "observe through the next handoff or scheduler heartbeat; diagnose if the action still has not started"}]
+  else []
+  end;
+
+def attention_of($s; $p; $stopped):
   ([($s.warnings // [])[] |
       {kind: "snapshot-warning", contract: "MEND-STATE-01", message: .}]
    + [($s.tickets // [])[]
@@ -24,7 +36,8 @@ def attention_of($s):
          type: (.type // "unknown"), turns: (.turns // null)}]
    + [($s.summary.repairs // [])[]
       | {kind: "partial-transition", contract: "MEND-STATE-01", ticket: .id,
-         shape: .shape, fix: .fix}]);
+         shape: .shape, fix: .fix}]
+   + actionable_idle_of($s; $p; $stopped));
 
 $snapshot[0] as $s
 | $plan[0] as $p
@@ -52,5 +65,5 @@ $snapshot[0] as $s
       residue: ($p.residue // []),
       deferred: ($p.deferred // [])
     },
-    attention: attention_of($s)
+    attention: attention_of($s; $p; $stopped)
   }
