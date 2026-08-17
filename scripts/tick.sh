@@ -2147,9 +2147,19 @@ _append_ticket_contract() { # <lane-id> <staged-brief>
       || die "spawn-lane: cannot derive ticket id from '$_contract_lane'"
     local _contract_marker="<!-- loom-ticket-contract $_contract_iid -->"
     grep -Fq "$_contract_marker" "$_contract_brief" && return 0
-    printf '\n\n## Immutable ticket contract (host snapshot)\n%s\n%s\n' \
-      "$_contract_body" "$_contract_marker" >> "$_contract_brief" \
-      || die "spawn-lane: cannot append ticket contract to staged brief '$_contract_brief'"
+    cat >> "$_contract_brief" <<BRIEFEOF || die "spawn-lane: cannot append ticket contract to staged brief '$_contract_brief'"
+
+
+## Immutable ticket contract (host snapshot)
+$_contract_body
+
+## Immutable contract authority (appended by spawn-lane)
+- The embedded ticket contract above is complete and authoritative for this lane. Work from this host-staged brief; do not try to recover a second version. An Active supervisor rescope appended below overrides conflicting original criteria, and active supervised-repair evidence must be preserved.
+- Do not query the tracker or rediscover the ticket, its acceptance criteria, dependencies, or scope. The host already froze the complete contract needed by this worker.
+- Never invent or call an undocumented lane.sh verb such as \`lane.sh show\`. For implementation work, the documented paths are \`lane.sh scratch\` for an ephemeral path, \`lane.sh blocked-report\` immediately followed by \`lane.sh transition <iid> blocked\` when blocked, and \`lane.sh submit <iid> --file <final-mr-body>\` when complete.
+- Gate and merge briefs append their exact \`lane.sh verdict\` or \`lane.sh merge\` command. Use that exact verdict or merge command; do not substitute another tracker write.
+$_contract_marker
+BRIEFEOF
 }
 
 _append_active_scope_reset() { # <lane-id> <staged-brief>

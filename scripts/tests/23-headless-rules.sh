@@ -123,6 +123,91 @@ if grep -q 'Run the committed benchmark' "$LOOM_HOME/briefs/impl-67.md" 2>/dev/n
 else
     bad "D-TICK-40: worker still depends on ambient tracker access"
 fi
+# JOR-221: receiving the whole host-snapshotted contract was not enough. Its
+# implementation worker still tried to rediscover the ticket with nonexistent
+# `lane.sh show 221`. The public staging seam must bind both a direct Claude
+# brief and a deferred Codex request to the immutable contract as their complete
+# authority, including the documented lane.sh terminal paths.
+cat > "$BR/authority-plan.json" <<'EOF'
+{"actions":[
+  {"lane":"impl-65","ticket":65,"spawn":{"brief":{"ticket_contract":"## Acceptance criteria\n\n- [ ] Trust the embedded contract\n"}}},
+  {"lane":"impl-66","ticket":66,"spawn":{"brief":{"ticket_contract":"## Acceptance criteria\n\n- [ ] Trust the embedded contract\n"}}}
+]}
+EOF
+AUTHORITY_AGENT="$BR/authority-agent.sh"
+cat > "$AUTHORITY_AGENT" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  detect|preflight|run) exit 0 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$AUTHORITY_AGENT"
+AUTHORITY_HOME="$T/authority-home"
+AUTHORITY_REPO="$T/authority-repo"
+mkdir -p "$AUTHORITY_REPO"
+seed_tracker_decl "$AUTHORITY_REPO"
+cp "$LOOM_REPO/.loom.yml" "$AUTHORITY_REPO/.loom.yml"
+git -C "$AUTHORITY_REPO" add .
+git -C "$AUTHORITY_REPO" commit -qm 'authority fixture'
+if LOOM_HOME="$AUTHORITY_HOME" LOOM_REPO="$AUTHORITY_REPO" LOOM_DEFER_LANE_LAUNCH= \
+    LOOM_AGENT_CMD="$AUTHORITY_AGENT" LOOM_WAVE_PLAN="$BR/authority-plan.json" \
+    "$TICK" spawn-lane impl-66 --no-tick --provider claude --job implementation --tier medium \
+    --cwd "$AUTHORITY_REPO" --brief "$BR/contract-source.md" >"$BR/authority-claude.out" 2>&1; then
+    claude_spawn_rc=0
+else
+    claude_spawn_rc=$?
+fi
+LOOM_HOME="$AUTHORITY_HOME" LOOM_REPO="$AUTHORITY_REPO" LOOM_DEFER_LANE_LAUNCH=1 LOOM_WAVE_PLAN="$BR/authority-plan.json" \
+    "$TICK" spawn-lane impl-65 --no-tick --provider codex --job implementation --tier medium \
+    --cwd "$AUTHORITY_REPO" --brief "$BR/contract-source.md" >/dev/null 2>&1
+claude_authority="$AUTHORITY_HOME/briefs/impl-66.md"
+codex_authority=""
+for authority_request in "$AUTHORITY_HOME/lane-launch-queue"/request-*; do
+    [ -d "$authority_request" ] || continue
+    [ "$(cat "$authority_request/id" 2>/dev/null)" = impl-65 ] || continue
+    codex_authority="$authority_request/brief.md"
+    break
+done
+authority_paths=0
+for authority_brief in "$claude_authority" "$codex_authority"; do
+    [ -n "$authority_brief" ] || continue
+    if grep -q 'complete and authoritative' "$authority_brief" \
+       && grep -q 'Do not query the tracker' "$authority_brief" \
+       && grep -q 'lane.sh show' "$authority_brief" \
+       && grep -q 'lane.sh scratch' "$authority_brief" \
+       && grep -q 'lane.sh blocked-report' "$authority_brief" \
+       && grep -q 'lane.sh submit' "$authority_brief" \
+       && grep -q 'exact.*verdict.*merge.*command' "$authority_brief"; then
+        authority_paths=$((authority_paths + 1))
+    fi
+done
+if [ "$authority_paths" = 2 ]; then
+    ok "immutable authority: direct Claude and deferred Codex briefs forbid tracker rediscovery and invented lane verbs"
+else
+    bad "immutable authority: only $authority_paths/2 provider paths received the authoritative contract rules (Claude spawn rc=$claude_spawn_rc: $(tr '\n' ' ' < "$BR/authority-claude.out"))"
+fi
+# Planted violation: remove only the mechanically appended authority block.
+# The ticket body must still reach the public spawn seam while the protection
+# against tracker rediscovery disappears, proving the assertion is sensitive
+# to this rule rather than merely to D-TICK-40's contract transport.
+AUTHORITY_MUT=$(mirror_scripts "$T/immutable-authority-mutant")
+sed '/## Immutable contract authority (appended by spawn-lane)/,/^\$_contract_marker$/d' \
+    "$AUTHORITY_MUT/tick.sh" > "$AUTHORITY_MUT/tick-mutant.sh"
+mv "$AUTHORITY_MUT/tick-mutant.sh" "$AUTHORITY_MUT/tick.sh"
+chmod +x "$AUTHORITY_MUT/tick.sh"
+AUTHORITY_MUT_HOME="$T/immutable-authority-mutant-home"
+authority_mut_out=$(LOOM_HOME="$AUTHORITY_MUT_HOME" LOOM_WAVE_PLAN="$BR/authority-plan.json" \
+    "$AUTHORITY_MUT/tick.sh" spawn-lane impl-65 --no-tick --cwd "$BR/wt" \
+    --brief "$BR/contract-source.md" -- /bin/echo immutable-authority-violation -p @brief 2>&1)
+authority_mut_rc=$?
+if assert_mutant_ran "$authority_mut_rc" "$authority_mut_out" "immutable-authority-violation" \
+   && grep -q 'Trust the embedded contract' "$AUTHORITY_MUT_HOME/briefs/impl-65.md" 2>/dev/null \
+   && ! grep -q 'complete and authoritative' "$AUTHORITY_MUT_HOME/briefs/impl-65.md" 2>/dev/null; then
+    ok "immutable authority mutant: deleting the rule recreates tracker-dependent worker discretion"
+else
+    bad "immutable authority mutant: planted rule deletion did not reach the public spawn seam (rc=$authority_mut_rc)"
+fi
 # Planted violations prove these assertions exercise the shared spawn boundary,
 # not only the fixture text.
 D38_MUT=$(mirror_scripts "$T/dtick38-mutant")
