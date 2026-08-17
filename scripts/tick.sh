@@ -2036,7 +2036,7 @@ _spawn_build_epilogue() {
 # die in here is the LAST refusal in spawn-lane — this function must always
 # be called before anything destructive.
 _spawn_build_pregate() {
-    local runner tiers
+    local runner tiers base_iid="" base_pre=""
     pre=""
     if [ -n "$pregate" ]; then
         # Validate against the tiers this repo ACTUALLY declares, not the four
@@ -2095,6 +2095,28 @@ ui"
             # ticker.
             pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
             pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+        fi
+    fi
+
+    # A review can wait long enough for its branch to stop containing the
+    # current base. That is reconciliation work, not a ticket rejection: an
+    # obsolete branch can run tests already fixed on main and spend a full
+    # reviewer before anybody notices. The lane-side verb owns the tracker
+    # write; tick.sh remains read-only. It runs before every provider gate,
+    # independent of adapter and before the configured pregate. rc 8 means the
+    # ticket was durably returned to in-progress and the lane outcome was
+    # recorded, so the provider must not start.
+    if [ -n "$provider" ] && [ "$(_lane_type "$id")" = gate ]; then
+        base_iid="${id#gate-}"; base_iid="${base_iid%%-*}"
+        case "$base_iid" in ''|*[!0-9]*) base_iid="" ;; esac
+        if [ -n "$base_iid" ]; then
+            export LOOM_GATE_TICKET="$base_iid"
+            base_pre='if lane.sh gate-base-check "$LOOM_GATE_TICKET"; then :; else _base_rc=$?; _rc=$_base_rc; fi; '
+            if [ -n "$pre" ]; then
+                pre="$base_pre"'if [ "$_rc" -eq 0 ]; then '"$pre"' fi; '
+            else
+                pre="$base_pre"
+            fi
         fi
     fi
     return 0
@@ -2422,6 +2444,7 @@ cmd_spawn_lane() {
               "LOOM_PREGATE_TIER=${LOOM_PREGATE_TIER:-}" "LOOM_PREGATE_RUNNER=${LOOM_PREGATE_RUNNER:-}" \
               "LOOM_PREGATE_ADV=${LOOM_PREGATE_ADV:-}" "LOOM_PREGATE_SCOPE=${LOOM_PREGATE_SCOPE:-}" \
               "LOOM_PREGATE_TREES=${LOOM_PREGATE_TREES:-}" \
+              "LOOM_GATE_TICKET=${LOOM_GATE_TICKET:-}" \
               /bin/bash -c "$program" _lane "$@"
         if "$LAUNCHCTL_CMD" bootstrap "$launch_domain" "$launch_plist"; then
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"

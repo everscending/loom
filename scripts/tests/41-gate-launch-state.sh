@@ -6,10 +6,12 @@ STATE_FILE="$T/gate-state"
 TRACKER="$T/gate-tracker.sh"
 AGENT="$T/gate-agent.sh"
 AGENT_CALLS="$T/gate-agent.calls"
-export STATE_FILE AGENT_CALLS TRACKER_CMD="$TRACKER" LOOM_AGENT_CMD="$AGENT"
+TRACKER_CALLS="$T/gate-tracker.calls"
+export STATE_FILE AGENT_CALLS TRACKER_CALLS TRACKER_CMD="$TRACKER" LOOM_AGENT_CMD="$AGENT"
 
 cat > "$TRACKER" <<'EOF'
 #!/usr/bin/env bash
+echo "$*" >> "$TRACKER_CALLS"
 case "$1" in
   issue)
     [ "$(cat "$STATE_FILE")" != read-fail ] || exit 1
@@ -89,4 +91,100 @@ else
 fi
 
 "$TICK" kill-lane gate-333 >/dev/null 2>&1 || true
+
+# A review branch can age while it waits behind the auxiliary cap. Patient
+# Imaging JOR-208 reached its UI gate 42 base commits behind: the pregate ran
+# an obsolete hard-coded-port test, then hung after a stale test fixture held
+# a request forever. Base drift is neither a ticket rejection nor a reason to
+# spend the full suite/reviewer. The lane-side write boundary moves it back to
+# implementation so the ordinary planner can assign reconciliation.
+git -C "$LOOM_REPO" config user.email loom@test
+git -C "$LOOM_REPO" config user.name loom
+mkdir -p "$LOOM_REPO/scripts"
+cat > "$LOOM_REPO/scripts/gate.sh" <<'EOF'
+#!/usr/bin/env bash
+touch "$STALE_RUNNER"
+EOF
+chmod +x "$LOOM_REPO/scripts/gate.sh"
+git -C "$LOOM_REPO" add .
+git -C "$LOOM_REPO" commit -qm base-one
+git -C "$LOOM_REPO" branch -M main
+git init -q --bare "$T/gate-origin.git"
+git -C "$LOOM_REPO" remote add origin "$T/gate-origin.git"
+git -C "$LOOM_REPO" push -qu origin main
+git -C "$LOOM_REPO" checkout -qb ticket-334
+printf 'ticket\n' > "$LOOM_REPO/ticket.txt"
+git -C "$LOOM_REPO" add ticket.txt
+git -C "$LOOM_REPO" commit -qm ticket
+git -C "$LOOM_REPO" push -qu origin ticket-334
+git -C "$LOOM_REPO" checkout -q main
+printf 'base two\n' > "$LOOM_REPO/base-two.txt"
+git -C "$LOOM_REPO" add base-two.txt
+git -C "$LOOM_REPO" commit -qm base-two
+git -C "$LOOM_REPO" push -qu origin main
+git -C "$LOOM_REPO" checkout -q ticket-334
+
+STALE_RUNNER="$T/stale-runner-ran"
+export STALE_RUNNER
+rm -f "$STALE_RUNNER" "$AGENT_CALLS" "$TRACKER_CALLS"
+printf 'review\n' > "$STATE_FILE"
+"$TICK" spawn-lane gate-334 --no-tick --pregate logic --provider claude \
+  --job gate --tier medium --brief "$T/gate-brief.md" --cwd "$LOOM_REPO" >/dev/null
+for _ in $(seq 1 60); do
+    [ -f "$LOOM_HOME/lanes/gate-334.rc" ] || [ -f "$STALE_RUNNER" ] || sleep 0.1
+done
+if [ "$(cat "$LOOM_HOME/lanes/gate-334.rc" 2>/dev/null)" = 0 ] \
+   && [ "$(cat "$LOOM_HOME/lanes/gate-334.outcome" 2>/dev/null)" = in-progress ] \
+   && [ ! -e "$STALE_RUNNER" ] \
+   && ! grep -q '^run ' "$AGENT_CALLS" 2>/dev/null \
+   && grep -q '^note-add 334 ' "$TRACKER_CALLS" 2>/dev/null \
+   && grep -q '^issue-relabel 334 .*--add in-progress' "$TRACKER_CALLS" 2>/dev/null \
+   && grep -q 'behind origin/main' "$LOOM_HOME/logs/lane-gate-334.log" 2>/dev/null; then
+    ok "gate base: a stale review branch returns to implementation before pregate or reviewer spend"
+else
+    bad "gate base: a 42-commit-stale branch reached pregate/reviewer or left no durable rework decision"
+fi
+"$TICK" kill-lane gate-334 >/dev/null 2>&1 || true
+
+# Countercondition: once origin/main is an ancestor, the same provider-neutral
+# path reaches both the configured pregate and the provider session.
+git -C "$LOOM_REPO" merge -q --no-edit origin/main
+rm -f "$STALE_RUNNER" "$AGENT_CALLS" "$TRACKER_CALLS"
+printf 'review\n' > "$STATE_FILE"
+"$TICK" spawn-lane gate-335 --no-tick --pregate logic --provider claude \
+  --job gate --tier medium --brief "$T/gate-brief.md" --cwd "$LOOM_REPO" >/dev/null
+for _ in $(seq 1 60); do
+    [ -f "$STALE_RUNNER" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null && break
+    sleep 0.1
+done
+if [ -f "$STALE_RUNNER" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null; then
+    ok "gate-base-violation: a reconciled branch still reaches pregate and review"
+else
+    bad "gate base: the freshness guard suppressed a current branch"
+fi
+"$TICK" kill-lane gate-335 >/dev/null 2>&1 || true
+
+# Planted violation: retain the production call site but make its write-side
+# base check always claim current. The stale branch must again burn both the
+# runner and the provider, proving the holding assertion is about this guard.
+git -C "$LOOM_REPO" checkout -q ticket-334
+MIRROR=$(mirror_scripts "$T/stale-mirror")
+sed '/^cmd_gate_base_check()/,/^}/c\
+cmd_gate_base_check() { return 0; }' "$MIRROR/lane.sh" > "$MIRROR/lane-mutant.sh"
+mv "$MIRROR/lane-mutant.sh" "$MIRROR/lane.sh"
+chmod +x "$MIRROR/lane.sh"
+rm -f "$STALE_RUNNER" "$AGENT_CALLS" "$TRACKER_CALLS"
+printf 'review\n' > "$STATE_FILE"
+"$MIRROR/tick.sh" spawn-lane gate-336 --no-tick --pregate logic --provider claude \
+  --job gate --tier medium --brief "$T/gate-brief.md" --cwd "$LOOM_REPO" >/dev/null
+for _ in $(seq 1 60); do
+    [ -f "$STALE_RUNNER" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null && break
+    sleep 0.1
+done
+if [ -f "$STALE_RUNNER" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null; then
+    ok "gate-base-violation: bypassing the stale-base decision recreates paid work on an obsolete branch"
+else
+    bad "gate-base-violation: planted bypass did not recreate the stale-branch spend"
+fi
+"$MIRROR/tick.sh" kill-lane gate-336 >/dev/null 2>&1 || true
 test_finish

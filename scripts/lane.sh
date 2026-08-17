@@ -37,6 +37,11 @@
 #                                            merge moved a manifest/lockfile,
 #                                            so the gate tests this worktree
 #                                            and not an hours-stale one
+#   lane.sh gate-base-check <iid>             gate-only preflight: if HEAD no
+#                                            longer contains current base,
+#                                            explain the drift and return the
+#                                            ticket to in-progress without a
+#                                            rejection; rc 8 means handled
 #   lane.sh merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F]
 #                                            record a merge attempt that did
 #                                            NOT merge (conflict, red combined
@@ -954,6 +959,49 @@ cmd_reconcile() { # [<base>] — fetch and MERGE origin/<base> into the branch
     _sync_deps "$_before"
 }
 
+cmd_gate_base_check() { # <iid> — rc 0 current/unverifiable, rc 8 stale and requeued
+    local iid="${1:-}" base head behind merge_rc=0 fetch_rc=0 note
+    _check_iid "$iid"
+
+    # A review branch can age while it waits behind the auxiliary cap. Fetch
+    # once at the cheap lane-side boundary so the configured pregate never
+    # spends minutes proving that an obsolete base is obsolete. A network
+    # outage is not evidence of staleness: retain the local ref if one exists,
+    # otherwise fail open to the ordinary gate instead of moving tracker state
+    # on a guess.
+    git fetch origin >/dev/null 2>&1 || fetch_rc=$?
+    base=$(_detect_base .)
+    if ! git show-ref --verify --quiet "refs/remotes/origin/$base" 2>/dev/null; then
+        echo "lane.sh: gate base freshness could not be verified (origin/$base unavailable; fetch rc=$fetch_rc) — proceeding with the configured gate" >&2
+        return 0
+    fi
+    head=$(git rev-parse HEAD 2>/dev/null || true)
+    [ -n "$head" ] || { echo "lane.sh: gate base freshness could not resolve HEAD — proceeding with the configured gate" >&2; return 0; }
+
+    if git merge-base --is-ancestor "origin/$base" HEAD >/dev/null 2>&1; then
+        return 0
+    else
+        merge_rc=$?
+    fi
+    [ "$merge_rc" -eq 1 ] || {
+        echo "lane.sh: gate base ancestry could not be resolved (rc=$merge_rc) — proceeding with the configured gate" >&2
+        return 0
+    }
+
+    behind=$(git rev-list --count "HEAD..origin/$base" 2>/dev/null || printf 'unknown')
+    echo "lane.sh: gate HEAD ${head:0:8} is $behind commit(s) behind origin/$base — returning issue $iid to implementation before pregate or review"
+    note=$(mktemp "${TMPDIR:-/tmp}/lane-stale-base.XXXXXX")
+    printf '%s\n\n%s\n\n%s\n' \
+        "Gate preflight deferred this review without a rejection: pushed HEAD \`${head}\` is ${behind} commit(s) behind \`origin/${base}\`." \
+        "The configured pregate and independent reviewer did not run against the obsolete base. Reconcile by running \`lane.sh reconcile\`, resolve any real conflict without rebasing, push the resulting merge commit, then submit the new HEAD for review." \
+        "This is base drift, not a failed implementation round." > "$note"
+    cmd_transition "$iid" in-progress --note --file "$note"
+    rm -f "$note"
+    _mark_lane_outcome in-progress
+    _lane_ev gate_base_stale ticket "$iid" head "$head" base "$base" behind "$behind"
+    return 8
+}
+
 # A worktree's installed dependencies are DERIVED state, and reconcile is the
 # one verb that moves the ground under them: a worktree cut before some ticket
 # added a dependency has a node_modules/venv that predates it, so the moment
@@ -1344,7 +1392,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1387,6 +1435,7 @@ case "${1:-}" in
     merge-reset) shift; cmd_merge_reset "$@" ;;
     probe-result) shift; cmd_probe_result "$@" ;;
     reconcile)  shift; cmd_reconcile "$@" ;;
+    gate-base-check) shift; cmd_gate_base_check "$@" ;;
     submit)     shift; cmd_submit "$@" ;;
     merge)      shift; cmd_merge "$@" ;;
     transition) shift; cmd_transition "$@" ;;
