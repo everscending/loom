@@ -366,6 +366,17 @@ refuses outside herdr anyway.
    exercises the epic the way a *user* would, against a really-running stack,
    not the test suite again.
 
+   When the repository has a fixed `scripts/probe.sh` runner, add
+   `--host-probe <epic-slug>`. The launchd-owned host runs that committed
+   runner before either provider adapter, with the isolated lane `PORT` and
+   `APP_BASE_URL`. The runner receives the slug as its only argument and writes
+   `{schema:1, probe, head, classification:pass|fail|infrastructure, summary}`
+   to `$LOOM_HOST_PROBE_OUTPUT`. This is the browser-capable seam: never pass a
+   command, script path, or provider-generated Playwright file to the host.
+   The provider reads the validated result at `$LOOM_HOST_PROBE_ARTIFACT` and
+   reports it through the ordinary `probe-result` workflow; it does not rerun
+   that browser check inside its sandbox.
+
    **Assemble the brief; never invent it.** `snapshot` carries each epic's own
    acceptance criteria at `.epics[].acceptance`, read from the
    `## Acceptance criteria` section of its milestone (phase 3 authors them

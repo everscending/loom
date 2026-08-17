@@ -13,7 +13,7 @@
 #                                capacity returns; one that crashes retries once.
 #   resume                       clear a usage pause by hand, reset the failure
 #                                count (needed under usage_limit: stop_and_wait)
-#   spawn-lane <id> [--cwd <dir>] [--pregate <tier>] [--merge-lock] [--no-tick] -- <cmd...>
+#   spawn-lane <id> [--cwd <dir>] [--pregate <tier>] [--host-probe <id>] [--merge-lock] [--no-tick] -- <cmd...>
 #                                start a detached lane with PID file + log,
 #                                running in <dir> (default: the repo root).
 #                                The lane fires the next wave when it exits
@@ -969,7 +969,7 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
-_ui_pregate_occupied() { # one shared UI pregate host: live metadata or a durable reservation
+_ui_pregate_occupied() { # one shared UI host: live pregate/probe metadata or durable reservation
     local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
     for metadata in "$LANES_DIR"/*.pregate; do
         [ -f "$metadata" ] || continue
@@ -988,7 +988,10 @@ _ui_pregate_occupied() { # one shared UI pregate host: live metadata or a durabl
         queued_id=$(cat "$request/id" 2>/dev/null || true)
         [ -n "$queued_id" ] || continue
         [ "$queued_id" != "$drain_id" ] || continue
-        [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] && return 0
+        if [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] \
+           || [ -s "$request/host-probe" ]; then
+            return 0
+        fi
     done
     return 1
 }
@@ -1009,7 +1012,7 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
 
 _ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retryable for drain
     local id="$1" from="$2"
-    echo "spawn-lane: UI pregate resource is already reserved — not starting '$id'."
+    echo "spawn-lane: UI host resource (UI pregate or browser probe) is already reserved — not starting '$id'."
     if [ -n "$from" ]; then
         echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
     fi
@@ -1873,7 +1876,7 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
     return $rc
 }
 
-_queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/locks
+_queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/host_probe/locks
     local base request n=0 existing
     # Do not let two commands in one provider session enqueue the same lane id.
     # There is no pid yet for the ordinary live-lane guard to see.
@@ -1894,6 +1897,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/lo
     printf '%s\n' "$agent_tier" > "$request/tier"
     printf '%s\n' "$abs" > "$request/cwd"
     printf '%s\n' "$pregate" > "$request/pregate"
+    printf '%s\n' "$host_probe" > "$request/host-probe"
     printf '%s\n' "$merge_lock" > "$request/merge-lock"
     printf '%s\n' "$on_done" > "$request/on-done"
     cp "$brief" "$request/brief.md" \
@@ -1911,7 +1915,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/lo
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate merge_lock on_done launch_rc rc=0
+    local request name launching id provider job tier cwd pregate host_probe merge_lock on_done launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -1925,11 +1929,13 @@ _drain_lane_launches() {
         tier=$(cat "$launching/tier" 2>/dev/null || true)
         cwd=$(cat "$launching/cwd" 2>/dev/null || true)
         pregate=$(cat "$launching/pregate" 2>/dev/null || true)
+        host_probe=$(cat "$launching/host-probe" 2>/dev/null || true)
         merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
         on_done=$(cat "$launching/on-done" 2>/dev/null || true)
         local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
                     --brief "$launching/brief.md" --cwd "$cwd")
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
+        [ -z "$host_probe" ] || args+=(--host-probe "$host_probe")
         [ "$merge_lock" = 1 ] && args+=(--merge-lock)
         [ "$on_done" = 0 ] && args+=(--no-tick)
         launch_rc=0
@@ -2034,7 +2040,7 @@ _codex_host_is_ephemeral() {
 
 # Flag parsing for spawn-lane, accepting the flags before OR after the id
 # (order-tolerant). Sets, in the caller's scope: id, on_done, cwd, merge_lock,
-# pregate, brief — and _spawn_shift, the count of arguments consumed, which
+# pregate, host_probe, brief — and _spawn_shift, the count of arguments consumed, which
 # the caller shifts away to stand on the lane command. A malformed flag dies
 # here; the missing-id and missing-command guards are the caller's, because
 # only it sees the remainder.
@@ -2046,6 +2052,8 @@ _spawn_parse_flags() {
             --no-tick) on_done=0; shift; _spawn_shift=$((_spawn_shift+1)) ;;
             --pregate) shift; [ $# -gt 0 ] || die "spawn-lane: --pregate needs a tier"
                        pregate="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --host-probe) shift; [ $# -gt 0 ] || die "spawn-lane: --host-probe needs an id"
+                          host_probe="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --merge-lock) merge_lock=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
             --cwd) shift; [ $# -gt 0 ] || die "spawn-lane: --cwd needs a directory"
                    cwd="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
@@ -2202,6 +2210,11 @@ BRIEFEOF
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - Before filing a product fix, prove that the failure reached product behavior. A provider sandbox denial, browser/executable launch failure, OS permission error, or local-stack bind failure before the first product request is probe infrastructure, not a product defect. For infrastructure, do not call \`lane.sh fix-ticket\`; preserve the evidence and report \`lane.sh probe-result <build-iid> <epic-slug> infrastructure --file <report>\`. Only a failure observed after the probe reaches the product can create a fix ticket and report FAIL.
 BRIEFEOF
+        if [ -n "$host_probe" ]; then
+            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The host already ran repository-owned probe \`$host_probe\` outside the provider sandbox. Read its immutable result from \`\$LOOM_HOST_PROBE_ARTIFACT\`; do not rerun its browser command. A \`pass\` or product-level \`fail\` classification reached this session. Report that evidence through the normal probe-result workflow.
+BRIEFEOF
+        fi
     fi
     if [ "$(_lane_type "$id")" = gate ]; then
         local _verdict_ticket="${id#gate-}" _verdict_head=""
@@ -2454,6 +2467,75 @@ ui"
     return 0
 }
 
+# A browser probe is repository code, but Chromium cannot register its macOS
+# services from inside a Codex workspace sandbox. Run one fixed runner at the
+# same launchd-owned boundary as pregates. The provider chooses only a validated
+# probe id; it can never supply a command or path for the host to execute.
+cmd_run_host_probe() { # <probe-id> <immutable-head>
+    local probe="${1:-}" expected_head="${2:-}" runner="scripts/probe.sh"
+    local artifact="$LANES_DIR/${LOOM_LANE_ID:-unknown}.host-probe.json"
+    local raw="$artifact.runner.$$" current_head="" runner_rc=0 classification="infrastructure" reason=""
+    case "$probe" in ''|*[!a-z0-9_-]*) die "run-host-probe: invalid probe id '$probe'" ;; esac
+    [ -n "${LOOM_LANE_ID:-}" ] || die "run-host-probe: missing lane identity"
+    rm -f "$raw"
+    current_head=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    if [ -z "$expected_head" ] || [ "$current_head" != "$expected_head" ]; then
+        reason="worktree HEAD changed before host probe execution"
+        runner_rc=10
+    elif [ ! -f "$runner" ]; then
+        reason="fixed repository runner scripts/probe.sh is missing"
+        runner_rc=127
+    else
+        LOOM_HOST_PROBE_ID="$probe" LOOM_HOST_PROBE_HEAD="$expected_head" \
+          LOOM_HOST_PROBE_OUTPUT="$raw" bash "$runner" "$probe" || runner_rc=$?
+        current_head=$(git rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+        if [ "$current_head" != "$expected_head" ]; then
+            classification="infrastructure"
+            reason="worktree HEAD changed during host probe execution"
+        elif jq -e --arg probe "$probe" --arg head "$expected_head" '
+          type == "object" and .schema == 1 and .probe == $probe and .head == $head
+          and (.classification == "pass" or .classification == "fail" or .classification == "infrastructure")
+          and ((.summary // "") | type) == "string"
+        ' "$raw" >/dev/null 2>&1; then
+            classification=$(jq -r '.classification' "$raw")
+            if [ "$classification" = pass ] && [ "$runner_rc" -ne 0 ]; then
+                classification="infrastructure"
+                reason="runner exited $runner_rc while claiming pass"
+            fi
+        else
+            classification="infrastructure"
+            reason="runner did not produce a valid HEAD-attributed artifact"
+        fi
+    fi
+    local tmp="$artifact.tmp.$$"
+    if [ -f "$raw" ] && [ -z "$reason" ]; then
+        jq -c --argjson runner_rc "$runner_rc" '. + {runner_rc:$runner_rc}' "$raw" > "$tmp"
+    else
+        jq -nc --arg probe "$probe" --arg head "$expected_head" --arg summary "$reason" \
+          --argjson runner_rc "$runner_rc" \
+          '{schema:1,probe:$probe,head:$head,classification:"infrastructure",summary:$summary,runner_rc:$runner_rc}' > "$tmp"
+    fi
+    mv "$tmp" "$artifact"
+    rm -f "$raw"
+    chmod 444 "$artifact" 2>/dev/null || true
+    _ev host_probe_result id "$LOOM_LANE_ID" probe "$probe" head "$expected_head" \
+        classification "$classification" runner_rc "$runner_rc" artifact "$artifact"
+    printf '%s\n' "--- host probe $probe: $classification (runner rc $runner_rc; artifact $artifact) ---"
+    case "$classification" in
+        pass|fail) return 0 ;;
+        *) return 10 ;;
+    esac
+}
+
+_spawn_build_host_probe() {
+    [ -n "$host_probe" ] || return 0
+    [ -n "$lane_head" ] || die "spawn-lane: --host-probe requires a committed git HEAD"
+    export LOOM_HOST_PROBE_ID="$host_probe"
+    export LOOM_HOST_PROBE_HEAD="$lane_head"
+    export LOOM_HOST_PROBE_ARTIFACT="$LANES_DIR/$id.host-probe.json"
+    pre="'$SELF_PATH' run-host-probe \"\$LOOM_HOST_PROBE_ID\" \"\$LOOM_HOST_PROBE_HEAD\"; _host_probe_rc=\$?; if [ \"\$_host_probe_rc\" -ne 0 ]; then _rc=\$_host_probe_rc; fi; $pre"
+}
+
 _cmd_spawn_lane() {
     # Self-trigger is the DEFAULT (P2). It used to be opt-in, and a wave that
     # forgot the flag said so itself: "I spawned both without --on-done-tick… So
@@ -2462,7 +2544,7 @@ _cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" lane_head="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" lane_head="" _spawn_shift=0
     local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
@@ -2492,6 +2574,12 @@ _cmd_spawn_lane() {
         [ $# -eq 0 ] || die "spawn-lane: provider jobs accept no raw command after --"
     else
         [ $# -gt 0 ] || die "spawn-lane: no provider job or custom command for lane '$id'"
+    fi
+    if [ -n "$host_probe" ]; then
+        case "$host_probe" in ''|*[!a-z0-9_-]*) die "spawn-lane: --host-probe id '$host_probe' must contain only lowercase letters, digits, _ or -" ;; esac
+        [ -n "$provider" ] && [ "$job" = probe ] && [ "$(_lane_type "$id")" = probe ] \
+          || die "spawn-lane: --host-probe is valid only for a provider-backed probe lane"
+        [ -z "$pregate" ] || die "spawn-lane: --host-probe and --pregate cannot be combined"
     fi
     # Planner deferral is explanatory, not the authority: a wave may hold an
     # old plan, a lane can chain directly, and a Codex request can wait in the
@@ -2591,7 +2679,7 @@ _cmd_spawn_lane() {
        && { [ -n "$provider" ] || [ -n "$handoff_from" ] || [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; }; then
         needs_aux_admission=1
     fi
-    if [ "$needs_aux_admission" -eq 1 ] || [ "$pregate" = ui ]; then
+    if [ "$needs_aux_admission" -eq 1 ] || [ "$pregate" = ui ] || [ -n "$host_probe" ]; then
         if ! _lock_reserve "$AUX_LOCK_DIR"; then
             if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; then return 75; fi
             if [ -n "$handoff_from" ]; then
@@ -2631,7 +2719,7 @@ _cmd_spawn_lane() {
         # handoff lives in the durable queue, while Claude/direct hosts record
         # the pregate beside the live lane. API pregates and non-UI lanes do
         # not enter this resource-specific admission path.
-        if [ "$pregate" = ui ] && _ui_pregate_occupied; then
+        if { [ "$pregate" = ui ] || [ -n "$host_probe" ]; } && _ui_pregate_occupied; then
             _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
             return "$aux_rc"
         fi
@@ -2756,6 +2844,7 @@ _cmd_spawn_lane() {
     local epi="" redirect="" pre=""
     _spawn_build_epilogue "$@"; set -- "${_SPAWN_ARGS[@]}"
     _spawn_build_pregate
+    _spawn_build_host_probe
 
     # EVERYTHING DESTRUCTIVE HAPPENS BELOW THIS LINE — since P75 a function
     # boundary, not just a comment: every stage that can refuse has returned by
@@ -2771,6 +2860,10 @@ _cmd_spawn_lane() {
     # inherit an old mtime" actually true.
     if [ -n "$pregate" ]; then
         printf '%s\n' "$pregate" > "$LANES_DIR/$id.pregate"
+    elif [ -n "$host_probe" ]; then
+        # Resource metadata, shared with UI pregates. The event still records
+        # an empty pregate, so a browser probe is never reported as a gate.
+        printf '%s\n' ui > "$LANES_DIR/$id.pregate"
     else
         rm -f "$LANES_DIR/$id.pregate"
     fi
@@ -2787,6 +2880,7 @@ _cmd_spawn_lane() {
     # report the old code — and a wave harvesting `rc` 7 posts a mechanical
     # rejection against a ticket whose lane is busy.
     rm -f "$LANES_DIR/$id.rc" "$LANES_DIR/$id.outcome"
+    rm -f "$LANES_DIR/$id.host-probe.json"
     printf '%s\n' "$lane_port" > "$LANES_DIR/$id.port"
     printf '%s\n' "$abs" > "$LANES_DIR/$id.cwd"
     if [ -n "$lane_head" ]; then
@@ -2834,12 +2928,15 @@ _cmd_spawn_lane() {
               "LOOM_PREGATE_ADV=${LOOM_PREGATE_ADV:-}" "LOOM_PREGATE_SCOPE=${LOOM_PREGATE_SCOPE:-}" \
               "LOOM_PREGATE_TREES=${LOOM_PREGATE_TREES:-}" \
               "LOOM_GATE_TICKET=${LOOM_GATE_TICKET:-}" \
+              "LOOM_HOST_PROBE_ID=${LOOM_HOST_PROBE_ID:-}" "LOOM_HOST_PROBE_HEAD=${LOOM_HOST_PROBE_HEAD:-}" \
+              "LOOM_HOST_PROBE_ARTIFACT=${LOOM_HOST_PROBE_ARTIFACT:-}" \
               /bin/bash -c "$program" _lane "$@"
         if "$LAUNCHCTL_CMD" bootstrap "$launch_domain" "$launch_plist"; then
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
             rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
-                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head"
+                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head" \
+                  "$LANES_DIR/$id.host-probe.json"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
             echo "spawn-lane: launchd refused supervised lane '$id'" >&2
@@ -2856,7 +2953,8 @@ _cmd_spawn_lane() {
     if [ ! -s "$LANES_DIR/$id.pid" ]; then
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
-        rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head"
+        rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head" \
+              "$LANES_DIR/$id.host-probe.json"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
     fi
@@ -2876,7 +2974,7 @@ _cmd_spawn_lane() {
 # and start after acquire had already returned success. If spawn wins the lock,
 # acquire says to retry; if acquire wins, the inner launch observes the lease.
 cmd_spawn_lane() {
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
     local iid="" rc=0 lock_rc=0
     _spawn_parse_flags "$@"
     iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || iid=""
@@ -3435,7 +3533,8 @@ cmd_clear_lane() {
     _release_lane_port "$1" || return $?
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
-          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.head" "$launch_marker" "$launch_plist"
+          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.head" \
+          "$LANES_DIR/$1.host-probe.json" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
@@ -5065,6 +5164,7 @@ case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     supervise)    shift; cmd_supervise "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
+    run-host-probe) shift; cmd_run_host_probe "$@" ;;
     drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;
     drain-lane-kills) shift; cmd_drain_lane_cleanups "$@" ;; # compatibility/readable operator alias
     drain-lane-launches) shift; cmd_drain_lane_launches "$@" ;;
@@ -5094,5 +5194,5 @@ case "${1:-}" in
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac
