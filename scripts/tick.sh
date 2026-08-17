@@ -2816,8 +2816,12 @@ _release_lane_port() { # <lane-id> — reap only a listener owned by this lane c
 
 cmd_clear_lane() {
     local launch_marker="$LANES_DIR/$1.launchd" launch_label="" launch_plist="$LANES_DIR/$1.plist"
-    if _codex_host_is_ephemeral && [ -s "$launch_marker" ] \
-       && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
+    # The launchd marker can disappear before a reparented lane server does.
+    # Interactive Codex cannot reliably boot out the former OR signal the
+    # latter, so every cleanup crosses the durable host boundary, not only
+    # cleanup of a still-marked service. The host override prevents recursion
+    # while draining the request.
+    if _codex_host_is_ephemeral && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
         _queue_lane_cleanup "$1" clear
         return 0
     fi
@@ -2863,8 +2867,7 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
     # human hold (2026-08-02). The tree is snapshotted first so nothing
     # re-parents past the kill.
     local id="${1:-}"; [ -n "$id" ] || die "kill-lane: need a lane id"
-    if _codex_host_is_ephemeral && [ -s "$LANES_DIR/$id.launchd" ] \
-       && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
+    if _codex_host_is_ephemeral && [ "${LOOM_HOST_LANE_CLEANUP:-}" != 1 ]; then
         _queue_lane_cleanup "$id" kill
         return 0
     fi

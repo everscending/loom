@@ -71,4 +71,52 @@ else
 fi
 
 kill "$worker" 2>/dev/null || true
+
+# A completed one-shot has already lost its launchd marker, but a reparented
+# Playwright/Next listener can still own the lane port. Provider-side clear
+# cannot signal that sibling process from the Codex sandbox. It must preserve
+# the port/cwd evidence and queue the entire clear for the durable host instead
+# of reporting a successful reap after kill(2) was denied.
+orphan_cwd="$T/dead-lane-worktree"; mkdir -p "$orphan_cwd" "$T/orphan-bin"
+(cd "$orphan_cwd" && sleep 60) & orphan_pid=$!
+orphan_id=impl-391
+orphan_port=45191
+ORPHAN_PID="$orphan_pid" ORPHAN_CWD="$orphan_cwd" ORPHAN_PORT="$orphan_port"
+export ORPHAN_PID ORPHAN_CWD ORPHAN_PORT
+cat > "$T/orphan-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-tiTCP:$ORPHAN_PORT"*) printf '%s\n' "$ORPHAN_PID" ;;
+  *"-p $ORPHAN_PID -d cwd -Fn"*) printf 'p%s\nfcwd\nn%s\n' "$ORPHAN_PID" "$ORPHAN_CWD" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod +x "$T/orphan-bin/lsof"
+printf '%s\n' "$orphan_port" > "$LOOM_HOME/lanes/$orphan_id.port"
+printf '%s\n' "$orphan_cwd" > "$LOOM_HOME/lanes/$orphan_id.cwd"
+
+CODEX_THREAD_ID=thread-2 CODEX_SESSION_ID= CODEX_CI= PATH="$T/orphan-bin:$PATH" \
+  "$TICK" clear-lane "$orphan_id" >/dev/null 2>&1
+if kill -0 "$orphan_pid" 2>/dev/null \
+   && [ -s "$LOOM_HOME/lanes/$orphan_id.port" ] \
+   && [ -s "$LOOM_HOME/lanes/$orphan_id.cwd" ] \
+   && find "$LOOM_HOME/lane-cleanup-queue" -mindepth 1 -maxdepth 1 -type d \
+        -name "request-*-$orphan_id" | grep -q .; then
+    ok "lane clear: sandboxed Codex preserves dead-lane port evidence for durable cleanup"
+else
+    bad "lane clear: provider-side cleanup lost or falsely reaped the orphan listener"
+fi
+
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= PATH="$T/orphan-bin:$PATH" \
+  "$TICK" drain-lane-cleanups >/dev/null 2>&1
+if ! kill -0 "$orphan_pid" 2>/dev/null \
+   && [ ! -e "$LOOM_HOME/lanes/$orphan_id.port" ] \
+   && [ ! -e "$LOOM_HOME/lanes/$orphan_id.cwd" ] \
+   && ! find "$LOOM_HOME/lane-cleanup-queue" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
+    ok "lane clear: durable host reaps the orphan listener and retires its evidence"
+else
+    bad "lane clear: durable cleanup left the orphan listener or lane state"
+    kill "$orphan_pid" 2>/dev/null || true
+fi
+
 test_finish
