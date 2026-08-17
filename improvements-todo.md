@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-16 23:11 America/Chicago
+Last updated: 2026-08-16 23:17 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -16,9 +16,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
 
-- [ ] **TODO — Add a supervised-repair lease.** A ticket under supervisor/sub-agent repair needs a machine-readable lease. Ordinary waves must not launch a duplicate implementer or gate until the lease is released or expires. This closes the duplicate JOR-214/JOR-287 lane collisions observed on 2026-08-16.
+- [ ] **TODO — Add a supervised-repair lease.** A ticket under supervisor/sub-agent repair needs a machine-readable lease. Ordinary waves must not launch a duplicate implementer or gate until the lease is released or expires. This closes the duplicate JOR-214/JOR-287 collisions and the 23:14 JOR-286 race, where a heartbeat launched `impl-286` during supervised reconciliation; it was stopped before editing the verified worktree.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208 passed its independent gate and entered merge. Next closure targets remain JOR-287 to unlock JOR-218, JOR-286 to unlock JOR-244, and JOR-206 to unlock JOR-230 and JOR-212. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208 is merged and closed. JOR-287 now owns the serialized UI gate to unlock JOR-218, while JOR-286's supervised API gate runs concurrently to unlock JOR-244; JOR-206 is reconciling current main before its UI turn and still unlocks JOR-230/JOR-212. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Retire blocked-report residue after a reset.** `verdict-reset` and `rescope` markers must retire earlier blocked reports as well as earlier verdict counts. Snapshot/planner repair logic must never treat a retired report as an unreleased current hold.
 
