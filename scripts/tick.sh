@@ -1932,6 +1932,11 @@ BRIEFEOF
         local _verdict_ticket="${id#gate-}" _verdict_head=""
         _verdict_ticket="${_verdict_ticket%-r[0-9]*}"
         _verdict_head=$(git -C "$abs" rev-parse HEAD 2>/dev/null || echo HEAD)
+        if [ -n "$pregate" ]; then
+            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The host runs the configured $pregate pregate before this review session. If the provider session starts, that host-owned check passed or explicitly declared a missing-runner reduction in the lane log; the branch was not mechanically rejected. Do not rerun that full tier. Treat the pregate as the deterministic suite evidence and spend this session only on focused adversarial checks, inspection, and the independent verdict.
+BRIEFEOF
+        fi
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - A prose verdict is not a completed gate. Before exit, write the review body to a scratch file and run exactly one tracker verdict for the reviewed HEAD. PASS: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket pass $_verdict_head --file <verdict-body-file>\`. FAIL: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket fail $_verdict_head --class <kebab-defect-class> --file <verdict-body-file>\`. Do not merely print PASS/FAIL in your final response; the verdict verb is the required ticket outcome.
 BRIEFEOF

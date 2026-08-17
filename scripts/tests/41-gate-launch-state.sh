@@ -81,9 +81,16 @@ fi
 # Countercondition: once the ticket is back in review, the same direct path is
 # admitted. This proves the holding assertions reached the state guard.
 printf 'review\n' > "$STATE_FILE"
-LOOM_LANE_ID=impl-333 "$TICK" spawn-lane gate-333 --no-tick \
+LOOM_LANE_ID=impl-333 "$TICK" spawn-lane gate-333 --no-tick --pregate logic \
   --provider claude --job gate --tier medium --brief "$T/gate-brief.md" \
   --cwd "$LOOM_REPO" >/dev/null 2>&1
+if grep -q 'The host runs the configured logic pregate before this review session' \
+     "$LOOM_HOME/briefs/gate-333.md" \
+   && grep -q 'Do not rerun that full tier' "$LOOM_HOME/briefs/gate-333.md"; then
+    ok "gate brief: automatic pregate evidence prevents a duplicate full-tier reviewer run"
+else
+    bad "gate brief: reviewer can repeat the host-owned pregate and double auxiliary occupancy"
+fi
 if [ -s "$LOOM_HOME/lanes/gate-333.pid" ]; then
     ok "gate-launch-violation: returning to review admits the direct handoff"
 else
