@@ -1,10 +1,22 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 07:15 America/Chicago
+Last updated: 2026-08-17 09:20 America/Chicago
 
-Status markers: `DONE`, `IN PROGRESS`, `TODO`.
+Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
+
+- [x] **DONE — Add contract-grounded active-build supervision.** Implemented
+  as `/loom mend` in `83ca609` (`feat(mend): add build supervisor`). The
+  human-run loop now evaluates stable state, chaining, immutable-head,
+  admission, liveness, hold, rejection-cap, classification, completion, and
+  provider-compatibility invariants instead of inventing policy from logs. A
+  read-only `tick.sh mend-status` composes the canonical snapshot and plan,
+  exposes intentional stop state without restarting it, and surfaces evidence
+  requiring attention. Direct Claude and durable Codex inputs yield identical
+  semantics; no adapter changed. Verification: focused mend 9/9, adjacent
+  scheduler/runtime 433/433, full suite 1,327/1,327, and the missing-builder
+  planted violation was caught. (`MEND-STATE-01`, `MEND-COMPAT-01`)
 
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
@@ -88,4 +100,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 ## Update rule
 
-Update this file whenever an item moves state. A `DONE` item must name its implementation commit and focused verification. An `IN PROGRESS` item must say what is already active and what remains before completion.
+Update this file whenever an item moves state. A `DONE` item must name its
+implementation commit and focused verification. An `IN PROGRESS` item must
+say what is already active and what remains before completion. A `BLOCKED`
+item must name the external condition that can release it. A `NEEDS DECISION`
+item must state the policy choice and must not be implemented until the human
+chooses it.
