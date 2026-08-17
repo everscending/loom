@@ -151,7 +151,15 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   at 09:59) whose four owned panes outlived it (`impl-231`, `gate-207`,
   `impl-253`, `gate-239`), while the only live lane `impl-291` had no pane.
   Immediate recovery closed those confirmed orphan panes and started a fresh
-  viewer, which opened `impl-291`. Durable completion requires active-only pane
+  viewer, which opened `impl-291`. A second live failure left JOR-292's pane
+  idle after its merge: the directly relaunched viewer could follow lanes but
+  did not hydrate Linear's configured credential, so its closed-ticket read
+  failed safe and never closed the pane. The provider-neutral viewer now loads
+  the same repo-state/global secret layers as `tick.sh`; implemented in
+  `bac994d` (`fix(viewer): close merged Linear panes`). Focused viewer coverage
+  is 60/60, Linear-driver coverage is 75/75, and the full suite is
+  1,361/1,361; removing that hydration recreates the merged-ticket orphan.
+  Durable completion still requires active-only pane
   reconciliation on every poll, recoverable ownership across viewer death,
   stale/PID-reuse-safe singleton detection, and automatic recovery that cannot
   strand a live lane until a human runs `watch` again. Add public regressions

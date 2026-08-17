@@ -172,6 +172,14 @@ the ledger and in repair evidence.
    Patient Imaging Portal Build JOR-267 — mend returned "loop armed" with zero
    lanes while the deterministic plan already contained the next UI gate; the
    human had to ask whether supervision was doing anything.)*
+10. Escalate human-attention boundaries when they appear, not on the next
+    status request. Name the exact ticket or runtime item, the authority,
+    decision, or external action needed, the work waiting behind it, and Mend's
+    recommended choice; then continue every unrelated safe path. Do not make
+    the human infer that attention is required from a stalled board or ask
+    whether Mend is waiting on them. *(paid: Patient Imaging Portal JOR-291 —
+    its shared harness blocker was fixed and merged, but the remaining sticky
+    hold authorization was surfaced only after the human asked for status.)*
 
 ## Safety boundary
 
