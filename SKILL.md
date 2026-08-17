@@ -235,10 +235,11 @@ refuses outside herdr anyway.
 
        spawn-lane gate-<ticket>[-r<round>] --provider <id> --job gate --tier <tier> --pregate <gate-tier> --brief <file> --cwd <worktree>
 
-   When several tickets are gateable, order them by the number of still-open
-   build tickets they directly unblock, highest first, then by ticket id. This
-   is derived only from the immutable snapshot; it spends scarce serialized UI
-   capacity on dependency unlocks without a provider-side tracker read.
+   When several tickets are gateable, first order them by how many still-open
+   build tickets would become fully unblocked if they merged. Break ties by the
+   number of open tickets they contribute to, then by ticket id. This is derived
+   only from the immutable snapshot; it spends scarce serialized UI capacity on
+   actual dependency releases without a provider-side tracker read.
 
    `--pregate` runs the repo's own gate runner in shell first, so a
    mechanically red branch exits 7 in seconds having spent no model time.

@@ -251,19 +251,27 @@ else
                   | lane_round(.id) ] | max) as $r
     | if $r == null then "gate-\($iid)" else "gate-\($iid)-r\($r + 1)" end;
 
-  # Closing a gate that releases other open tickets moves more of the build
-  # than closing an isolated ticket. Score only from the immutable snapshot:
-  # no tracker read, no provider judgment, and ticket id remains the stable
-  # tie-breaker. (D-TICK-42: #289 waited behind four isolated UI gates while
-  # #231 and #233 both depended on it.)
+  # Closing a gate that fully releases other open tickets moves more of the
+  # build than merely contributing to a multiply-blocked ticket. Score only
+  # from the immutable snapshot: no tracker read, no provider judgment, and
+  # ticket id remains the stable final tie-breaker. (D-TICK-42: #289 waited
+  # behind serialized UI gates while #231 and #233 depended only on it.)
   def open_dependents_of($iid):
       [ $tickets[]
         | select(any(.blocked_by[]?; .id == $iid and (.closed != true))) ]
       | length;
+  def released_dependents_of($iid):
+      [ $tickets[]
+        | ([.blocked_by[]? | select(.closed != true) | .id]) as $open
+        | select(($open | length) > 0 and all($open[]; . == $iid)) ]
+      | length;
 
   ([ $tickets[] | select(.gate.eligible // false)
-     | . + {_dependency_unlocks: open_dependents_of(.id)} ]
-   | sort_by([(-._dependency_unlocks), .id])) as $gate_candidates
+     | . + {
+         _dependency_releases: released_dependents_of(.id),
+         _dependency_impacts: open_dependents_of(.id)
+       } ]
+   | sort_by([(-._dependency_releases), (-._dependency_impacts), .id])) as $gate_candidates
 | ([ $gate_candidates[] | select(.supervised_lease != null) ]) as $gate_leased
 | ([ $gate_candidates[] | select(.supervised_lease == null) ]) as $gate_all
 | ($gate_all[0:$aux_free]) as $gate_take

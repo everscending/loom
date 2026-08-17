@@ -11,7 +11,8 @@ FX="$T/fx"; mkdir -p "$FX"
 # One fixture snapshot carrying one case per SKILL.md step, so the whole
 # decision table is exercised by a single `plan` run and the ORDER between the
 # steps is assertable at the same time:
-#   #39/#40 review and gateable; #40 unlocks #46        (step 3 priority)
+#   #39/#40 review and gateable; #40 fully unlocks #46, while #39 only
+#   contributes to #47, which still has open blocker #48 (step 3 priority)
 #   #40's prior gate lane is dead at rc 7               (step 2 + round id)
 #   #41 in-progress behind a STALE lane                (step 2)
 #   #42 stranded, one rejection                        (step 4, rework)
@@ -91,6 +92,17 @@ cat > "$FX/snap.json" <<'EOF'
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
+    {"id": 47, "title": "ready, blocked by two open blockers", "state": "ready-for-agent", "tier": "ui",
+     "fix": false, "unblocked": false, "assignees": [], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "blocked_by": [{"id":39,"source":"native","closed":false},{"id":48,"source":"native","closed":false}],
+     "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
+     "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
+     "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
+    {"id": 48, "title": "the other open blocker", "state": "in-progress", "tier": "logic",
+     "fix": false, "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "blocked_by": [], "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
+     "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
+     "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 47, "title": "merge-queue, held", "state": "merge-queue", "tier": "api", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
@@ -132,7 +144,7 @@ cat > "$FX/snap.json" <<'EOF'
   ],
   "lessons_tail": [],
   "summary": {
-    "open_tickets": 13, "by_state": {}, "all_blocked": false,
+    "open_tickets": 15, "by_state": {}, "all_blocked": false,
     "epics_awaiting_probe": ["Ledger core", "Reporting surface"],
     "ready_set_empty": false, "lanes_running": 2, "gateable": 2,
     "lanes_running_by_type": {"impl": 2, "gate": 0, "merge": 0, "probe": 0, "unknown": 0},
