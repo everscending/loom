@@ -20,8 +20,9 @@ per lane — what it's doing, why, what's next — plus merge-queue depth and
 blocked list. Read-only.
 
 Then give the human eyes on the work: inside herdr (`$HERDR_ENV` is `1`),
-**always `scripts/watch-panes.sh raise`, detached** — a pane per live lane
-running `tick.sh render-log <id> --follow`, plus a build-ticker strip running
+**always `scripts/watch-panes.sh raise`** — it ensures one tagged controller
+pane inside Herdr, whose supervised polling worker maintains a pane per live
+lane running `tick.sh render-log <id> --follow`, plus a build-ticker strip running
 `tick.sh render-events --follow` (one timestamped line per step: claimed, →
 review, gate verdict, merged — deterministic, zero model time; narrating
 mechanical events with a session is the wrong tool). The viewer keeps the
@@ -33,9 +34,10 @@ next tick cannot undo it). `raise` is what clears both switches, which is why
 `watch` uses it and a plain launch is wrong here: a human typing `watch` is
 asking to see the build, an intent newer than whatever earlier close is on
 disk. Only `start` and `watch` may clear them — an *automatic* tick undoing a
-human's close is the thing the switches exist to prevent. Detached, so the
-panes outlive this session. *(paid: a stale ticker-off marker made `watch`
-raise a viewer that silently closed its own ticker every poll.)*
+human's close is the thing the switches exist to prevent. Herdr hosts the
+controller, so it and its panes outlive this session. *(paid: a stale
+ticker-off marker made `watch` raise a viewer that silently closed its own
+ticker every poll.)*
 
 Outside herdr, name those commands instead. `--no-panes` for the summary
 alone. Never hand the human a command to paste when it can just be run.

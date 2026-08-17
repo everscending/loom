@@ -1,8 +1,7 @@
 # Durable viewer controller design
 
-Status: design and red contract tests. Consumer: the next Loom viewer
-implementation change. The tests are intentionally outside `scripts/tests/`
-until the controller exists, so the shipping suite stays green.
+Status: implemented. Consumer: Loom viewer maintainers. The shipping contract
+tests live in `scripts/tests/14-viewer-durability.sh`.
 
 ## Failure being repaired
 
@@ -91,7 +90,7 @@ keep the controller alive, emit one `viewer_note`, and retry next poll.
 ## Delivery stages
 
 1. Implement token helpers and recovery without changing layout. Make the
-   ownership/orphan tests in `scripts/tests/pending/viewer-durability.sh`
+   ownership/orphan tests in `scripts/tests/14-viewer-durability.sh`
    green, including the unrelated-pane negative assertion.
 2. Replace idle affinity with active-only reconciliation and update the old
    idle-pane assertions in section 14. Preserve ticket affinity only while

@@ -5251,7 +5251,7 @@ _raise_viewer() {
     [ "${HERDR_ENV:-}" = 1 ] || return 0
     [ -x "$WATCH_PANES_CMD" ] || return 0
     rm -f "$LOOM_HOME/ticker-off" "$LOOM_HOME/viewer-off"
-    nohup "$WATCH_PANES_CMD" >>"$LOOM_HOME/watch-panes.out" 2>&1 &
+    "$WATCH_PANES_CMD" raise >>"$LOOM_HOME/watch-panes.out" 2>&1 || :
     echo "loom: viewer raised — a pane per live worker, plus the build ticker."
 }
 
