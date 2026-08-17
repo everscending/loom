@@ -1189,11 +1189,8 @@ _supervised_lane_ticket() { # ordinary impl/gate/merge lane id → ticket iid
 
 _is_agent_cmd() { [ "${1:-}" = "$AGENT_SH" ] || [ "$(basename "${1:-}")" = agent.sh ]; }
 
-_assert_build_provider() { # <provider> — tracker is canonical, argument is transport
-    local provider="$1" raw build labels count current
-    [ -n "${LOOM_SKIP_PROVIDER_CHECK:-}" ] && return 0
-    "$AGENT_SH" detect --provider "$provider" >/dev/null \
-      || die "tick: '$provider' has no registered provider adapter"
+_canonical_build_provider() { # tracker is canonical; print one registered provider
+    local raw build labels count current
     raw=$("$TRACKER_SH" issues-open) || die "tick: cannot verify provider — open Build issue read failed"
     build=$(printf '%s' "$raw" | jq -r '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
     [ -n "$build" ] || die "tick: cannot verify provider — no open Build N issue"
@@ -1203,7 +1200,31 @@ _assert_build_provider() { # <provider> — tracker is canonical, argument is tr
     current="${labels#provider::}"
     "$AGENT_SH" detect --provider "$current" >/dev/null \
       || die "tick: Build #$build carries provider::$current, but that adapter is not registered"
-    [ "$current" = "$provider" ] || die "tick: scheduler transport says '$provider' but Build #$build says '$current' — refusing before model invocation"
+    printf '%s\n' "$current"
+}
+
+_assert_build_provider() { # <provider> — tracker is canonical, argument is transport
+    local provider="$1" current
+    [ -n "${LOOM_SKIP_PROVIDER_CHECK:-}" ] && return 0
+    "$AGENT_SH" detect --provider "$provider" >/dev/null \
+      || die "tick: '$provider' has no registered provider adapter"
+    current=$(_canonical_build_provider) || return $?
+    [ "$current" = "$provider" ] || die "tick: scheduler transport says '$provider' but the active Build says '$current' — refusing before model invocation"
+}
+
+# Deterministic handoffs normally inherit the provider chosen by their lane's
+# scheduler. A human may safely resume the same public verb from a clean shell,
+# where there is no transport value to inherit: recover it from the one active
+# Build issue instead of manufacturing an empty provider. Inherited values are
+# still checked against the same canonical state before a successor is paid.
+_handoff_provider() {
+    local provider="${LOOM_PROVIDER:-}"
+    if [ -n "$provider" ]; then
+        _assert_build_provider "$provider" || return $?
+    else
+        provider=$(_canonical_build_provider) || return $?
+    fi
+    printf '%s\n' "$provider"
 }
 
 # Only ever consulted on a FAILED session. A `rate_limit_event` with status
@@ -2896,7 +2917,7 @@ _chain_merge_fallback() {
 cmd_chain_gate() { # <impl-lane-id>
     local source="${1:-}" iid issue notes evidence tier mrs branch mr_head wt wt_head jqd
     local gate_id scratch briefpath lane_tier defer_launch="${LOOM_DEFER_LANE_LAUNCH:-}" rc=0
-    local scope_body repair_body lane_path
+    local scope_body repair_body lane_path handoff_provider
     case "$source" in impl-[0-9]*) iid="${source#impl-}" ;; *) _chain_merge_fallback; return 0 ;; esac
     case "$iid" in ''|*[!0-9]*) _chain_merge_fallback; return 0 ;; esac
     if _loop_stopped; then return 0; fi
@@ -2934,6 +2955,7 @@ cmd_chain_gate() { # <impl-lane-id>
     [ -n "$wt" ] && [ -d "$wt" ] || { _chain_merge_fallback; return 0; }
     wt_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     case "$wt_head:$mr_head" in "$mr_head":*|*:"$wt_head") ;; *) _chain_merge_fallback; return 0 ;; esac
+    handoff_provider=$(_handoff_provider) || return $?
 
     # Reusing the base id is intentional. spawn-lane's ticket@HEAD lock is the
     # cross-id authority when a scheduler raced us with gate-<iid>-rN, while a
@@ -2964,7 +2986,7 @@ cmd_chain_gate() { # <impl-lane-id>
     _codex_host_is_ephemeral && defer_launch=1
     LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
       "$SELF_PATH" spawn-lane "$gate_id" --cwd "$wt" --brief "$briefpath" \
-        --provider "${LOOM_PROVIDER:-}" --job gate --tier "$lane_tier" --pregate "$tier" \
+        --provider "$handoff_provider" --job gate --tier "$lane_tier" --pregate "$tier" \
         >>"$LOGS_DIR/self-trigger.log" 2>&1 || rc=$?
 
     # A duplicate loser is success: the ticket@HEAD owner is already doing the
@@ -3021,6 +3043,7 @@ cmd_chain_merge() {
     if [ -z "$head_id" ] || [ -z "$head_branch" ] || [ -z "$head_tier" ]; then _chain_merge_fallback; return 0; fi
     local wt; wt="$(_worktree_for_branch "$REPO_ROOT" "$head_branch")"
     if [ -z "$wt" ] || [ ! -d "$wt" ]; then _chain_merge_fallback; return 0; fi
+    local handoff_provider; handoff_provider=$(_handoff_provider) || return $?
     local base; base="$(_detect_base "$REPO_ROOT")"
     local scratch; scratch="$(_new_scratch "merge-chain-$head_id")"
     local briefpath="$scratch/brief.md"
@@ -3037,7 +3060,7 @@ cmd_chain_merge() {
     _codex_host_is_ephemeral && defer_launch=1
     LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
       "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
-        --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" --pregate "$head_tier" \
+        --provider "$handoff_provider" --job merge --tier "$tier" --pregate "$head_tier" \
         >>"$LOGS_DIR/self-trigger.log" 2>&1 || _chain_merge_fallback
 }
 

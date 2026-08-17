@@ -71,7 +71,7 @@ FX="$T/fx35"
 make_glab_fixture "$FX"
 cat > "$FX/open.json" <<'EOF'
 [
- {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],"description":"noise"},
+ {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":["provider::claude"],"assignees":[],"description":"noise"},
  {"iid":28,"title":"Second in queue's blocker","project_id":1,"web_url":"https://x/28",
   "labels":["build-9","merge-queue","tier::logic"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"},
  {"iid":30,"title":"Newer, behind 28","project_id":1,"web_url":"https://x/30",
@@ -227,6 +227,23 @@ if [ ! -e "$WT28/base-after-staging.txt" ]; then
     ok "merge preflight: staging a deferred provider brief does not execute reconcile"
 else
     bad "merge preflight: the provider brief executed reconcile while it was being staged"
+fi
+rm -rf "$LOOM_HOME/lane-launch-queue"/request-*
+reap_lanes
+
+# D-TICK-35's other deterministic successor has the same clean-shell seam.
+# With no inherited provider, a manual chain-merge recovers the canonical
+# Build provider and freezes it into the durable host request.
+CODEX_THREAD_ID=interactive-codex GLAB_CMD="$FX/glab-stub.sh" \
+  LOOM_PROVIDER= LOOM_SKIP_PROVIDER_CHECK= "$TICK" chain-merge >/dev/null 2>&1
+manual_merge=$(find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 \
+    -type d -name 'request-*' -exec sh -c \
+    '[ "$(cat "$1/id" 2>/dev/null)" = merge-28 ] && printf "%s\n" "$1"' _ {} \; | head -1)
+if [ -n "$manual_merge" ] \
+   && [ "$(cat "$manual_merge/provider" 2>/dev/null)" = claude ]; then
+    ok "chain-merge: manual resume recovers the canonical Build provider"
+else
+    bad "chain-merge: manual resume lost the canonical Build provider"
 fi
 rm -rf "$LOOM_HOME/lane-launch-queue"/request-*
 reap_lanes

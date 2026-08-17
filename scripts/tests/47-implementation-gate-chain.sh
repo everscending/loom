@@ -11,9 +11,14 @@ git -C "$LOOM_REPO" branch -M loom-236
 head=$(git -C "$LOOM_REPO" rev-parse HEAD)
 
 CHAIN_TRACKER="$T/chain-tracker.sh"
+CHAIN_BUILD_JSON="$T/chain-build.json"
+export CHAIN_BUILD_JSON
+printf '%s\n' '[{"id":9,"title":"Build 9","state":"open","labels":["provider::claude"]}]' > "$CHAIN_BUILD_JSON"
 cat > "$CHAIN_TRACKER" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
+  issues-open)
+    cat "$CHAIN_BUILD_JSON" ;;
   issue)
     printf '%s\n' '{"id":236,"title":"Direct review handoff","state":"open","labels":["review"],"body":"## Risk tier\n\nui\n\n## Acceptance criteria\n\n- [ ] review this exact contract"}' ;;
   issue-notes)
@@ -39,7 +44,8 @@ export CHAIN_CALLS
 cat > "$CHAIN_AGENT" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
-  detect|preflight) exit 0 ;;
+  detect) [ "${3:-}" = claude ] ;;
+  preflight) exit 0 ;;
   run) printf '%s\n' "$*" >> "$CHAIN_CALLS"; sleep 20 ;;
   *) exit 2 ;;
 esac
@@ -80,6 +86,45 @@ runs=$(wc -l < "$CHAIN_CALLS" | tr -d ' ')
 
 kill "$gate_pid" 2>/dev/null || true
 TRACKER_CMD="$CHAIN_TRACKER" "$TICK" clear-lane gate-236 >/dev/null 2>&1 || true
+
+# A manually resumed deterministic handoff starts at the public verb without
+# an epilogue environment. It must recover the one canonical Build provider
+# and preserve it in the durable request instead of passing an empty provider
+# to spawn-lane.
+TRACKER_CMD="$CHAIN_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+  LOOM_PROVIDER= LOOM_SKIP_PROVIDER_CHECK= LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" chain-gate impl-236 >/dev/null 2>&1 || true
+manual_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ -n "$manual_request" ] \
+   && [ "$(cat "$manual_request/id" 2>/dev/null)" = gate-236 ] \
+   && [ "$(cat "$manual_request/provider" 2>/dev/null)" = claude ]; then
+    ok "implementation handoff: manual resume recovers the canonical Build provider"
+else
+    bad "implementation handoff: manual resume lost the canonical Build provider"
+fi
+[ -z "$manual_request" ] || mv "$manual_request" "$LOOM_HOME/lane-launch-queue/consumed-manual-request"
+
+# Canonical recovery is deliberately strict. Ambiguous state and a provider
+# without a registered adapter must both fail before creating a durable lane
+# request; guessing either value can silently move a Build onto another biller.
+provider_refusals=0
+for labels in '["provider::claude","provider::codex"]' '["provider::future"]'; do
+  printf '[{"id":9,"title":"Build 9","state":"open","labels":%s}]\n' "$labels" > "$CHAIN_BUILD_JSON"
+  if TRACKER_CMD="$CHAIN_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+      LOOM_PROVIDER= LOOM_SKIP_PROVIDER_CHECK= LOOM_DEFER_LANE_LAUNCH=1 \
+      "$TICK" chain-gate impl-236 >"$T/provider-refusal.out" 2>&1; then
+    :
+  else
+    provider_refusals=$((provider_refusals + 1))
+  fi
+done
+leftover_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ "$provider_refusals" = 2 ] && [ -z "$leftover_request" ]; then
+    ok "implementation handoff: ambiguous and unregistered Build providers are refused before spawn"
+else
+    bad "implementation handoff: invalid canonical provider reached spawn (refused=$provider_refusals request=${leftover_request:-none})"
+fi
+printf '%s\n' '[{"id":9,"title":"Build 9","state":"open","labels":["provider::claude"]}]' > "$CHAIN_BUILD_JSON"
 
 # Codex-authored handoffs use the same command but freeze the gate into the
 # durable host queue. The chain must treat that request as success; a later
@@ -127,6 +172,26 @@ if ! grep -Eq "chain-gate '?impl-237'?" "$MUT_ARGS"; then
     ok "implementation handoff violation: deleting the host chain recreates scheduler-only review"
 else
     bad "implementation handoff violation: planted deletion still exposed a direct gate chain"
+fi
+
+# Planted D-TICK-35 violation: delete only canonical recovery from a private
+# copy. The public manual verb must again reach spawn-lane with no provider.
+MUT_PROVIDER=$(mirror_scripts "$T/mut-handoff-provider")
+sed -i.bak '/provider=$(\_canonical_build_provider)/s/.*/        provider="${LOOM_PROVIDER:-}"/' \
+  "$MUT_PROVIDER/tick.sh"
+if TRACKER_CMD="$CHAIN_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+    LOOM_PROVIDER= LOOM_SKIP_PROVIDER_CHECK= LOOM_DEFER_LANE_LAUNCH=1 \
+    "$MUT_PROVIDER/tick.sh" chain-gate impl-236 >"$T/mut-provider.out" 2>&1; then
+  mut_provider_rc=0
+else
+  mut_provider_rc=$?
+fi
+mut_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ -z "$mut_request" ] \
+   && grep -q "no provider job or custom command" "$LOOM_HOME/logs/self-trigger.log"; then
+    ok "implementation handoff violation: deleting canonical recovery recreates the empty-provider refusal"
+else
+    bad "implementation handoff violation: provider mutant did not recreate D-TICK-35 (rc=$mut_provider_rc request=${mut_request:-none})"
 fi
 
 test_finish
