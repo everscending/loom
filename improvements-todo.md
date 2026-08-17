@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-16 23:00 America/Chicago
+Last updated: 2026-08-16 23:11 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -12,13 +12,13 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [ ] **TODO — Classify infrastructure failures separately from product verdicts.** Lock timeouts, port collisions, stale-base returns, cross-gate fixture resets, and provider/runtime failures must not increment a product rejection round. Preserve the artifact and schedule an infrastructure retry or repair without posting a product `FAIL`.
 
-- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. This is active operationally for JOR-214, JOR-286, and JOR-206; machine-enforced planner routing is still TODO.
+- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206 reproduced its forged-cursor defect (`200` instead of `422`), landed and pushed the authenticated-cursor repair at `56e2ebb`, and is waiting for the serialized UI resource. JOR-286's latest reviewer found a test-proof gap rather than a new RPC defect; a supervised test-only repair is in progress. JOR-214's fixture-lease repair remains verified and awaits its serialized gate. Machine-enforced planner routing is still TODO.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
 
 - [ ] **TODO — Add a supervised-repair lease.** A ticket under supervisor/sub-agent repair needs a machine-readable lease. Ordinary waves must not launch a duplicate implementer or gate until the lease is released or expires. This closes the duplicate JOR-214/JOR-287 lane collisions observed on 2026-08-16.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. Active examples: close JOR-287 to unlock JOR-218; close JOR-286 to unlock JOR-244; repair JOR-206 to unlock JOR-230 and JOR-212. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208 passed its independent gate and entered merge. Next closure targets remain JOR-287 to unlock JOR-218, JOR-286 to unlock JOR-244, and JOR-206 to unlock JOR-230 and JOR-212. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Retire blocked-report residue after a reset.** `verdict-reset` and `rescope` markers must retire earlier blocked reports as well as earlier verdict counts. Snapshot/planner repair logic must never treat a retired report as an unreleased current hold.
 
