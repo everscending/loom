@@ -76,6 +76,77 @@ if [ -n "$queued_rescope" ] && grep -q 'lib/scheduling/booking.ts' "$queued_resc
 else
     bad "D-TICK-28: deferred provider request lost the active rescope"
 fi
+# D-TICK-38: the replacement scope must bind the independent gate as well as
+# implementation. JOR-240's gate brief omitted it and restored requirements
+# that the human had explicitly assigned to other tickets.
+printf 'Original gate brief: require both DST dates and the patient booking collision.\n' > "$BR/pre-rescope-gate.md"
+cat > "$BR/gate-rescope-plan.json" <<'EOF'
+{"actions":[{"lane":"gate-70","ticket":70,"spawn":{"brief":{"active_scope_reset":{"at":"2026-08-10T09:59:00Z","body":"Replacement gate scope: availability round-trip only; DST and booking are owned elsewhere.\n\n<!-- orch-scope-reset 2026-08-10T09:59:00Z -->"}}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/gate-rescope-plan.json" \
+    "$TICK" spawn-lane gate-70 --no-tick --cwd "$BR/wt" --brief "$BR/pre-rescope-gate.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'availability round-trip only' "$LOOM_HOME/briefs/gate-70.md" 2>/dev/null \
+   && grep -q 'DST and booking are owned elsewhere' "$LOOM_HOME/briefs/gate-70.md" 2>/dev/null \
+   && ! grep -q 'availability round-trip only' "$BR/pre-rescope-gate.md"; then
+    ok "D-TICK-38: staged gate brief carries the immutable active rescope"
+else
+    bad "D-TICK-38: staged gate brief reused the superseded review contract"
+fi
+# D-TICK-39: after a completed supervised repair, a later gate rejection can
+# return the ticket to rework. The immutable repair evidence must reach that
+# implementation brief or the worker can delete the exact fix as "out of scope."
+printf 'Original ticket scope: only edit the four listed feature files.\n' > "$BR/pre-repair-rework.md"
+cat > "$BR/repair-plan.json" <<'EOF'
+{"actions":[{"lane":"impl-69","ticket":69,"spawn":{"brief":{"active_supervised_repair":{"at":"2026-08-10T09:59:00Z","body":"Verified repair a84fcf3 adds db/deploy/reminder-cron.sql, scripts/configure-reminder-cron.sh, and tests/deploy/reminder-cron-config.test.ts; preserve them.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"}}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/repair-plan.json" \
+    "$TICK" spawn-lane impl-69 --no-tick --cwd "$BR/wt" --brief "$BR/pre-repair-rework.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'db/deploy/reminder-cron.sql' "$LOOM_HOME/briefs/impl-69.md" 2>/dev/null \
+   && grep -q 'preserve them' "$LOOM_HOME/briefs/impl-69.md" 2>/dev/null; then
+    ok "D-TICK-39: staged rework brief carries completed repair evidence"
+else
+    bad "D-TICK-39: staged rework brief lost the repair it must preserve"
+fi
+# Planted violations prove these assertions exercise the shared spawn boundary,
+# not only the fixture text.
+D38_MUT=$(mirror_scripts "$T/dtick38-mutant")
+sed 's/impl|gate) ;; \*) return 0 ;;/impl) ;; *) return 0 ;;/' "$D38_MUT/tick.sh" > "$D38_MUT/tick-mutant.sh"
+mv "$D38_MUT/tick-mutant.sh" "$D38_MUT/tick.sh"
+chmod +x "$D38_MUT/tick.sh"
+cat > "$BR/gate-rescope-mutant-plan.json" <<'EOF'
+{"actions":[{"lane":"gate-72","ticket":72,"spawn":{"brief":{"active_scope_reset":{"at":"2026-08-10T09:59:00Z","body":"Replacement gate scope: availability round-trip only.\n\n<!-- orch-scope-reset 2026-08-10T09:59:00Z -->"}}}}]}
+EOF
+D38_HOME="$T/dtick38-mutant-home"
+d38_out=$(LOOM_HOME="$D38_HOME" LOOM_WAVE_PLAN="$BR/gate-rescope-mutant-plan.json" \
+    "$D38_MUT/tick.sh" spawn-lane gate-72 --no-tick --cwd "$BR/wt" \
+    --brief "$BR/pre-rescope-gate.md" -- /bin/echo D-TICK-38-scope-transport-violation -p @brief 2>&1)
+d38_rc=$?
+if assert_mutant_ran "$d38_rc" "$d38_out" "D-TICK-38-scope-transport-violation" \
+   && ! grep -q 'availability round-trip only' "$D38_HOME/briefs/gate-72.md" 2>/dev/null; then
+    ok "D-TICK-38 mutant: excluding gates recreates the superseded-contract escape"
+else
+    bad "D-TICK-38 mutant: planted gate exclusion did not recreate the escape (rc=$d38_rc)"
+fi
+
+D39_MUT=$(mirror_scripts "$T/dtick39-mutant")
+sed '/_append_active_supervised_repair "$id" "$BRIEFS_DIR\/$id.md"/d' \
+    "$D39_MUT/tick.sh" > "$D39_MUT/tick-mutant.sh"
+mv "$D39_MUT/tick-mutant.sh" "$D39_MUT/tick.sh"
+chmod +x "$D39_MUT/tick.sh"
+cat > "$BR/repair-mutant-plan.json" <<'EOF'
+{"actions":[{"lane":"impl-68","ticket":68,"spawn":{"brief":{"active_supervised_repair":{"at":"2026-08-10T09:59:00Z","body":"Verified repair a84fcf3 adds db/deploy/reminder-cron.sql; preserve it.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"}}}}]}
+EOF
+D39_HOME="$T/dtick39-mutant-home"
+d39_out=$(LOOM_HOME="$D39_HOME" LOOM_WAVE_PLAN="$BR/repair-mutant-plan.json" \
+    "$D39_MUT/tick.sh" spawn-lane impl-68 --no-tick --cwd "$BR/wt" \
+    --brief "$BR/pre-repair-rework.md" -- /bin/echo D-TICK-39-repair-transport-violation -p @brief 2>&1)
+d39_rc=$?
+if assert_mutant_ran "$d39_rc" "$d39_out" "D-TICK-39-repair-transport-violation" \
+   && ! grep -q 'db/deploy/reminder-cron.sql' "$D39_HOME/briefs/impl-68.md" 2>/dev/null; then
+    ok "D-TICK-39 mutant: deleting the shared append recreates repair erasure"
+else
+    bad "D-TICK-39 mutant: planted append deletion did not recreate the escape (rc=$d39_rc)"
+fi
 # The composed brief itself must be clean of the shape it forbids, or every
 # lane reads an instruction to do the one thing that cannot work.
 if grep -qE '(^|[^A-Za-z0-9_./-])/(implement|loom|code-review|to-tickets)([^A-Za-z0-9-]|$)' "$COMPOSED"; then

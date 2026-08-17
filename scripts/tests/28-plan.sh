@@ -38,6 +38,7 @@ cat > "$FX/snap.json" <<'EOF'
   "tickets": [
     {"id": 40, "title": "pregate rejected", "state": "review", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "medium", "source": "lane_tier"},
+     "active_scope_reset": {"at":"2026-08-10T09:59:00Z","body":"Replacement gate scope: prove only the provider availability round-trip; DST and booking belong to other tickets.\n\n<!-- orch-scope-reset 2026-08-10T09:59:00Z -->"},
      "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
      "merge_attempts": 0, "merge_hold": null,
      "related_merge_requests": [{"id": 90, "state": "open", "branch": "t40", "sha": "aaaa111"}],
@@ -50,6 +51,7 @@ cat > "$FX/snap.json" <<'EOF'
     {"id": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
      "active_scope_reset": {"at":"2026-08-10T09:58:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:58:00Z -->"},
+     "active_supervised_repair": {"at":"2026-08-10T09:59:00Z","body":"Verified repair a84fcf3 adds the deployment runner and its public contract test; preserve those files during later rework.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"},
      "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
@@ -236,6 +238,17 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate')" = "logic" ] \
     && ok "plan: the gate spawn carries the ticket's own tier as its pregate" \
     || bad "plan: gate pregate wrong ($(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate'))"
+# D-TICK-38: an active scope reset is the gate's replacement contract too.
+# JOR-240's planner carried the reset only for implementation actions, so its
+# reviewer was mechanically briefed with superseded DST and booking criteria.
+if [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.brief.active_scope_reset.body')" = \
+     "Replacement gate scope: prove only the provider availability round-trip; DST and booking belong to other tickets.
+
+<!-- orch-scope-reset 2026-08-10T09:59:00Z -->" ]; then
+    ok "D-TICK-38: gate action carries the active replacement scope"
+else
+    bad "D-TICK-38: gate action silently restored the pre-rescope contract"
+fi
 # Step 4: two rejections mean stop, not respawn, even when their classes differ
 # (#43/#52); one does not (#42), and the rework respawn takes the ticket's OWN resolved model — a
 # rework round is exactly where the escalation chain differs from lane_model.
@@ -254,6 +267,16 @@ if [ "$(jq '[.actions[] | select(.lane=="impl-42" or .lane=="impl-45")
     ok "D-TICK-28: new-work and rework actions both carry the active rescope note"
 else
     bad "D-TICK-28: a fill action silently fell back to pre-rescope scope"
+fi
+# D-TICK-39: a later rejection must not erase the completed repair evidence
+# that explains why necessary support files exceed the ticket's old file list.
+if [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.brief.active_supervised_repair.body')" = \
+     "Verified repair a84fcf3 adds the deployment runner and its public contract test; preserve those files during later rework.
+
+<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->" ]; then
+    ok "D-TICK-39: rework action carries completed supervised-repair evidence"
+else
+    bad "D-TICK-39: rework action forgot the repair it must preserve"
 fi
 # Step 5: the oldest merge-queue ticket whose hold is null. #47 is held, #49
 # has spent its attempt cap and is blocked so the queue ADVANCES, #48 merges.

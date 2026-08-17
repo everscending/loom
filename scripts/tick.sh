@@ -1911,9 +1911,10 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
       || { rm -rf "$request"; die "spawn-lane: cannot stage deferred brief '$brief'"; }
     # Codex provider sessions queue their launch for a durable host, so the
     # immutable wave plan may be gone when that host stages the final brief.
-    # Freeze the active rescope into the queued copy now. Claude/direct
-    # launches use the same helper later in _spawn_stage_brief.
+    # Freeze active supervisor context into the queued copy now. Claude/direct
+    # launches use the same helpers later in _spawn_stage_brief.
     _append_active_scope_reset "$id" "$request/brief.md"
+    _append_active_supervised_repair "$id" "$request/brief.md"
     local ready="${request%.tmp}"
     mv "$request" "$ready"
     _ev lane_queued id "$id" type "$(_lane_type "$id")" job "$job" \
@@ -2122,7 +2123,7 @@ _spawn_parse_flags() {
 # back. Every die in here fires before anything destructive runs.
 _append_active_scope_reset() { # <lane-id> <staged-brief>
     local _scope_lane="$1" _scope_brief="$2" _scope_plan="${LOOM_WAVE_PLAN:-}"
-    [ "$(_lane_type "$_scope_lane")" = impl ] || return 0
+    case "$(_lane_type "$_scope_lane")" in impl|gate) ;; *) return 0 ;; esac
     [ -n "$_scope_plan" ] || return 0
     [ -r "$_scope_plan" ] \
       || die "spawn-lane: immutable wave plan '$_scope_plan' is unreadable; refusing a possibly pre-rescope brief"
@@ -2153,6 +2154,38 @@ _append_active_scope_reset() { # <lane-id> <staged-brief>
     printf '\n\n## Active supervisor rescope (from immutable wave plan)\n%s\n' \
       "$_scope_body" >> "$_scope_brief" \
       || die "spawn-lane: cannot append active rescope to staged brief '$_scope_brief'"
+}
+
+_append_active_supervised_repair() { # <lane-id> <staged-brief>
+    local _repair_lane="$1" _repair_brief="$2" _repair_plan="${LOOM_WAVE_PLAN:-}"
+    [ "$(_lane_type "$_repair_lane")" = impl ] || return 0
+    [ -n "$_repair_plan" ] || return 0
+    [ -r "$_repair_plan" ] \
+      || die "spawn-lane: immutable wave plan '$_repair_plan' is unreadable; refusing a brief that may erase a supervised repair"
+
+    local _repair_record="" _repair_body=""
+    _repair_record=$(jq -ce --arg lane "$_repair_lane" '
+      [.actions[]? | select(.lane == $lane)] as $actions
+      | if ($actions | length) != 1 then
+          error("immutable wave plan must contain exactly one action for " + $lane)
+        else ($actions[0].spawn.brief.active_supervised_repair // null) as $repair
+        | if $repair == null then {present:false}
+          elif (($repair.body // null) | type) != "string" or ($repair.body | length) == 0 then
+            error("active supervised repair for " + $lane + " has no note body")
+          else {present:true, body:$repair.body} end
+        end' "$_repair_plan" 2>/dev/null) \
+      || die "spawn-lane: immutable wave plan has no valid repair evidence for '$_repair_lane'"
+    [ "$(printf '%s\n' "$_repair_record" | jq -r '.present')" = true ] || return 0
+    _repair_body=$(printf '%s\n' "$_repair_record" | jq -r '.body')
+    local _repair_marker=""
+    _repair_marker=$(printf '%s\n' "$_repair_body" \
+      | grep -oE '<!-- orch-supervised-repair [^>]+-->' | tail -1 || true)
+    if [ -n "$_repair_marker" ] && grep -Fq "$_repair_marker" "$_repair_brief"; then
+        return 0
+    fi
+    printf '\n\n## Active supervised repair (from immutable wave plan)\n%s\n' \
+      "$_repair_body" >> "$_repair_brief" \
+      || die "spawn-lane: cannot append supervised repair evidence to staged brief '$_repair_brief'"
 }
 
 _spawn_stage_brief() {
@@ -2211,6 +2244,7 @@ _spawn_stage_brief() {
     done
     cp "$brief" "$BRIEFS_DIR/$id.md" || die "spawn-lane: cannot copy brief into $BRIEFS_DIR"
     _append_active_scope_reset "$id" "$BRIEFS_DIR/$id.md"
+    _append_active_supervised_repair "$id" "$BRIEFS_DIR/$id.md"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless
     # survival rules the probe brief alone used to carry. They are facts
     # about the execution environment, not about probing, and a wave asked

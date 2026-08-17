@@ -241,7 +241,11 @@ refuses outside herdr anyway.
    it, the session does the ticket's **single** independent `/code-review` +
    PRD-faithfulness check against its `PRD requirement`, plus **scope**: the
    brief names the ticket's expected file surface, and a diff reaching outside
-   it is a FAIL unless the ticket body names those files.
+   it is a FAIL unless the ticket body names those files. When the gate action
+   carries an active supervisor scope reset, that reset is the replacement
+   review contract: it overrides conflicting original ticket and PRD criteria,
+   and `spawn-lane` appends it mechanically to both direct and deferred gate
+   briefs before either provider starts.
 
    Verdict is a label change: pass → `merge-queue`; fail → `in-progress` with
    a rejection comment. End every verdict comment with
@@ -279,7 +283,11 @@ refuses outside herdr anyway.
    "these files are outside this ticket's scope; decide whether they belong
    here before continuing" — not a work item; its tier is the ticket's own
    `.tier_selection.effective`, which on a rework round is exactly where the
-   escalation chain differs from `lane_tier`. A **new** one:
+   escalation chain differs from `lane_tier`. If the action carries an active
+   supervised repair, that record is verified work to preserve: `spawn-lane`
+   appends it mechanically to direct and deferred rework briefs so a later
+   worker cannot delete the repair merely because its support files were absent
+   from the original file list. A **new** one:
 
    - `tick.sh` has already run the action's `worktree.sh prepare` operation
      before opening the provider sandbox. It fetched `origin/<base>`, created
