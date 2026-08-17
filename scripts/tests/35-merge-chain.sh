@@ -25,16 +25,34 @@ EOF
 chmod +x "$T/bin/claude"
 export PATH="$T/bin:$PATH"
 
-# A real repo at $LOOM_REPO, one commit, so worktrees can branch off it.
+# A real repo at $LOOM_REPO, one commit and a local origin, so worktrees can
+# branch off it and the host merge preflight can reconcile without a network.
 # `seed_tracker_decl` (test-lib.sh) already ran `git init` + staged the
 # tracker declaration; this section is the first to need a commit and a
 # worktree.
+mkdir -p "$LOOM_REPO/scripts"
+HOST_GATE_MARK="$T/host-merge-gate"
+printf '#!/usr/bin/env bash\n[ -f base-after.txt ] || exit 44\n[ ! -f RED ] || exit 45\ntouch %q\n' \
+    "$HOST_GATE_MARK" > "$LOOM_REPO/scripts/gate.sh"
+chmod +x "$LOOM_REPO/scripts/gate.sh"
+git -C "$LOOM_REPO" add scripts/gate.sh
 git -C "$LOOM_REPO" commit -qm init >/dev/null 2>&1
+git -C "$LOOM_REPO" branch -M main
+git init -q --bare "$T/origin.git"
+git -C "$LOOM_REPO" remote add origin "$T/origin.git"
+git -C "$LOOM_REPO" push -q -u origin main
 # The next merge-queue ticket's worktree, a SIBLING of the repo (SKILL.md
 # step 4's convention) — _worktree_for_branch reads this back by branch,
 # never by the `<repo>-wt-<n>` name.
 WT28="$T/repo-wt-28"
 git -C "$LOOM_REPO" worktree add -q "$WT28" -b ticket-28 >/dev/null 2>&1
+# Make main move after the ticket branch is cut. The host preflight must merge
+# this commit before invoking the gate; the gate script itself refuses unless
+# it can see the marker file.
+printf 'arrived from main\n' > "$LOOM_REPO/base-after.txt"
+git -C "$LOOM_REPO" add base-after.txt
+git -C "$LOOM_REPO" commit -qm 'move integration base'
+git -C "$LOOM_REPO" push -q origin main
 
 # `git worktree list` always reports the PHYSICALLY resolved path (git
 # canonicalizes at `add` time), where $T itself is mktemp's LOGICAL spelling
@@ -55,9 +73,9 @@ cat > "$FX/open.json" <<'EOF'
 [
  {"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],"description":"noise"},
  {"iid":28,"title":"Second in queue's blocker","project_id":1,"web_url":"https://x/28",
-  "labels":["build-9","merge-queue"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"},
+  "labels":["build-9","merge-queue","tier::logic"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"},
  {"iid":30,"title":"Newer, behind 28","project_id":1,"web_url":"https://x/30",
-  "labels":["build-9","merge-queue"],"assignees":[],"updated_at":"2026-08-10T03:00:00Z"}
+  "labels":["build-9","merge-queue","tier::api"],"assignees":[],"updated_at":"2026-08-10T03:00:00Z"}
 ]
 EOF
 cat > "$FX/mrs-28.json" <<'EOF'
@@ -98,6 +116,9 @@ if [ "$rc" = 0 ] && jq -e . "$T/mq.json" >/dev/null 2>&1; then
     [ "$(jq -r '.[0].branch' "$T/mq.json")" = "ticket-28" ] \
         && ok "merge-queue: the head names its MR's branch" \
         || bad "merge-queue: branch missing or wrong ($(jq -c '.[0]' "$T/mq.json"))"
+    [ "$(jq -c '[.[].tier]' "$T/mq.json")" = '["logic","api"]' ] \
+        && ok "merge-queue: the narrow read carries each ticket's gate tier" \
+        || bad "merge-queue: gate tiers missing ($(jq -c . "$T/mq.json"))"
 else
     bad "merge-queue: read failed rc=$rc ($(cat "$T/mq.err"))"
 fi
@@ -142,20 +163,38 @@ if [ -f "$LOOM_HOME/briefs/merge-28.md" ] \
 else
     bad "chain-merge: brief substitution incomplete ($(cat "$LOOM_HOME/briefs/merge-28.md" 2>/dev/null | head -3))"
 fi
-# Live failure (demand-letter-generator build 1, ticket #136, 2026-08-16):
-# Codex's shell response window elapsed while the unit gate was still running.
-# The merge lane launched the gate again, then invented a 20-second timeout;
-# concurrent workers made both branch and base cross that synthetic deadline,
-# so a green branch was falsely parked as base-red. The rendered brief is the
-# seam the lane actually reads, so keep the full long-running-command contract
-# here rather than testing only the source template.
-if grep -q 'poll that same running session' "$LOOM_HOME/briefs/merge-28.md" \
-   && grep -q 'Do not rerun the gate' "$LOOM_HOME/briefs/merge-28.md" \
-   && grep -q 'Do not add.*timeout' "$LOOM_HOME/briefs/merge-28.md"; then
-    ok "chain-merge: the rendered brief preserves one gate run across shell response windows"
+if grep -q 'host merge preflight' "$LOOM_HOME/briefs/merge-28.md" \
+   && grep -q 'Do not rerun.*configured tier gate.*provider session' "$LOOM_HOME/briefs/merge-28.md"; then
+    ok "chain-merge: the provider trusts host reconcile and gate evidence"
 else
-    bad "chain-merge: brief permits gate reruns or synthetic timeouts after a shell response window"
+    bad "chain-merge: the merge provider still owns the sandboxed full gate"
 fi
+grep -q '"ev":"lane_spawn".*"id":"merge-28".*"pregate":"logic"' "$LOOM_HOME/events.jsonl" \
+    && ok "chain-merge: the ticket tier reaches the host merge preflight" \
+    || bad "chain-merge: the chained merge lost its host preflight tier"
+if [ -f "$HOST_GATE_MARK" ] && [ -f "$WT28/base-after.txt" ]; then
+    ok "chain-merge: host reconciliation completes before the configured gate and provider"
+else
+    bad "chain-merge: merge provider started without a reconciled host gate"
+fi
+reap_lanes
+
+# A red host merge gate is not a gate-review rejection. It suppresses the
+# provider and leaves rc 9 for the ordinary dead-merge harvest path; rc 7
+# would make the wave post a gate verdict against a ticket already in the
+# merge queue.
+RED_PROVIDER_MARK="$T/red-merge-provider-ran"
+touch "$WT28/RED"
+"$TICK" spawn-lane merge-29 --no-tick --pregate logic --cwd "$WT28" -- \
+    touch "$RED_PROVIDER_MARK" >/dev/null
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/merge-29.rc" ] && break; sleep 0.1; done
+if [ ! -f "$RED_PROVIDER_MARK" ] \
+   && [ "$(cat "$LOOM_HOME/lanes/merge-29.rc" 2>/dev/null)" = 9 ]; then
+    ok "merge preflight: a red host gate suppresses the provider as an ordinary merge failure"
+else
+    bad "merge preflight: red host gate ran the provider or became a gate rejection"
+fi
+rm -f "$WT28/RED"
 reap_lanes
 
 # B2. A human can ask Loom to advance the merge queue from inside an
@@ -236,7 +275,7 @@ reap_lanes
 cat > "$FX/open.json" <<'EOF'
 [{"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],"description":"noise"},
  {"iid":50,"title":"No worktree for this one","project_id":1,"web_url":"https://x/50",
-  "labels":["build-9","merge-queue"],"assignees":[]}]
+  "labels":["build-9","merge-queue","tier::logic"],"assignees":[]}]
 EOF
 cat > "$FX/mrs-50.json" <<'EOF'
 [{"iid":103,"title":"t50","state":"opened","draft":false,"web_url":"https://x/mr/103","source_branch":"ticket-50-never-checked-out","sha":"ccccccc"}]
@@ -268,7 +307,7 @@ LIMIT_CMD='echo "You'"'"'ve hit your usage limit"; exit 1'
 cat > "$FX/open.json" <<'EOF'
 [{"iid":1,"title":"Build 9","project_id":1,"web_url":"https://x/1","labels":[],"assignees":[],"description":"noise"},
  {"iid":28,"title":"Second in queue's blocker","project_id":1,"web_url":"https://x/28",
-  "labels":["build-9","merge-queue"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"}]
+  "labels":["build-9","merge-queue","tier::logic"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"}]
 EOF
 WAVE_MARK_E="$T/wave-fired-e"
 rm -f "$LOOM_HOME/usage.pause"

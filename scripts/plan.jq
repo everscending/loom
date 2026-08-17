@@ -357,7 +357,7 @@ else
           | ("merge-\(.id)") as $lid
           | select(spawnable($lid))
           | { step: "merge", kind: "spawn", lane: $lid, ticket: .id,
-              spawn: { id: $lid, type: "merge", provider: $provider, tier: $lane_tier, pregate: null,
+              spawn: { id: $lid, type: "merge", provider: $provider, tier: $lane_tier, pregate: .tier,
                        merge_lock: true,
                        cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                        brief: { step: 5,

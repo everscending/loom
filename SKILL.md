@@ -308,7 +308,7 @@ refuses outside herdr anyway.
 
 5. **Merge queue** — a `merge` spawn action, never inline:
 
-       spawn-lane merge-<ticket> --provider <id> --job merge --tier <tier> --merge-lock --brief <file> --cwd <worktree>
+       spawn-lane merge-<ticket> --provider <id> --job merge --tier <tier> --pregate <ticket-tier> --merge-lock --brief <file> --cwd <worktree>
 
    which holds the single-writer merge lock for that lane alone, so scheduling
    continues while it runs and a second merge is refused.
@@ -317,28 +317,20 @@ refuses outside herdr anyway.
    — render it with the ticket iid, its worktree and the integration base
    (declared `base:`, else `develop`, else `main`; the remote ref) rather than
    composing one, so a wave-spawned merge and a chained one carry the same
-   instructions. It does only `lane.sh reconcile` (fetch + **merge**
-   `origin/<base>`, **never rebase** — force-push is denied, so rebased history
-   can never be pushed; reconcile re-installs dependencies itself when that
-   merge moved a manifest or lockfile, so a post-reconcile red gate is real:
-   never hand-diagnose it as a stale worktree and never hand-run an installer
-   in the wave), then this ticket's configured tier gate on the merged tree
-   **once, as one foreground command**. If the shell tool returns a running-
-   session identifier before the command exits, poll that same running session
-   until completion; do not rerun the gate. A shell response window ending is
-   not a test failure or evidence for base-check/base-red. Never add a timeout,
-   alarm, or other synthetic deadline; only the repository gate's own timeouts
-   count. Never background a finite gate and poll a status file from a later
-   tool call; Codex can reap descendants detached from the tool session —
-   `lane.sh base-check -- <cmd>` re-runs a failing check on clean base, and
-   the **same check** red there is a base defect recorded with
-   `merge-failed <iid> --base-red <check-id> --fix <fix-iid>`, which never
-   counts the cap and parks the ticket in `.merge_hold` until the fix merges —
-   then **`lane.sh merge <iid>`**, the one verb that merges the MR, waits until
-   the tracker reports it actually `merged`, closes the ticket and strips its
-   state labels. A conflict or a real failure is recorded with
-   `lane.sh merge-failed <iid>` and the lane exits: **never ask a question, no
-   one is there**, and never fix it in the merge lane. Never hand-roll the
+   instructions. Before the provider starts, the launchd-owned host wrapper
+   runs `lane.sh reconcile` (fetch + **merge** `origin/<base>`, **never
+   rebase**) and then this ticket's configured tier gate once on the reconciled
+   tree. Reconcile re-installs dependencies itself when the merge moved a
+   manifest or lockfile. A conflict or red gate prevents the provider from
+   starting and leaves an ordinary dead merge lane for the wave to classify
+   and record exactly once; it is never rc 7, which is reserved for gate
+   rejection. Running this integration check at the host boundary is
+   provider-neutral and lets browser gates use OS services that a coding-agent
+   sandbox can legitimately deny. If the provider starts, the host evidence is
+   authoritative: it does not reconcile or re-run the gate, and calls only
+   **`lane.sh merge <iid>`**, the verb that merges the MR, waits until the
+   tracker reports it actually `merged`, closes the ticket and strips its
+   state labels. Never hand-roll the
    merge, and never reach for `close` to finish a ticket — `close` closes an
    *issue* and merges nothing, so a lane calling it alone reports success over
    unmerged work and the dependents it unblocks branch from a base without the

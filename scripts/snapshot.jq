@@ -18,10 +18,6 @@
 
 include "lib";
 
-    def section($name):
-        (. // "")
-        | (capture("(?ms)^##[ \\t]*" + $name + "[ \\t]*$(?<b>.*?)(?=^##[ \\t]|\\z)") // {b: ""})
-        | .b;
     # `state_of` is in lib.jq now (P93: shared with merge-queue.jq).
     # `epic_norm` is in lib.jq, and lane.sh's milestone close normalizes
     # through the same def — byte-identical by construction now, where it used
@@ -32,10 +28,6 @@ include "lib";
     # perfectly good tier label still read `tier: null` and no gate lane could
     # pick a suite (#52, 2026-08-03 — and #51 before it, both filed by probe
     # lanes that set the label and not the section).
-    def tier_of($labels):
-        ([(.body | section("Risk tier")) | scan("\\b(docs|logic|api|ui)\\b") | .[0]] | first)
-        // ($labels | map(select(test("^(tier::)?(docs|logic|api|ui)$")) | ltrimstr("tier::"))
-                    | first) // null;
     # P11. Build 2 spawned a 12m53s verifier on a ticket whose code had merged
     # 95 seconds earlier — it dutifully FAILED shipped code — and gated another
     # twice at the identical commit, the duplicate re-running the live suite for

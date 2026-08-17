@@ -29,10 +29,11 @@ include "lib";
     | select(state_of(.labels // []) == "merge-queue")
     | . as $t
     | { id: $t.id,
+        tier: ($t | tier_of($t.labels // [])),
         branch: ((($M[$t.id | tostring]) // [])
                  | map(select((.state // "") == "open")) | first | .branch // null),
         merge_attempts: merge_attempts_of(($N[$t.id | tostring]) // []),
         merge_hold: merge_hold_of(($N[$t.id | tostring]) // []; $open_iids) }]
    | sort_by(.id)) as $queue
 | [$queue[] | select(.merge_attempts < $merge_cap and .merge_hold == null)
-            | {id, branch}]
+            | {id, branch, tier}]

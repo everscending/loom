@@ -32,6 +32,19 @@
 def epic_norm:
     ascii_downcase | gsub("[^a-z0-9]+"; "-") | gsub("^-+"; "") | gsub("-+$"; "");
 
+# Markdown section extraction and the product risk tier are shared by the
+# full scheduler snapshot and chain-merge's narrow queue read. A chained merge
+# must carry the same configured gate tier as a wave-spawned merge; duplicating
+# the label/body fallback here would let those two paths drift.
+def section($name):
+    (. // "")
+    | (capture("(?ms)^##[ \\t]*" + $name + "[ \\t]*$(?<b>.*?)(?=^##[ \\t]|\\z)") // {b: ""})
+    | .b;
+def tier_of($labels):
+    ([(.body | section("Risk tier")) | scan("\\b(docs|logic|api|ui)\\b") | .[0]] | first)
+    // ($labels | map(select(test("^(tier::)?(docs|logic|api|ui)$")) | ltrimstr("tier::"))
+                | first) // null;
+
 # The gate verdict trailer, in one regex. Emits [verdict, sha, class], class
 # null when the trailer carries none — a PASS never does (lane.sh strips one
 # that rides along) and a FAIL always does. Consumers: snapshot.jq's

@@ -1941,6 +1941,13 @@ BRIEFEOF
 - A prose verdict is not a completed gate. Before exit, write the review body to a scratch file and run exactly one tracker verdict for the reviewed HEAD. PASS: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket pass $_verdict_head --file <verdict-body-file>\`. FAIL: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket fail $_verdict_head --class <kebab-defect-class> --file <verdict-body-file>\`. Do not merely print PASS/FAIL in your final response; the verdict verb is the required ticket outcome.
 BRIEFEOF
     fi
+    if [ "$(_lane_type "$id")" = merge ] && [ -n "$pregate" ]; then
+        local _merge_ticket="${id#merge-}"
+        _merge_ticket="${_merge_ticket%%-*}"
+        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The launchd-owned host merge preflight already ran `lane.sh reconcile` and then the configured $pregate tier gate before this provider session started. That host evidence is authoritative and supersedes any source-brief instruction to reconcile or run the full gate here. Do not rerun the configured tier gate inside the provider session; agent sandboxes can deny browser/OS services that the host gate legitimately needs. Run only `$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket` and report its result. If the runner was absent, the lane log explicitly declares that reduction; do not invent a replacement command.
+BRIEFEOF
+    fi
     local _hit=0 _prev=""
     for _b in "$@"; do
         if [ "$_prev" = "-p" ] && [ "$_b" = "@brief" ]; then
@@ -2055,7 +2062,8 @@ _spawn_build_epilogue() {
 # die in here is the LAST refusal in spawn-lane — this function must always
 # be called before anything destructive.
 _spawn_build_pregate() {
-    local runner tiers base_iid="" base_pre=""
+    local runner tiers base_iid="" base_pre="" lane_kind
+    lane_kind="$(_lane_type "$id")"
     pre=""
     if [ -n "$pregate" ]; then
         # Validate against the tiers this repo ACTUALLY declares, not the four
@@ -2102,7 +2110,11 @@ ui"
             pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
             pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
             pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
-            pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
+            if [ "$lane_kind" = merge ]; then
+                pre="$pre"' echo "--- host merge preflight gate FAILED — merge provider not started ---"; _rc=9; fi;'
+            else
+                pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
+            fi
             # P60: a missing runner is a DECLARED bootstrap stage, never a
             # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
             # skipping" on every gate all night while the runner sat in an
@@ -2114,6 +2126,18 @@ ui"
             # ticker.
             pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
             pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+        fi
+
+        # Merge gates must run after reconciliation, but a Codex provider
+        # sandbox cannot launch Chromium on macOS (Mach service registration
+        # is denied). Keep both deterministic integration steps in the
+        # launchd-owned host wrapper. A red preflight exits as an ordinary dead
+        # merge lane (rc 9), never as a gate rejection (rc 7), so the normal
+        # merge-failed harvest path records and classifies it exactly once.
+        if [ "$lane_kind" = merge ]; then
+            local merge_pre
+            merge_pre='echo "--- host merge preflight: lane.sh reconcile ---"; if lane.sh reconcile; then :; else _merge_rc=$?; git merge --abort >/dev/null 2>&1 || true; echo "--- host merge preflight reconcile FAILED — merge provider not started ---"; _rc=9; fi; '
+            pre="$merge_pre"'if [ "$_rc" -eq 0 ]; then '"$pre"' fi; '
         fi
     fi
 
@@ -2585,11 +2609,12 @@ cmd_chain_merge() {
     _pause_on_lane_limit || :
     _usage_gate || return 0
     command -v jq >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
-    local queue_json head_id head_branch
+    local queue_json head_id head_branch head_tier
     queue_json="$(cmd_snapshot --merge-queue 2>>"$LOGS_DIR/self-trigger.log")" || queue_json="[]"
     head_id="$(printf '%s' "$queue_json" | jq -r '.[0].id // empty' 2>/dev/null)"
     head_branch="$(printf '%s' "$queue_json" | jq -r '.[0].branch // empty' 2>/dev/null)"
-    if [ -z "$head_id" ] || [ -z "$head_branch" ]; then _chain_merge_fallback; return 0; fi
+    head_tier="$(printf '%s' "$queue_json" | jq -r '.[0].tier // empty' 2>/dev/null)"
+    if [ -z "$head_id" ] || [ -z "$head_branch" ] || [ -z "$head_tier" ]; then _chain_merge_fallback; return 0; fi
     local wt; wt="$(_worktree_for_branch "$REPO_ROOT" "$head_branch")"
     if [ -z "$wt" ] || [ ! -d "$wt" ]; then _chain_merge_fallback; return 0; fi
     local base; base="$(_detect_base "$REPO_ROOT")"
@@ -2608,7 +2633,7 @@ cmd_chain_merge() {
     _codex_host_is_ephemeral && defer_launch=1
     LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
       "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
-        --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" \
+        --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" --pregate "$head_tier" \
         >>"$LOGS_DIR/self-trigger.log" 2>&1 || _chain_merge_fallback
 }
 

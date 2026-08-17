@@ -201,6 +201,9 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="merge-48") | .spawn.merge_lock')" = "true" ] \
     && ok "plan: the merge spawn holds the merge lock" \
     || bad "plan: merge spawn is missing --merge-lock"
+[ "$(p '.actions[] | select(.lane=="merge-48") | .spawn.pregate')" = "api" ] \
+    && ok "plan: merge preflight carries the ticket tier to the host boundary" \
+    || bad "plan: merge preflight tier missing ($(p '.actions[] | select(.lane=="merge-48") | .spawn.pregate'))"
 [ "$(act merge transition)" = "49" ] \
     && ok "plan: a ticket at merge_attempt_cap is blocked so the queue advances past it" \
     || bad "plan: merge-cap block wrong ($(act merge transition))"
