@@ -12,7 +12,7 @@
 # its own copy of both.
 #
 # Inputs are bound by tick.sh: --slurpfile open/links/mrs/notes/tnotes/
-# milestones/closed, --rawfile lanes_raw/warn_raw, --argjson config/brief, and
+# milestones/closed/supervised_leases, --rawfile lanes_raw/warn_raw, --argjson config/brief, and
 # --arg logs_dir/generated_at/label/build_iid/merge_owner. Output is the single
 # JSON document a wave reads; every consumer of a field is named at the field.
 
@@ -277,6 +277,7 @@ include "lib";
        | if length > 0 then . else null end) as $provider
     | ($bi.project? // null) as $home
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
+    | ($supervised_leases[0] // []) as $SL
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
        | map({id: .[0], pid: .[1], state: .[2], type: (.[3] // "unknown"),
               rc: (.[4] // "-"), turns: (.[5] // "-"),
@@ -337,6 +338,7 @@ include "lib";
             epic: ($t.epic // null),
             criteria_count: $criteria_count,
             file_surface: $file_surface,
+            supervised_lease: ([$SL[] | select(.ticket == $t.id)] | first // null),
             blocked_by: $bb,
             unblocked: ($bb | all(.closed == true)),
             related: ($lk | map(select((.type // "") == "relates_to") | .id)),
@@ -540,11 +542,13 @@ include "lib";
                   else $tickets end),
         other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .id]
                      else [] end),
+        supervised_leases: $SL,
         lanes: $lanes,
         lessons_tail: ($notes[0] | map(select((.system // false) | not))
                        | map({author: (.author // null), created_at, body})),
         summary: {
             open_tickets: ($tickets | length),
+            supervised_tickets: [$SL[] | .ticket],
             by_state: ($tickets | map(.state // "unlabeled") | group_by(.)
                        | map({key: .[0], value: length}) | from_entries),
             all_blocked: (($tickets | length) > 0

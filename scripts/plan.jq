@@ -57,10 +57,12 @@ def spawnable($id):
 # `stage` — one shape of id, read the same way everywhere.
 def lane_ticket($id): $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
+def lease_why:
+    "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation and gate launches wait for release or expiry";
 
 def empty_plan($gen; $build; $reason):
     { generated_at: $gen, build: $build, reason: $reason,
-      actions: [], residue: [], deferred: [] };
+      actions: [], residue: [], deferred: [], supervised_leases: [] };
 
 # ---------------------------------------------------------------------------
 # A snapshot the planner cannot read produces an empty plan and a named
@@ -241,7 +243,9 @@ else
                   | lane_round(.id) ] | max) as $r
     | if $r == null then "gate-\($iid)" else "gate-\($iid)-r\($r + 1)" end;
 
-  ([ $tickets[] | select(.gate.eligible // false) ] | sort_by(.id)) as $gate_all
+  ([ $tickets[] | select(.gate.eligible // false) ] | sort_by(.id)) as $gate_candidates
+| ([ $gate_candidates[] | select(.supervised_lease != null) ]) as $gate_leased
+| ([ $gate_candidates[] | select(.supervised_lease == null) ]) as $gate_all
 | ($gate_all[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
      | (gate_lane(.id)) as $lid
@@ -256,7 +260,8 @@ else
                                     "the merge spawn line to run on a PASS"] } },
          why: "gate.eligible — in `review`, an open MR, and no verdict standing at this HEAD" } ])
   as $gate_actions
-| ([ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
+| ([ $gate_leased[] | { step: "gate", ticket: .id, why: lease_why } ]
+   + [ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
      | { step: "gate", ticket: .id, lane: $lid,
          why: "lane id `\($lid)` is not one `spawn-lane` accepts — a planner bug, not a lane failure" } ]
    + [ $gate_all[$aux_free:][]
@@ -281,7 +286,9 @@ else
 # stranded finishes in one build.)
 | (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids) as $repairing
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
-     | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded
+     | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded_candidates
+| ([ $stranded_candidates[] | select(.supervised_lease != null) ]) as $stranded_leased
+| ([ $stranded_candidates[] | select(.supervised_lease == null) ]) as $stranded
 
 # Two rejections mean stop, not respawn: round three needs diagnosis even when
 # the failure classes differ. Alternating labels are not evidence of healthy
@@ -304,7 +311,9 @@ else
 | ([ $tickets[] | select(.state == "ready-for-agent" and (.unblocked // false)
                          and ((.assignees | length) == 0))
                 | select(.id as $i | ($repairing | index($i)) == null) ]
-   | sort_by([(if .fix then 0 else 1 end), .id])) as $ready
+   | sort_by([(if .fix then 0 else 1 end), .id])) as $ready_candidates
+| ([ $ready_candidates[] | select(.supervised_lease != null) ]) as $ready_leased
+| ([ $ready_candidates[] | select(.supervised_lease == null) ]) as $ready
 
 | ($rework[0:$impl_free]) as $rework_take
 | (($impl_free - ($rework_take | length)) | if . < 0 then 0 else . end) as $impl_left
@@ -337,7 +346,9 @@ else
          why: (if .fix then "ready `fix:` ticket — fix tickets outrank the rest of the ready set"
                else "ready, unblocked and unclaimed" end) } ])
   as $fill_actions
-| ([ ($rework[$impl_free:] + $ready[$impl_left:])[]
+| ([ ($stranded_leased + $ready_leased)[]
+     | { step: "fill", ticket: .id, why: lease_why } ]
+   + [ ($rework[$impl_free:] + $ready[$impl_left:])[]
      | { step: "fill", ticket: .id,
          why: "no implementation slot free (`summary.impl_slots_free` was \($impl_free))" } ])
   as $fill_deferred
@@ -504,6 +515,7 @@ else
              else null end),
     actions: [ $actions | to_entries[] | .value + { order: (.key + 1) } ],
     residue: $residue,
-    deferred: $deferred }
+    deferred: $deferred,
+    supervised_leases: ($s.supervised_leases // []) }
 
 end

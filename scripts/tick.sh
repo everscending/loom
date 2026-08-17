@@ -114,6 +114,12 @@ LANE_LAUNCH_DIR="$LOOM_HOME/lane-launch-queue"
 # boundary as deferred launches. Cleanup is drained first so a replacement can
 # never collide with the service or lock left by the worker it replaces.
 LANE_CLEANUP_DIR="$LOOM_HOME/lane-cleanup-queue"
+# A bounded host-state ownership claim used while a human or delegated repair
+# agent is reconciling one ticket. This is deliberately outside tracker prose:
+# a heartbeat must be able to answer the admission question without trusting a
+# comment that an ordinary implementation worker could write itself.
+SUPERVISED_LEASE_DIR="$LOOM_HOME/supervised-leases"
+SUPERVISED_ADMISSION_DIR="$LOOM_HOME/supervised-admission"
 # P85: what the last sweep pass could not remove, and why. Sweep said all of
 # this to stdout inside a wave session for five builds — the right message,
 # addressed to a human, into a file no human reads.
@@ -141,7 +147,8 @@ WATCH_PANES_CMD="${WATCH_PANES_CMD:-${SELF_PATH%/*}/watch-panes.sh}"
 AGENT_SH="${LOOM_AGENT_CMD:-${SELF_PATH%/*}/agent.sh}"
 
 mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR" \
-         "$LANE_LAUNCH_DIR" "$LANE_CLEANUP_DIR"
+         "$LANE_LAUNCH_DIR" "$LANE_CLEANUP_DIR" "$SUPERVISED_LEASE_DIR"
+mkdir -p "$SUPERVISED_ADMISSION_DIR"
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -1057,6 +1064,96 @@ cmd_event() { # event <name> [key value]...  — so a lane can record its own ex
 _now() { date +%s; }
 _stamp() { # <epoch> → local human time, for a human reading a push notification
     date -r "$1" '+%H:%M %Z' 2>/dev/null || date -d "@$1" '+%H:%M %Z' 2>/dev/null || printf '%s' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Supervised-repair leases. Acquire BEFORE changing a ticket's tracker state;
+# release only after reconciliation is durable. The deadline makes a crashed
+# supervisor self-healing rather than a permanent scheduler hold.
+
+_supervised_lease_read() { # <ticket> → active lease JSON, or rc 1
+    local iid="$1" file="$SUPERVISED_LEASE_DIR/$1.json" now
+    [ -f "$file" ] || return 1
+    now=$(_now)
+    jq -ce --argjson iid "$iid" --argjson now "$now" '
+        select(type == "object" and .schema == 1 and .ticket == $iid
+               and (.owner | type) == "string" and (.owner | length) > 0
+               and (.acquired_at | type) == "number"
+               and (.expires_at | type) == "number" and .expires_at > $now)
+    ' "$file" 2>/dev/null
+}
+
+_supervised_leases_json() { # active-only array; expiry requires no cleanup write
+    local file
+    for file in "$SUPERVISED_LEASE_DIR"/*.json; do
+        [ -f "$file" ] || continue
+        _supervised_lease_read "$(basename "$file" .json)" || true
+    done | jq -s '.'
+}
+
+cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
+    local verb="${1:-}" iid="${2:-}" owner="" ttl=3600 now expires tmp file
+    shift 2 2>/dev/null || die "supervise: use acquire <ticket> --owner <id> [--ttl-seconds N] or release <ticket>"
+    case "$iid" in ''|*[!0-9]*) die "supervise: ticket must be a numeric iid" ;; esac
+    # Only an operator-side session may create the exemption. A worker could
+    # otherwise lease itself and escape ordinary lane admission indefinitely.
+    if [ -n "${LOOM_LANE_ID:-}" ] || [ -n "${LOOM_WAVE_PROMPT:-}" ]; then
+        die "supervise: human-only host-state verb; lane/wave sessions cannot acquire or release repair leases"
+    fi
+    file="$SUPERVISED_LEASE_DIR/$iid.json"
+    case "$verb" in
+        acquire)
+            while [ $# -gt 0 ]; do
+                case "$1" in
+                    --owner) [ $# -ge 2 ] || die "supervise acquire: --owner needs a value"; owner="$2"; shift 2 ;;
+                    --ttl-seconds) [ $# -ge 2 ] || die "supervise acquire: --ttl-seconds needs a value"; ttl="$2"; shift 2 ;;
+                    *) die "supervise acquire: unknown argument '$1'" ;;
+                esac
+            done
+            [ -n "$owner" ] || die "supervise acquire: --owner is required"
+            [ "${#owner}" -le 128 ] || die "supervise acquire: owner must be at most 128 characters"
+            case "$ttl" in ''|*[!0-9]*) die "supervise acquire: ttl must be an integer from 1 to 86400 seconds" ;; esac
+            [ "$ttl" -ge 1 ] && [ "$ttl" -le 86400 ] \
+                || die "supervise acquire: ttl must be an integer from 1 to 86400 seconds"
+            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+                || die "supervise acquire: ticket #$iid launch admission is busy — retry after the current spawn command finishes"
+            if _supervised_lease_read "$iid" >/dev/null; then
+                die "supervise acquire: ticket #$iid already has an active supervised-repair lease"
+            fi
+            now=$(_now); expires=$((now + ttl)); tmp="$SUPERVISED_LEASE_DIR/.$iid.$$.tmp"
+            jq -n --argjson ticket "$iid" --arg owner "$owner" \
+                  --argjson acquired_at "$now" --argjson expires_at "$expires" \
+                  '{schema:1, kind:"supervised-repair", ticket:$ticket, owner:$owner,
+                    acquired_at:$acquired_at, expires_at:$expires_at}' > "$tmp" \
+                || die "supervise acquire: could not encode lease"
+            chmod 600 "$tmp" 2>/dev/null || true
+            mv "$tmp" "$file" || die "supervise acquire: could not publish lease"
+            rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
+            _ev supervised_lease_acquired ticket "$iid" owner "$owner" expires_at "$expires"
+            echo "ticket #$iid: supervised repair leased to $owner until $expires"
+            ;;
+        release)
+            [ $# -eq 0 ] || die "supervise release: unexpected arguments"
+            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+                || die "supervise release: ticket #$iid launch admission is busy — retry after the current spawn command finishes"
+            rm -f "$file"
+            rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
+            _ev supervised_lease_released ticket "$iid"
+            echo "ticket #$iid: supervised repair lease released"
+            ;;
+        *) die "supervise: use acquire <ticket> --owner <id> [--ttl-seconds N] or release <ticket>" ;;
+    esac
+}
+
+_supervised_lane_ticket() { # ordinary impl/gate lane id → ticket iid
+    local id="$1" iid
+    case "$id" in
+        impl-*) iid="${id#impl-}" ;;
+        gate-*) iid="${id#gate-}"; iid="${iid%%-r*}" ;;
+        *) return 1 ;;
+    esac
+    case "$iid" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$iid"
 }
 
 _is_agent_cmd() { [ "${1:-}" = "$AGENT_SH" ] || [ "$(basename "${1:-}")" = agent.sh ]; }
@@ -2205,7 +2302,7 @@ ui"
     return 0
 }
 
-cmd_spawn_lane() {
+_cmd_spawn_lane() {
     # Self-trigger is the DEFAULT (P2). It used to be opt-in, and a wave that
     # forgot the flag said so itself: "I spawned both without --on-done-tick… So
     # nothing advances on its own" — then the build sat 12m44s until a human
@@ -2243,6 +2340,29 @@ cmd_spawn_lane() {
         [ $# -eq 0 ] || die "spawn-lane: provider jobs accept no raw command after --"
     else
         [ $# -gt 0 ] || die "spawn-lane: no provider job or custom command for lane '$id'"
+    fi
+    # Planner deferral is explanatory, not the authority: a wave may hold an
+    # old plan, a lane can chain directly, and a Codex request can wait in the
+    # durable host queue. Re-read the lease at the final launch boundary so
+    # all providers and all three paths enforce the same current fact.
+    local _lease_iid="" _lease_json="" _lease_owner="" _lease_exp=""
+    _lease_iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || _lease_iid=""
+    if [ -n "$_lease_iid" ]; then
+        _lease_json=$(_supervised_lease_read "$_lease_iid" 2>/dev/null) || _lease_json=""
+    fi
+    if [ -n "$_lease_json" ]; then
+        _lease_owner=$(printf '%s' "$_lease_json" | jq -r '.owner')
+        _lease_exp=$(printf '%s' "$_lease_json" | jq -r '.expires_at')
+        echo "spawn-lane: ticket #$_lease_iid has an active supervised-repair lease owned by $_lease_owner until $_lease_exp — not launching '$id'."
+        _ev lane_launch_deferred id "$id" ticket "$_lease_iid" reason supervised_repair \
+            owner "$_lease_owner" expires_at "$_lease_exp"
+        # A queued launch is now obsolete and should be consumed, not retained
+        # until expiry. A chained handoff is likewise a soft stop: its parent
+        # completed normally and the next heartbeat will plan from the lease.
+        if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ] || [ -n "$handoff_from" ]; then
+            return 0
+        fi
+        return 1
     fi
     # Decision 4: `stop` cuts the direct handoffs too, so a ticket already in
     # flight finishes its CURRENT worker and nothing follows it. The chain
@@ -2585,6 +2705,26 @@ cmd_spawn_lane() {
     local note=" (self-triggers next wave on exit)"
     [ "$on_done" -eq 0 ] && note=" (--no-tick: does NOT advance the loop)"
     echo "lane $id: pid $(cat "$LANES_DIR/$id.pid")$note log $log"
+}
+
+# Serialize a supervisor's acquire/release with the complete ordinary launch
+# admission window. Without this wrapper, spawn could read "no lease", pause,
+# and start after acquire had already returned success. If spawn wins the lock,
+# acquire says to retry; if acquire wins, the inner launch observes the lease.
+cmd_spawn_lane() {
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local iid="" rc=0
+    _spawn_parse_flags "$@"
+    iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || iid=""
+    if [ -z "$iid" ]; then
+        _cmd_spawn_lane "$@"
+        return $?
+    fi
+    _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+        || die "spawn-lane: ticket #$iid launch admission is busy with supervised-repair coordination — retry on the next heartbeat"
+    _cmd_spawn_lane "$@" || rc=$?
+    rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
+    return "$rc"
 }
 
 # Lane ids are structured so the scheduler can tell a lane's KIND from its name
@@ -3436,6 +3576,11 @@ cmd_snapshot() {
            rework_tier: $rework_tier,
            base: (if $base == "" then null else $base end) }')
 
+    # Host coordination state is read once into the immutable snapshot. Only
+    # valid, unexpired leases are represented; an expired supervisor process
+    # cannot wedge scheduling and snapshot remains a read-only verb.
+    _supervised_leases_json > "$SNAP_TMP/supervised-leases.json"
+
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
     jq -L "$SNAP_JQD" -n > "$SNAP_TMP/snapshot.json" \
@@ -3444,6 +3589,7 @@ cmd_snapshot() {
         --slurpfile tnotes "$SNAP_TMP/tnotes.json" \
         --slurpfile milestones "$SNAP_TMP/milestones.json" \
         --slurpfile closed "$SNAP_TMP/closed.json" \
+        --slurpfile supervised_leases "$SNAP_TMP/supervised-leases.json" \
         --rawfile lanes_raw "$SNAP_TMP/lanes.txt" --rawfile warn_raw "$SNAP_TMP/warn.txt" \
         --argjson config "$config_json" --arg logs_dir "$LOGS_DIR" \
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -4650,6 +4796,7 @@ cmd_agent_status() {
 
 case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
+    supervise)    shift; cmd_supervise "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
     drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;
     drain-lane-kills) shift; cmd_drain_lane_cleanups "$@" ;; # compatibility/readable operator alias
@@ -4679,5 +4826,5 @@ case "${1:-}" in
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
 esac
