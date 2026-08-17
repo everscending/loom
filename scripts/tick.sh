@@ -2682,16 +2682,31 @@ _pregate_artifact_validate() { # <lane-id> <cwd> -> physical cwd
 
 cmd_pregate_artifacts_begin() { # <lane-id> <cwd>
     [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts begin <lane-id> <cwd>"
-    local id="$1" abs="" head="" prefix="" stash="" worktree_tree="" index_tree="" tmp=""
+    local id="$1" abs="" head="" prefix="" stash="" worktree_tree="" index_tree="" tmp="" untracked="" first=""
     abs=$(_pregate_artifact_validate "$id" "$2")
     head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     prefix="$LANES_DIR/$id.pregate-artifacts"
+    rm -f "$prefix.head" "$prefix.cwd" "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
     if [ -z "$head" ]; then
         printf '%s\n' no-git > "$prefix.head"
         printf '%s\n' "$abs" > "$prefix.cwd"
-        rm -f "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
         return 0
     fi
+    # `git stash create` cannot represent an untracked worktree file. That
+    # includes the subtle staged-delete shape produced by `git rm --cached`:
+    # the index says absent while bytes still exist at the path. Refuse before
+    # the runner can overwrite either shape. This keeps JOR-290's ordinary
+    # tracked dirty artifact viable while making unrepresentable ownership
+    # explicit and fail-closed.
+    untracked="$prefix.untracked.tmp.$$"
+    git -C "$abs" ls-files --others -z -- tests/artifacts docs/deploy.md > "$untracked" \
+        || { rm -f "$untracked"; die "pregate-artifacts: cannot inspect pre-gate untracked deterministic outputs"; }
+    if [ -s "$untracked" ]; then # mutate:pregate-refuse-untracked-collision
+        IFS= read -r -d '' first < "$untracked" || true
+        rm -f "$untracked"
+        die "pregate-artifacts: allowlisted path '$first' is untracked before the runner (including staged-delete-with-bytes); refusing rather than overwrite pre-existing work"
+    fi
+    rm -f "$untracked"
     # `stash create` records the exact working-tree tree and index tree without
     # changing either one or creating a stash ref. The finish half consumes
     # both trees path-by-path, then clears these temporary references. This is
@@ -2724,7 +2739,7 @@ cmd_pregate_artifacts_begin() { # <lane-id> <cwd>
 cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
     [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts finish <lane-id> <cwd>"
     local id="$1" abs="" prefix="" expected_head="" expected_cwd=""
-    local worktree_tree="" index_tree="" current_head="" current="" path="" restored=0
+    local worktree_tree="" index_tree="" current_head="" current="" untracked="" path="" restored=0 removed=0
     abs=$(_pregate_artifact_validate "$id" "$2")
     prefix="$LANES_DIR/$id.pregate-artifacts"
     [ -f "$prefix.head" ] && [ -f "$prefix.cwd" ] \
@@ -2777,9 +2792,29 @@ cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
             || die "pregate-artifacts: worktree state for '$path' differs from its pre-gate snapshot"
         restored=$((restored + 1))
     done < "$prefix.paths"
+
+    # Begin refused every pre-existing allowlisted untracked path. Therefore an
+    # allowlisted untracked file present now was created by this synchronous
+    # runner, and exact pre-gate state for it is absence. Unknown paths outside
+    # the allowlist remain untouched and keep sweep fail-closed.
+    untracked="$prefix.untracked.tmp.$$"
+    git -C "$abs" ls-files --others -z -- tests/artifacts docs/deploy.md > "$untracked" \
+        || die "pregate-artifacts: cannot inspect post-gate untracked deterministic outputs"
+    while IFS= read -r -d '' path; do
+        _pregate_owned_artifact_path "$path" || continue
+        case "$path" in tests/artifacts/*|docs/deploy.md) ;; *) die "pregate-artifacts: refusing unsafe generated path '$path'" ;; esac
+        [ -f "$abs/$path" ] || [ -L "$abs/$path" ] \
+            || die "pregate-artifacts: generated allowlisted path '$path' is not a file or symlink"
+        rm -f -- "$abs/$path" \
+            || die "pregate-artifacts: could not restore pre-gate absence for '$path'; sweep will keep this worktree"
+        [ ! -e "$abs/$path" ] && [ ! -L "$abs/$path" ] \
+            || die "pregate-artifacts: generated allowlisted path '$path' still exists after cleanup"
+        removed=$((removed + 1))
+    done < "$untracked"
+    rm -f "$untracked"
     rm -f "$prefix.head" "$prefix.cwd" "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
-    [ "$restored" -eq 0 ] \
-        || echo "--- pregate artifacts: restored $restored deterministic tracked output(s) to their exact pre-gate index/worktree state; test evidence remains in the lane log ---"
+    [ "$restored" -eq 0 ] && [ "$removed" -eq 0 ] \
+        || echo "--- pregate artifacts: restored $restored deterministic tracked output(s) and $removed generated untracked output(s) to exact pre-gate state; test evidence remains in the lane log ---"
 }
 
 cmd_pregate_artifacts() {

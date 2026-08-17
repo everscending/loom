@@ -266,8 +266,11 @@ refuses outside herdr anyway.
    exact state after the runner (green or red), and consumes the temporary
    snapshot. The runner transcript is the lasting gate evidence. A pre-existing
    edit therefore survives even when the runner overwrites the same path; an
-   unknown output path, changed HEAD, or failed restore stays dirty so sweep
-   keeps the worktree. *(paid:
+   allowlisted untracked path (including `git rm --cached` with worktree bytes)
+   refuses before the runner because Git's tracked snapshot cannot represent
+   it. An allowlisted untracked path created by the runner is removed to restore
+   its pre-run absence. An unknown output path, changed HEAD, or failed restore
+   stays dirty so sweep keeps the worktree. *(paid:
    Patient Imaging Portal Build JOR-267 retained nine completed worktrees;
    eight held only gate-generated `tests/artifacts/e8-run.json`, while older
    completed trees held generated `docs/deploy.md`.)*

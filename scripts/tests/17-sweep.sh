@@ -80,6 +80,7 @@ git -C "$GA/repo" config user.email t@t; git -C "$GA/repo" config user.name t
 mkdir -p "$GA/repo/tests/artifacts" "$GA/repo/scripts" "$GA/repo/docs/agents"
 printf '{"run":"baseline"}\n' > "$GA/repo/tests/artifacts/e8-run.json"
 printf '{"note":"baseline"}\n' > "$GA/repo/tests/artifacts/user-note.json"
+printf '{"deleted":"baseline"}\n' > "$GA/repo/tests/artifacts/deleted.json"
 printf 'deployment baseline\n' > "$GA/repo/docs/deploy.md"
 printf 'base\n' > "$GA/repo/f"
 printf '# Issue tracker: GitLab\n' > "$GA/repo/docs/agents/issue-tracker.md"
@@ -89,6 +90,9 @@ echo "gate evidence: deterministic outputs exercised"
 printf '{"run":"gate-output"}\n' > tests/artifacts/e8-run.json
 printf 'deployment gate output\n' > docs/deploy.md
 [ "${GATE_WRITE_UNKNOWN:-0}" != 1 ] || printf 'unknown gate output\n' > f
+[ "${GATE_COLLIDE_DELETED:-0}" != 1 ] || printf '{"deleted":"runner overwrite"}\n' > tests/artifacts/deleted.json
+[ "${GATE_COLLIDE_UNTRACKED:-0}" != 1 ] || printf '{"untracked":"runner overwrite"}\n' > tests/artifacts/untracked.json
+[ "${GATE_CREATE_UNTRACKED:-0}" != 1 ] || printf '{"generated":"runner"}\n' > tests/artifacts/generated.json
 [ "${GATE_FORCE_FAIL:-0}" != 1 ] || { echo "gate failed intentionally" >&2; exit 23; }
 exit 0
 GATEEOF
@@ -191,6 +195,89 @@ if [ "$(cat "$GA_RED_HOME/lanes/gate-314.rc" 2>/dev/null)" = 7 ] \
     ok "pregate artifacts: a red runner restores exact state, keeps transcript evidence, and exits 7"
 else
     bad "pregate artifacts: failed-runner cleanup lost state, evidence, or rejection semantics"
+fi
+
+# `git rm --cached` is both a staged deletion and an untracked worktree file.
+# The tracked stash trees cannot encode those remaining bytes, so refuse before
+# the runner overwrites them and preserve both index absence and file content.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/315" -b ticket-315-staged-delete origin/main 2>/dev/null
+printf '{"deleted":"user worktree bytes"}\n' > "$GA/repo/.worktrees/315/tests/artifacts/deleted.json"
+git -C "$GA/repo/.worktrees/315" rm -q --cached tests/artifacts/deleted.json
+GA_DELETED_HOME="$GA/home-staged-delete"
+GATE_COLLIDE_DELETED=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_DELETED_HOME" \
+  "$TICK" spawn-lane gate-315 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/315" -- touch "$GA/reviewed-315" >/dev/null
+_wait_gate_artifact_lane "$GA_DELETED_HOME" gate-315
+if [ "$(cat "$GA_DELETED_HOME/lanes/gate-315.rc" 2>/dev/null)" = 7 ] \
+   && [ ! -e "$GA/reviewed-315" ] \
+   && grep -q '"deleted":"user worktree bytes"' "$GA/repo/.worktrees/315/tests/artifacts/deleted.json" \
+   && ! git -C "$GA/repo/.worktrees/315" ls-files --error-unmatch tests/artifacts/deleted.json >/dev/null 2>&1 \
+   && grep -q 'refusing rather than overwrite pre-existing work' "$GA_DELETED_HOME/logs/lane-gate-315.log" \
+   && ! find "$GA_DELETED_HOME/lanes" -name 'gate-315.pregate-artifacts*' -print -quit | grep -q .; then
+    ok "pregate artifacts: staged-delete worktree bytes refuse before runner and remain exact"
+else
+    bad "pregate artifacts: staged-delete collision ran or lost index/worktree state"
+fi
+
+# A plain pre-existing untracked allowlisted file has the same unrepresentable
+# ownership and must take the same pre-run refusal path.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/316" -b ticket-316-untracked origin/main 2>/dev/null
+printf '{"untracked":"user bytes"}\n' > "$GA/repo/.worktrees/316/tests/artifacts/untracked.json"
+GA_UNTRACKED_HOME="$GA/home-untracked"
+GATE_COLLIDE_UNTRACKED=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNTRACKED_HOME" \
+  "$TICK" spawn-lane gate-316 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/316" -- touch "$GA/reviewed-316" >/dev/null
+_wait_gate_artifact_lane "$GA_UNTRACKED_HOME" gate-316
+if [ "$(cat "$GA_UNTRACKED_HOME/lanes/gate-316.rc" 2>/dev/null)" = 7 ] \
+   && [ ! -e "$GA/reviewed-316" ] \
+   && grep -q '"untracked":"user bytes"' "$GA/repo/.worktrees/316/tests/artifacts/untracked.json" \
+   && ! git -C "$GA/repo/.worktrees/316" ls-files --error-unmatch tests/artifacts/untracked.json >/dev/null 2>&1; then
+    ok "pregate artifacts: pre-existing untracked same-path collision refuses before runner"
+else
+    bad "pregate artifacts: pre-existing untracked collision was overwritten or admitted"
+fi
+
+# With no pre-run file, the same allowlisted untracked output is provably
+# runner-owned and exact restoration means removing it before review starts.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/318" -b ticket-318-generated-untracked origin/main 2>/dev/null
+GA_GENERATED_HOME="$GA/home-generated"
+GATE_CREATE_UNTRACKED=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_GENERATED_HOME" \
+  "$TICK" spawn-lane gate-318 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/318" -- touch "$GA/reviewed-318" >/dev/null
+_wait_gate_artifact_lane "$GA_GENERATED_HOME" gate-318
+if [ "$(cat "$GA_GENERATED_HOME/lanes/gate-318.rc" 2>/dev/null)" = 0 ] \
+   && [ -e "$GA/reviewed-318" ] \
+   && [ ! -e "$GA/repo/.worktrees/318/tests/artifacts/generated.json" ]; then
+    ok "pregate artifacts: runner-created untracked output returns to exact pre-run absence"
+else
+    bad "pregate artifacts: runner-created untracked output survived cleanup or blocked review"
+fi
+
+# Planted collision violation: bypass only the pre-run untracked refusal. The
+# runner overwrites the user's bytes, finish treats the file as generated and
+# removes it, then sweep deletes the falsely clean worktree.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/317" -b ticket-317-untracked-mutant origin/main 2>/dev/null
+printf '{"untracked":"user mutant bytes"}\n' > "$GA/repo/.worktrees/317/tests/artifacts/untracked.json"
+MUT_UNTRACKED_ARTIFACT=$(mirror_scripts "$GA/mut-untracked-artifact")
+sed -i.bak 's/if \[ -s "\$untracked" \]; then # mutate:pregate-refuse-untracked-collision/if false; then # mutate:pregate-refuse-untracked-collision/' \
+  "$MUT_UNTRACKED_ARTIFACT/tick.sh"
+if cmp -s "$MUT_UNTRACKED_ARTIFACT/tick.sh" "$TICK"; then
+    bad "pregate-untracked-violation: sed did not match the pre-run collision guard"
+else
+    GA_UNTRACKED_MUT_HOME="$GA/home-untracked-mutant"
+    mut_untracked_out=$(GATE_COLLIDE_UNTRACKED=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNTRACKED_MUT_HOME" \
+      "$MUT_UNTRACKED_ARTIFACT/tick.sh" spawn-lane gate-317 --no-tick --pregate ui \
+      --cwd "$GA/repo/.worktrees/317" -- touch "$GA/reviewed-317" 2>&1); mut_untracked_rc=$?
+    _wait_gate_artifact_lane "$GA_UNTRACKED_MUT_HOME" gate-317
+    SWEEP_MERGED="ticket-317-untracked-mutant" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNTRACKED_MUT_HOME" \
+      "$MUT_UNTRACKED_ARTIFACT/tick.sh" sweep >"$GA/sweep-untracked-mutant.out" 2>&1
+    if assert_mutant_ran "$mut_untracked_rc" "$mut_untracked_out" "pregate-untracked-violation"; then
+        if [ ! -e "$GA/repo/.worktrees/317" ]; then
+            ok "pregate-untracked-violation: bypassing collision refusal erases user bytes and sweeps"
+        else
+            bad "pregate-untracked-violation: planted guard bypass did not recreate user-byte loss"
+        fi
+    fi
 fi
 
 # Planted violation: replace both exact snapshot trees with HEAD. The public
