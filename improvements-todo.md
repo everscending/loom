@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 02:06 America/Chicago
+Last updated: 2026-08-17 02:15 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -37,6 +37,12 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 - [x] **DONE — Keep queued Codex worktrees alive until durable launch.** JOR-240 was prepared, claimed, and queued at 01:24, but the next tick swept its unchanged branch before the durable host launched it. Implemented provider-neutrally in `a5e417c` (`fix(sweep): preserve queued worktrees`): sweep folds both `request-*` and `launching-*` cwd ownership into the same protected set as live processes and fails closed on unreadable or non-absolute queue metadata. Verification: focused sweep 28/28, full suite 1,237/1,237, and removing queued cwd ownership recreates the pre-launch deletion. No adapter changed.
 
 - [x] **DONE — Make implementation-to-gate chaining deterministic.** Implemented provider-neutrally in `f7f9214` (`fix(chain): hand implementations to gates`): the host implementation epilogue calls `chain-gate`, live-reads Review/MR/HEAD state, freezes active scope-reset and supervised-repair evidence, emits exact SHA-pinned verdict commands, and reuses existing UI/aux admission, leases, ticket-at-HEAD dedupe, Claude direct launch, and Codex durable launch. Verification: new direct/deferred/duplicate/mutant seam 5/5 and adjacent admission/chaining suites 183/183; isolated full suite 1,240/1,240.
+
+- [ ] **IN PROGRESS — Resolve the build provider for resumed deterministic handoffs.** The first live manual `chain-gate impl-236` after `f7f9214` had no inherited `LOOM_PROVIDER` and reached `spawn-lane` with an empty provider. Epilogue-owned chaining inherits the provider correctly, but a human-resumed chain must safely recover the Build issue's single canonical `provider::` label, validate the adapter, and preserve explicit/inherited Claude or Codex selection. A public manual-resume regression and mutant are in progress.
+
+- [ ] **IN PROGRESS — Make host-state commands linked-worktree safe.** Running `tick.sh supervise release 236` from `.worktrees/236` printed success while mutating a separate worktree-derived Loom state; the canonical build lease remained and refused the next gate. Host-state commands must resolve the main common checkout/build identity or refuse loudly, with shared Claude/Codex behavior. A linked-worktree acquire/release regression is in progress.
+
+- [ ] **IN PROGRESS — Eliminate watcher unbound-state crashes.** Two live refreshes logged `wj: unbound variable` when a tick lock existed without a discoverable wave JSONL file. The progress watcher must initialize and handle that empty state under `set -u`; a public no-wave regression and planted mutant are in progress.
 
 - [ ] **IN PROGRESS — Run browser acceptance probes at a viable provider boundary.** The E2 probe started its real Next stack and passed API lint, but Codex's workspace sandbox denied Chromium's macOS Mach-port bootstrap before any page opened. `4940b52` now prevents this infrastructure failure from creating another false product ticket and gives it a typed ticker outcome; JOR-290 remains held. The remaining security decision is whether to run a supervised E2 retry with the existing explicit `LOOM_CODEX_SANDBOX=danger-full-access` opt-in or move browser execution to a narrower host-owned boundary. Claude behavior is preserved.
 
