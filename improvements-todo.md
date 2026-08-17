@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 05:28 America/Chicago
+Last updated: 2026-08-17 05:34 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -66,7 +66,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Make immutable-contract authority explicit in the staged brief.** Implemented provider-neutrally in `744e794` (`fix(briefs): declare contract authority`): the shared contract-staging boundary says the host snapshot is complete and authoritative, forbids tracker rediscovery and invented verbs such as `lane.sh show`, names the documented implementation terminal paths, and defers gate/merge work to each brief's exact appended command while preserving later scope-reset and supervised-repair precedence. RED showed 0/2 direct-Claude/deferred-Codex paths carrying the rule; GREEN is 32/32 focused plus 109/109 adjacent assertions, and deleting only the authority block recreates the gap. Adapters remain unchanged.
 
-- [ ] **IN PROGRESS — Preserve supervised worktrees from sweep.** JOR-221's diagnostic checkout and then JOR-216's freshly recreated branch were swept while valid supervised leases were active. No #216 edits were lost, but the repair had to move to an isolated checkout. A provider-neutral TDD fix is now assigned: active canonical leases must protect their matching clean worktrees; released or expired leases must not prevent later cleanup. Sweep already protects live and durable-queued lane cwd values.
+- [x] **DONE — Preserve supervised worktrees from sweep.** JOR-221's diagnostic checkout and then JOR-216's freshly recreated branch were swept while valid supervised leases were active. Implemented provider-neutrally in `dc4df12` (`fix(sweep): preserve supervised worktrees`): active-only canonical leases add both current `.worktrees/<ticket>` and legacy `<repo>-wt-<ticket>` paths to the shared protected-cwd set; release and expiry restore normal cleanup. RED reproduced the #216 deletion at the public acquire → sweep seam; GREEN is sweep 32/32, lease/canonical-state 20/20, full Loom 1,299/1,299, with a planted omission recreating deletion. No adapters changed.
 
 - [ ] **IN PROGRESS — Provision the deployed application schema before performance work.** JOR-221 is correctly blocked on environment readiness, not product code: the configured Supabase project authenticates the demo user, but both authenticated and service-role PostgREST reads return `PGRST205` for `patients` and `audit_events`, proving migrations/seed are absent from the exposed schema. JOR-252 owns promotion of the finished build; completion must apply migrations 001–008, align `authenticated`/`app_user` grants, seed demo data/assets, and expose a repeatable verification command before JOR-221 can record honest baselines.
 
