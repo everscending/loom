@@ -546,6 +546,12 @@ include "lib";
         # never filters: `$brief` is false and every ticket keeps its row.
         tickets: (if $brief then [$tickets[] | select(is_actionable(.; $working))]
                   else $tickets end),
+        # Gate priority needs blocked dependents even when --brief correctly
+        # collapses their full rows. Carry only the immutable graph fields the
+        # planner consumes; this same shape is present in full snapshots.
+        dependency_edges: [$tickets[]
+                           | select((.blocked_by | length) > 0)
+                           | {id, blocked_by: [.blocked_by[] | {id, closed}]}],
         other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .id]
                      else [] end),
         supervised_leases: $SL,

@@ -60,6 +60,22 @@ def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
 def lease_why:
     "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation, gate and merge launches wait for release or expiry";
 
+# New snapshots carry a compact dependency graph because --brief filters full
+# rows that cannot be acted on this turn. Old snapshots remain valid: missing
+# or malformed graph data falls back to the blocked_by fields in tickets[].
+def valid_dependency_edges:
+    type == "array"
+    and all(.[]; try (
+        type == "object"
+        and (.id | type) == "number"
+        and (.blocked_by | type) == "array"
+        and all(.blocked_by[];
+            type == "object"
+            and (.id | type) == "number"
+            and ((has("closed") | not)
+                 or .closed == null or .closed == true or .closed == false))
+    ) catch false);
+
 def empty_plan($gen; $build; $reason):
     { generated_at: $gen, build: $build, reason: $reason,
       actions: [], residue: [], deferred: [], supervised_leases: [] };
@@ -88,6 +104,10 @@ else
 . as $s
 | ($s.config // {}) as $cfg
 | ($s.tickets // []) as $tickets
+| (($s.dependency_edges // null) as $edges
+   | if ($edges | valid_dependency_edges) then $edges
+     else [$tickets[] | {id, blocked_by: [(.blocked_by // [])[] | {id, closed}]}]
+     end) as $dependency_edges
 | ($s.lanes // []) as $lanes
 | ($s.summary // {}) as $sum
 | ($s.epics // []) as $epics
@@ -257,11 +277,11 @@ else
   # ticket id remains the stable final tie-breaker. (D-TICK-42: #289 waited
   # behind serialized UI gates while #231 and #233 depended only on it.)
   def open_dependents_of($iid):
-      [ $tickets[]
+      [ $dependency_edges[]
         | select(any(.blocked_by[]?; .id == $iid and (.closed != true))) ]
       | length;
   def released_dependents_of($iid):
-      [ $tickets[]
+      [ $dependency_edges[]
         | ([.blocked_by[]? | select(.closed != true) | .id]) as $open
         | select(($open | length) > 0 and all($open[]; . == $iid)) ]
       | length;

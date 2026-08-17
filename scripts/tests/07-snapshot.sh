@@ -634,6 +634,9 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-b
 [ "$(jq -c '.other_iids' "$T/snap-brief.json")" = "[207]" ] \
     && ok "brief: the blocked, unclaimed, laneless ticket is a bare iid, not a full row" \
     || bad "brief: other_iids = $(jq -c '.other_iids' "$T/snap-brief.json"), want [207]"
+[ "$(jq -c '.dependency_edges' "$T/snap-brief.json")" = '[{"id":207,"blocked_by":[{"id":205,"closed":false}]}]' ] \
+    && ok "brief: filtered blocked dependents retain compact immutable dependency edges" \
+    || bad "brief: dependency edges lost with filtered #207 ($(jq -c '.dependency_edges' "$T/snap-brief.json"))"
 [ "$(jq -r '.tickets[] | select(.id==206) | .gate.eligible' "$T/snap-brief.json")" = "false" ] \
     && ok "brief: #206 earns its row via the lane clause, not the gateable one (already gated)" \
     || bad "brief: #206 unexpectedly gate.eligible — the fixture no longer tests what it claims to"
@@ -641,8 +644,21 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-b
     "$TICK" snapshot > "$T/snap-full.json" 2>/dev/null
 [ "$(jq -c '[.tickets[].id] | sort' "$T/snap-full.json")" = "[201,202,203,204,205,206,207]" ] \
     && [ "$(jq -c '.other_iids' "$T/snap-full.json")" = "[]" ] \
+    && [ "$(jq -c '.dependency_edges' "$T/snap-full.json")" = '[{"id":207,"blocked_by":[{"id":205,"closed":false}]}]' ] \
     && ok "brief: plain snapshot (no flag) still carries every ticket, other_iids empty" \
     || bad "brief: plain snapshot filtered rows or populated other_iids ($(jq -c '{t: [.tickets[].id], o: .other_iids}' "$T/snap-full.json"))"
+# Planted mutant: remove the compact dependency transport while keeping the
+# filtering itself. The same public --brief seam must lose #207's edge, proving
+# the control above depends on this field rather than another full ticket row.
+DEM=$(mirror_scripts "$T/dependency-edges-mutant")
+sed 's/^[[:space:]]*dependency_edges:/        dependency_edges_removed:/' \
+    "$DEM/snapshot.jq" > "$DEM/snapshot.jq.mut"
+mv "$DEM/snapshot.jq.mut" "$DEM/snapshot.jq"
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-brief.json" STUB_LOG="$T/calls-brief-mutant" \
+    "$DEM/tick.sh" snapshot --brief > "$T/snap-brief-mutant.json" 2>/dev/null
+[ "$(jq -r 'has("dependency_edges")' "$T/snap-brief-mutant.json")" = "false" ] \
+    && ok "brief mutant: removing dependency transport drops the filtered dependent edge" \
+    || bad "brief mutant: planted missing dependency transport did not reach the public seam"
 kill "$(cat "$LOOM_HOME/lanes/gate-206.pid" 2>/dev/null)" 2>/dev/null
 "$TICK" clear-lane gate-206 >/dev/null
 

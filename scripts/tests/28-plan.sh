@@ -259,6 +259,53 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate')" = "logic" ] \
     && ok "plan: the gate spawn carries the ticket's own tier as its pregate" \
     || bad "plan: gate pregate wrong ($(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate'))"
+# Live brief shape: both dependents are filtered out of tickets[] and survive
+# only in dependency_edges. With one aux slot, #289 must outrank older #239.
+jq '
+  .tickets = [
+    (.tickets[] | select(.id == 39) | .id = 239 | .title = "older isolated gate"),
+    (.tickets[] | select(.id == 40) | .id = 289 | .title = "gate releasing filtered dependent")
+  ]
+  | .dependency_edges = [{"id":231,"blocked_by":[{"id":289,"closed":false}]}]
+  | .other_iids = [231]
+  | .lanes = [] | .epics = [] | .supervised_leases = []
+  | .config.max_aux_lanes = 1
+  | .summary = {"open_tickets":3,"lanes_running":0,"impl_slots_free":0,
+                "merge_in_flight":false,"stranded":[],"repairs":[],
+                "epics_awaiting_probe":[],"ready_set_empty":true}
+' "$FX/snap.json" > "$FX/snap-filtered-dependency.json"
+PLAN "$FX/snap-filtered-dependency.json" > "$T/plan-filtered-dependency.json" 2>/dev/null
+[ "$(jq -r '[.actions[] | select(.step=="gate" and .kind=="spawn") | .lane] | join(",")' "$T/plan-filtered-dependency.json")" = "gate-289" ] \
+    && ok "plan: filtered dependent priority survives the live --brief snapshot shape" \
+    || bad "plan: filtered dependency collapsed to iid order ($(jq -c '[.actions[]|select(.step=="gate")|.lane]' "$T/plan-filtered-dependency.json"))"
+
+# Backward compatibility: an old producer has no dependency_edges. A malformed
+# producer is treated the same way. Both fall back to full ticket rows.
+jq '
+  del(.dependency_edges) |
+  .tickets += [{"id":231,"state":"ready-for-agent","unblocked":false,"assignees":[],
+                "blocked_by":[{"id":289,"closed":false}],
+                "gate":{"eligible":false},"related_merge_requests":[]}]
+' "$FX/snap-filtered-dependency.json" > "$FX/snap-dependency-legacy.json"
+PLAN "$FX/snap-dependency-legacy.json" > "$T/plan-dependency-legacy.json" 2>/dev/null
+jq '.dependency_edges = "malformed"' "$FX/snap-dependency-legacy.json" > "$FX/snap-dependency-malformed.json"
+PLAN "$FX/snap-dependency-malformed.json" > "$T/plan-dependency-malformed.json" 2>/dev/null
+if [ "$(jq -r '[.actions[] | select(.step=="gate" and .kind=="spawn") | .lane] | join(",")' "$T/plan-dependency-legacy.json")" = "gate-289" ] \
+   && [ "$(jq -r '[.actions[] | select(.step=="gate" and .kind=="spawn") | .lane] | join(",")' "$T/plan-dependency-malformed.json")" = "gate-289" ]; then
+    ok "plan: missing and malformed dependency_edges fall back to legacy full ticket rows"
+else
+    bad "plan: dependency compatibility fallback changed ordering"
+fi
+
+# Planted mutant: regress only the priority scorer to actionable tickets[].
+# It must pick older #239, proving the live-shaped assertion detects D-TICK.
+DPM=$(mirror_scripts "$T/dependency-priority-mutant")
+sed 's/\$dependency_edges\[\]/\$tickets[]/g' "$DPM/plan.jq" > "$DPM/plan.jq.mut"
+mv "$DPM/plan.jq.mut" "$DPM/plan.jq"
+"$DPM/tick.sh" plan "$FX/snap-filtered-dependency.json" > "$T/plan-filtered-dependency-mutant.json" 2>/dev/null
+[ "$(jq -r '[.actions[] | select(.step=="gate" and .kind=="spawn") | .lane] | join(",")' "$T/plan-filtered-dependency-mutant.json")" = "gate-239" ] \
+    && ok "plan mutant: dropping compact edges recreates iid-order gate starvation" \
+    || bad "plan mutant: planted ticket-only scorer did not recreate the priority defect"
 # D-TICK-38: an active scope reset is the gate's replacement contract too.
 # JOR-240's planner carried the reset only for implementation actions, so its
 # reviewer was mechanically briefed with superseded DST and booking criteria.
