@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 04:49 America/Chicago
+Last updated: 2026-08-17 04:53 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -64,7 +64,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Preserve Loom's ticket marker when an existing MR body is refreshed.** JOR-199's worker updated PR #65 after `lane.sh submit` and accidentally removed `Loom-Ticket: 199`; snapshot then saw Review with no MR and stranded the gate until the marker was restored manually. Implemented provider-neutrally in `44123ab` (`fix(submit): preserve ticket markers`): `lane.sh submit --file <final-body>` owns MR-body refresh, falls back from marker lookup to the current branch's single open MR, appends the forge-specific marker, updates through reviewed file-only GitHub/GitLab verbs, and refuses duplicate or ambiguous MRs. RED reproduced a duplicate POST; GREEN focused/adjacent tracker, forge, and lane suites passed 334/334.
 
-- [ ] **IN PROGRESS — Make immutable-contract authority explicit in the staged brief.** JOR-221 received its complete host-snapshotted contract but still attempted the nonexistent `lane.sh show 221` before proceeding from the embedded copy. Add a provider-neutral staged rule that the immutable contract is complete and authoritative, forbids tracker reads for rediscovery, and limits `lane.sh` to the documented terminal write verbs. The current attempt caused no tracker read or block, but the extra command is avoidable latency and could regress into a credential-dependent stop.
+- [x] **DONE — Make immutable-contract authority explicit in the staged brief.** Implemented provider-neutrally in `744e794` (`fix(briefs): declare contract authority`): the shared contract-staging boundary says the host snapshot is complete and authoritative, forbids tracker rediscovery and invented verbs such as `lane.sh show`, names the documented implementation terminal paths, and defers gate/merge work to each brief's exact appended command while preserving later scope-reset and supervised-repair precedence. RED showed 0/2 direct-Claude/deferred-Codex paths carrying the rule; GREEN is 32/32 focused plus 109/109 adjacent assertions, and deleting only the authority block recreates the gap. Adapters remain unchanged.
 
 - [ ] **TODO — Preserve supervised worktrees from sweep.** JOR-221's worktree was swept while a valid supervised lease was active, forcing its clean-host diagnosis to recreate the exact checkout. Sweep already protects live and durable-queued lane cwd values; extend the same canonical protection to active supervised leases so a focused human repair cannot lose its workspace.
 
