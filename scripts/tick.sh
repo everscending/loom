@@ -284,7 +284,7 @@ _sweep_held_summary() {
 
 cmd_sweep() {
     _SWEEP_HELD=0; _SWEEP_REMOVED=0; rm -f "$SWEEP_HELD_FILE.new"
-    local base dir name branch st gd dir_p root_p
+    local base dir name branch st gd dir_p root_p request queued_cwd protected_cwds
     # git always reports worktrees by their PHYSICAL path, so a REPO_ROOT
     # carrying a symlink (macOS /tmp -> private/tmp, /var -> private/var, or
     # any symlinked checkout) never matched below — and sweep silently swept
@@ -316,6 +316,21 @@ cmd_sweep() {
         rm -f "$SWEEP_HELD_FILE.new"   # a skipped pass observed nothing; keep the last real inventory
         return 0
     fi
+    # JOR-240: a prepared worktree can belong to a durable launch request
+    # before its worker has a pid. Preserve both ready and actively-draining
+    # requests across that host gap; this core queue contract applies without
+    # knowing which provider caused the launch to be deferred.
+    protected_cwds="$live_cwds"
+    for request in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
+        [ -d "$request" ] || continue
+        queued_cwd=$(cat "$request/cwd" 2>/dev/null || true)
+        case "$queued_cwd" in
+            /*) protected_cwds="$protected_cwds $queued_cwd" ;;
+            *)  echo "sweep: queued lane request ${request##*/} has no readable absolute cwd — skipping sweep rather than risk its prepared worktree"
+                rm -f "$SWEEP_HELD_FILE.new"
+                return 0 ;;
+        esac
+    done
     for dir in "$REPO_ROOT/.worktrees/"* "$REPO_ROOT"-wt-*; do
         [ -e "$dir" ] || continue
         case "$dir" in
@@ -328,7 +343,7 @@ cmd_sweep() {
         esac                                 # digits = ticket lanes; probe-* =
                                              # epic-acceptance worktrees
         dir_p=$(cd "$dir" 2>/dev/null && pwd -P) || dir_p="$dir"
-        case " $live_cwds " in *" $dir "*|*" $dir_p "*) continue ;; esac
+        case " $protected_cwds " in *" $dir "*|*" $dir_p "*) continue ;; esac
         if git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null | grep -qxF "worktree $dir_p"; then
             branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
             [ -n "$branch" ] || continue

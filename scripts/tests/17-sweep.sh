@@ -66,6 +66,38 @@ if [ ! -e "$SW/repo/.worktrees/11" ]; then
 else
     bad "sweep: left a merged nested .worktrees lane behind"
 fi
+
+# A provider-backed worker can be durably queued after its worktree is
+# prepared but before any process exists there. The queued cwd is already
+# committed launch ownership; sweep must preserve it through that host gap.
+git -C "$SW/repo" worktree add -q "$SW/repo/.worktrees/240" -b loom-240 origin/main 2>/dev/null
+printf 'queued implementation\n' > "$SW/queued-brief.md"
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/queued-home" LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" spawn-lane impl-240 --no-tick --provider codex --job implementation \
+  --tier medium --brief "$SW/queued-brief.md" --cwd "$SW/repo/.worktrees/240" >/dev/null
+LOOM_REPO="$SW/repo" LOOM_HOME="$SW/queued-home" "$TICK" sweep >"$SW/out-queued" 2>&1
+if [ -d "$SW/repo/.worktrees/240" ] \
+   && find "$SW/queued-home/lane-launch-queue" -name 'request-*impl-240' -type d 2>/dev/null | grep -q .; then
+    ok "sweep: preserves a prepared worktree owned by a durable lane request"
+else
+    bad "sweep: deleted a queued lane's prepared worktree before the durable host launched it"
+fi
+# Planted violation: keep live-process protection but remove queued-cwd
+# ownership from a private copy. The same public sweep must delete the clean
+# prepared checkout again, proving the durable request guard carries the fix.
+MUT_QUEUED_SWEEP=$(mirror_scripts "$SW/mut-queued-sweep")
+sed -i.bak 's@protected_cwds="$protected_cwds $queued_cwd"@protected_cwds="$protected_cwds"@' \
+  "$MUT_QUEUED_SWEEP/tick.sh"
+mut_queued_out=$(LOOM_REPO="$SW/repo" LOOM_HOME="$SW/queued-home" \
+  "$MUT_QUEUED_SWEEP/tick.sh" sweep 2>&1); mut_queued_rc=$?
+if assert_mutant_ran "$mut_queued_rc" "$mut_queued_out" "queued-worktree-violation"; then
+    if [ ! -e "$SW/repo/.worktrees/240" ] \
+       && printf '%s' "$mut_queued_out" | grep -q 'removed merged worktree'; then
+        ok "sweep-violation: dropping queued cwd ownership recreates the pre-launch deletion"
+    else
+        bad "sweep-violation: planted queued-cwd omission did not recreate deletion (rc=$mut_queued_rc)"
+    fi
+fi
 # The safety boundary: unmerged work is never ours to delete. Fixing the crash
 # above ARMED a deletion path that had never executed, so prove it still stops.
 git -C "$SW/repo" checkout -qb live-work origin/main
