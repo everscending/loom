@@ -596,6 +596,10 @@ include "lib";
             # A merge is in flight in its own lane; scheduling continues around
             # it, but a second merge waits (P5).
             merge_in_flight: ($merge_owner != ""),
+            # Admission remains the final atomic guard, but the pure planner
+            # needs this immutable host-resource fact to avoid scheduling UI
+            # work that is already guaranteed to be refused.
+            ui_pregate_occupied: $ui_pregate_occupied,
             # Claimed but unworked: `in-progress`, yet no ALIVE lane carries
             # the ticket. This is exactly where a gate rejection lands a
             # ticket (verdict fail → in-progress, assignee kept) — and no

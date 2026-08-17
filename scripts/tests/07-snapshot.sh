@@ -86,6 +86,24 @@ fi
 [ "$(q2 '.config.max_aux_lanes')" != "null" ] \
     && ok "snapshot: aux cap is published so the wave can bound gates/probes" \
     || bad "snapshot: no max_aux_lanes in config"
+# D-TICK: admission already serializes the shared UI host, but the planner
+# needs the same immutable fact or it schedules several guaranteed refusals.
+"$TICK" spawn-lane gate-64 --pregate ui --no-tick -- sleep 20 >/dev/null
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-resource" "$TICK" snapshot \
+    > "$T/snap-ui-resource.json" 2>/dev/null
+if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-resource.json")" = true ]; then
+    ok "snapshot: live UI ownership reaches the pure planner"
+else
+    bad "snapshot: live UI ownership was discarded before planning"
+fi
+"$TICK" clear-lane gate-64 >/dev/null 2>&1
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-released" "$TICK" snapshot \
+    > "$T/snap-ui-released.json" 2>/dev/null
+if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-released.json")" = false ]; then
+    ok "snapshot: released UI ownership restores planner availability"
+else
+    bad "snapshot: released UI ownership remained stuck"
+fi
 # 7a3. Stranded detection: `in-progress` with no ALIVE lane — where a gate
 #      rejection parks a ticket (verdict fail → in-progress, assignee kept).
 #      No wave step read that state, so gate-rejected #11/#12 sat unworked

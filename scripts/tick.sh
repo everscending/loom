@@ -4082,7 +4082,7 @@ cmd_snapshot() {
     # closed. Resolution is the wave cadence, which is honest and enough.
     [ -n "$label" ] && printf '%s\n' "$label" > "$BUILD_LABEL_CACHE"
 
-    local config_json
+    local config_json ui_pregate_occupied=false
     config_json=$(jq -n \
         --arg max_lanes "$(cfg max_lanes 4)" --arg rejection_cap "$(cfg rejection_cap 2)" \
         --arg crash_cap "$(cfg crash_cap 2)" --arg stale "$(cfg heartbeat_stale_minutes 30)" \
@@ -4105,6 +4105,7 @@ cmd_snapshot() {
     # valid, unexpired leases are represented; an expired supervisor process
     # cannot wedge scheduling and snapshot remains a read-only verb.
     _supervised_leases_json > "$SNAP_TMP/supervised-leases.json"
+    if _ui_pregate_occupied; then ui_pregate_occupied=true; fi
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
@@ -4120,7 +4121,7 @@ cmd_snapshot() {
         --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --arg label "$label" --arg build_iid "$build_iid" \
         --arg merge_owner "$(_merge_lock_owner)" \
-        --argjson brief "$brief" \
+        --argjson brief "$brief" --argjson ui_pregate_occupied "$ui_pregate_occupied" \
         -f "$SNAP_JQ"
 
     # The retro record is derived from the finished snapshot, never recomputed

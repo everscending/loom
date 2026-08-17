@@ -117,6 +117,7 @@ else
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
 | (($cfg.rejection_cap | tonumber?) // 2) as $rejection_cap
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_free
+| (($sum.ui_pregate_occupied // false) == true) as $ui_pregate_occupied
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
 | ([ $tickets[]
@@ -294,7 +295,20 @@ else
    | sort_by([(-._dependency_releases), (-._dependency_impacts), .id])) as $gate_candidates
 | ([ $gate_candidates[] | select(.supervised_lease != null) ]) as $gate_leased
 | ([ $gate_candidates[] | select(.supervised_lease == null) ]) as $gate_all
-| ($gate_all[0:$aux_free]) as $gate_take
+# UI pregates share one host resource even when the auxiliary pool has several
+# free slots. Admission remains the final race guard, but a snapshot that
+# already sees an owner must not spend a wave attempting every UI candidate.
+# When free, select the highest-priority UI gate once and let API gates retain
+# their normal parallelism and dependency-priority order.
+| ([ $gate_all[] | select(.tier == "ui") ] | first | .id) as $first_ui_gate
+| (if $ui_pregate_occupied then null else $first_ui_gate end) as $selected_ui_gate
+| ([ $gate_all[]
+     | select(.tier != "ui"
+              or ($selected_ui_gate != null and .id == $selected_ui_gate)) ]) as $gate_admissible
+| ([ $gate_all[]
+     | select(.tier == "ui"
+              and ($selected_ui_gate == null or .id != $selected_ui_gate)) ]) as $gate_ui_wait
+| ($gate_admissible[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
      | (gate_lane(.id)) as $lid
      | select(spawnable($lid))
@@ -314,10 +328,15 @@ else
          why: "gate.eligible — in `review`, an open MR, and no verdict standing at this HEAD" } ])
   as $gate_actions
 | ([ $gate_leased[] | { step: "gate", ticket: .id, why: lease_why } ]
+   + [ $gate_ui_wait[]
+     | { step: "gate", ticket: .id,
+         why: (if $ui_pregate_occupied
+               then "UI host resource already reserved by live or queued UI work"
+               else "one UI gate already selected for the shared UI host resource" end) } ]
    + [ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
      | { step: "gate", ticket: .id, lane: $lid,
          why: "lane id `\($lid)` is not one `spawn-lane` accepts — a planner bug, not a lane failure" } ]
-   + [ $gate_all[$aux_free:][]
+   + [ $gate_admissible[$aux_free:][]
      | { step: "gate", ticket: .id,
          why: "no aux slot free (\($aux_alive) of \($aux_cap) held by gates, merges and probes)" } ])
   as $gate_deferred
@@ -441,7 +460,10 @@ else
   as $block_merge_cap
 | ([ $merge_available[] | select((.merge_attempts // 0) < $merge_cap and .merge_hold == null) ] | first)
   as $merge_head
-| (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1 then []
+| (any($gate_actions[]; .spawn.pregate == "ui")) as $planned_ui_gate
+| ($ui_pregate_occupied or $planned_ui_gate) as $ui_reserved_after_gate
+| (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1
+       or ($merge_head.tier == "ui" and $ui_reserved_after_gate) then []
    else [ $merge_head
           | ("merge-\(.id)") as $lid
           | select(spawnable($lid))
@@ -462,6 +484,9 @@ else
    + (if ($sum.merge_in_flight // false)
       then [ { step: "merge",
                why: "a merge lane already holds the merge lock — a second merge waits" } ]
+      elif $merge_head != null and $merge_head.tier == "ui" and $ui_reserved_after_gate
+      then [ { step: "merge", ticket: $merge_head.id,
+               why: "UI host resource already reserved by live, queued, or planned UI work" } ]
       elif $merge_head != null and $aux_left < 1
       then [ { step: "merge", ticket: $merge_head.id,
                why: "no aux slot free (\($aux_alive) of \($aux_cap) held by gates, merges and probes)" } ]
