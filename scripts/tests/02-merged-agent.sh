@@ -318,6 +318,19 @@ else
     bad "hold release continuation: first=$release_first (want non-zero), second=$release_second (want 0)"
 fi
 
+# A Mend-filed fix has no worker epilogue to advance it. Its successful create
+# uses the same durable, coalesced heartbeat request and therefore cannot wait
+# out a stale paid-wave gap.
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+MENV "$TICK" request-continuation fix-ticket 292 >/dev/null 2>&1
+MTICK tick --auto; fix_first=$(_mwaves)
+MTICK tick --auto; fix_second=$(_mwaves)
+if [ "$fix_first" != 0 ] && [ "$fix_second" = 0 ]; then
+    ok "fix-ticket continuation: heartbeat bypasses the old gap once"
+else
+    bad "fix-ticket continuation: first=$fix_first (want non-zero), second=$fix_second (want 0)"
+fi
+
 # Planted violation: make the automatic wave-gap gate ignore the durable
 # continuation marker. The public request still succeeds, but its heartbeat
 # must now strand the work exactly as the live JOR-290 incident did.

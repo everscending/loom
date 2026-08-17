@@ -191,8 +191,8 @@ STATES="ready-for-agent in-progress review merge-queue blocked"
 # tracker write must never fail because the ticker could not be fed.
 TICK_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 _lane_ev() { "$TICK_SH" event "$@" >/dev/null 2>&1 || true; }
-_request_heartbeat_continuation() { # <ticket>
-    "$TICK_SH" request-continuation hold-release "$1" >/dev/null 2>&1 || true
+_request_heartbeat_continuation() { # <ticket> [hold-release|fix-ticket]
+    "$TICK_SH" request-continuation "${2:-hold-release}" "$1" >/dev/null 2>&1 || true
 }
 
 # A tracker outcome is stronger than the provider process exit that follows
@@ -930,6 +930,11 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     rm -f "$err"
     echo "lane.sh: filed #$iid — $blabel, fix, tier::$tier, ready-for-agent, milestone '$ms'${blockedby:+, blocked by $blockedby}"
     _lane_ev fix_filed ticket "$iid" tier "$tier"
+    # A lane-filed fix inherits its caller's epilogue, but a human Mend pass
+    # has no lane to hand off. In both cases this coalesced request is safe: the
+    # ordinary heartbeat remains the scheduler and consumes it only after the
+    # quiet/usage/stop gates, while bypassing a stale paid-wave gap once.
+    _request_heartbeat_continuation "$iid" fix-ticket
 }
 
 cmd_probe_result() { # <build-iid> <epic-slug> pass|fail|infrastructure [--file F]

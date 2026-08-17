@@ -121,8 +121,10 @@ the ledger and in repair evidence.
    A successful human hold release or supervised-repair lease release similarly
    leaves a durable continuation request for the ordinary heartbeat: the next
    eligible heartbeat bypasses the stale wave gap once, but a stopped loop
-   remains stopped. Mend verifies that request and the resulting lane start;
-   it never substitutes a manual tick for either.
+   remains stopped. A successful `fix-ticket` creation does the same because a
+   human Mend pass has no worker epilogue to hand off the newly ready work.
+   Mend verifies that request and the resulting lane start; it never substitutes
+   a manual tick for either.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect. Rank pressure before choosing the

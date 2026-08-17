@@ -135,6 +135,17 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   an invisible merge queue while unrelated work remains active.
   (`MEND-FLOW-01`, `MEND-LEARN-01`)
 
+- [x] **DONE — Continue immediately after Mend files a fix ticket.** Live Mend
+  filed JOR-292 to repair the shared gate harness after JOR-291's valid product
+  branch was rejected, but the human `fix-ticket` call had no lane epilogue to
+  request another wave. With no active lanes, the ready fix could wait through
+  the full paid-wave gap. A successful `fix-ticket` now leaves the same durable,
+  coalesced continuation request used by hold releases; the ordinary heartbeat
+  remains the scheduler and still honors stop, quiet, and usage gates. Verification:
+  scheduler 31/31, lane/ticker 177/177, full suite 1,359/1,359; deleting the
+  request from the successful create recreates the idle gap.
+  (`MEND-FLOW-01`, `MEND-LEARN-01`)
+
 - [ ] **IN PROGRESS — Keep viewer panes equal to active workers.** Patient
   Imaging Portal exposed a dead viewer (`watch-panes.pid` 45610; output stopped
   at 09:59) whose four owned panes outlived it (`impl-231`, `gate-207`,

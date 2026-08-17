@@ -1421,12 +1421,12 @@ cmd_resume() {
     echo "resume: consecutive-wave-failure count reset"
 }
 
-cmd_request_continuation() { # hold-release|supervised-release <ticket>
+cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticket>
     local reason="${1:-}" ticket="${2:-}"
     [ "$#" -eq 2 ] \
-        || die "request-continuation: usage: request-continuation hold-release|supervised-release <ticket>"
+        || die "request-continuation: usage: request-continuation hold-release|supervised-release|fix-ticket <ticket>"
     case "$reason" in
-        hold-release|supervised-release) ;;
+        hold-release|supervised-release|fix-ticket) ;;
         *) die "request-continuation: unknown reason '$reason'" ;;
     esac
     case "$ticket" in ''|*[!0-9]*) die "request-continuation: ticket must be numeric" ;; esac
@@ -5537,5 +5537,5 @@ case "${1:-}" in
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release|fix-ticket <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac

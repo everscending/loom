@@ -1098,6 +1098,33 @@ echo "turns after the first never complete" | LOOM_HOME="$EVH" \
     "$LANE" fix-ticket --title "realtime turns stall" --tier logic \
         --milestone "E4 · Realtime mode" >/dev/null 2>&1
 lbl=$(grep -o 'labels=[^ ]*' "$FCAP" | grep ',' | head -1)
+if [ -f "$EVH/continuation.request" ] \
+   && jq -Rre 'fromjson? | select(.ev == "continuation_requested" and .reason == "fix-ticket" and .ticket == 64)' \
+        "$EVH/events.jsonl" >/dev/null 2>&1; then
+    ok "fix-ticket: successful creation requests one scheduler continuation"
+else
+    bad "fix-ticket: ready work can wait behind the old wave gap"
+fi
+rm -f "$EVH/continuation.request"
+: > "$EVH/events.jsonl"
+FIX_CONT_MUT=$(mirror_scripts "$T/fix-ticket-continuation-mutant")
+sed '/^[[:space:]]*_request_heartbeat_continuation "\$iid" fix-ticket$/d' \
+    "$FIX_CONT_MUT/lane.sh" > "$FIX_CONT_MUT/lane-mutant.sh"
+mv "$FIX_CONT_MUT/lane-mutant.sh" "$FIX_CONT_MUT/lane.sh"
+chmod +x "$FIX_CONT_MUT/lane.sh"
+fix_cont_mut_out=$(echo "branch scope belongs to the gate" | LOOM_HOME="$EVH" \
+    GLAB_CMD="$FX/fixtkt-stub.sh" ACAP="$FCAP" \
+    "$FIX_CONT_MUT/lane.sh" fix-ticket --title "recipient suite scope" --tier logic \
+        --milestone "E4 · Realtime mode" 2>&1); fix_cont_mut_rc=$?
+if assert_mutant_ran "$fix_cont_mut_rc" "$fix_cont_mut_out" "fix-ticket-continuation-violation"; then
+    if [ ! -f "$EVH/continuation.request" ] \
+       && ! jq -Rre 'fromjson? | select(.ev == "continuation_requested" and .reason == "fix-ticket")' \
+            "$EVH/events.jsonl" >/dev/null 2>&1; then
+        ok "fix-ticket continuation mutant: removing the request recreates the idle gap"
+    else
+        bad "fix-ticket continuation mutant: the planted violation still requested scheduling"
+    fi
+fi
 miss=""
 for want in build-3 fix tier::logic ready-for-agent; do
     case "$lbl" in *"$want"*) ;; *) miss="$miss $want" ;; esac
