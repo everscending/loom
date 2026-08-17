@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 03:46 America/Chicago
+Last updated: 2026-08-17 03:50 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -32,7 +32,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Make malformed notification calls fail cleanly.** A recovery wave invoked `tick.sh notify` without arguments and tripped a `set -u` unbound-argument error after its scheduled state changes. Implemented provider-neutrally in `aef17c6` (`fix(notify): validate CLI arity`): the public boundary accepts exactly three or four arguments and otherwise returns named usage before reading positionals or touching event/transport state. Verification: notification/liveness 41/41, 254 adjacent assertions in isolation, and removing the guard recreates the unbound-variable crash.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-206, JOR-214, JOR-218, JOR-236, JOR-251, and JOR-283 have merged. Active lanes are API gates for JOR-193 and JOR-203, the serialized UI gate for JOR-253, and focused rework for JOR-199 and JOR-240. JOR-239, JOR-257, JOR-260, JOR-289, and JOR-290 remain gate-ready; JOR-289 is the highest dependency unlock because it releases JOR-231 and JOR-233. JOR-196 is still a human hold even though JOR-195, JOR-220, and JOR-251 are closed; recommend human `unblock 196`. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-206, JOR-214, JOR-218, JOR-236, JOR-251, and JOR-283 have merged. Active lanes are API gates for JOR-193 and JOR-203, the serialized UI gate for JOR-253, and focused rework for JOR-199 and JOR-240. JOR-239, JOR-257, JOR-260, JOR-289, and JOR-290 remain gate-ready; JOR-289 is the highest dependency unlock because it releases JOR-231 and JOR-233. JOR-196's formal blockers JOR-195/JOR-220/JOR-251 are closed, but its human hold names the still-unmerged provider-schedule API now owned by JOR-260; keep the hold until JOR-260 merges, then recommend `unblock 196`. Planner scoring and holding tests remain TODO.
 
 - [x] **DONE — Release provider-complete lanes from capacity immediately.** Implemented provider-neutrally in `616d3a3` (`fix(capacity): release finished lane slots`): snapshot and final auxiliary admission stop charging a lane after its durable rc/outcome exists, while true PID liveness remains authoritative for worktree safety and same-ticket dedupe. The planner clears cleanup-eligible lanes and fills their released slots in the same ordered wave instead of spending a cleanup-only wave. Verification: planner 54/54, auxiliary admission 10/10, host-probe admission 10/10, full isolated suite 1,257/1,257, and the finished-lane-capacity mutant was caught. No adapter changed.
 
