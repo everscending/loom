@@ -108,7 +108,12 @@
 #                                            header, feed the outcome to the
 #                                            build ticker; a PASS also closes
 #                                            the epic's milestone
-#   lane.sh transition <iid> <state>         move the ticket's state label;
+#   lane.sh transition <iid> <state> [--if-current <state>]
+#                                            move the ticket's state label;
+#                                            --if-current makes a disposable
+#                                            wave plan compare its observed
+#                                            source state at the live write
+#                                            boundary before mutating
 #                                            ready-for-agent also clears the
 #                                            assignee (the unblock rule — a
 #                                            claimed "ready" ticket is
@@ -1093,13 +1098,14 @@ _run_install() { # <cmd> <dir>
     return 0
 }
 
-cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
-    local iid="${1:-}" state="${2:-}" ok=0 s note=0 bodyargs=()
+cmd_transition() { # <iid> <state> [--if-current <state>] [--release-hold] [--note [--file F]]
+    local iid="${1:-}" state="${2:-}" expected="" ok=0 s note=0 bodyargs=()
     _check_iid "$iid"
     # P36: the only way out of a human hold, and deliberately unpleasant to
     # reach by accident — see `_blocked_guard`.
     set -- "${@:3}"
     while [ $# -gt 0 ]; do case "$1" in
+        --if-current) expected="${2:-}"; [ -n "$expected" ] || die "transition: --if-current needs a state"; shift 2 ;;
         --release-hold) RELEASE_HOLD=1; shift ;;
         # P78: the decision and the relabel are ONE verb. Releasing a hold was
         # two commands — `note` then `transition` — and the batch path in
@@ -1117,6 +1123,26 @@ cmd_transition() { # <iid> <state> [--release-hold] [--note [--file F]]
         || die "transition: --file needs --note (the body is the decision note)"
     for s in $STATES; do [ "$s" = "$state" ] && ok=1; done
     [ "$ok" = 1 ] || die "unknown state '$state' (one of: $STATES)"
+    if [ -n "$expected" ]; then
+        ok=0
+        for s in $STATES unlabeled; do [ "$s" = "$expected" ] && ok=1; done
+        [ "$ok" = 1 ] \
+            || die "transition: unknown --if-current state '$expected' (one of: $STATES unlabeled)"
+        # A wave's plan is immutable but disposable. Its decision is valid
+        # only while the source state it observed still stands. Patient
+        # Imaging JOR-283/JOR-208/JOR-286 were reset to review and given live
+        # gate lanes after an older plan was derived; that plan later replayed
+        # its unconditional cap transitions and moved all three back to
+        # blocked underneath the gates. Compare at the tracker write boundary,
+        # where every provider reaches the same verb. (Paid for: 2026-08-16.)
+        _read_issue "$iid" "refusing to apply a transition from a stale wave plan."
+        local current jqd
+        jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
+        current=$(printf '%s' "$_ISSUE_JSON" \
+            | jq -L "$jqd" -r 'include "lib"; state_of(.labels // []) // "unlabeled"')
+        [ "$current" = "$expected" ] \
+            || die "issue $iid: planned transition expected '$expected' but is currently '$current' — snapshot is stale; re-run snapshot and plan."
+    fi
     # A closed ticket is finished; state labels on it are pure misinformation.
     # The same stale-snapshot race that produced the merge-failed above went on
     # to label closed #23 `blocked`, and a later wave then "requeued" it to

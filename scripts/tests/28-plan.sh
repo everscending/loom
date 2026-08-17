@@ -165,8 +165,8 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
     && ok "plan: the turn-cap lane's ticket is blocked, not respawned" \
     || bad "plan: turn-cap block wrong ($(jq -c '[.actions[]|select(.step=="harvest" and .kind=="transition")]' "$T/plan.json"))"
 [ "$(act harvest repair)" = "44,51" ] \
-    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==44) | .argv] | .[0]' "$T/plan.json")" = '["transition","44","review"]' ] \
-    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==51) | .argv] | .[0]' "$T/plan.json")" = '["transition","51","blocked"]' ] \
+    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==44) | .argv] | .[0]' "$T/plan.json")" = '["transition","44","review","--if-current","ready-for-agent"]' ] \
+    && [ "$(jq -c '[.actions[] | select(.kind=="repair" and .ticket==51) | .argv] | .[0]' "$T/plan.json")" = '["transition","51","blocked","--if-current","merge-queue"]' ] \
     && [ "$(jq -r '[.actions[] | select(.kind=="repair" and .ticket==51) | .report_already_present] | .[0]' "$T/plan.json")" = true ] \
     && ok "plan: half-finished tracker transitions become repair actions" \
     || bad "plan: repair action wrong ($(jq -c '[.actions[]|select(.kind=="repair")]' "$T/plan.json"))"
@@ -251,7 +251,7 @@ PLAN "$FX/snap-no-merge-outcome.json" > "$T/plan-no-merge-outcome.json" 2>/dev/n
     || bad "plan: blocked-report residue wrong ($(res blocked-report))"
 # Every `transition … blocked` says so, so an executor cannot apply the label
 # without the report the human reads to make the decision.
-[ "$(jq '[.actions[] | select(.kind == "transition" and .argv[-1] == "blocked")] | map(.needs_report) | unique | @csv' "$T/plan.json")" \
+[ "$(jq '[.actions[] | select(.kind == "transition" and .argv[2] == "blocked")] | map(.needs_report) | unique | @csv' "$T/plan.json")" \
     = '"true"' ] \
     && ok "plan: no ticket is blocked without a report being demanded with it" \
     || bad "plan: a blocking action carries no needs_report flag"

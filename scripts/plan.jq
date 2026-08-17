@@ -106,6 +106,14 @@ else
 
 # One lookup, so every rule below reads the same row for the same ticket.
 | def ticket($iid): ($tickets | map(select((.id | tostring) == ($iid | tostring))) | first);
+  # Plans are immutable for one wave, but tracker state can change while the
+  # provider is still executing them. Every planned transition carries the
+  # source state this snapshot observed; lane.sh compares it live before the
+  # write. `unlabeled` preserves the same fail-closed rule for a repair whose
+  # source has no Loom state label.
+  def transition_argv($iid; $target):
+      ["transition", ($iid | tostring), $target, "--if-current",
+       (ticket($iid).state // "unlabeled")];
 
 # `blocked-report` and `transition … blocked` are two tracker writes. If the
 # first lands and the lane dies (or a provider stops after reporting), the
@@ -148,7 +156,7 @@ else
   as $kill_overrun
 | ([ $overrun[] | select(ticket(lane_ticket(.id)) != null)
      | { step: "harvest", kind: "transition", lane: .id, ticket: (lane_ticket(.id) | tonumber),
-         via: "lane.sh", argv: ["transition", lane_ticket(.id), "blocked"],
+         via: "lane.sh", argv: transition_argv(lane_ticket(.id); "blocked"),
          why: "turn cap spent — a ticket that needs this many turns was written too big or the lane is lost; the next step is a human decision",
          needs_report: true } ])
   as $block_overrun
@@ -170,13 +178,18 @@ else
 # `snapshot.jq` located them (P63); the plan is where they stop being a warning
 # a wave has to notice and become work with a place in the order.
 | ([ ($sum.repairs // [])[]
+     | . as $repair
+     | (.fix | ltrimstr("lane.sh ") | split(" ")) as $argv
      | { step: "harvest", kind: "repair", ticket: .id,
-         via: "lane.sh", argv: (.fix | ltrimstr("lane.sh ") | split(" ")),
+         via: "lane.sh",
+         argv: (if $argv[0] == "transition"
+                then $argv + ["--if-current", (ticket($repair.id).state // "unlabeled")]
+                else $argv end),
          why: "\(.shape) — a lane died between its two writes" } ])
   as $repairs
 | ([ $reported_blocks[]
      | { step: "harvest", kind: "repair", ticket: .id,
-         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
+         via: "lane.sh", argv: transition_argv(.id; "blocked"),
          report_already_present: true,
          why: "an unreleased blocked report landed while the ticket stayed `\(.state // "unlabeled")` — finish the second half of that tracker transition" } ])
   as $blocked_repairs
@@ -277,7 +290,7 @@ else
 | ([ $stranded[] | select((.rejections.total // 0) >= $rejection_cap) ]) as $rejection_spent  # mutate:rejection-total-cap
 | ([ $rejection_spent[]
      | { step: "fill", kind: "transition", ticket: .id,
-         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
+         via: "lane.sh", argv: transition_argv(.id; "blocked"),
          why: "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three needs diagnosis, rescope, or prerequisite work instead of another automatic guess",
          needs_report: true } ])
   as $block_rejections
@@ -346,7 +359,7 @@ else
 # `base-red` never count — `snapshot.jq` already excludes them.
 | ([ $queue[] | select((.merge_attempts // 0) >= $merge_cap)  # mutate:merge-attempt-cap
      | { step: "merge", kind: "transition", ticket: .id,
-         via: "lane.sh", argv: ["transition", (.id | tostring), "blocked"],
+         via: "lane.sh", argv: transition_argv(.id; "blocked"),
          why: "\(.merge_attempts) merge attempts against a cap of \($merge_cap) — blocking it advances the queue instead of feeding the next lane into the same wall",
          needs_report: true } ])
   as $block_merge_cap
