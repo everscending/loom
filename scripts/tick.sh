@@ -1549,7 +1549,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 start_kick=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -1618,11 +1618,15 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     if ! _codex_host_is_ephemeral; then
         _drain_lane_cleanups \
           || die "tick: one or more queued lane cleanups failed at the durable host boundary"
+        if [ "${DRAINED_LANE_CLEANUPS:-0}" -gt 0 ]; then
+            cleanup_kick=1
+            _ev tick_cleanup_continuation count "$DRAINED_LANE_CLEANUPS"
+        fi
         _drain_lane_launches \
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
     [ ! -f "$START_KICK_FILE" ] || start_kick=1
-    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && ! _wave_gap_ok; then
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0

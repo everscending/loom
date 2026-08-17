@@ -1000,7 +1000,7 @@ cat > "$T/glab-unheld-stub.sh" <<'STUB'
 for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${NCAP:?}" ;; esac; done
 echo "$*" >> "${NARGV:?}"
 case "$*" in
-    *"issues/61/notes"*) echo '[]' ;;
+    *"issues/61/notes"*) cat "${NTHREAD:-/dev/null}" 2>/dev/null || echo '[]' ;;
     *"issues/61"*) echo '{"iid":61,"state":"opened","labels":["build-3","in-progress"]}' ;;
     *) echo '{}' ;;
 esac
@@ -1012,6 +1012,38 @@ LOOM_HOME="$EVH" GLAB_CMD="$T/glab-unheld-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
 [ -s "$NCAP" ] \
     && bad "transition: stamped a release on a ticket that was never held ($(tail -3 "$NCAP"))" \
     || ok "transition: a transition that releases nothing writes no trailer"
+# A machine decision on an ordinary transition is not a release. Patient
+# Imaging JOR-231 already had a historical blocked/unblock pair; consulting
+# release dedup swallowed its later stale-base note while still moving it to
+# in-progress, recreating the review loop. The exact machine trailer owns
+# idempotence on this path and no new orch-unblock is fabricated.
+cat > "$T/thread-historical-release.json" <<'STUB'
+[{"body":"Old block.\n\n<!-- orch-blocked category=old 2026-08-08T10:00:00Z -->","created_at":"2026-08-08T10:00:00Z"},
+ {"body":"Old release.\n\n<!-- orch-unblock 2026-08-08T11:00:00Z -->","created_at":"2026-08-08T11:00:00Z"}]
+STUB
+: > "$NCAP"; : > "$NARGV"
+printf 'Reconcile current base.\n\n<!-- orch-base-stale abc1234 base=main behind=4 -->\n' \
+  | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-unheld-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+      NTHREAD="$T/thread-historical-release.json" \
+      "$LANE" transition 61 in-progress --note >/dev/null 2>&1
+if grep -q 'orch-base-stale abc1234' "$NCAP" \
+   && ! grep -q 'orch-unblock' "$NCAP" \
+   && grep -q 'add_labels=in-progress' "$NARGV"; then
+    ok "transition decision: historical release cannot swallow a new head-bound note"
+else
+    bad "transition decision: non-hold machine note was lost or mislabeled as a release"
+fi
+cat > "$T/thread-machine-noted.json" <<'STUB'
+[{"body":"Reconcile current base.\n\n<!-- orch-base-stale abc1234 base=main behind=4 -->","created_at":"2026-08-17T18:41:49Z"}]
+STUB
+: > "$NCAP"; : > "$NARGV"
+printf 'Reconcile current base.\n\n<!-- orch-base-stale abc1234 base=main behind=4 -->\n' \
+  | LOOM_HOME="$EVH" GLAB_CMD="$T/glab-unheld-stub.sh" NCAP="$NCAP" NARGV="$NARGV" \
+      NTHREAD="$T/thread-machine-noted.json" \
+      "$LANE" transition 61 in-progress --note >/dev/null 2>&1
+[ ! -s "$NCAP" ] && grep -q 'add_labels=in-progress' "$NARGV" \
+    && ok "transition decision: exact machine trailer deduplicates a label-write retry" \
+    || bad "transition decision: retry duplicated the note or skipped the label half"
 # --note does not buy a way past the hold guard: releasing still needs
 # --release-hold, and an automated caller still cannot say it.
 : > "$NARGV"

@@ -100,7 +100,8 @@ the ledger and in repair evidence.
    remains intact.
    Two known examples are structural contracts, not ad-hoc exceptions:
    durable post-wave cleanup requests one immediate replay from the resulting
-   lane state, and an `orch-base-stale` decision at the current MR HEAD routes
+   lane state; cleanup inherited by the next heartbeat admits that heartbeat
+   past the old wave gap. An `orch-base-stale` decision at the current MR HEAD routes
    the ticket to implementation reconciliation instead of the generic
    MR-open repair back to review.
 3. Inspect every `attention` item and any plan residue. Correlate it with the

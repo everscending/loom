@@ -58,7 +58,11 @@ set; cleanup can expose runnable work after the provider is gone, when no lane
 remains to hand off and the heartbeat is still inside the wave gap. Replanning
 once from that durable post-cleanup state closes the gap without a human or
 `mend` issuing a manual tick. Multiple cleanup requests in one batch coalesce
-to the same single replay.
+to the same single replay. If the original host dies before that postlude, the
+next durable heartbeat can inherit the queued cleanup. Because it drains
+before the automatic wave-gap check, any cleanup it completes admits that
+same heartbeat's wave once; draining durable state and then stopping at the
+old gap would recreate the exact lost-host stall the queue exists to recover.
 Every tick arms the backstop itself if none is armed, so a loop kicked by a
 manual `tick` acquires one; if launchd refuses, one push says so and the build
 is running unprotected. *(paid: a wave misread a permission denial as "never

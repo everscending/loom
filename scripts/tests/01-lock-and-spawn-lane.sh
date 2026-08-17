@@ -148,6 +148,46 @@ if [ "$(wc -l < "$CLEAN_WAVES" | tr -d ' ')" = 1 ]; then
 else
     bad "cleanup-continuation-violation: planted deletion still continued the build"
 fi
+
+# The post-wave host can die after a provider queues cleanup but before its
+# own drain/replay postlude. The next durable heartbeat drains that request
+# before checking the paid wave gap; the state change must admit this same
+# heartbeat instead of recreating the gap one boundary later.
+PRE_HOME="$T/pre-gap-cleanup-home" PRE_MARK="$T/pre-gap-cleanup-wave"
+LOOM_HOME="$PRE_HOME" LOOM_WAVE_CMD=true "$TICK" tick --provider claude >/dev/null 2>&1
+pre_request="$PRE_HOME/lane-cleanup-queue/request-pre-gap"
+mkdir -p "$pre_request"
+printf '%s\n' impl-908 > "$pre_request/id"
+printf '%s\n' clear > "$pre_request/action"
+: > "$pre_request/pid"
+LOOM_HOME="$PRE_HOME" LOOM_WAVE_CMD="touch $PRE_MARK" \
+  "$TICK" tick --auto --provider claude >/dev/null 2>&1
+if [ -e "$PRE_MARK" ] \
+   && grep -q '"ev":"tick_cleanup_continuation"' "$PRE_HOME/events.jsonl"; then
+    ok "cleanup continuation: heartbeat cleanup bypasses the stale paid-wave gap"
+else
+    bad "cleanup continuation: recovery heartbeat drained state then stopped at wave_gap"
+fi
+
+# Planted violation: without the cleanup admission bit, the same public
+# heartbeat drains successfully but the recent wave still suppresses work.
+PRE_MUT=$(mirror_scripts "$T/pre-gap-cleanup-mutant")
+sed '/cleanup_kick=1/d' "$PRE_MUT/tick.sh" > "$PRE_MUT/tick-mutant.sh"
+mv "$PRE_MUT/tick-mutant.sh" "$PRE_MUT/tick.sh"; chmod +x "$PRE_MUT/tick.sh"
+PRE_MUT_HOME="$T/pre-gap-cleanup-mutant-home" PRE_MUT_MARK="$T/pre-gap-cleanup-mutant-wave"
+LOOM_HOME="$PRE_MUT_HOME" LOOM_WAVE_CMD=true "$PRE_MUT/tick.sh" tick --provider claude >/dev/null 2>&1
+pre_mut_request="$PRE_MUT_HOME/lane-cleanup-queue/request-pre-gap"
+mkdir -p "$pre_mut_request"
+printf '%s\n' impl-907 > "$pre_mut_request/id"
+printf '%s\n' clear > "$pre_mut_request/action"
+: > "$pre_mut_request/pid"
+LOOM_HOME="$PRE_MUT_HOME" LOOM_WAVE_CMD="touch $PRE_MUT_MARK" \
+  "$PRE_MUT/tick.sh" tick --auto --provider claude >/dev/null 2>&1
+if [ ! -e "$PRE_MUT_MARK" ]; then
+    ok "cleanup-continuation-violation: deleting heartbeat admission recreates the gap"
+else
+    bad "cleanup-continuation-violation: planted admission deletion still ran a wave"
+fi
 rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 
 # Planted violation: background only `_start_handoff_tick` in a private copy.

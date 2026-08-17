@@ -1253,16 +1253,41 @@ cmd_transition() { # <iid> <state> [--if-current <state>] [--release-hold] [--no
         # A thread with no `orch-blocked` trailer (blocked by hand, or before
         # this verb existed) has no bound to compute, so it posts: a duplicate
         # comment is noise, a missing decision is not.
-        if _release_noted "$iid"; then
+        # A decision attached to an ordinary (non-hold) transition is not a
+        # release. Gate-base-check is the automated caller: tickets commonly
+        # carry an older blocked/unblock pair, and consulting `_release_noted`
+        # there silently swallowed the new `orch-base-stale` decision while
+        # still moving the label. Deduplicate such machine decisions by their
+        # own exact trailer; reserve orch-unblock and its block-bounded lookup
+        # for an actual hold release.
+        local decision_marker=""
+        if [ "$releasing" -eq 0 ] && [ "$note" = 1 ]; then
+            decision_marker=$(grep -oE '<!-- orch-[A-Za-z0-9_-]+ [^>]+-->' "$f" | tail -1 || true)
+            [ -n "$decision_marker" ] \
+                || die "transition --note on a non-held ticket needs an orch-* decision trailer for idempotence"
+        fi
+        if [ "$releasing" -eq 1 ] && _release_noted "$iid"; then
             echo "lane.sh: issue $iid already carries a release note for this block — not posting a second one"
+        elif [ -n "$decision_marker" ] && _decision_noted "$iid" "$decision_marker"; then
+            echo "lane.sh: issue $iid already carries decision '$decision_marker' — not posting a second one"
         else
-            printf '\n\n<!-- orch-unblock %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+            if [ "$releasing" -eq 1 ]; then
+                printf '\n\n<!-- orch-unblock %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+            fi
             _post_note issue "$iid" "$f"
         fi
     fi
     if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" --unassign
     else _set_state "$iid" "$state"; fi
     _lane_ev ticket_transition ticket "$iid" state "$state"
+}
+
+_decision_noted() { # <iid> <exact machine trailer>
+    local iid="$1" marker="$2" body rc
+    body=$("$TRACKER" issue-notes "$iid" --limit 30 2>/dev/null) && rc=0 || rc=$?
+    [ "$rc" -eq 0 ] || return 1
+    printf '%s' "$body" | jq -e --arg marker "$marker" \
+        'any(.[]; (.body // "") | contains($marker))' >/dev/null 2>&1
 }
 
 # True when this ticket already carries a release note for the block it is
