@@ -29,6 +29,9 @@ case "$*" in
   *"POST projects/:fullpath/merge_requests"*)
       [ -n "${STUB_MR_FAIL:-}" ] && exit 1
       echo '{"iid":9}' ;;
+  *"merge_requests?source_branch=ticket-41"*)
+      if [ -n "${STUB_BRANCH_MR:-}" ]; then cat "$STUB_BRANCH_MR"; else echo '[]'; fi ;;
+  *"PUT projects/:fullpath/merge_requests/8"*) echo '{"iid":8}' ;;
   *"closed_by"*)  cat "${STUB_CLOSEDBY:-/dev/null}" 2>/dev/null; echo ;;
   *"issues/44"*)  echo '{"state":"opened","title":"Already judged","labels":["build-2","merge-queue"]}' ;;
   *"issues/"*)    echo '{"state":"opened","title":"Add ledger table","labels":["build-2","in-progress"]}' ;;
@@ -101,10 +104,34 @@ body
 EOB
 ) >"$SB/o5" 2>&1; rc_s5=$?
 if [ "$rc_s5" = 0 ] && grep -q 'already open' "$SB/o5" \
-   && ! grep -q 'merge_requests' "$SB/calls5" && grep -q 'add_labels=review' "$SB/calls5"; then
-    ok "submit: re-run over an open MR moves only the label — never a second MR"
+   && grep -q 'PUT projects/:fullpath/merge_requests/8' "$SB/calls5" \
+   && ! grep -q 'POST projects/:fullpath/merge_requests' "$SB/calls5" \
+   && grep -q 'add_labels=review' "$SB/calls5"; then
+    ok "submit: re-run refreshes the existing MR safely — never a second MR"
 else
     bad "submit: re-run mishandled (rc=$rc_s5, $(head -1 "$SB/o5"), $(tr '\n' ';' < "$SB/calls5"))"
+fi
+# D-TICK-41: an existing MR body can be refreshed after submit. If that edit
+# drops Loom's marker, marker-only lookup sees no MR and the old verb opens a
+# duplicate. The current branch is the second, forge-owned identity: recover
+# its one open MR, rewrite the supplied final body with the marker appended,
+# and only then move the ticket to Review.
+printf '[{"iid":8,"title":"work","state":"opened","draft":false,"web_url":"u","source_branch":"ticket-41","sha":"abc","description":"Acceptance mapping without marker"}]\n' > "$SB/branch-mr.json"
+printf 'Final acceptance mapping from the implementation worker.\n' > "$SB/final-body.md"
+: > "$SB/calls7"; : > "$SB/body7"
+( cd "$SB/repo" && git checkout -q ticket-41 && GLAB_CMD="$SB/glab-stub.sh" \
+    STUB_LOG="$SB/calls7" STUB_BODY="$SB/body7" STUB_BRANCH_MR="$SB/branch-mr.json" \
+    "$LANE" submit 41 --file "$SB/final-body.md"
+) >"$SB/o7" 2>&1; rc_s7=$?
+if [ "$rc_s7" = 0 ] \
+   && grep -q 'PUT projects/:fullpath/merge_requests/8' "$SB/calls7" \
+   && ! grep -q 'POST projects/:fullpath/merge_requests' "$SB/calls7" \
+   && grep -q 'Final acceptance mapping' "$SB/body7" \
+   && grep -q 'Closes #41' "$SB/body7" \
+   && grep -q 'add_labels=review' "$SB/calls7"; then
+    ok "D-TICK-41: submit repairs a markerless current-branch MR instead of opening a duplicate"
+else
+    bad "D-TICK-41: markerless MR was stranded or duplicated (rc=$rc_s7, $(tr '\n' ';' < "$SB/calls7"))"
 fi
 # A ticket the gate already passed must not be dragged back to review.
 : > "$SB/calls6"

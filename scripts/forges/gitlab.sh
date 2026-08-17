@@ -105,11 +105,12 @@ v_issue_mrs() {
 
 v_mr() { need_id "${1:-}" mr; _one "$(_p "merge_requests/$1")" | _shape_one "$_MAP_MR"; }
 
-v_mr_for_branch() { # <branch> [--state merged]
-    local br="${1:-}" state="merged"
+v_mr_for_branch() { # <branch> [--state merged|open|closed]
+    local br="${1:-}" state="merged" query_state
     [ -n "$br" ] || die "mr-for-branch: needs a branch"
     case "${2:-}" in --state) state="${3:-merged}" ;; esac
-    _list --capped "$(_p "merge_requests?source_branch=$br&state=$state&per_page=1")" | _shape "$_MAP_MR"
+    case "$state" in open) query_state=opened ;; closed) query_state=closed ;; *) query_state="$state" ;; esac
+    _list --capped "$(_p "merge_requests?source_branch=$br&state=$query_state&per_page=1")" | _shape "$_MAP_MR"
 }
 
 v_mr_create() { # --source B --target B --title T --body-file F → the new mr id
@@ -126,6 +127,18 @@ v_mr_create() { # --source B --target B --title T --body-file F → the new mr i
     "$GLAB" api --method POST "$(_p merge_requests)" \
         -f "source_branch=$src" -f "target_branch=$tgt" -f "title=$title" \
         --field "description=@$f" | jq -r '.iid // empty'
+}
+
+v_mr_update() { # <id> --body-file F
+    local id="${1:-}" f=""
+    need_id "$id" mr-update
+    shift
+    while [ $# -gt 0 ]; do case "$1" in
+        --body-file) f="${2:-}"; shift 2 ;;
+        *) die "mr-update: unknown option '$1'" ;;
+    esac; done
+    [ -f "$f" ] || die "mr-update: no such body file: '$f'"
+    "$GLAB" api --method PUT "$(_p "merge_requests/$id")" --field "description=@$f" >/dev/null
 }
 
 # P84: the source branch is deleted as part of the merge. This is the one
@@ -152,6 +165,7 @@ case "${1:-}" in
     mr)             shift; v_mr "$@" ;;
     mr-for-branch)  shift; v_mr_for_branch "$@" ;;
     mr-create)      shift; v_mr_create "$@" ;;
+    mr-update)      shift; v_mr_update "$@" ;;
     mr-merge)       shift; v_mr_merge "$@" ;;
     mr-note-add)    shift; v_mr_note_add "$@" ;;
     # The roster, printed for a human and read by the suite's drift check.
@@ -159,5 +173,6 @@ case "${1:-}" in
   link  : ticket-marker <id> | mr-for-ticket <id> | issue-mrs <id>
   reads : mr <id> | mr-for-branch <branch> [--state S]
   writes: mr-create --source B --target B --title T --body-file F |
+          mr-update <id> --body-file F |
           mr-merge <id> | mr-note-add <id> <body-file>" ;;
 esac

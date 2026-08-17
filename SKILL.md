@@ -319,9 +319,12 @@ refuses outside herdr anyway.
      checks for the changed surface only (never the full configured tier gate
      inside the provider session), a commit with
      the `Assisted-by` trailer, a push, then finishes with
-     **`lane.sh submit <ticket>`**: one call opens the MR (carrying the
+     **`lane.sh submit <ticket> --file <final-mr-body>`**: one call opens or
+     safely refreshes the current branch's MR (carrying the
      `Closes #<ticket-iid>` link the build reads) and moves the label to
-     `review`. Its final act is the gate spawn line (step 3) the wave handed
+     `review`. This is the only supported MR-body update path: it preserves the
+     forge ticket marker, and a markerless current-branch MR is repaired instead
+     of duplicated. Its final act is the gate spawn line (step 3) the wave handed
      it. That launchd-supervised gate lane owns the full configured pregate on
      the pushed HEAD; this is the provider-neutral definition-of-done boundary
      for both Claude and Codex, and avoids long UI suites losing a provider

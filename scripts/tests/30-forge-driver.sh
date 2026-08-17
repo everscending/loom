@@ -208,7 +208,7 @@ grep -qx "mr-for-ticket" "$TD/frg2.log" \
 # `tick.sh` mutates nothing. P86 re-pointed that scan at the contract's write
 # verbs; half of those verbs now live on a second driver, and a scan that only
 # watched the first would go quietly blind to `mr-merge`.
-FRG_WRITES="mr-create mr-merge mr-note-add"
+FRG_WRITES="mr-create mr-update mr-merge mr-note-add"
 scan_forge_writes() { local log="$1" v hits=""
     for v in $FRG_WRITES; do grep -qx "$v" "$log" 2>/dev/null && hits="$hits $v"; done
     printf '%s' "${hits# }"; }
@@ -271,6 +271,26 @@ n=$(LOOM_REPO="$TD/lin-gh" GH_CMD="$GH_STUB" "$GHF" mr-for-ticket 410 | jq 'leng
 [ "$n" = 1 ] \
     && ok "marker: and its own MR is found — the boundary is not simply refusing everything" \
     || bad "marker: ticket 410 could not find its own MR"
+# Body refresh is a forge write with file-only transport. It is the boundary
+# lane.sh submit uses to preserve Loom's marker when an existing PR is edited.
+GH_UPDATE_STUB="$TD/gh-update-stub.sh"
+cat > "$GH_UPDATE_STUB" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_LOG:?}"
+for a in "$@"; do case "$a" in body=@*) cat "${a#body=@}" >> "${STUB_BODY:?}" ;; esac; done
+echo '{}'
+EOF
+chmod +x "$GH_UPDATE_STUB"
+printf 'final github body\n' > "$TD/update-body.md"
+: > "$TD/gh-update.log"; : > "$TD/gh-update.body"
+LOOM_REPO="$TD/lin-gh" GH_CMD="$GH_UPDATE_STUB" STUB_LOG="$TD/gh-update.log" STUB_BODY="$TD/gh-update.body" \
+    "$GHF" mr-update 9 --body-file "$TD/update-body.md" >/dev/null
+if grep -q -- '--method PATCH repos/{owner}/{repo}/pulls/9' "$TD/gh-update.log" \
+   && grep -q 'final github body' "$TD/gh-update.body"; then
+    ok "marker: GitHub MR body refresh uses the reviewed file-only forge verb"
+else
+    bad "marker: GitHub MR body refresh drifted ($(tr '\n' ';' < "$TD/gh-update.log"))"
+fi
 
 # P89: forges/gitlab.sh carries the same split, for a GitLab repo whose board
 # is not GitLab. `$TD/lin-gl` (Linear board, gitlab.com remote) was seeded in
@@ -302,6 +322,12 @@ n=$(LOOM_REPO="$TD/lin-gl" GLAB_CMD="$GLAB_STUB" "$GLF" mr-for-ticket 410 | jq '
 [ "$n" = 1 ] \
     && ok "marker: and its own MR is found on the GitLab split path — the boundary is not simply refusing everything" \
     || bad "marker: ticket 410 could not find its own MR on the GitLab forge's split path"
+GLOG_UPDATE="$TD/glab-update.log"; : > "$GLOG_UPDATE"
+LOOM_REPO="$TD/lin-gl" GLAB_CMD="$GLAB_STUB" STUB_LOG="$GLOG_UPDATE" \
+    "$GLF" mr-update 9 --body-file "$TD/update-body.md" >/dev/null
+grep -q -- '--method PUT projects/:fullpath/merge_requests/9 --field description=@' "$GLOG_UPDATE" \
+    && ok "marker: GitLab MR body refresh uses the same file-only forge verb" \
+    || bad "marker: GitLab MR body refresh drifted ($(tr '\n' ';' < "$GLOG_UPDATE"))"
 # A GitLab board's mr-for-ticket must still be the native endpoint, never the
 # split path's MR-list walk — without this one the native branch could be
 # dead code and every assertion above would still pass.

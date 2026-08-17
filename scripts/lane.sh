@@ -1328,15 +1328,30 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         || die "submit: origin/$branch is at ${remote_head:0:8}, this worktree is at ${head:0:8} — push before submitting, or the MR carries work the gate will never see"
     # Already-open MR = the strand this verb exists to end. Complete the missing
     # half; never open a second MR for the same ticket.
-    local mr
+    local mr marker f branch_mrs branch_count
+    marker=$("$FORGE" ticket-marker "$iid") \
+        || die "submit: the forge could not name its ticket marker — refusing an MR body the build could never find"
+    f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
+    grep -Eqi "$marker([^0-9]|\$)" "$f" || printf '\n\n%s\n' "$marker" >> "$f"
     _open_mr_closing "$iid" "refusing to open an MR that may be the second one."
     mr="$_OPEN_MR"
+    if [ -z "$mr" ]; then
+        branch_mrs=$("$FORGE" mr-for-branch "$branch" --state open 2>/dev/null) \
+            || die "submit: could not check the current branch for an existing open MR — refusing to open a duplicate"
+        branch_count=$(printf '%s' "$branch_mrs" | jq '[.[] | select(.state == "open")] | length' 2>/dev/null) \
+            || die "submit: forge returned invalid current-branch MR data — refusing to open a duplicate"
+        [ "$branch_count" -le 1 ] \
+            || die "submit: branch '$branch' has $branch_count open MRs — refusing to choose one or open another"
+        mr=$(printf '%s' "$branch_mrs" | jq -r '[.[] | select(.state == "open")] | .[0].id // empty')
+    fi
     if [ -n "$mr" ]; then
-        echo "lane.sh: MR !$mr is already open on issue $iid — completing the label move only"
+        "$FORGE" mr-update "$mr" --body-file "$f" >/dev/null 2>&1 \
+            || die "submit: could not refresh MR !$mr with the final body and ticket marker — label was NOT moved"
+        _forget_issue
+        echo "lane.sh: MR !$mr is already open on branch '$branch' — final body and ticket marker refreshed"
     else
         [ -n "$title" ] || title=$(printf '%s' "$_ISSUE_JSON" | jq -r '.title // empty' || true)
         [ -n "$title" ] || die "submit: no title on issue $iid and none given — pass --title"
-        local f; f=$(_stage_body ${bodyargs[@]+"${bodyargs[@]}"})
         # The marker that links MR to ticket; an MR without it is invisible to
         # the build. Appended here rather than asked for, exactly as verdict
         # appends its own trailer.
@@ -1346,9 +1361,6 @@ cmd_submit() { # <iid> [--title <t>] [--file F] — open the MR AND move the lab
         # are somebody else's — a GitHub repo with a Linear board — `Closes #41`
         # would close GitHub issue 41, so that forge names a marker of its own.
         # A marker must be regex-inert; the drivers' are.
-        local marker; marker=$("$FORGE" ticket-marker "$iid") \
-            || die "submit: the forge could not name its ticket marker — refusing to open an MR the build could never find"
-        grep -Eqi "$marker([^0-9]|\$)" "$f" || printf '\n\n%s\n' "$marker" >> "$f"
         mr=$("$FORGE" mr-create --source "$branch" --target "$base" \
             --title "$title" --body-file "$f" 2>/dev/null) || mr=""
         # MR first, label second, and the label is skipped when the MR failed:

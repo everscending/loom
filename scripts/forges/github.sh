@@ -145,6 +145,18 @@ v_mr_create() { # --source B --target B --title T --body-file F → the new id
         | jq -r '.number // empty'
 }
 
+v_mr_update() { # <id> --body-file F
+    local id="${1:-}" f=""
+    need_id "$id" mr-update
+    shift
+    while [ $# -gt 0 ]; do case "$1" in
+        --body-file) f="${2:-}"; shift 2 ;;
+        *) die "mr-update: unknown option '$1'" ;;
+    esac; done
+    [ -f "$f" ] || die "mr-update: no such body file: '$f'"
+    "$GH" api --method PATCH "$(_r "pulls/$id")" -F "body=@$f" >/dev/null
+}
+
 # P84: the source branch goes with the merge, the one moment it is provably
 # disposable. GitHub takes no field for it on the merge call, so it is a second
 # request — and a failure to delete must NOT fail the merge, which already
@@ -176,11 +188,13 @@ case "${1:-}" in
     mr)             shift; v_mr "$@" ;;
     mr-for-branch)  shift; v_mr_for_branch "$@" ;;
     mr-create)      shift; v_mr_create "$@" ;;
+    mr-update)      shift; v_mr_update "$@" ;;
     mr-merge)       shift; v_mr_merge "$@" ;;
     mr-note-add)    shift; v_mr_note_add "$@" ;;
     *) die "usage: github.sh <verb> [args]   (forge role)
   link  : ticket-marker <id> | mr-for-ticket <id> | issue-mrs <id>
   reads : mr <id> | mr-for-branch <branch> [--state S]
   writes: mr-create --source B --target B --title T --body-file F |
+          mr-update <id> --body-file F |
           mr-merge <id> | mr-note-add <id> <body-file>" ;;
 esac
