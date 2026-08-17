@@ -186,4 +186,74 @@ else
     bad "supervised lease: admission I/O denial hung or lacked a named failure (rc=$io_rc; out=$io_out)"
 fi
 
+# D-TICK-36: a human commonly runs the public supervise verb while inspecting
+# a ticket's linked worktree. Host state belongs to the repository's main
+# checkout, not to whichever linked worktree happened to be the caller's cwd.
+D36="$FX/linked-worktree-state"; mkdir -p "$D36/main" "$D36/operator-home"
+git -C "$D36/main" init -q
+git -C "$D36/main" config user.email loom@test
+git -C "$D36/main" config user.name loom
+printf 'fixture\n' > "$D36/main/tracked"
+git -C "$D36/main" add tracked
+git -C "$D36/main" commit -qm fixture
+git -C "$D36/main" worktree add -qb repair "$D36/repair"
+main_root=$(git -C "$D36/main" rev-parse --show-toplevel)
+repair_root=$(git -C "$D36/repair" rev-parse --show-toplevel)
+main_key="$(basename "$main_root")-$(printf '%s' "$main_root" | cksum | cut -d' ' -f1)"
+repair_key="$(basename "$repair_root")-$(printf '%s' "$repair_root" | cksum | cut -d' ' -f1)"
+repair_alias_key="$(basename "$D36/repair")-$(printf '%s' "$D36/repair" | cksum | cut -d' ' -f1)"
+main_state="$D36/operator-home/.loom/$main_key"
+repair_state="$D36/operator-home/.loom/$repair_key"
+repair_alias_state="$D36/operator-home/.loom/$repair_alias_key"
+
+env -u LOOM_HOME HOME="$D36/operator-home" LOOM_REPO="$main_root" \
+    "$TICK" supervise acquire 236 --owner root/worktree-release --ttl-seconds 60 >/dev/null
+release_out=$(cd "$D36/repair" && env -u LOOM_HOME -u LOOM_REPO HOME="$D36/operator-home" \
+    "$TICK" supervise release 236 2>&1); release_rc=$?
+if [ "$release_rc" -eq 0 ] && [ ! -e "$main_state/supervised-leases/236.json" ] \
+   && [ ! -e "$repair_state" ] && [ ! -e "$repair_alias_state" ]; then
+    ok "supervised lease: release from a linked worktree reaches canonical host state"
+else
+    bad "supervised lease: linked-worktree release silently used parallel state (rc=$release_rc; out=$release_out)"
+fi
+
+acquire_out=$(cd "$D36/repair" && env -u LOOM_HOME -u LOOM_REPO HOME="$D36/operator-home" \
+    "$TICK" supervise acquire 214 --owner root/worktree-acquire --ttl-seconds 60 2>&1); acquire_rc=$?
+if [ "$acquire_rc" -eq 0 ] && [ -e "$main_state/supervised-leases/214.json" ] \
+   && [ ! -e "$repair_state" ] && [ ! -e "$repair_alias_state" ]; then
+    ok "supervised lease: acquire from a linked worktree publishes canonical host state"
+else
+    bad "supervised lease: linked-worktree acquire silently used parallel state (rc=$acquire_rc; out=$acquire_out)"
+fi
+env -u LOOM_HOME HOME="$D36/operator-home" LOOM_REPO="$main_root" \
+    "$TICK" supervise release 214 >/dev/null
+
+mkdir -p "$D36/broken-linked"
+printf 'gitdir: %s\n' "$D36/missing-common/worktrees/broken" > "$D36/broken-linked/.git"
+broken_out=$(cd "$D36/broken-linked" && env -u LOOM_HOME -u LOOM_REPO HOME="$D36/broken-home" \
+    "$TICK" supervise release 999 2>&1); broken_rc=$?
+if [ "$broken_rc" -ne 0 ] && printf '%s' "$broken_out" | grep -qi 'linked worktree' \
+   && [ ! -e "$D36/broken-home/.loom" ]; then
+    ok "supervised lease: unreadable linked-worktree identity fails before host-state mutation"
+else
+    bad "supervised lease: unreadable linked worktree silently derived state (rc=$broken_rc; out=$broken_out)"
+fi
+
+# Planted violation: restore the old cwd-derived repository assignment in a
+# private copy. The linked release must again report success while leaving the
+# canonical lease intact, proving repository canonicalization is the guard.
+D36_MUT=$(mirror_scripts "$D36/mut-cwd-state")
+sed -i.bak 's/^REPO_ROOT=.*/REPO_ROOT="${LOOM_REPO:-$PWD}"/' "$D36_MUT/tick.sh"
+env -u LOOM_HOME HOME="$D36/operator-home" LOOM_REPO="$main_root" \
+    "$D36_MUT/tick.sh" supervise acquire 237 --owner root/worktree-mutant --ttl-seconds 60 >/dev/null
+mut_release_out=$(cd "$D36/repair" && env -u LOOM_HOME -u LOOM_REPO HOME="$D36/operator-home" \
+    "$D36_MUT/tick.sh" supervise release 237 2>&1); mut_release_rc=$?
+if [ "$mut_release_rc" -eq 0 ] && [ -n "$mut_release_out" ] \
+   && [ -e "$main_state/supervised-leases/237.json" ] \
+   && { [ -d "$repair_state" ] || [ -d "$repair_alias_state" ]; }; then
+    ok "supervised lease violation: cwd-derived state recreates false-success release"
+else
+    bad "supervised lease violation: cwd mutant did not recreate parallel state (rc=$mut_release_rc; out=$mut_release_out)"
+fi
+
 test_finish

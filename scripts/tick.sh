@@ -45,7 +45,46 @@
 # instead of using `wait -n`.
 set -euo pipefail
 
-REPO_ROOT="${LOOM_REPO:-$PWD}"
+# D-TICK-36: host state belongs to the repository, never to the linked
+# worktree from which an operator happened to invoke a public verb. Git's
+# common directory identifies that repository; `worktree list --porcelain`
+# names its main checkout without relying on a `.worktrees` naming convention.
+# Resolve before deriving LOOM_HOME or creating a directory, and refuse a
+# linked checkout whose canonical peer cannot be proved.
+_canonical_repo_root() { # <cwd or LOOM_REPO> -> main checkout (non-git unchanged)
+    local requested="$1" top git_dir common_dir main main_top main_common
+    if ! top=$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null); then
+        if [ -e "$requested/.git" ]; then
+            echo "tick.sh: '$requested' looks like a linked worktree but its git identity is unreadable — refusing to create parallel host state" >&2
+            return 1
+        fi
+        printf '%s\n' "$requested"
+        return 0
+    fi
+    git_dir=$(git -C "$top" rev-parse --path-format=absolute --git-dir 2>/dev/null) \
+        || { echo "tick.sh: cannot resolve git directory for '$top' — refusing to derive host state" >&2; return 1; }
+    common_dir=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+        || { echo "tick.sh: cannot resolve common git directory for '$top' — refusing to derive host state" >&2; return 1; }
+    if [ "$git_dir" = "$common_dir" ]; then
+        # Preserve the caller's spelling for an ordinary checkout. On macOS,
+        # mktemp's /var path and Git's /private/var path name the same place;
+        # rewriting established main-checkout state would itself fork it.
+        printf '%s\n' "$requested"
+        return 0
+    fi
+    main=$(git -C "$top" worktree list --porcelain 2>/dev/null | sed -n '1s/^worktree //p')
+    [ -n "$main" ] && [ -d "$main" ] \
+        || { echo "tick.sh: linked worktree '$top' has no available main checkout — refusing to create parallel host state" >&2; return 1; }
+    main_top=$(git -C "$main" rev-parse --show-toplevel 2>/dev/null) \
+        || { echo "tick.sh: cannot open main checkout '$main' for linked worktree '$top' — refusing to create parallel host state" >&2; return 1; }
+    main_common=$(git -C "$main_top" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) \
+        || { echo "tick.sh: cannot verify main checkout '$main_top' for linked worktree '$top' — refusing to create parallel host state" >&2; return 1; }
+    [ "$main_common" = "$common_dir" ] \
+        || { echo "tick.sh: main checkout '$main_top' does not share git state with linked worktree '$top' — refusing to create parallel host state" >&2; return 1; }
+    printf '%s\n' "$main_top"
+}
+
+REPO_ROOT="$(_canonical_repo_root "${LOOM_REPO:-$PWD}")" || exit 1
 # Stable per-repo key (basename + path hash). Drives the state dir AND the
 # launchd label, so every repo is isolated and a repo's plist / manual runs
 # resolve to the same lock. Two repos never collide.
