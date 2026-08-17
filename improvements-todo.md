@@ -68,7 +68,14 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   `MEND-FLOW-01`/`MEND-LEARN-01` obligation rather than healthy pacing.
   Verification: focused runtime and mend suites 60/60, full Loom suite
   1,343/1,343, syntax/diff checks clean; restoring the all-or-nothing return
-  recreates the pre-provider build gap.
+  recreates the pre-provider build gap. Live holding proof: at 19:06:39Z the
+  installed runtime emitted `wave_spawn_deferred` for JOR-290's tracked-change
+  conflict, started the wave one second later, cleared two dead lanes, and
+  launched `impl-231`. Mend preserved JOR-290's explicitly excluded local
+  experiment as stash `loom mend: excluded JOR-290 dirty experiment before
+  reviewed head`, advanced the clean checkout to reviewed HEAD `0251cd3`, and
+  released its supervised lease; unrelated `gate-233` and `impl-231` remained
+  active.
 
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
