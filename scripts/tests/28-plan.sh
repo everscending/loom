@@ -113,7 +113,7 @@ cat > "$FX/snap.json" <<'EOF'
   "lanes": [
     {"id": "gate-40", "pid": "111", "state": "dead", "type": "gate", "rc": "7", "turns": "3"},
     {"id": "impl-41", "pid": "112", "state": "stale", "type": "impl", "rc": "-", "turns": "9"},
-    {"id": "merge-49", "pid": "113", "state": "dead", "type": "merge", "rc": "1", "turns": "12"},
+    {"id": "merge-49", "pid": "113", "state": "dead", "type": "merge", "rc": "0", "turns": "12", "outcome": "merge-failed"},
     {"id": "merge-51", "pid": "115", "state": "dead", "type": "merge", "rc": "0", "turns": "8"},
     {"id": "impl-50", "pid": "114", "state": "running", "type": "impl", "rc": "-", "turns": "301"}
   ],
@@ -227,9 +227,18 @@ res() { jq -r --arg k "$1" '[.residue[] | select(.kind == $k) | ((.ticket // .ep
 [ "$(res pregate-rejection)" = "40" ] \
     && ok "plan: an rc-7 lane leaves a pregate rejection to post, not a verifier to spawn" \
     || bad "plan: pregate residue wrong ($(res pregate-rejection))"
-[ "$(res merge-failed)" = "49" ] \
-    && ok "plan: a dead merge lane whose ticket is still merge-queue leaves a merge-failed to record" \
+[ "$(res merge-failed)" = "" ] \
+    && ok "plan: a merge lane that already recorded merge-failed leaves no duplicate residue" \
     || bad "plan: merge-failed residue wrong ($(res merge-failed))"
+# Planted violation: remove only the semantic outcome supplied by the lane.
+# The same dead merge then becomes genuinely unhandled and must leave residue,
+# proving the suppression above depends on the marker rather than the rc.
+jq '(.lanes[] | select(.id == "merge-49")) |= del(.outcome)' \
+    "$FX/snap.json" > "$FX/snap-no-merge-outcome.json"
+PLAN "$FX/snap-no-merge-outcome.json" > "$T/plan-no-merge-outcome.json" 2>/dev/null
+[ "$(jq -r '[.residue[] | select(.kind == "merge-failed") | .ticket] | join(",")' "$T/plan-no-merge-outcome.json")" = "49" ] \
+    && ok "plan violation: removing the recorded outcome recreates duplicate merge-failed residue" \
+    || bad "plan violation: the planted unhandled merge did not recreate residue"
 [ "$(jq '[.actions[] | select(.ticket==51 and .kind=="spawn")] | length' "$T/plan.json")" = 0 ] \
     && [ "$(jq '[.residue[] | select(.ticket==51 and .kind=="merge-failed")] | length' "$T/plan.json")" = 0 ] \
     && ok "plan: an unreleased blocked report suppresses retries and duplicate failure accounting" \

@@ -287,7 +287,8 @@ include "lib";
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
     | ($lanes_raw | split("\n") | map(select(length > 0) | split(" "))
        | map({id: .[0], pid: .[1], state: .[2], type: (.[3] // "unknown"),
-              rc: (.[4] // "-"), turns: (.[5] // "-")})) as $lanes
+              rc: (.[4] // "-"), turns: (.[5] // "-"),
+              outcome: (.[7] // "none")})) as $lanes
     # The ticket iid (as a string) behind every ALIVE lane, whatever its kind
     # — a probe's id has no ticket iid in it and simply never matches. Shared
     # by `summary.stranded` (in-progress AND absent here) and the P51 brief

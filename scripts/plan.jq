@@ -198,6 +198,7 @@ else
 # written. (paid: #23 merged at 22:23:17 and was blocked at 22:24:29 by a wave
 # harvesting against a photograph taken 90 seconds before the merge.)
 | ([ $lanes[] | select(.state == "dead" and .type == "merge")
+     | select((.outcome // "none") != "merge-failed")
      | select((ticket(lane_ticket(.id)).state // "") == "merge-queue")
      | (lane_ticket(.id) | tonumber) as $iid
      | select(($reported_block_ids | index($iid)) == null)

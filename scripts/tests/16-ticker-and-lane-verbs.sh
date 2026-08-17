@@ -581,12 +581,16 @@ fi
 #      because blocking the ticket is a decision, not plumbing.
 VCAP3="$T/merge-attempt-bodies"; : > "$VCAP3"
 echo "combined gate deadlocked in pytest" | LOOM_HOME="$EVH" \
+    LOOM_LANE_ID=merge-8 \
     GLAB_CMD="$T/glab-body-stub.sh" VCAP="$VCAP3" \
     "$LANE" merge-failed 8 >/dev/null 2>&1
 grep -q "orch-merge-attempt 8" "$VCAP3" \
     && grep -q "deadlocked in pytest" "$VCAP3" \
     && ok "merge-failed: records the attempt with its reason and a trailer" \
     || bad "merge-failed: trailer or body missing ($(tail -3 "$VCAP3" 2>/dev/null))"
+[ "$(cat "$EVH/lanes/merge-8.outcome" 2>/dev/null)" = "merge-failed" ] \
+    && ok "merge-failed: stamps the lane outcome so harvest cannot count the attempt twice" \
+    || bad "merge-failed: successful recording left no semantic lane outcome"
 # Planted violation: it must NOT move the ticket. Recording an attempt and
 # judging one are different acts — the wave decides when the cap is reached,
 # and a verb that silently relabelled would take that call away from it.

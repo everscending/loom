@@ -182,7 +182,7 @@ _lane_ev() { "$TICK_SH" event "$@" >/dev/null 2>&1 || true; }
 # host (or fail an optional handoff); that raw rc is useful diagnostics, but it
 # must not repaint completed ticket work as a failed lane. The host epilogue
 # consumes this marker and retains both values in the lane_exit event.
-_mark_lane_outcome() { # <review|merge-queue|blocked|gate-verdict|closed|probe-result>
+_mark_lane_outcome() { # <review|merge-queue|blocked|gate-verdict|merge-failed|closed|probe-result>
     [ -n "${LOOM_HOME:-}" ] && [ -n "${LOOM_LANE_ID:-}" ] || return 0
     case "$LOOM_LANE_ID" in impl-*|gate-*|merge-*|probe-*) ;; *) return 0 ;; esac
     mkdir -p "$LOOM_HOME/lanes" 2>/dev/null || return 0
@@ -481,6 +481,11 @@ cmd_merge_failed() { # <iid> [--file F]
         "${klass:+ base-red=$klass fix=$fixiid}" >> "$f"
     _post_note issue "$iid" "$f"
     _lane_ev merge_failed ticket "$iid" ${klass:+base_red "$klass"}
+    # The tracker attempt is the semantic completion of this lane. Without
+    # the marker, the next wave sees only a dead merge lane and records the
+    # same attempt again while harvesting it, consuming two cap slots for one
+    # execution. The host epilogue preserves the raw provider rc separately.
+    _mark_lane_outcome merge-failed
     echo "lane.sh: issue $iid — merge attempt recorded${klass:+ (base-red: $klass, fix #$fixiid — does not count toward the cap)}"
 }
 

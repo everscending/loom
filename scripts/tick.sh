@@ -2829,7 +2829,10 @@ cmd_lane_status() {
         # a spend signal, not a liveness one — `-` when no stamp exists yet.
         # `cost` (P55) comes from canonical provider-reported usage, so a
         # running build shows known spend next to progress and null otherwise.
-        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl")"
+        # `outcome` is last so every prior column remains stable; the planner
+        # uses it to distinguish an already-recorded merge failure from an
+        # unhandled dead merge lane.
+        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl") $(cat "$LANES_DIR/$id.outcome" 2>/dev/null || echo none)"
     done
 }
 
