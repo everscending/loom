@@ -900,6 +900,30 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
+_ui_pregate_occupied() { # one shared UI pregate host: live metadata or a durable reservation
+    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
+    for metadata in "$LANES_DIR"/*.pregate; do
+        [ -f "$metadata" ] || continue
+        [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || continue
+        live_id="${metadata##*/}"; live_id="${live_id%.pregate}"
+        pid=$(cat "$LANES_DIR/$live_id.pid" 2>/dev/null || true)
+        if _lane_process_alive "$live_id" "$pid"; then
+            return 0
+        fi
+        # Admission owns AUX_LOCK_DIR here, so no spawning process can be in
+        # the metadata-before-pid window. Retire only a dead lane's stale hint.
+        rm -f "$metadata"
+    done
+    for request in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
+        [ -d "$request" ] || continue
+        queued_id=$(cat "$request/id" 2>/dev/null || true)
+        [ -n "$queued_id" ] || continue
+        [ "$queued_id" != "$drain_id" ] || continue
+        [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] && return 0
+    done
+    return 1
+}
+
 _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
     local id="$1" from="$2" used="$3" cap="$4"
     echo "spawn-lane: auxiliary lane cap full ($used of $cap held by gates, merges, probes, or queued handoffs) — not starting '$id'."
@@ -909,6 +933,18 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
     _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason aux_cap used "$used" cap "$cap"
     # A durable drain must keep the queued request. 75 is private to this
     # tick.sh-to-tick.sh boundary; direct lane handoffs remain successful no-ops.
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+    [ -n "$from" ] && return 0
+    return 1
+}
+
+_ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retryable for drain
+    local id="$1" from="$2"
+    echo "spawn-lane: UI pregate resource is already reserved — not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
     [ -n "$from" ] && return 0
     return 1
@@ -1991,6 +2027,10 @@ _spawn_build_epilogue() {
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
+    # Release the host-scoped pregate reservation before draining a queued
+    # successor, so the next UI gate can launch immediately rather than wait
+    # for a heartbeat. clear-lane owns the hard-kill path for the same file.
+    epi="$epi rm -f '$LANES_DIR/$id.pregate'; "
     # A provider lane may have queued its successor. Its host shell reaches
     # this epilogue only after the provider session exits, so the successor is
     # safe to detach here. Do this after releasing locks and before firing the
@@ -2272,8 +2312,14 @@ cmd_spawn_lane() {
     # workers. Production scheduler and handoff lanes use the provider-neutral
     # interface; direct handoffs are still covered even in a custom-command
     # fixture because LOOM_LANE_ID identifies the path under test.
-    if _aux_lane_id "$id" \
+    local spawn_kind is_aux=0 needs_aux_admission=0
+    spawn_kind="$(_lane_type "$id")"
+    _aux_lane_id "$id" && is_aux=1
+    if [ "$is_aux" -eq 1 ] \
        && { [ -n "$provider" ] || [ -n "$handoff_from" ] || [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; }; then
+        needs_aux_admission=1
+    fi
+    if [ "$needs_aux_admission" -eq 1 ] || [ "$pregate" = ui ]; then
         if ! _lock_reserve "$AUX_LOCK_DIR"; then
             if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; then return 75; fi
             if [ -n "$handoff_from" ]; then
@@ -2286,9 +2332,6 @@ cmd_spawn_lane() {
         fi
         trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
         local aux_cap aux_used aux_source_pid="" aux_rc=0
-        aux_cap=$(cfg max_aux_lanes 4)
-        case "$aux_cap" in ''|*[!0-9]*) die "spawn-lane: max_aux_lanes must be a non-negative integer, got '$aux_cap'" ;; esac
-        aux_used=$(_aux_capacity_usage)
         # An aux-to-aux successor replaces the caller's own slot. Provider
         # sessions must reserve that successor before they return to the host
         # epilogue; counting the still-live source as permanent makes every
@@ -2296,14 +2339,28 @@ cmd_spawn_lane() {
         # Subtract only an actually live source lane. Other handoffs (notably
         # impl -> gate) still consume a new aux slot, and a stale/spoofed lane
         # id cannot borrow capacity it does not own.
-        if [ -n "$handoff_from" ] && _aux_lane_id "$handoff_from"; then
-            aux_source_pid=$(cat "$LANES_DIR/$handoff_from.pid" 2>/dev/null || true)
-            if [ "$aux_used" -gt 0 ] && _lane_process_alive "$handoff_from" "$aux_source_pid"; then
-                aux_used=$((aux_used - 1))
+        if [ "$needs_aux_admission" -eq 1 ]; then
+            aux_cap=$(cfg max_aux_lanes 4)
+            case "$aux_cap" in ''|*[!0-9]*) die "spawn-lane: max_aux_lanes must be a non-negative integer, got '$aux_cap'" ;; esac
+            aux_used=$(_aux_capacity_usage)
+            if [ -n "$handoff_from" ] && _aux_lane_id "$handoff_from"; then
+                aux_source_pid=$(cat "$LANES_DIR/$handoff_from.pid" 2>/dev/null || true)
+                if [ "$aux_used" -gt 0 ] && _lane_process_alive "$handoff_from" "$aux_source_pid"; then
+                    aux_used=$((aux_used - 1))
+                fi
+            fi
+            if [ "$aux_used" -ge "$aux_cap" ]; then
+                _aux_admission_refusal "$id" "$handoff_from" "$aux_used" "$aux_cap" || aux_rc=$?
+                return "$aux_rc"
             fi
         fi
-        if [ "$aux_used" -ge "$aux_cap" ]; then
-            _aux_admission_refusal "$id" "$handoff_from" "$aux_used" "$aux_cap" || aux_rc=$?
+        # UI pregates share identity fixtures and other host-scoped state.
+        # Reserve that one resource before a paid worker exists: a Codex
+        # handoff lives in the durable queue, while Claude/direct hosts record
+        # the pregate beside the live lane. API pregates and non-UI lanes do
+        # not enter this resource-specific admission path.
+        if [ "$pregate" = ui ] && _ui_pregate_occupied; then
+            _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
             return "$aux_rc"
         fi
     fi
@@ -2433,6 +2490,11 @@ cmd_spawn_lane() {
     # previous run wrote nothing read as `stale` the instant it started, and the
     # wave would kill it. Truncating in place is what makes "a reused id cannot
     # inherit an old mtime" actually true.
+    if [ -n "$pregate" ]; then
+        printf '%s\n' "$pregate" > "$LANES_DIR/$id.pregate"
+    else
+        rm -f "$LANES_DIR/$id.pregate"
+    fi
     _rotate_log "$log"; : > "$log"
     if [ "$stream" -eq 1 ]; then
         _rotate_log "$jsonl"; : > "$jsonl"
@@ -2492,7 +2554,8 @@ cmd_spawn_lane() {
         if "$LAUNCHCTL_CMD" bootstrap "$launch_domain" "$launch_plist"; then
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
-            rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd"
+            rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
+                  "$LANES_DIR/$id.pregate"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
             echo "spawn-lane: launchd refused supervised lane '$id'" >&2
@@ -2509,6 +2572,7 @@ cmd_spawn_lane() {
     if [ ! -s "$LANES_DIR/$id.pid" ]; then
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
+        rm -f "$LANES_DIR/$id.pregate"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
     fi
@@ -2968,7 +3032,7 @@ cmd_clear_lane() {
     _release_lane_port "$1" || return $?
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
-          "$LANES_DIR/$1.cwd" "$launch_marker" "$launch_plist"
+          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
