@@ -158,6 +158,24 @@ else
 fi
 reap_lanes
 
+# B2. A human can ask Loom to advance the merge queue from inside an
+# interactive Codex turn. That host process is ephemeral: a child detached
+# directly from it is reaped when the tool call returns, even if its lane
+# bookkeeping was written first. Keep the fast decision, but defer the worker
+# launch to the durable scheduler boundary.
+CODEX_THREAD_ID=interactive-codex GLAB_CMD="$FX/glab-stub.sh" \
+    "$TICK" chain-merge >/dev/null 2>&1
+queued_merge=$(find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 \
+    -type d -name 'request-*' -exec sh -c \
+    '[ "$(cat "$1/id" 2>/dev/null)" = merge-28 ] && printf "%s\n" "$1"' _ {} \; | head -1)
+if [ -n "$queued_merge" ] && [ ! -e "$LOOM_HOME/lanes/merge-28.pid" ]; then
+    ok "chain-merge: interactive Codex defers the worker to the durable host queue"
+else
+    bad "chain-merge: interactive Codex launched a disposable worker instead of queuing it"
+fi
+rm -rf "$LOOM_HOME/lane-launch-queue"/request-*
+reap_lanes
+
 # --- C. fallback: an empty queue still fires the ordinary wave -------------
 
 cat > "$FX/open.json" <<'EOF'

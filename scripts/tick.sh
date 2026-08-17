@@ -2529,8 +2529,15 @@ cmd_chain_merge() {
     [ -f "$briefsrc" ] || { eval "$fallback"; return 0; }
     sed -e "s/{{TICKET_IID}}/$head_id/g" -e "s#{{WORKTREE}}#$wt#g" -e "s/{{BASE}}/$base/g" \
         "$briefsrc" > "$briefpath"
-    local tier; tier="$(cfg lane_tier medium)"
-    "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
+    local tier defer_launch="${LOOM_DEFER_LANE_LAUNCH:-}"; tier="$(cfg lane_tier medium)"
+    # A human-triggered chain running beneath interactive Codex is not a
+    # durable worker host: Codex reaps descendants when that tool call ends.
+    # Preserve the already-determined queue head, but hand its launch to the
+    # installed scheduler just like a provider-authored Codex handoff. Claude
+    # and durable launchd callers keep their existing direct fast path.
+    _codex_host_is_ephemeral && defer_launch=1
+    LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
+      "$SELF_PATH" spawn-lane "merge-$head_id" --merge-lock --cwd "$wt" --brief "$briefpath" \
         --provider "${LOOM_PROVIDER:-}" --job merge --tier "$tier" \
         >>"$LOGS_DIR/self-trigger.log" 2>&1 || eval "$fallback"
 }
