@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-16 23:45 America/Chicago
+Last updated: 2026-08-16 23:52 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -12,7 +12,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [ ] **TODO — Classify infrastructure failures separately from product verdicts.** Lock timeouts, port collisions, stale-base returns, cross-gate fixture resets, and provider/runtime failures must not increment a product rejection round. Preserve the artifact and schedule an infrastructure retry or repair without posting a product `FAIL`.
 
-- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-286's supervised repair is merged and closed. JOR-206's authenticated-cursor repair is under a machine lease while it reconciles current main. JOR-214's fixture repair is reconciled at `4b423a8` and is in its serialized UI gate. JOR-218's first actionable post-reset gate failure is under supervised repair because its new report tests bypassed the shared identity-fixture lease. Machine-enforced round-three routing itself is still TODO.
+- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-286's supervised repair is merged and closed. JOR-206's cursor repair is pushed and its serialized UI gate is active. JOR-214's mechanical gate passed but independent review found a real unavailable-frame manifest mismatch; a supervised lease now prevents another blind round while the focused repair runs. JOR-218's identity-fixture repair is pushed under a supervised lease and awaits one focused concurrent UI check before regating. Machine-enforced round-three routing itself is still TODO.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
 
@@ -20,7 +20,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Add a supervised-repair lease.** Implemented in `8d41930` (`fix(wave): lease supervised repairs`), with the restricted-filesystem fail-fast follow-up in `7cf559e` (`fix(lock): fail fast on reservation I/O`). `tick.sh supervise acquire/release` writes bounded host-state leases; snapshots and plans expose them; implementation and gate admission rechecks them under a per-ticket lock for stale plans, Claude handoffs, and Codex durable drains. Expiry fails open, ordinary workers cannot self-lease, and reservation I/O denial is named instead of recursing. Verification: lease 11/11, shared-lock mutant 10/10, snapshot 124/124, planner 50/50, gate admission 9/9, and auxiliary admission 9/9. The live build now uses leases for JOR-206 and JOR-218.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, and JOR-286 are merged and closed. JOR-287 released JOR-218, whose ShareDialog wiring reached review and whose identity-fixture gate failure is now in focused repair; it still unlocks JOR-239/JOR-236/JOR-233. JOR-286 released JOR-244, which is in its API gate and still unlocks JOR-205/JOR-251. JOR-214 is in the serialized UI gate, while JOR-206 reconciles under lease and still unlocks JOR-230/JOR-212. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, and JOR-244 are merged and closed. JOR-244 released JOR-251, which has moved to implementation; JOR-205 still waits on additional E7 prerequisites. JOR-218's pushed fixture repair remains the next UI verification after the active JOR-206 gate and still unlocks JOR-239/JOR-236/JOR-233. JOR-214 is under focused repair for its confirmed manifest mismatch and still unlocks JOR-224/JOR-221/JOR-231. JOR-206's active UI gate can unlock JOR-230/JOR-212. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
