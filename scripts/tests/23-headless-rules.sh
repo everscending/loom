@@ -107,6 +107,22 @@ if grep -q 'db/deploy/reminder-cron.sql' "$LOOM_HOME/briefs/impl-69.md" 2>/dev/n
 else
     bad "D-TICK-39: staged rework brief lost the repair it must preserve"
 fi
+# D-TICK-40: workers must not need ambient tracker credentials to learn their
+# acceptance contract. Freeze the host-read body into the action and append it
+# mechanically before either provider starts.
+printf 'Implement ticket 67 using the immutable plan inputs.\n' > "$BR/contract-source.md"
+cat > "$BR/contract-plan.json" <<'EOF'
+{"actions":[{"lane":"impl-67","ticket":67,"spawn":{"brief":{"ticket_contract":"## Acceptance criteria\n\n- [ ] Run the committed benchmark\n\n## Mandatory adversarial tests\n\n- [ ] Missing baseline fails closed\n"}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/contract-plan.json" \
+    "$TICK" spawn-lane impl-67 --no-tick --cwd "$BR/wt" --brief "$BR/contract-source.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'Run the committed benchmark' "$LOOM_HOME/briefs/impl-67.md" 2>/dev/null \
+   && grep -q 'Missing baseline fails closed' "$LOOM_HOME/briefs/impl-67.md" 2>/dev/null \
+   && ! grep -q 'Run the committed benchmark' "$BR/contract-source.md"; then
+    ok "D-TICK-40: staged worker brief carries the host-read ticket contract"
+else
+    bad "D-TICK-40: worker still depends on ambient tracker access"
+fi
 # Planted violations prove these assertions exercise the shared spawn boundary,
 # not only the fixture text.
 D38_MUT=$(mirror_scripts "$T/dtick38-mutant")
@@ -146,6 +162,23 @@ if assert_mutant_ran "$d39_rc" "$d39_out" "D-TICK-39-repair-transport-violation"
     ok "D-TICK-39 mutant: deleting the shared append recreates repair erasure"
 else
     bad "D-TICK-39 mutant: planted append deletion did not recreate the escape (rc=$d39_rc)"
+fi
+
+D40_MUT=$(mirror_scripts "$T/dtick40-mutant")
+sed '/_append_ticket_contract "$id" "$BRIEFS_DIR\/$id.md"/d' \
+    "$D40_MUT/tick.sh" > "$D40_MUT/tick-mutant.sh"
+mv "$D40_MUT/tick-mutant.sh" "$D40_MUT/tick.sh"
+chmod +x "$D40_MUT/tick.sh"
+D40_HOME="$T/dtick40-mutant-home"
+d40_out=$(LOOM_HOME="$D40_HOME" LOOM_WAVE_PLAN="$BR/contract-plan.json" \
+    "$D40_MUT/tick.sh" spawn-lane impl-67 --no-tick --cwd "$BR/wt" \
+    --brief "$BR/contract-source.md" -- /bin/echo D-TICK-40-contract-transport-violation -p @brief 2>&1)
+d40_rc=$?
+if assert_mutant_ran "$d40_rc" "$d40_out" "D-TICK-40-contract-transport-violation" \
+   && ! grep -q 'Run the committed benchmark' "$D40_HOME/briefs/impl-67.md" 2>/dev/null; then
+    ok "D-TICK-40 mutant: deleting the shared append recreates tracker-dependent work"
+else
+    bad "D-TICK-40 mutant: planted append deletion did not recreate the missing contract (rc=$d40_rc)"
 fi
 # The composed brief itself must be clean of the shape it forbids, or every
 # lane reads an instruction to do the one thing that cannot work.

@@ -1913,6 +1913,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     # immutable wave plan may be gone when that host stages the final brief.
     # Freeze active supervisor context into the queued copy now. Claude/direct
     # launches use the same helpers later in _spawn_stage_brief.
+    _append_ticket_contract "$id" "$request/brief.md"
     _append_active_scope_reset "$id" "$request/brief.md"
     _append_active_supervised_repair "$id" "$request/brief.md"
     local ready="${request%.tmp}"
@@ -2121,6 +2122,36 @@ _spawn_parse_flags() {
 # "$@"; leaves the command — rewritten to the pointer prompt when a brief
 # travels, untouched otherwise — in _SPAWN_ARGS for the caller to `set --`
 # back. Every die in here fires before anything destructive runs.
+_append_ticket_contract() { # <lane-id> <staged-brief>
+    local _contract_lane="$1" _contract_brief="$2" _contract_plan="${LOOM_WAVE_PLAN:-}"
+    case "$(_lane_type "$_contract_lane")" in impl|gate) ;; *) return 0 ;; esac
+    [ -n "$_contract_plan" ] || return 0
+    [ -r "$_contract_plan" ] \
+      || die "spawn-lane: immutable wave plan '$_contract_plan' is unreadable; refusing a brief without its ticket contract"
+
+    local _contract_record="" _contract_body="" _contract_iid=""
+    _contract_record=$(jq -ce --arg lane "$_contract_lane" '
+      [.actions[]? | select(.lane == $lane)] as $actions
+      | if ($actions | length) != 1 then
+          error("immutable wave plan must contain exactly one action for " + $lane)
+        else ($actions[0].spawn.brief.ticket_contract // null) as $contract
+        | if $contract == null or $contract == "" then {present:false}
+          elif ($contract | type) != "string" then
+            error("ticket contract for " + $lane + " is not text")
+          else {present:true, body:$contract} end
+        end' "$_contract_plan" 2>/dev/null) \
+      || die "spawn-lane: immutable wave plan has no valid ticket contract for '$_contract_lane'"
+    [ "$(printf '%s\n' "$_contract_record" | jq -r '.present')" = true ] || return 0
+    _contract_body=$(printf '%s\n' "$_contract_record" | jq -r '.body')
+    _contract_iid=$(_supervised_lane_ticket "$_contract_lane" 2>/dev/null) \
+      || die "spawn-lane: cannot derive ticket id from '$_contract_lane'"
+    local _contract_marker="<!-- loom-ticket-contract $_contract_iid -->"
+    grep -Fq "$_contract_marker" "$_contract_brief" && return 0
+    printf '\n\n## Immutable ticket contract (host snapshot)\n%s\n%s\n' \
+      "$_contract_body" "$_contract_marker" >> "$_contract_brief" \
+      || die "spawn-lane: cannot append ticket contract to staged brief '$_contract_brief'"
+}
+
 _append_active_scope_reset() { # <lane-id> <staged-brief>
     local _scope_lane="$1" _scope_brief="$2" _scope_plan="${LOOM_WAVE_PLAN:-}"
     case "$(_lane_type "$_scope_lane")" in impl|gate) ;; *) return 0 ;; esac
@@ -2243,6 +2274,7 @@ _spawn_stage_brief() {
         esac
     done
     cp "$brief" "$BRIEFS_DIR/$id.md" || die "spawn-lane: cannot copy brief into $BRIEFS_DIR"
+    _append_ticket_contract "$id" "$BRIEFS_DIR/$id.md"
     _append_active_scope_reset "$id" "$BRIEFS_DIR/$id.md"
     _append_active_supervised_repair "$id" "$BRIEFS_DIR/$id.md"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless

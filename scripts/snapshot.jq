@@ -336,6 +336,10 @@ include "lib";
             assignees: ($t.assignees // []),
             updated_at: ($t.updated_at // null),
             epic: ($t.epic // null),
+            # D-TICK-40: the host already paid for the tracker read. Preserve
+            # the complete contract so provider workers never need ambient
+            # tracker credentials to recover acceptance or adversarial scope.
+            contract: $desc,
             criteria_count: $criteria_count,
             file_surface: $file_surface,
             supervised_lease: ([$SL[] | select(.ticket == $t.id)] | first // null),

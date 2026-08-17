@@ -50,6 +50,7 @@ cat > "$FX/snap.json" <<'EOF'
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 42, "title": "stranded, one class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
+     "contract": "## Acceptance criteria\n\n- [ ] Persist the timing record\n\n## Mandatory adversarial tests\n\n- [ ] A failed write emits no success record\n",
      "active_scope_reset": {"at":"2026-08-10T09:58:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:58:00Z -->"},
      "active_supervised_repair": {"at":"2026-08-10T09:59:00Z","body":"Verified repair a84fcf3 adds the deployment runner and its public contract test; preserve those files during later rework.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"},
      "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
@@ -277,6 +278,18 @@ if [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.brief.active_supervise
     ok "D-TICK-39: rework action carries completed supervised-repair evidence"
 else
     bad "D-TICK-39: rework action forgot the repair it must preserve"
+fi
+if [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.brief.ticket_contract')" = \
+     "## Acceptance criteria
+
+- [ ] Persist the timing record
+
+## Mandatory adversarial tests
+
+- [ ] A failed write emits no success record" ]; then
+    ok "D-TICK-40: implementation action freezes the full ticket contract"
+else
+    bad "D-TICK-40: implementation action carries only a pointer to tracker state"
 fi
 # Step 5: the oldest merge-queue ticket whose hold is null. #47 is held, #49
 # has spent its attempt cap and is blocked so the queue ADVANCES, #48 merges.

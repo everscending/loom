@@ -242,6 +242,10 @@ refuses outside herdr anyway.
    PRD-faithfulness check against its `PRD requirement`, plus **scope**: the
    brief names the ticket's expected file surface, and a diff reaching outside
    it is a FAIL unless the ticket body names those files. When the gate action
+   is planned, the full host-read ticket body is frozen into the immutable
+   action and `spawn-lane` appends it to the staged brief; the reviewer never
+   depends on provider-side tracker credentials to recover its contract. When
+   the gate action
    carries an active supervisor scope reset, that reset is the replacement
    review contract: it overrides conflicting original ticket and PRD criteria,
    and `spawn-lane` appends it mechanically to both direct and deferred gate
@@ -300,7 +304,10 @@ refuses outside herdr anyway.
    - `spawn-lane impl-<ticket> --provider <id> --job implementation --tier
      <tier> --brief <file> --cwd <worktree>` starts a headless session
      whose brief **inlines** the work rather than naming `/implement`
-     (headless has no slash commands): the ticket body + lessons thread. First
+     (headless has no slash commands): the host snapshot freezes the full
+     ticket body into the immutable action, and `spawn-lane` appends it before
+     either provider starts, so the worker does not need ambient tracker
+     credentials; the brief also carries the lessons thread. First
      classify an absent contract by ownership: when the ticket's own Scope or
      Files touched names a new endpoint, schema, route, wire shape, or file,
      the ticket owns that surface and the lane must create it. Block with

@@ -35,6 +35,21 @@ if [ "$rc" = 0 ] && jq -e . "$T/snap.json" >/dev/null 2>&1; then
 else
     bad "snapshot: did not emit valid JSON (rc=$rc, $(head -2 "$T/snap.err"))"
 fi
+# D-TICK-40: provider workers do not inherit tracker credentials. The host
+# snapshot must therefore carry the complete ticket contract into the immutable
+# plan instead of expecting a lane to rediscover it from Linear/GitLab.
+if [ "$(q '.tickets[] | select(.id==10) | .contract')" = \
+     "## Risk tier
+
+api
+
+## Blocked by
+
+- #7 schema groundwork" ]; then
+    ok "D-TICK-40: snapshot preserves the full immutable ticket contract"
+else
+    bad "D-TICK-40: snapshot discarded the ticket body before provider launch"
+fi
 # P52: the lane's turn count travels into the snapshot too — the wave
 # compares it against .config.lane_turn_cap without a second tracker read.
 # Its own stub log: appending to $CALLS would corrupt the 7b call-count test.
