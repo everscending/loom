@@ -207,7 +207,7 @@ for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticke
     ln -sf "$(dirname "$TICK")/$jf" "$P74/wedged/$jf"
 done
 ln -sf "$LIBSH" "$P74/wedged/lib.sh"; ln -sf "$LANE" "$P74/wedged/lane.sh"
-sed 's|^    rm -rf "\$dir"                         # owner dead: break the stale lock$|    return 1|' \
+sed 's@^    rm -rf "\$dir" 2>/dev/null || return 2 # owner dead: break the stale lock$@    return 1@' \
     "$TICK" > "$P74/wedged/tick.sh"
 chmod +x "$P74/wedged/tick.sh"
 PW="$T/p74lock"; mkdir -p "$PW/repo" "$PW/home/tick.lock.d"

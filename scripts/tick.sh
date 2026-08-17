@@ -823,16 +823,24 @@ cfg_ntfy_events() {
 # lock broken by the next attempt, so the worst case is one skipped
 # tick/merge/gate and never two at once.
 _lock_reserve() { # <dir> → 0 reserved (pid stamped), 1 genuinely held
-    local dir="$1" owner
-    mkdir -p "$(dirname "$dir")" 2>/dev/null || :
+    local dir="$1" owner parent
+    parent=$(dirname "$dir")
+    # Permission/I/O denial is not a stale lock. Returning 2 lets operator
+    # verbs name the failure instead of recursively retrying a path that can
+    # never be created (interactive Codex hit this against host-owned state).
+    mkdir -p "$parent" 2>/dev/null || return 2
     if mkdir "$dir" 2>/dev/null; then
-        echo $$ > "$dir/pid"; return 0
+        echo $$ > "$dir/pid" 2>/dev/null \
+            || { rm -rf "$dir" 2>/dev/null || true; return 2; }
+        return 0
     fi
+    [ -d "$dir" ] || return 2
     owner=$(cat "$dir/pid" 2>/dev/null || echo "")
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
         return 1                          # genuinely held
     fi
-    rm -rf "$dir"                         # owner dead: break the stale lock
+    rm -rf "$dir" 2>/dev/null || return 2 # owner dead: break the stale lock
+    [ ! -e "$dir" ] || return 2
     _lock_reserve "$dir"
 }
 
@@ -1092,7 +1100,7 @@ _supervised_leases_json() { # active-only array; expiry requires no cleanup writ
 }
 
 cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
-    local verb="${1:-}" iid="${2:-}" owner="" ttl=3600 now expires tmp file
+    local verb="${1:-}" iid="${2:-}" owner="" ttl=3600 now expires tmp file lock_rc=0
     shift 2 2>/dev/null || die "supervise: use acquire <ticket> --owner <id> [--ttl-seconds N] or release <ticket>"
     case "$iid" in ''|*[!0-9]*) die "supervise: ticket must be a numeric iid" ;; esac
     # Only an operator-side session may create the exemption. A worker could
@@ -1115,8 +1123,11 @@ cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
             case "$ttl" in ''|*[!0-9]*) die "supervise acquire: ttl must be an integer from 1 to 86400 seconds" ;; esac
             [ "$ttl" -ge 1 ] && [ "$ttl" -le 86400 ] \
                 || die "supervise acquire: ttl must be an integer from 1 to 86400 seconds"
-            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" || lock_rc=$?
+            [ "$lock_rc" -ne 1 ] \
                 || die "supervise acquire: ticket #$iid launch admission is busy — retry after the current spawn command finishes"
+            [ "$lock_rc" -eq 0 ] \
+                || die "supervise acquire: cannot reserve ticket #$iid launch admission in '$SUPERVISED_ADMISSION_DIR'"
             if _supervised_lease_read "$iid" >/dev/null; then
                 die "supervise acquire: ticket #$iid already has an active supervised-repair lease"
             fi
@@ -1134,8 +1145,12 @@ cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
             ;;
         release)
             [ $# -eq 0 ] || die "supervise release: unexpected arguments"
-            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+            lock_rc=0
+            _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" || lock_rc=$?
+            [ "$lock_rc" -ne 1 ] \
                 || die "supervise release: ticket #$iid launch admission is busy — retry after the current spawn command finishes"
+            [ "$lock_rc" -eq 0 ] \
+                || die "supervise release: cannot reserve ticket #$iid launch admission in '$SUPERVISED_ADMISSION_DIR'"
             rm -f "$file"
             rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
             _ev supervised_lease_released ticket "$iid"
@@ -2713,15 +2728,18 @@ _cmd_spawn_lane() {
 # acquire says to retry; if acquire wins, the inner launch observes the lease.
 cmd_spawn_lane() {
     local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
-    local iid="" rc=0
+    local iid="" rc=0 lock_rc=0
     _spawn_parse_flags "$@"
     iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || iid=""
     if [ -z "$iid" ]; then
         _cmd_spawn_lane "$@"
         return $?
     fi
-    _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" \
+    _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" || lock_rc=$?
+    [ "$lock_rc" -ne 1 ] \
         || die "spawn-lane: ticket #$iid launch admission is busy with supervised-repair coordination — retry on the next heartbeat"
+    [ "$lock_rc" -eq 0 ] \
+        || die "spawn-lane: cannot reserve ticket #$iid supervised-repair admission in '$SUPERVISED_ADMISSION_DIR'"
     _cmd_spawn_lane "$@" || rc=$?
     rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
     return "$rc"

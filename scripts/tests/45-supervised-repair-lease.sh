@@ -96,5 +96,17 @@ else
 fi
 rm -rf "$LOOM_HOME/supervised-admission/13.lock.d"
 
-test_finish
+# A restricted operator can see the state directory but be unable to create a
+# child lock (the interactive Codex sandbox is the live example). That is an
+# I/O failure, not a stale lock to recursively break forever.
+chmod 500 "$LOOM_HOME/supervised-admission"
+io_out=$(perl -e 'alarm 2; exec @ARGV' "$TICK" supervise acquire 14 --owner root/restricted --ttl-seconds 60 2>&1); io_rc=$?
+chmod 700 "$LOOM_HOME/supervised-admission"
+if [ "$io_rc" -ne 0 ] && [ "$io_rc" -ne 142 ] \
+   && printf '%s' "$io_out" | grep -q 'cannot reserve'; then
+    ok "supervised lease: admission I/O denial fails promptly instead of recursing"
+else
+    bad "supervised lease: admission I/O denial hung or lacked a named failure (rc=$io_rc; out=$io_out)"
+fi
 
+test_finish
