@@ -199,6 +199,7 @@ if grep -q '| `mend' "$SKILL" \
    && grep -q 'MEND-FLOW-01' "$MEND_REF" 2>/dev/null \
    && grep -q 'Host preflight is isolated per spawn' "$MEND_REF" 2>/dev/null \
    && grep -q 'wave_spawn_deferred' "$MEND_REF" 2>/dev/null \
+   && grep -q 'rc-7 gate retains its lane evidence' "$MEND_REF" 2>/dev/null \
    && grep -q 'do not end the mend turn' "$MEND_REF" 2>/dev/null; then
     ok "mend: the human verb is routed to a grounded provider-neutral supervisory contract"
 else

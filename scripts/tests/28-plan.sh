@@ -250,8 +250,8 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(act harvest kill-lane)" = "impl-41,impl-50" ] \
     && ok "plan: a stale lane and a lane past lane_turn_cap are both killed through kill-lane" \
     || bad "plan: kill list wrong ($(act harvest kill-lane))"
-[ "$(act harvest clear-lane)" = "gate-40,merge-49,merge-51" ] \
-    && ok "plan: every dead lane is cleared" \
+[ "$(act harvest clear-lane)" = "merge-49,merge-51" ] \
+    && ok "plan: dead lanes are cleared after any required rejection evidence is posted" \
     || bad "plan: clear list wrong ($(act harvest clear-lane))"
 [ "$(jq -r '[.actions[] | select(.step=="harvest" and .kind=="transition") | .ticket] | join(",")' "$T/plan.json")" = "50" ] \
     && ok "plan: the turn-cap lane's ticket is blocked, not respawned" \
@@ -410,8 +410,21 @@ fi
 # report. None of those are argv.
 res() { jq -r --arg k "$1" '[.residue[] | select(.kind == $k) | ((.ticket // .epic // .build)|tostring)] | join(",")' "$T/plan.json"; }
 [ "$(res pregate-rejection)" = "40" ] \
-    && ok "plan: an rc-7 lane leaves a pregate rejection to post, not a verifier to spawn" \
+    && [ "$(jq '[.actions[] | select(.kind == "clear-lane" and .lane == "gate-40")] | length' "$T/plan.json")" = 0 ] \
+    && ok "plan: an rc-7 lane keeps its evidence until the pregate rejection is posted" \
     || bad "plan: pregate residue wrong ($(res pregate-rejection))"
+
+# Planted violation: restoring eager rc-7 cleanup recreates the live failure
+# where the source lane's launchd retirement kills its handoff wave before the
+# prose verdict can be written.
+PREGATE_CLEAR_MUT="$T/plan-pregate-clear-mutant.jq"
+sed '/# mutate:clear-pregate-before-verdict/,+0d' "$PLANJQ" > "$PREGATE_CLEAR_MUT"
+if jq -L "$(dirname "$PLANJQ")" -f "$PREGATE_CLEAR_MUT" "$FX/snap.json" \
+     | jq -e 'any(.actions[]; .kind == "clear-lane" and .lane == "gate-40")' >/dev/null; then
+    ok "plan violation: eager rc-7 cleanup recreates verdict-loss ordering"
+else
+    bad "plan violation: cleanup mutant did not restore the source-lane hazard"
+fi
 [ "$(res merge-failed)" = "" ] \
     && ok "plan: a merge lane that already recorded merge-failed leaves no duplicate residue" \
     || bad "plan: merge-failed residue wrong ($(res merge-failed))"

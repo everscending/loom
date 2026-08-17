@@ -190,6 +190,11 @@ else
 # duplicate reuse until this ordered clear runs.
 | ([ $lanes[] | select(lane_cleanup_eligible)
      | . as $l | (lane_ticket(.id)) as $tk
+     # A review-state rc-7 lane still owns the only prose evidence needed to
+     # write its verdict. Clearing its launchd job can terminate the lane's
+     # own handoff wave before that residue is posted. Retain it until either
+     # the verdict stands at HEAD or the transition has moved the ticket on.
+     | select(.rc != "7" or ticket($tk) == null or ticket($tk).state != "review" or ticket($tk).gate.last_verdict != null) # mutate:clear-pregate-before-verdict
      | { step: "harvest", kind: "clear-lane", lane: .id, ticket: $tk,
          via: "tick.sh", argv: ["clear-lane", .id],
          why: (if .rc == "7" then "pregate rejected the branch (rc 7) — the lane is finished with it"
@@ -223,6 +228,8 @@ else
 # can turn into a rejection comment, so it is residue by construction.
 | ([ $lanes[] | select(lane_cleanup_eligible and .rc == "7")
      | select(ticket(lane_ticket(.id)) != null)
+     | select(ticket(lane_ticket(.id)).state == "review"
+              and ticket(lane_ticket(.id)).gate.last_verdict == null)
      | ((.head // "")
         | if type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$") then . else null end) as $head
      | (lane_ticket(.id) | tonumber) as $iid

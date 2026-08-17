@@ -109,7 +109,10 @@ the ledger and in repair evidence.
    MR-open repair back to review. A host worktree preflight failure becomes a
    `host-preflight-failed` deferred item plus `wave_spawn_deferred`; the wave
    still executes every safe action. If it instead dies before `wave_start`,
-   the build has another actionable idle defect, not a healthy deferral.
+   the build has another actionable idle defect, not a healthy deferral. An
+   rc-7 gate retains its lane evidence until the prose verdict is durably
+   posted; cleanup must not retire the source launchd job while its handoff
+   wave is still classifying that rejection.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.

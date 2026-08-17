@@ -76,6 +76,13 @@ the reason. Harvest writes and other safe actions remain in the immutable
 plan and the wave starts. A single dirty or missing checkout must never turn
 the whole pre-provider boundary into an unrecorded build gap.
 
+Cleanup also preserves evidence ordering. A gate that exits rc 7 is not
+cleanup-eligible while its ticket remains in Review with no verdict at the
+immutable launch HEAD. Its handoff wave first reads the retained log and posts
+the rejection. Only a later plan may clear the lane. Retiring the source
+launchd job first can terminate that very handoff and silently lose the
+verdict, causing the same failing HEAD to be gated again.
+
 ## The loop switch
 
 `start` clears `$LOOM_HOME/loop.stopped`; `stop` writes it. While it exists,
