@@ -54,7 +54,7 @@ set -euo pipefail
 _canonical_repo_root() { # <cwd or LOOM_REPO> -> main checkout (non-git unchanged)
     local requested="$1" top git_dir common_dir main main_top main_common
     if ! top=$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null); then
-        if [ -e "$requested/.git" ]; then
+        if [ -f "$requested/.git" ]; then
             echo "tick.sh: '$requested' looks like a linked worktree but its git identity is unreadable — refusing to create parallel host state" >&2
             return 1
         fi
