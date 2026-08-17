@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 13:04 America/Chicago
+Last updated: 2026-08-17 17:14 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
@@ -164,8 +164,12 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   stale/PID-reuse-safe singleton detection, and automatic recovery that cannot
   strand a live lane until a human runs `watch` again. Add public regressions
   for viewer death with surviving panes and for a new lane arriving after that
-  death, plus a planted ownership-recovery mutation. (`MEND-LIVE-01`,
-  `MEND-LEARN-01`)
+  death, plus a planted ownership-recovery mutation. Live proof after installing
+  `bac994d`: JOR-291 moved through implementation, gate, and merge in one pane;
+  after Linear closed the ticket and the merge lane exited, the watcher emitted
+  `ticket 291 concluded` and removed only pane `wE:p31`. Durable restart and
+  ownership recovery are now being developed in isolated branch
+  `codex/viewer-durability`. (`MEND-LIVE-01`, `MEND-LEARN-01`)
 
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
 
@@ -175,7 +179,18 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [x] **DONE — Complete a valid supervised repair without falsifying history.** JOR-251 exposed a missing tracker action after the rejection cap: `verdict-reset` truthfully means an invalid gate, while `rescope` truthfully means different work. Implemented provider-neutrally in `45f8308` (`fix(recovery): complete supervised repairs`): human-only `lane.sh supervised-repair` requires a reason, refuses lane and wave callers before tracker writes, retires only prior verdict/rejection history, preserves merge history, exposes immutable repair evidence through snapshot and plan, and carries it into the next gate action for both Claude and Codex. Verification: focused sections 07/16/28/29 passed 380/380 and a planted cutoff mutant restored the stale rejection history and was caught.
 
-- [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
+- [ ] **NEEDS DECISION — Reuse mechanical gate evidence by commit SHA.** JOR-291
+  measured the waste directly: its gate worker passed 750 unit, 42 integration,
+  and 138 Playwright tests at `e6da865`, then its merge worker immediately reran
+  the same roughly five-minute UI pregate for the unchanged SHA while holding the
+  merge lock. The proposed reuse is UI-only and fail-closed: evidence must match
+  the exact ticket, HEAD, base SHA, tier, local host, runner fingerprint,
+  `.loom.yml` fingerprint, and normalized command manifest within a short TTL;
+  missing, malformed, expired, or drifted evidence runs the full gate. Candidate
+  evidence is promoted only after the independent reviewer records PASS. This
+  changes a release security control and therefore awaits explicit human
+  authorization before implementation. Read-only design and adversarial test
+  cases are ready on `codex/pregate-attestation-reuse`.
 
 - [x] **DONE — Pin every gate outcome to its start SHA.** JOR-218's gate pregated `4fdfbcc`, then a supervised repair advanced the branch to `8fcf7ed` before delayed failure classification ran. The classifier incorrectly attached the old `rg ENOENT` failure to the repaired, untested SHA and blocked it. Implemented provider-neutrally in `b96abc8` (`fix(gates): pin verdicts to launch head`): the shared launch boundary captures and persists immutable HEAD provenance, snapshot and plan preserve it, delayed rc-7 verdicts name that concrete SHA, and legacy/missing provenance refuses classification instead of rereading a mutable worktree. Focused result: attribution 6/6 and adjacent planner 50/50; the isolated implementation also passed 282 adjacent assertions.
 
@@ -221,9 +236,20 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [x] **DONE — Eliminate watcher unbound-state crashes.** Implemented in `8e1a2e5` (`fix(watch): initialize empty wave stream`): the progress watcher initializes `wj` before the fallible empty-glob pipeline used when a tick lock exists without a wave JSONL. Verification: watcher/liveness suites 66/66, isolated full suite 1,247/1,247, and a public planted mutant recreates `wj: unbound variable`. Shared host code only; adapters unchanged.
 
-- [ ] **IN PROGRESS — Run browser acceptance probes at a viable provider boundary.** Loom core implementation `0d2b0df` adds validated `--host-probe <id>` execution at the launchd-owned host prelude, fixed runner lookup, immutable HEAD artifacts, typed pass/fail/infrastructure outcomes, durable Codex transport, and shared UI admission without widening the sandbox or changing either adapter. Focused host-probe coverage is 10/10 and the isolated full suite is 1,265/1,265. The E8 milestone probe passed its live application/REST/Postgres boundary: 8/8 checks, including two-run and overlap behavior, with 10/10 due reminders sent and zero duplicates. JOR-290 was re-scoped to the repository-owned `e2` runner only; PR #69 contains the two-file runner, its 51/51 focused contract suite, and a real host run that passed all 11 E2 checks. Completion requires its independent host-probe review and merge; arbitrary provider-authored host commands remain explicitly out of scope.
+- [ ] **IN PROGRESS — Run browser acceptance probes at a viable provider boundary.** Loom core implementation `0d2b0df` adds validated `--host-probe <id>` execution at the launchd-owned host prelude, fixed runner lookup, immutable HEAD artifacts, typed pass/fail/infrastructure outcomes, durable Codex transport, and shared UI admission without widening the sandbox or changing either adapter. Focused host-probe coverage is 10/10 and the isolated full suite is 1,265/1,265. The E8 milestone probe passed its live application/REST/Postgres boundary: 8/8 checks, including two-run and overlap behavior, with 10/10 due reminders sent and zero duplicates. JOR-290 was re-scoped to the repository-owned `e2` runner only; PR #69 contains the two-file runner, its 51/51 focused contract suite, and a real host run that passed all 11 E2 checks. Mend proved its latest rejection was the now-removed JOR-239 global branch assertion, merged current `origin/main` at `861e604`, verified the branch still changes only its two authorized files, passed 40/40 focused unit checks and the exact formerly failing host Playwright check, then recorded a supervised repair and returned it to Review. Completion requires the fresh independent host-probe review and merge; arbitrary provider-authored host commands remain explicitly out of scope.
 
-- [ ] **IN PROGRESS — Promote shared UI harness repairs before retrying dependent branches.** JOR-236, JOR-289, and JOR-239 passed full UI review and merged, releasing JOR-231, JOR-233, and JOR-248. JOR-233 is host-verified and in Review at `296f818`. JOR-231's exact E3 project passed 128/128 before independent review found incomplete acceptance coverage; its focused rework is back in Review at `fced486`. JOR-257 was reconciled merge-only after JOR-239 landed, repaired JOR-239's globally invalid branch-scope guard, and passed a fresh full host gate including 153/153 browser tests at `0aa22f1`; it is back in Review after explicit hold-release authorization and is queued behind the active JOR-260 UI gate. JOR-240, JOR-253, JOR-257, JOR-260, and JOR-290 remain in the serialized UI frontier.
+- [ ] **TODO — Restore gate-generated tracked artifacts before sweeping completed
+  worktrees.** Live mend after JOR-291 found nine completed worktrees retained as
+  `sweep_held reason=modified-tracked`. Eight carry only a gate-generated change
+  to `tests/artifacts/e8-run.json`; older completed worktrees similarly retain
+  generated `docs/deploy.md` changes. The gate boundary must distinguish its own
+  deterministic tracked outputs from pre-existing/user edits, restore only the
+  former after preserving test evidence, and keep the sweep fail-closed for any
+  unknown modification. Add a public regression proving a green merged ticket is
+  swept after its gate mutates a tracked artifact, plus a mutation proving a
+  genuine pre-existing edit is never erased. (`MEND-LIVE-01`, `MEND-LEARN-01`)
+
+- [ ] **IN PROGRESS — Promote shared UI harness repairs before retrying dependent branches.** JOR-236, JOR-289, JOR-239, JOR-292, and JOR-291 passed and merged. JOR-292 removed the branch-specific JOR-239 assertion from the shared suite; JOR-291 replaced the fixed UI command-count assertion with a fail-closed extensible manifest contract and passed 750 unit, 42 integration, and 138 browser tests at both gate and merge. That shared repair now permits valid ticket-owned Playwright/report pairs without editing a central expected length. JOR-290 has been reconciled and returned to Review at `861e604`; JOR-240, JOR-253, JOR-257, JOR-260, and JOR-290 remain in the serialized UI frontier. Completion requires driving those branches through fresh gates and separating any remaining product defect from obsolete shared-harness failures.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
