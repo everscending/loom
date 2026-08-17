@@ -155,14 +155,24 @@ kill "$pid" 2>/dev/null
 # reap only a listener still rooted in the lane worktree. Model lsof's two
 # answers around a real process instead of binding a TCP socket: Codex's test
 # sandbox denies listen(2), which made the fixture fail before tick.sh ran.
+# The alive marker is the stub's model of an open socket. A killed process can
+# remain waitable by this parent for a moment, but a zombie owns no listener;
+# an lsof stub that returns it forever makes successful cleanup unverifiable.
 leak_cwd="$T/leaked-port-worktree"; mkdir -p "$leak_cwd" "$T/leak-bin"
-(cd "$leak_cwd" && sleep 60) & leak_pid=$!
+LEAK_ALIVE="$T/leaked-port.alive"; export LEAK_ALIVE
+(
+  cd "$leak_cwd" || exit 1
+  trap 'rm -f "$LEAK_ALIVE"; exit 0' TERM INT
+  : > "$LEAK_ALIVE"
+  while :; do sleep 60 & wait "$!" || :; done
+) & leak_pid=$!
+for _ in $(seq 1 30); do [ -f "$LEAK_ALIVE" ] && break; sleep 0.05; done
 leak_port=45123
 LEAK_PID="$leak_pid" LEAK_CWD="$leak_cwd" LEAK_PORT="$leak_port"; export LEAK_PID LEAK_CWD LEAK_PORT
 cat > "$T/leak-bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *"-tiTCP:$LEAK_PORT"*) printf '%s\n' "$LEAK_PID" ;;
+  *"-tiTCP:$LEAK_PORT"*) [ ! -f "$LEAK_ALIVE" ] || printf '%s\n' "$LEAK_PID" ;;
   *"-p $LEAK_PID -d cwd -Fn"*) printf 'p%s\nfcwd\nn%s\n' "$LEAK_PID" "$LEAK_CWD" ;;
   *) exit 1 ;;
 esac
@@ -269,7 +279,7 @@ cat > "$DEFER_AGENT" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   detect|preflight) exit 0 ;;
-  run) touch "${DEFER_MARK:?}"; sleep 5 ;;
+  run) touch "${DEFER_MARK:?}"; sleep 10 ;;
   *) exit 2 ;;
 esac
 EOF
@@ -285,6 +295,7 @@ else
   bad "deferred launch: provider session spawned directly or lost its request"
 fi
 TRACKER_CMD="$REVIEW_TRACKER" DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" "$TICK" drain-lane-launches >/dev/null
+for _ in $(seq 1 100); do [ -f "$DEFER_MARK" ] && break; sleep 0.05; done
 pid=$(cat "$LOOM_HOME/lanes/gate-90.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK" ]; then
   ok "deferred launch: host drain starts a surviving worker"
@@ -320,6 +331,7 @@ rm -rf "$LOOM_HOME/tick.lock.d"
 TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_WAVE" \
   LOOM_WAVE_CMD="LOOM_DEFER_LANE_LAUNCH=1 '$TICK' spawn-lane gate-91 --no-tick --provider codex --job gate --tier medium --brief '$T/deferred-brief.md' --cwd '$LOOM_REPO'" \
   "$TICK" tick --provider claude >/dev/null
+for _ in $(seq 1 100); do [ -f "$DEFER_MARK_WAVE" ] && break; sleep 0.05; done
 pid=$(cat "$LOOM_HOME/lanes/gate-91.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK_WAVE" ]; then
   ok "deferred launch: wave return drains requests from the host boundary"
@@ -345,6 +357,7 @@ else
 fi
 TRACKER_CMD="$REVIEW_TRACKER" CODEX_THREAD_ID= CODEX_CI= LOOM_AGENT_CMD="$DEFER_AGENT" DEFER_MARK="$DEFER_MARK_CODEX" \
   LOOM_WAVE_CMD=true "$TICK" tick --auto --provider claude >/dev/null
+for _ in $(seq 1 100); do [ -f "$DEFER_MARK_CODEX" ] && break; sleep 0.05; done
 pid=$(cat "$LOOM_HOME/lanes/gate-92.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK_CODEX" ]; then
   ok "codex host boundary: safe heartbeat drains before the wave gap"
