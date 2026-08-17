@@ -508,6 +508,84 @@ else
   bad "wave preparation: open-MR rework could not reconstruct its swept worktree (rc=$rework_rc cwd=[$resolved_rework] $(tail -2 "$WT/rework.out" | tr '\n' ';'))"
 fi
 
+# A supervisor can finish and push from an isolated clone while Loom's
+# standard ticket worktree still points at its original base commit. The
+# tracker-derived MR head is the gate's immutable review target: host
+# preparation must advance a clean stale checkout to exactly that commit
+# before either provider can launch against it.
+git -C "$WT/repo" branch gate-122 main
+gate_cwd=$(LOOM_WORKTREE_INSTALL_CMD=true \
+  "$WORKTREE" prepare --repo "$WT/repo" --ticket 122 --branch gate-122 --base main)
+gate_stale_head=$(git -C "$gate_cwd" rev-parse HEAD)
+git clone -q "$WT/origin.git" "$WT/gate-writer"
+git -C "$WT/gate-writer" config user.email loom@test
+git -C "$WT/gate-writer" config user.name Loom
+git -C "$WT/gate-writer" switch -qc gate-122 origin/main
+printf 'supervised\n' > "$WT/gate-writer/supervised.txt"
+git -C "$WT/gate-writer" add supervised.txt
+git -C "$WT/gate-writer" commit -qm 'supervised repair'
+git -C "$WT/gate-writer" push -q origin gate-122
+gate_mr_head=$(git -C "$WT/gate-writer" rev-parse HEAD)
+cat > "$WT/build-gate.json" <<'EOF'
+[
+  {"id":1,"title":"Build 1","state":"open","labels":["provider::codex"],"assignees":[],"body":"","url":"https://x/build"},
+  {"id":122,"title":"Supervised repair from another clone","state":"open","labels":["build-1","review","tier::logic"],"assignees":["human"],"body":"Review the pushed repair","url":"https://x/122"}
+]
+EOF
+printf '[{"id":78,"title":"Gate 122","state":"open","draft":false,"url":"https://x/pr/78","branch":"gate-122","sha":"%s","body":"Loom-Ticket: 122"}]\n' \
+  "$gate_mr_head" > "$WT/gate-mrs.json"
+BUILD_JSON="$WT/build-gate.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=122 FORGE_JSON="$WT/gate-mrs.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/gate-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$TICK" tick --provider codex >"$WT/gate.out" 2>&1
+gate_rc=$?
+gate_plan=$(find "$WT/gate-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+gate_plan_head=$([ -n "$gate_plan" ] && jq -r '.actions[] | select(.lane == "gate-122") | .spawn.expected_head // empty' "$gate_plan")
+gate_prepared_head=$(git -C "$gate_cwd" rev-parse HEAD 2>/dev/null)
+if [ "$gate_rc" -eq 0 ] && [ "$gate_stale_head" != "$gate_mr_head" ] \
+   && [ "$gate_plan_head" = "$gate_mr_head" ] && [ "$gate_prepared_head" = "$gate_mr_head" ]; then
+  ok "wave preparation: gate cwd resolves to the immutable MR head before provider launch"
+else
+  bad "wave preparation: gate kept stale cwd or lost immutable MR head (rc=$gate_rc stale=$gate_stale_head mr=$gate_mr_head planned=[$gate_plan_head] prepared=[$gate_prepared_head] $(tail -2 "$WT/gate.out" | tr '\n' ';'))"
+fi
+
+# Planted violation: preserve the planned expected_head but drop only the
+# tick -> worktree handoff. A newer supervised push must then recreate the
+# observed stale-cwd failure, proving the regression is sensitive to the
+# production boundary rather than merely to the new JSON field.
+printf 'newer supervised\n' >> "$WT/gate-writer/supervised.txt"
+git -C "$WT/gate-writer" add supervised.txt
+git -C "$WT/gate-writer" commit -qm 'newer supervised repair'
+git -C "$WT/gate-writer" push -q origin gate-122
+newer_gate_mr_head=$(git -C "$WT/gate-writer" rev-parse HEAD)
+printf '[{"id":78,"title":"Gate 122","state":"open","draft":false,"url":"https://x/pr/78","branch":"gate-122","sha":"%s","body":"Loom-Ticket: 122"}]\n' \
+  "$newer_gate_mr_head" > "$WT/gate-mrs-newer.json"
+GATE_MUT=$(mirror_scripts "$WT/gate-head-mutant")
+sed 's/ --head "$expected_head"//g' "$GATE_MUT/tick.sh" > "$GATE_MUT/tick-mutant.sh"
+chmod +x "$GATE_MUT/tick-mutant.sh"
+gate_mut_out=$(BUILD_JSON="$WT/build-gate.json" MUTATIONS="$WT/mutations" \
+  TRACKER_CMD="$AR/bin/tracker" FORGE_CMD="$AR/bin/forge" \
+  FIXTURE_TICKET=122 FORGE_JSON="$WT/gate-mrs-newer.json" \
+  LOOM_REPO="$WT/repo" LOOM_HOME="$WT/gate-mutant-home" LOOM_GLOBAL_CONFIG="$WT/global.yml" \
+  LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_AGENT_PREFLIGHT=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+  LOOM_PREPARE_PLAN_WITH_WAVE_CMD=1 LOOM_WAVE_CMD=true LOOM_WORKTREE_INSTALL_CMD=true \
+  "$GATE_MUT/tick-mutant.sh" tick --provider codex 2>&1)
+gate_mut_rc=$?
+if assert_mutant_ran "$gate_mut_rc" "$gate_mut_out" "gate-head-handoff-violation"; then
+  gate_mut_plan=$(find "$WT/gate-mutant-home/scratch" -name plan.json -print 2>/dev/null | head -1)
+  gate_mut_planned=$([ -n "$gate_mut_plan" ] && jq -r '.actions[] | select(.lane == "gate-122") | .spawn.expected_head // empty' "$gate_mut_plan")
+  gate_mut_prepared=$(git -C "$gate_cwd" rev-parse HEAD 2>/dev/null)
+  if [ "$gate_mut_rc" -eq 0 ] && [ "$gate_mut_planned" = "$newer_gate_mr_head" ] \
+     && [ "$gate_mut_prepared" != "$newer_gate_mr_head" ]; then
+    ok "wave preparation violation: dropping immutable-head handoff recreates stale gate cwd"
+  else
+    bad "wave preparation violation: mutant did not isolate the stale-cwd failure (rc=$gate_mut_rc planned=[$gate_mut_planned] prepared=[$gate_mut_prepared] mr=$newer_gate_mr_head)"
+  fi
+fi
+
 # If that PR lands outside Loom while its tracker ticket remains open, the
 # branch is no longer rework. Preserve a post-merge FAIL as explicit residue
 # and let other ready work proceed; never recreate and edit shipped code under

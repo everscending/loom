@@ -1700,7 +1700,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
 
 _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing the wave
     local scratch="$1" snapshot="$1/snapshot.json" plan="$1/plan.json" raw="$1/plan.raw.json"
-    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch cwd tmp lane_type has_open_mr
+    local worktree_sh="${SELF_PATH%/*}/worktree.sh" lane ticket base branch expected_head cwd tmp lane_type has_open_mr
     [ -x "$worktree_sh" ] || die "wave: deterministic worktree helper missing: $worktree_sh"
     "$SELF_PATH" snapshot --brief > "$snapshot" \
       || die "wave: could not capture the tracker snapshot before provider invocation"
@@ -1724,8 +1724,8 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
            | .related_merge_requests[]?
            | select(.state == "open")
            | .branch ] | first // "") as $branch
-      | [.lane, $ticket, $base, $branch, (.spawn.type // "")] | join("\u001c")' "$raw" \
-      | while IFS="$(printf '\034')" read -r lane ticket base branch lane_type; do
+      | [.lane, $ticket, $base, $branch, (.spawn.expected_head // ""), (.spawn.type // "")] | join("\u001c")' "$raw" \
+      | while IFS="$(printf '\034')" read -r lane ticket base branch expected_head lane_type; do
         [ -n "$lane" ] || continue
         # plan.jq uses <base> when the repo has no explicit `base:` key. It is
         # a host-side instruction to apply Loom's shared base rule, not a Git
@@ -1756,8 +1756,15 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
           fi
           cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
           if [ -n "$cwd" ]; then
-            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd") \
-              || exit 1
+            if [ "$lane_type" = gate ]; then
+              [ -n "$expected_head" ] \
+                || die "wave: gate '$lane' has no immutable MR head in its planned action"
+              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd" --head "$expected_head") \
+                || exit 1
+            else
+              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --reuse "$cwd") \
+                || exit 1
+            fi
           else
             # An implementation with no MR may contain uncommitted-only work;
             # recreating loom-<ticket> from a branch tip would silently lose
@@ -1769,8 +1776,15 @@ _prepare_wave_plan() { # <scratch> — resolve every spawn cwd before sandboxing
               die "wave: stranded implementation '$lane' has no surviving worktree on branch '$branch'"
             fi
             base=$(_detect_base "$REPO_ROOT")
-            cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base") \
-              || exit 1
+            if [ "$lane_type" = gate ]; then
+              [ -n "$expected_head" ] \
+                || die "wave: gate '$lane' has no immutable MR head in its planned action"
+              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base" --head "$expected_head") \
+                || exit 1
+            else
+              cwd=$("$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base") \
+                || exit 1
+            fi
           fi
         fi
         tmp="$plan.tmp.$$"
