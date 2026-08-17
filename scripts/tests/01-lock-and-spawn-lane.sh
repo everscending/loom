@@ -9,8 +9,9 @@
 #     and the kick it could not run is REMEMBERED rather than dropped (P1).
 #     The note is cleared before the holder exits so this test does not also
 #     trigger a re-tick — 1d owns that half.
-LOOM_WAVE_CMD="sleep 1" "$TICK" tick >/dev/null 2>&1 &
-first=$!; sleep 0.3
+LOOM_WAVE_CMD="sleep 2" "$TICK" tick >/dev/null 2>&1 &
+first=$!
+for _ in $(seq 1 80); do [ -d "$LOOM_HOME/tick.lock.d" ] && break; sleep 0.05; done
 out=$(LOOM_WAVE_CMD="echo second-wave-ran" "$TICK" tick 2>&1)
 case "$out" in *"wave already running"*) ok "lock: concurrent tick skipped";; *) bad "lock: concurrent tick ran ($out)";; esac
 [ -f "$LOOM_HOME/tick.pending" ] \
@@ -102,6 +103,51 @@ else
     bad "pending: launchd wave exited before its recorded replay completed"
 fi
 for _ in $(seq 1 40); do [ -f "$LR_MARK" ] && break; sleep 0.1; done
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
+
+# MEND-FLOW-02: a wave plans against the lane set that existed before its
+# durable host cleanup.  If that cleanup removes the last completed lane, the
+# newly visible action must be replanned immediately rather than waiting inside
+# min_wave_gap_minutes with zero active lanes.
+CLEAN_WAVES="$T/cleanup-replay-waves" CLEAN_ONCE="$T/cleanup-replay-once"
+export CLEAN_WAVES CLEAN_ONCE
+CLEAN_CMD="$T/cleanup-replay-wave.sh"
+cat > "$CLEAN_CMD" <<'EOF'
+#!/usr/bin/env bash
+echo wave >> "$CLEAN_WAVES"
+if [ ! -e "$CLEAN_ONCE" ]; then
+  : > "$CLEAN_ONCE"
+  request="$LOOM_HOME/lane-cleanup-queue/request-test-cleanup"
+  mkdir -p "$request"
+  printf '%s\n' impl-909 > "$request/id"
+  printf '%s\n' clear > "$request/action"
+  : > "$request/pid"
+fi
+EOF
+chmod +x "$CLEAN_CMD"
+: > "$CLEAN_WAVES"; rm -f "$CLEAN_ONCE"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$CLEAN_CMD" "$TICK" tick >/dev/null 2>&1
+if [ "$(wc -l < "$CLEAN_WAVES" | tr -d ' ')" = 2 ] \
+   && grep -q '"ev":"tick_replay_requested".*"reason":"lane_cleanup"' "$LOOM_HOME/events.jsonl"; then
+    ok "cleanup continuation: durable cleanup immediately triggers one post-state replay"
+else
+    bad "cleanup continuation: build remained inside the wave gap after lane visibility changed"
+fi
+
+# Planted violation: remove only the cleanup-to-replay write.  The same public
+# wave now stops after cleanup, reproducing the zero-lane gap.
+CLEAN_MUT=$(mirror_scripts "$T/cleanup-replay-mutant")
+sed '/: > "$PENDING_FILE" # mutate:post-cleanup-replay/d' "$CLEAN_MUT/tick.sh" > "$CLEAN_MUT/tick-mutant.sh"
+mv "$CLEAN_MUT/tick-mutant.sh" "$CLEAN_MUT/tick.sh"; chmod +x "$CLEAN_MUT/tick.sh"
+CLEAN_MUT_HOME="$T/cleanup-replay-mutant-home"
+: > "$CLEAN_WAVES"; rm -f "$CLEAN_ONCE"
+LOOM_HOME="$CLEAN_MUT_HOME" LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$CLEAN_CMD" \
+  "$CLEAN_MUT/tick.sh" tick >/dev/null 2>&1
+if [ "$(wc -l < "$CLEAN_WAVES" | tr -d ' ')" = 1 ]; then
+    ok "cleanup-continuation-violation: deleting the replay recreates the scheduler gap"
+else
+    bad "cleanup-continuation-violation: planted deletion still continued the build"
+fi
 rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
 
 # Planted violation: background only `_start_handoff_tick` in a private copy.

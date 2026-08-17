@@ -1898,7 +1898,7 @@ Wave context from tick.sh — trust it over rediscovery:
 # waves left 15 bytes and no diagnosis: with a stream on stdout, an error on
 # stderr is the only thing that explains an empty transcript (P15).
 _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
-    local stem="$1" provider="$2" tier="$3" brief="$4" rc=0 t0 retry=0
+    local stem="$1" provider="$2" tier="$3" brief="$4" rc=0 t0 retry=0 cleaned=0
     t0=$(_now)
     case "$stem" in *-retry) retry=1 ;; esac
     _ev wave_start stem "$stem" retry "$retry" provider "$provider" tier "$tier"
@@ -1920,6 +1920,17 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
             [ "$rc" -ne 0 ] || rc=26
         elif ! _drain_lane_launches; then
             [ "$rc" -ne 0 ] || rc=26
+        fi
+        cleaned=${DRAINED_LANE_CLEANUPS:-0}
+        # A provider plans against the pre-cleanup lane set.  Clearing a
+        # finished lane after that provider exits can expose the next action,
+        # but no lane remains to fire another handoff and an auto heartbeat is
+        # still inside the wave gap.  Reuse the lock's one-shot replay flag so
+        # the host immediately replans from durable post-cleanup state.  This
+        # is scheduler continuation, never a mend/manual tick.
+        if [ "$cleaned" -gt 0 ]; then
+            : > "$PENDING_FILE" # mutate:post-cleanup-replay
+            _ev tick_replay_requested reason lane_cleanup count "$cleaned"
         fi
     elif find "$LANE_LAUNCH_DIR" -mindepth 1 -maxdepth 1 -type d -name 'request-*' 2>/dev/null | grep -q .; then
         echo "tick: Codex-hosted wave left lane launches queued for the durable scheduler"
@@ -1961,6 +1972,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     _append_ticket_contract "$id" "$request/brief.md"
     _append_active_scope_reset "$id" "$request/brief.md"
     _append_active_supervised_repair "$id" "$request/brief.md"
+    _append_active_base_reconcile "$id" "$request/brief.md"
     local ready="${request%.tmp}"
     mv "$request" "$ready"
     _ev lane_queued id "$id" type "$(_lane_type "$id")" job "$job" \
@@ -2069,6 +2081,7 @@ _reclaim_lane_cleanup_claims() {
 
 _drain_lane_cleanups() {
     local request name running id action expected current cleanup_rc rc=0
+    DRAINED_LANE_CLEANUPS=0
     _reclaim_lane_cleanup_claims
     for request in "$LANE_CLEANUP_DIR"/request-*; do
         [ -d "$request" ] || continue
@@ -2093,6 +2106,7 @@ _drain_lane_cleanups() {
         esac
         if [ "$cleanup_rc" -eq 0 ]; then
             rm -rf "$running"
+            DRAINED_LANE_CLEANUPS=$((DRAINED_LANE_CLEANUPS + 1))
         else
             mv "$running" "$request" 2>/dev/null || true
             _ev lane_cleanup_failed id "${id:-unknown}" action "${action:-unknown}"
@@ -2275,6 +2289,38 @@ _append_active_supervised_repair() { # <lane-id> <staged-brief>
       || die "spawn-lane: cannot append supervised repair evidence to staged brief '$_repair_brief'"
 }
 
+_append_active_base_reconcile() { # <lane-id> <staged-brief>
+    local _base_lane="$1" _base_brief="$2" _base_plan="${LOOM_WAVE_PLAN:-}"
+    [ "$(_lane_type "$_base_lane")" = impl ] || return 0
+    [ -n "$_base_plan" ] || return 0
+    [ -r "$_base_plan" ] \
+      || die "spawn-lane: immutable wave plan '$_base_plan' is unreadable; refusing a brief that may lose base reconciliation"
+
+    local _base_record="" _base_body=""
+    _base_record=$(jq -ce --arg lane "$_base_lane" '
+      [.actions[]? | select(.lane == $lane)] as $actions
+      | if ($actions | length) != 1 then
+          error("immutable wave plan must contain exactly one action for " + $lane)
+        else ($actions[0].spawn.brief.active_base_reconcile // null) as $base
+        | if $base == null then {present:false}
+          elif (($base.body // null) | type) != "string" or ($base.body | length) == 0 then
+            error("active base reconciliation for " + $lane + " has no note body")
+          else {present:true, body:$base.body} end
+        end' "$_base_plan" 2>/dev/null) \
+      || die "spawn-lane: immutable wave plan has no valid base reconciliation for '$_base_lane'"
+    [ "$(printf '%s\n' "$_base_record" | jq -r '.present')" = true ] || return 0
+    _base_body=$(printf '%s\n' "$_base_record" | jq -r '.body')
+    local _base_marker=""
+    _base_marker=$(printf '%s\n' "$_base_body" \
+      | grep -oE '<!-- orch-base-stale [^>]+-->' | tail -1 || true)
+    if [ -n "$_base_marker" ] && grep -Fq "$_base_marker" "$_base_brief"; then
+        return 0
+    fi
+    printf '\n\n## Active base reconciliation (from immutable wave plan)\n%s\n' \
+      "$_base_body" >> "$_base_brief" \
+      || die "spawn-lane: cannot append base reconciliation to staged brief '$_base_brief'"
+}
+
 _spawn_stage_brief() {
     _SPAWN_ARGS=("$@")
     if [ -z "$brief" ]; then
@@ -2333,6 +2379,7 @@ _spawn_stage_brief() {
     _append_ticket_contract "$id" "$BRIEFS_DIR/$id.md"
     _append_active_scope_reset "$id" "$BRIEFS_DIR/$id.md"
     _append_active_supervised_repair "$id" "$BRIEFS_DIR/$id.md"
+    _append_active_base_reconcile "$id" "$BRIEFS_DIR/$id.md"
     # P68: every lane kind — impl, gate, merge, probe — gets the headless
     # survival rules the probe brief alone used to carry. They are facts
     # about the execution environment, not about probing, and a wave asked

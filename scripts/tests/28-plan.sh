@@ -197,6 +197,23 @@ if jq -e '.actions | length == 1
 else
     bad "plan: supervised repair did not produce the expected gate action ($(jq -c '.actions' "$T/plan-supervised-repair.json"))"
 fi
+# The current-head gate deferral is executable input, not prose a new worker
+# must rediscover.  It changes the ordinary stranded action into an explicit
+# reconciliation action without consuming a gate rejection round.
+jq '(.tickets[] | select(.id==42) | .active_base_reconcile) = {
+      "at":"2026-08-17T17:56:00Z", "head":"abc1234", "base":"main", "behind":"4",
+      "body":"Reconcile origin/main and resubmit.\n\n<!-- orch-base-stale abc1234 base=main behind=4 -->"
+    }' "$FX/snap.json" > "$FX/snap-base-reconcile.json"
+PLAN "$FX/snap-base-reconcile.json" > "$T/plan-base-reconcile.json" 2>/dev/null
+if jq -e '.actions[] | select(.lane=="impl-42")
+          | (.why | contains("stale-base reconciliation"))
+            and (.spawn.brief.active_base_reconcile.base == "main")
+            and (.spawn.brief.inputs | any(contains("merge the named origin base")))' \
+          "$T/plan-base-reconcile.json" >/dev/null 2>&1; then
+    ok "plan: stale-base stranded ticket becomes an immutable reconciliation action"
+else
+    bad "plan: stale-base decision did not reach implementation ($(jq -c '.actions[] | select(.lane=="impl-42")' "$T/plan-base-reconcile.json"))"
+fi
 # Provider selection changes only the adapter named on the shared action; both
 # Claude and Codex consume the same tracker-derived repair evidence.
 for provider in claude codex; do

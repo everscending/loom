@@ -488,8 +488,9 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 
 - **`mend [--once|--observe-only]`** — stay attached to an active build,
   close or diagnose actionable idle gaps, help rejection-cap tickets, and
-  repair confirmed runtime defects without becoming another scheduler or
-  resuming a stopped loop: [references/mend.md](references/mend.md).
+  turn every confirmed avoidable gap into a regression-backed Loom repair,
+  without becoming another scheduler or resuming a stopped loop:
+  [references/mend.md](references/mend.md).
 - **`triage`** — every blocked ticket on one `/lavish` surface, six actions
   each (requeue, to review, `rescope`, `model-tier`, leave, close), applied as
   a batch; `unblock <n>` is unchanged and still the one-ticket path.

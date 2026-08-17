@@ -93,6 +93,48 @@ if [ "$(qr '[.summary.repairs[] | select(.id==57 or .id==58)] | length')" = "0" 
 else
     bad "repairs: FAIL verdict repaired into review ($(qr '[.summary.repairs[] | select(.id==57 or .id==58)] | tostring'))"
 fi
+# A gate-base deferral is an intentional transition, not a lane dying between
+# MR creation and relabel.  Its tracker marker is active only at the inspected
+# HEAD, suppresses the false repair to review, and leaves the ticket stranded
+# for implementation reconciliation.  Advancing the MR head retires it.
+cat > "$RP/notes-31.json" <<'EOF'
+[{"system":false,"created_at":"2026-08-07T04:05:00Z","body":"Reconcile origin/main, push, and resubmit.\n\n<!-- orch-base-stale aaa1111000000000000000000000000000000000 base=main behind=4 -->"}]
+EOF
+GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap-base-stale.json" 2>/dev/null
+if jq -e '([.summary.repairs[] | select(.id==31)] | length) == 0
+          and (.summary.stranded | index(31)) != null
+          and (.tickets[] | select(.id==31) | .active_base_reconcile.base) == "main"' \
+          "$RP/snap-base-stale.json" >/dev/null 2>&1; then
+    ok "base reconcile: current-head marker suppresses the false review repair and exposes rework"
+else
+    bad "base reconcile: stale-base transition still loops through review ($(jq -c '{repairs:.summary.repairs,stranded:.summary.stranded,ticket:(.tickets[]|select(.id==31)|{active_base_reconcile,related_merge_requests})}' "$RP/snap-base-stale.json"))"
+fi
+# Planted violation: remove only the intentional-transition exclusion.  The
+# current-head marker remains visible, but the generic half-transition repair
+# sends the ticket straight back to the stale gate.
+BASE_REPAIR_MUT=$(mirror_scripts "$T/base-repair-mutant")
+sed 's/ and \$base_reconcile == null//' "$BASE_REPAIR_MUT/snapshot.jq" \
+    > "$BASE_REPAIR_MUT/snapshot-mutant.jq"
+mv "$BASE_REPAIR_MUT/snapshot-mutant.jq" "$BASE_REPAIR_MUT/snapshot.jq"
+GLAB_CMD="$RP/glab-stub.sh" "$BASE_REPAIR_MUT/tick.sh" snapshot \
+    > "$RP/snap-base-stale-mutant.json" 2>/dev/null
+if jq -e '([.summary.repairs[] | select(.id==31 and .shape=="mr-open-not-in-review")] | length) == 1' \
+          "$RP/snap-base-stale-mutant.json" >/dev/null 2>&1; then
+    ok "base-reconcile-violation: deleting the exclusion recreates the stale review loop"
+else
+    bad "base-reconcile-violation: planted exclusion deletion did not restore the false repair"
+fi
+sed 's/aaa1111000000000000000000000000000000000/9999999000000000000000000000000000000000/' \
+    "$RP/mrs-31.json" > "$RP/mrs-31-new.json"
+mv "$RP/mrs-31-new.json" "$RP/mrs-31.json"
+GLAB_CMD="$RP/glab-stub.sh" "$TICK" snapshot > "$RP/snap-base-advanced.json" 2>/dev/null
+if jq -e '([.summary.repairs[] | select(.id==31 and .shape=="mr-open-not-in-review")] | length) == 1
+          and (.tickets[] | select(.id==31) | .active_base_reconcile) == null' \
+          "$RP/snap-base-advanced.json" >/dev/null 2>&1; then
+    ok "base reconcile: advancing HEAD automatically retires the stale-base decision"
+else
+    bad "base reconcile: old marker remained active against a new HEAD ($(jq -c '{repairs:.summary.repairs,ticket:(.tickets[]|select(.id==31)|{active_base_reconcile,related_merge_requests})}' "$RP/snap-base-advanced.json"))"
+fi
 # A ticket whose lane is still ALIVE is never flagged: the second write may
 # simply not have happened yet. Same live-lane set `summary.stranded` uses.
 "$TICK" spawn-lane impl-31 -- sleep 30 >/dev/null

@@ -7,12 +7,14 @@ TRACKER="$T/gate-tracker.sh"
 AGENT="$T/gate-agent.sh"
 AGENT_CALLS="$T/gate-agent.calls"
 TRACKER_CALLS="$T/gate-tracker.calls"
-export STATE_FILE AGENT_CALLS TRACKER_CALLS TRACKER_CMD="$TRACKER" LOOM_AGENT_CMD="$AGENT"
+STALE_NOTE="$T/gate-stale-note.md"
+export STATE_FILE AGENT_CALLS TRACKER_CALLS STALE_NOTE TRACKER_CMD="$TRACKER" LOOM_AGENT_CMD="$AGENT"
 
 cat > "$TRACKER" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "$TRACKER_CALLS"
 case "$1" in
+  note-add) cp "$3" "$STALE_NOTE" ;;
   issue)
     [ "$(cat "$STATE_FILE")" != read-fail ] || exit 1
     state=$(cat "$STATE_FILE")
@@ -145,9 +147,10 @@ if [ "$(cat "$LOOM_HOME/lanes/gate-334.rc" 2>/dev/null)" = 0 ] \
    && [ ! -e "$STALE_RUNNER" ] \
    && ! grep -q '^run ' "$AGENT_CALLS" 2>/dev/null \
    && grep -q '^note-add 334 ' "$TRACKER_CALLS" 2>/dev/null \
+   && grep -q '<!-- orch-base-stale [0-9a-f].* base=main behind=1 -->' "$STALE_NOTE" 2>/dev/null \
    && grep -q '^issue-relabel 334 .*--add in-progress' "$TRACKER_CALLS" 2>/dev/null \
    && grep -q 'behind origin/main' "$LOOM_HOME/logs/lane-gate-334.log" 2>/dev/null; then
-    ok "gate base: a stale review branch returns to implementation before pregate or reviewer spend"
+    ok "gate base: stale review returns to implementation with a head-bound tracker decision"
 else
     bad "gate base: a 42-commit-stale branch reached pregate/reviewer or left no durable rework decision"
 fi

@@ -140,6 +140,21 @@ if grep -q 'db/deploy/reminder-cron.sql' "$LOOM_HOME/briefs/impl-69.md" 2>/dev/n
 else
     bad "D-TICK-39: staged rework brief lost the repair it must preserve"
 fi
+# A stale-base implementation has no rejection comment to explain why it was
+# respawned.  The shared staging seam must append the host-snapshotted tracker
+# decision directly to the worker brief.
+cat > "$BR/base-reconcile-plan.json" <<'EOF'
+{"actions":[{"lane":"impl-64","ticket":64,"spawn":{"brief":{"active_base_reconcile":{"at":"2026-08-17T17:56:00Z","head":"abc1234","base":"main","behind":"4","body":"Reconcile origin/main, push the merge commit, and resubmit.\n\n<!-- orch-base-stale abc1234 base=main behind=4 -->"}}}}]}
+EOF
+LOOM_WAVE_PLAN="$BR/base-reconcile-plan.json" \
+    "$TICK" spawn-lane impl-64 --no-tick --cwd "$BR/wt" --brief "$BR/pre-repair-rework.md" -- true -p @brief >/dev/null 2>&1
+if grep -q 'Active base reconciliation' "$LOOM_HOME/briefs/impl-64.md" 2>/dev/null \
+   && grep -q 'Reconcile origin/main, push the merge commit' "$LOOM_HOME/briefs/impl-64.md" 2>/dev/null \
+   && grep -q 'orch-base-stale abc1234' "$LOOM_HOME/briefs/impl-64.md" 2>/dev/null; then
+    ok "base reconcile: staged implementation brief carries the current-head decision"
+else
+    bad "base reconcile: worker brief lost the reconciliation instruction"
+fi
 # D-TICK-40: workers must not need ambient tracker credentials to learn their
 # acceptance contract. Freeze the host-read body into the action and append it
 # mechanically before either provider starts.

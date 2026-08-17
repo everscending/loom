@@ -57,6 +57,10 @@ the ledger and in repair evidence.
   deterministic plan has an actionable idle gap. Keep supervision attached
   until the scheduler starts that work or the missed handoff/heartbeat is
   diagnosed and repaired. An armed timer is recovery plumbing, not progress.
+- `MEND-LEARN-01` — every confirmed avoidable progress gap feeds back into
+  Loom itself: preserve the live evidence, establish a public reproduction,
+  repair the provider-neutral owning seam, and add regression plus planted
+  mutation coverage. A one-off ticket nudge is not completion of mend.
 - `MEND-HEAD-01` — gates and merges use the exact immutable MR head, correct
   tier, complete active scope, and a verdict attributed to that head.
 - `MEND-ADMIT-01` — implementation and auxiliary caps, UI serialization,
@@ -94,6 +98,11 @@ the ledger and in repair evidence.
    and host epilogue, then establish a public RED reproduction and repair the
    shared scheduler seam. Do not launch the action by hand: scheduler ownership
    remains intact.
+   Two known examples are structural contracts, not ad-hoc exceptions:
+   durable post-wave cleanup requests one immediate replay from the resulting
+   lane state, and an `orch-base-stale` decision at the current MR HEAD routes
+   the ticket to implementation reconciliation instead of the generic
+   MR-open repair back to review.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.
@@ -113,6 +122,9 @@ the ledger and in repair evidence.
    applicable planted mutation. Commit and push each verified fix before
    beginning the next one. Deploy a live runtime change only by a syntax-tested
    atomic integration while no lane can read a partially updated skill.
+   This feedback step is part of the default mend outcome under
+   `MEND-LEARN-01`; do not stop after making the current build move if the same
+   gap can recur on its next ticket or in another repository.
 7. For an inefficiency, record the measured cost and a falsifiable expected
    improvement. A narrative without a number is not an actionable optimization.
 8. Update `improvements-todo.md` after each meaningful transition. Use

@@ -114,6 +114,26 @@ def active_supervised_repair_of($notes):
      | sort_by([.at, -.i]) | last) as $repair
   | if $repair == null then null else ($repair | del(.i)) end;
 
+# A gate that deliberately returns a stale branch to implementation records
+# the decision against the exact MR head it inspected.  The marker remains
+# active only while that head is still current: reconciliation advances HEAD
+# and retires the instruction without a second tracker write.  Consumers:
+# snapshot.jq (suppress the false half-transition repair) and plan.jq (freeze
+# the reconciliation instruction into the implementation action).
+def active_base_reconcile_of($notes; $head):
+    ([$notes | to_entries[] | .key as $i | .value as $note
+      | [($note.body // "")
+         | scan("<!-- orch-base-stale ([0-9a-fA-F]{7,40}) base=([A-Za-z0-9._/-]+) behind=([0-9]+|unknown) -->")]
+      | to_entries[]
+      | {at: ($note.created_at // ""), i: $i, mi: .key,
+         body: ($note.body // ""), head: .value[0], base: .value[1],
+         behind: .value[2]}]
+     | map(select($head != null and
+                  (. as $m | ($head | startswith($m.head)) or
+                              ($m.head | startswith($head)))))
+     | sort_by([.at, -.i, .mi]) | last) as $stale
+  | if $stale == null then null else ($stale | del(.i, .mi)) end;
+
 # A lane can finish its paid provider job and durably write rc/outcome while
 # its host epilogue still owns the process id. It is then cleanup-eligible, not
 # capacity-bearing. Keep the two predicates shared because snapshot.jq reports

@@ -117,10 +117,11 @@ include "lib";
               | first) as $mr
       | ($mrs | map(select((.state // "") == "open")) | first | .sha // null) as $head
       | judged_at($notes; $head) as $judged
+      | active_base_reconcile_of($notes; $head) as $base_reconcile
       | if $busy or $state == "blocked" then []
         else
           [ (if $mr != null and (($state == "review" or $state == "merge-queue") | not)
-                and (($judged.verdict // "") != "FAIL")
+                and (($judged.verdict // "") != "FAIL") and $base_reconcile == null
              then {id: $iid, shape: "mr-open-not-in-review", state: $state, mr: $mr.id,
                    fix: "lane.sh transition \($iid) review"}
              else empty end),
@@ -355,6 +356,10 @@ include "lib";
             rejections: $rej,
             active_scope_reset: active_scope_reset_of((($N[$t.id | tostring]) // [])), # mutate:scope-reset-transport
             active_supervised_repair: active_supervised_repair_of((($N[$t.id | tostring]) // [])),
+            active_base_reconcile: (active_base_reconcile_of(
+                (($N[$t.id | tostring]) // []);
+                ((($M[$t.id | tostring]) // [])
+                 | map(select((.state // "") == "open")) | first | .sha // null))),
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),

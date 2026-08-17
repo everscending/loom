@@ -1048,7 +1048,7 @@ cmd_gate_base_check() { # <iid> — rc 0 current/unverifiable, rc 8 stale and re
     printf '%s\n\n%s\n\n%s\n' \
         "Gate preflight deferred this review without a rejection: pushed HEAD \`${head}\` is ${behind} commit(s) behind \`origin/${base}\`." \
         "The configured pregate and independent reviewer did not run against the obsolete base. Reconcile by running \`lane.sh reconcile\`, resolve any real conflict without rebasing, push the resulting merge commit, then submit the new HEAD for review." \
-        "This is base drift, not a failed implementation round." > "$note"
+        "This is base drift, not a failed implementation round.\n\n<!-- orch-base-stale ${head} base=${base} behind=${behind} -->" > "$note"
     cmd_transition "$iid" in-progress --note --file "$note"
     rm -f "$note"
     _mark_lane_outcome in-progress

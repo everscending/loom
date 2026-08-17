@@ -52,6 +52,13 @@ A finishing lane fires the next wave immediately, so the loop advances at the
 speed of work. The timer only covers the two things completion cannot signal:
 the initial kick, and resuming after a full stall. Redundant fires are safe — a
 tick landing mid-wave is remembered and replayed once when that wave exits.
+The same one-shot replay is requested when the durable post-wave boundary
+clears one or more completed lanes. The provider planned against the old lane
+set; cleanup can expose runnable work after the provider is gone, when no lane
+remains to hand off and the heartbeat is still inside the wave gap. Replanning
+once from that durable post-cleanup state closes the gap without a human or
+`mend` issuing a manual tick. Multiple cleanup requests in one batch coalesce
+to the same single replay.
 Every tick arms the backstop itself if none is armed, so a loop kicked by a
 manual `tick` acquires one; if launchd refuses, one push says so and the build
 is running unprotected. *(paid: a wave misread a permission denial as "never

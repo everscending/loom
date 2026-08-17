@@ -402,12 +402,16 @@ else
                            ticket_contract: (.contract // null),
                            active_scope_reset: (.active_scope_reset // null),
                            active_supervised_repair: (.active_supervised_repair // null),
+                           active_base_reconcile: (.active_base_reconcile // null),
                            inputs: ["ticket #\(.id) body",
                                     "the active scope reset in this action, when non-null — it overrides conflicting original ticket scope",
                                     "the active supervised repair in this action, when non-null — verified repair evidence that later rework must preserve",
+                                    "the active base reconciliation in this action, when non-null — merge the named origin base into the current branch, push the merge commit, and resubmit before changing ticket behavior",
                                     "the latest rejection comment on #\(.id)",
                                     "the build lessons thread"] } },
-         why: "stranded rework (round \((.rejections.total // 0) + 1), tier source `\(.tier_selection.source)`) — closest to done and its rejection cap is already counting" } ]
+         why: (if .active_base_reconcile != null
+               then "stale-base reconciliation — gate deferred HEAD \(.active_base_reconcile.head) until origin/\(.active_base_reconcile.base) is merged and the new HEAD is submitted"
+               else "stranded rework (round \((.rejections.total // 0) + 1), tier source `\(.tier_selection.source)`) — closest to done and its rejection cap is already counting" end) } ]
    + [ $ready_take[]
      | ("impl-\(.id)") as $lid
      | select(spawnable($lid))
