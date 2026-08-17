@@ -280,7 +280,7 @@ LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=lau
 for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/impl-94.pid" ] && break; sleep 0.05; done
 pid=$(cat "$LOOM_HOME/lanes/impl-94.pid" 2>/dev/null || echo "")
 program=$(plutil -convert json -o - "$LOOM_HOME/lanes/impl-94.plist" \
-  | jq -r '.ProgramArguments | map(select(contains("tick --from-lane"))) | first // ""')
+  | jq -r '.ProgramArguments | map(select(contains("chain-gate"))) | first // ""')
 impl_port=$(plutil -convert json -o - "$LOOM_HOME/lanes/impl-94.plist" \
   | jq -r '.ProgramArguments | map(select(startswith("PORT="))) | first // ""')
 kill "$pid" 2>/dev/null
@@ -292,13 +292,13 @@ for _ in $(seq 1 30); do [ -s "$LOOM_HOME/lanes/merge-94.pid" ] && break; sleep 
 merge_pid=$(cat "$LOOM_HOME/lanes/merge-94.pid" 2>/dev/null || echo "")
 merge_program=$(plutil -convert json -o - "$LOOM_HOME/lanes/merge-94.plist" \
   | jq -r '.ProgramArguments | map(select(contains("chain-merge"))) | first // ""')
-if printf '%s' "$program" | grep -q 'tick --from-lane' \
+if printf '%s' "$program" | grep -Eq "chain-gate '?impl-94'?" \
    && ! printf '%s' "$program" | grep -Fq '2>&1 &' \
    && printf '%s' "$merge_program" | grep -q 'chain-merge' \
    && ! printf '%s' "$merge_program" | grep -Fq '2>&1 &'; then
-  ok "launchd handoff: tick and merge successors stay supervised until they return"
+  ok "launchd handoff: gate and merge successors stay supervised until they return"
 else
-  bad "launchd handoff: a completion successor is backgrounded and launchd can reap it"
+  bad "launchd handoff: implementation does not directly chain its gate"
 fi
 kill "$merge_pid" 2>/dev/null
 LAUNCH_CALLS="$LAUNCH_CALLS" LAUNCHCTL_CMD="$LAUNCH_STUB" LOOM_LANE_LAUNCHER=launchd \

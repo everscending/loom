@@ -2210,18 +2210,28 @@ _spawn_build_epilogue() {
     # safe to detach here. Do this after releasing locks and before firing the
     # ordinary next wave.
     epi="$epi '$SELF_PATH' drain-lane-launches >>'$LOGS_DIR/lane-launches.log' 2>&1 || true; "
-    # P93: a merge lane's own exit tries to spawn its successor directly
+    # P93: a completed lane tries to spawn its deterministic successor directly
     # (chain-merge), released lock and all, INSTEAD of firing a whole wave to
     # rediscover a decision that is already deterministic. Gate exits use the
     # same narrow queue reader: a wave-authored gate brief can omit its PASS
     # handoff, but the oldest merge-queue ticket is still deterministic after
     # the verdict. Every other lane kind fires the ordinary wave. chain-merge's
     # own fallback is that same "tick --from-lane" line, for every way the fast
-    # path can decline (empty queue, no worktree, a refused spawn). (Paid for:
+    # path can decline (empty queue, no worktree, a refused spawn). An
+    # implementation lane similarly hands its ticket straight to chain-gate;
+    # the tracker write remains the authority, so a failed or blocked worker
+    # simply makes that narrow live read decline and fire the ordinary wave.
+    # (Paid for:
     # patient-imaging JOR-191 passed but its gate brief said "End after the
     # verdict", losing the direct merge handoff, 2026-08-16.)
     if [ "$on_done" -eq 1 ]; then
-        if [ "$merge_lock" -eq 1 ] || [ "$(_lane_type "$id")" = gate ]; then
+        if [ "$(_lane_type "$id")" = impl ]; then
+            if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+                epi="$epi LOOM_LANE_EPILOGUE=1 '$SELF_PATH' chain-gate '$id' >>'$LOGS_DIR/self-trigger.log' 2>&1 || true; "
+            else
+                epi="$epi( LOOM_LANE_EPILOGUE=1 '$SELF_PATH' chain-gate '$id' >>'$LOGS_DIR/self-trigger.log' 2>&1 & ); "
+            fi
+        elif [ "$merge_lock" -eq 1 ] || [ "$(_lane_type "$id")" = gate ]; then
             if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
                 # D-TICK-22: launchd owns the one-shot job's process group and
                 # reaps background descendants when the lane shell exits. Keep
@@ -2872,6 +2882,99 @@ _render_stream() { # _render_stream <jsonl> <log>
 # boundary and retains the detached fallback it has always used.
 _chain_merge_fallback() {
     _start_handoff_tick
+}
+
+# The implementation counterpart to chain-merge. The worker only owns the
+# tracker submit verb; this fresh host process owns the successor launch. Read
+# the ticket and MR live so a provider's prose, an old wave plan, or a delayed
+# epilogue can never manufacture a gate after the ticket moved on.
+cmd_chain_gate() { # <impl-lane-id>
+    local source="${1:-}" iid issue notes evidence tier mrs branch mr_head wt wt_head jqd
+    local gate_id scratch briefpath lane_tier defer_launch="${LOOM_DEFER_LANE_LAUNCH:-}" rc=0
+    local scope_body repair_body lane_path
+    case "$source" in impl-[0-9]*) iid="${source#impl-}" ;; *) _chain_merge_fallback; return 0 ;; esac
+    case "$iid" in ''|*[!0-9]*) _chain_merge_fallback; return 0 ;; esac
+    if _loop_stopped; then return 0; fi
+    _pause_on_lane_limit || :
+    _usage_gate || return 0
+    command -v jq >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
+    issue=$("$TRACKER_SH" issue "$iid" 2>>"$LOGS_DIR/self-trigger.log") \
+        || { _chain_merge_fallback; return 0; }
+    printf '%s' "$issue" | jq -e '
+      (.state // "open") == "open"
+      and (((.labels // []) | index("review")) != null)
+    ' >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
+    jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    tier=$(printf '%s' "$issue" | jq -r -L "$jqd" 'include "lib"; . as $t | $t | tier_of(.labels) // empty' 2>/dev/null)
+    [ -n "$tier" ] || { _chain_merge_fallback; return 0; }
+    # Scope resets replace ticket prose and completed supervised repairs are
+    # evidence the next independent reviewer must assess. Derive both from the
+    # live tracker thread with the exact shared ordering definitions used by
+    # snapshot.jq/plan.jq; a comment read failure declines the fast path rather
+    # than silently launching a reviewer with a stale contract.
+    notes=$("$TRACKER_SH" issue-notes "$iid" --limit 30 2>>"$LOGS_DIR/self-trigger.log") \
+        || { _chain_merge_fallback; return 0; }
+    evidence=$(printf '%s' "$notes" | jq -c -L "$jqd" '
+      include "lib";
+      {scope: active_scope_reset_of(.), repair: active_supervised_repair_of(.)}
+    ' 2>/dev/null) || { _chain_merge_fallback; return 0; }
+    scope_body=$(printf '%s' "$evidence" | jq -r '.scope.body // empty')
+    repair_body=$(printf '%s' "$evidence" | jq -r '.repair.body // empty')
+    mrs=$("$FORGE_SH" mr-for-ticket "$iid" 2>>"$LOGS_DIR/self-trigger.log") \
+        || { _chain_merge_fallback; return 0; }
+    branch=$(printf '%s' "$mrs" | jq -r '[.[] | select(.state == "open")][0].branch // empty' 2>/dev/null)
+    mr_head=$(printf '%s' "$mrs" | jq -r '[.[] | select(.state == "open")][0].sha // empty' 2>/dev/null)
+    [ -n "$branch" ] && [ -n "$mr_head" ] || { _chain_merge_fallback; return 0; }
+    wt="$(_worktree_for_branch "$REPO_ROOT" "$branch")"
+    [ -n "$wt" ] && [ -d "$wt" ] || { _chain_merge_fallback; return 0; }
+    wt_head=$(git -C "$wt" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    case "$wt_head:$mr_head" in "$mr_head":*|*:"$wt_head") ;; *) _chain_merge_fallback; return 0 ;; esac
+
+    # Reusing the base id is intentional. spawn-lane's ticket@HEAD lock is the
+    # cross-id authority when a scheduler raced us with gate-<iid>-rN, while a
+    # completed historical base id is safely rotated like every other respawn.
+    gate_id="gate-$iid"
+    scratch="$(_new_scratch "gate-chain-$iid")"
+    briefpath="$scratch/brief.md"
+    lane_path="$(dirname "$SELF_PATH")/lane.sh"
+    {
+        printf '# Independent gate for ticket #%s\n\n' "$iid"
+        printf 'Review the implementation at immutable MR HEAD `%s` in this worktree. Do not implement fixes. Inspect the complete diff against `%s`, then test the highest-risk acceptance and adversarial seams that are not already established by the host pregate.\n\n' "$mr_head" "$(_detect_base "$REPO_ROOT")"
+        printf '## Ticket title\n\n%s\n\n## Ticket body and acceptance contract\n\n%s\n' \
+            "$(printf '%s' "$issue" | jq -r '.title // ""')" \
+            "$(printf '%s' "$issue" | jq -r '.body // ""')"
+        if [ -n "$scope_body" ]; then
+            printf '\n## Active supervisor rescope (tracker evidence)\n\nThis replaces any conflicting scope in the original ticket body:\n\n%s\n' "$scope_body"
+        fi
+        if [ -n "$repair_body" ]; then
+            printf '\n## Active supervised repair (tracker evidence)\n\nReview the repaired HEAD against this completed repair record:\n\n%s\n' "$repair_body"
+        fi
+        printf '\n## Required tracker verdict\n\n'
+        printf 'Write the review body to a scratch file, then run exactly one of these commands before exit. The SHA is immutable; do not substitute the worktree HEAD at verdict time.\n\n'
+        printf -- '- PASS: `%s verdict %s pass %s --file <verdict-body-file>`\n' "$lane_path" "$iid" "$mr_head"
+        printf -- '- FAIL: `%s verdict %s fail %s --class <kebab-defect-class> --file <verdict-body-file>`\n\n' "$lane_path" "$iid" "$mr_head"
+        printf 'One prose PASS/FAIL is not a verdict. Issue exactly one tracker verdict. Do not construct or launch a merge command; the host epilogue owns `chain-merge` after this gate exits.\n'
+    } > "$briefpath" || { _chain_merge_fallback; return 0; }
+    lane_tier="$(cfg lane_tier medium)"
+    _codex_host_is_ephemeral && defer_launch=1
+    LOOM_DEFER_LANE_LAUNCH="$defer_launch" \
+      "$SELF_PATH" spawn-lane "$gate_id" --cwd "$wt" --brief "$briefpath" \
+        --provider "${LOOM_PROVIDER:-}" --job gate --tier "$lane_tier" --pregate "$tier" \
+        >>"$LOGS_DIR/self-trigger.log" 2>&1 || rc=$?
+
+    # A duplicate loser is success: the ticket@HEAD owner is already doing the
+    # review. A deferred request is likewise a durable reservation. Any other
+    # refusal (notably a busy UI resource) must wake the ordinary planner so the
+    # handoff is not lost merely because this narrow fast path declined.
+    if _gate_lock_owner "$iid@$wt_head" >/dev/null 2>&1; then return 0; fi
+    local request queued_id
+    for request in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
+        [ -d "$request" ] || continue
+        queued_id=$(cat "$request/id" 2>/dev/null || true)
+        [ "$queued_id" = "$gate_id" ] && return 0
+    done
+    _chain_merge_fallback
+    return "$rc"
 }
 
 # P93: the merge lane's post-exit hook calls this INSTEAD of firing a wave,
@@ -4920,5 +5023,6 @@ case "${1:-}" in
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
+    chain-gate) shift; cmd_chain_gate "$@" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac
