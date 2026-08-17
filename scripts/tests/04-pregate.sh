@@ -102,6 +102,44 @@ grep -q '"ev":"pregate_reduced"' "$LOOM_HOME/events.jsonl" 2>/dev/null \
 grep -q "reduced to review-only" "$LOOM_HOME/logs/lane-gate-41.log" 2>/dev/null \
     && bad "pregate-reduced: a present runner still declared a reduction" \
     || ok "pregate-reduced: a present runner declares nothing — the line means what it says"
+
+# D-TICK-43: UI is the mechanically derived floor for a ticket whose
+# acceptance requires Playwright. Unlike lower tiers, reducing a missing UI
+# runner to prose review would start a sandboxed reviewer with no browser
+# evidence and invite it to launch Chromium itself. Fail closed at the host
+# boundary and never start that provider session.
+UI_RAN="$T/ui-review-without-host-evidence"; rm -f "$UI_RAN"
+printf '%s\n' 'Review the browser acceptance contract.' > "$T/ui-review-source.md"
+printf '#!/bin/sh\ntouch %q\n' "$UI_RAN" > "$T/ui-review-provider.sh"
+chmod +x "$T/ui-review-provider.sh"
+"$TICK" spawn-lane gate-145 --no-tick --pregate ui --cwd "$WT" \
+  --brief "$T/ui-review-source.md" -- "$T/ui-review-provider.sh" -p @brief >/dev/null
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-145.rc" ] && break; sleep 0.1; done
+if [ ! -f "$UI_RAN" ] \
+   && [ "$(cat "$LOOM_HOME/lanes/gate-145.rc" 2>/dev/null)" = 7 ] \
+   && grep -q "required host UI evidence is absent" "$LOOM_HOME/logs/lane-gate-145.log" 2>/dev/null \
+   && grep -q "never launch Playwright/Chromium from this reviewer sandbox" "$LOOM_HOME/briefs/gate-145.md" 2>/dev/null; then
+    ok "D-TICK-43: missing UI runner fails closed before sandboxed review"
+else
+    bad "D-TICK-43: reviewer started without host UI evidence (rc=$(cat "$LOOM_HOME/lanes/gate-145.rc" 2>/dev/null))"
+fi
+
+UI_EVIDENCE_MUTANT=$(mirror_scripts "$T/ui-evidence-mutant")
+sed 's/rejecting before sandboxed review (JOR-294) ---"; _rc=7;/rejecting before sandboxed review (JOR-294) ---"; _rc=0;/' \
+  "$UI_EVIDENCE_MUTANT/tick.sh" > "$UI_EVIDENCE_MUTANT/tick.sh.mut"
+mv "$UI_EVIDENCE_MUTANT/tick.sh.mut" "$UI_EVIDENCE_MUTANT/tick.sh"
+chmod +x "$UI_EVIDENCE_MUTANT/tick.sh"
+UI_MUTANT_RAN="$T/ui-mutant-review-ran"; rm -f "$UI_MUTANT_RAN"
+printf '#!/bin/sh\ntouch %q\n' "$UI_MUTANT_RAN" > "$T/ui-mutant-provider.sh"
+chmod +x "$T/ui-mutant-provider.sh"
+"$UI_EVIDENCE_MUTANT/tick.sh" spawn-lane gate-146 --no-tick --pregate ui --cwd "$WT" -- \
+  "$T/ui-mutant-provider.sh" >/dev/null
+for _ in $(seq 1 60); do [ -f "$LOOM_HOME/lanes/gate-146.rc" ] && break; sleep 0.1; done
+if [ -f "$UI_MUTANT_RAN" ]; then
+    ok "D-TICK-43 violation: removing fail-closed rc recreates sandbox review without host UI evidence"
+else
+    bad "D-TICK-43 violation: planted fail-open mutation did not reach the reviewer seam"
+fi
 rm -f "$GWT/RED"
 
 # 4i6. A respawned lane must NOT inherit the previous run's exit code. Rotating

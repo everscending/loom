@@ -75,7 +75,8 @@ cat > "$FX/open.json" <<'EOF'
  {"iid":28,"title":"Second in queue's blocker","project_id":1,"web_url":"https://x/28",
   "labels":["build-9","merge-queue","tier::logic"],"assignees":[],"updated_at":"2026-08-10T02:00:00Z"},
  {"iid":30,"title":"Newer, behind 28","project_id":1,"web_url":"https://x/30",
-  "labels":["build-9","merge-queue","tier::api"],"assignees":[],"updated_at":"2026-08-10T03:00:00Z"}
+  "labels":["build-9","merge-queue","tier::api"],"assignees":[],"updated_at":"2026-08-10T03:00:00Z",
+  "description":"## Risk tier\n\napi\n\n## Mandatory adversarial tests\n\n- [ ] e2e/e2-wiring.spec.ts rejects an expired session"}
 ]
 EOF
 cat > "$FX/mrs-28.json" <<'EOF'
@@ -116,8 +117,8 @@ if [ "$rc" = 0 ] && jq -e . "$T/mq.json" >/dev/null 2>&1; then
     [ "$(jq -r '.[0].branch' "$T/mq.json")" = "ticket-28" ] \
         && ok "merge-queue: the head names its MR's branch" \
         || bad "merge-queue: branch missing or wrong ($(jq -c '.[0]' "$T/mq.json"))"
-    [ "$(jq -c '[.[].tier]' "$T/mq.json")" = '["logic","api"]' ] \
-        && ok "merge-queue: the narrow read carries each ticket's gate tier" \
+    [ "$(jq -c '[.[].tier]' "$T/mq.json")" = '["logic","ui"]' ] \
+        && ok "D-TICK-43: narrow merge read raises mandatory browser evidence to UI" \
         || bad "merge-queue: gate tiers missing ($(jq -c . "$T/mq.json"))"
 else
     bad "merge-queue: read failed rc=$rc ($(cat "$T/mq.err"))"

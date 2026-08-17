@@ -107,6 +107,14 @@ rediscover a figure the closing lane already knew.)*
 `docs | logic | api | ui` — one word. Selects the gate suite from
 `.loom.yml`. When in doubt between two tiers, take the higher.
 
+When Acceptance criteria or Mandatory adversarial tests explicitly name
+Playwright or an `e2e/*.spec.*` test, Loom mechanically raises the effective
+host pregate/admission tier to `ui` without rewriting this section. UI scope
+rules then apply; cross-tree paths remain legal when the ticket names them.
+A missing UI runner fails closed before the review provider starts; browser
+evidence is never reconstructed inside an agent sandbox. *(Paid: Patient
+Imaging Portal JOR-294.)*
+
 ## PRD requirement
 
 The requirement ID(s) from the spec this ticket satisfies. The

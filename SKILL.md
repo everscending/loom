@@ -245,6 +245,13 @@ refuses outside herdr anyway.
 
    `--pregate` runs the repo's own gate runner in shell first, so a
    mechanically red branch exits 7 in seconds having spent no model time.
+   A ticket whose acceptance or mandatory adversarial contract explicitly
+   names Playwright or an `e2e/*.spec.*` test has UI as its minimum pregate
+   even when its implementation risk tier is API. The host browser result is
+   authoritative; a missing UI runner fails closed before review, and the
+   reviewer never substitutes Chromium inside its provider sandbox. *(paid:
+   Patient Imaging Portal JOR-294 was API-gated, omitted its named browser
+   proof, and sent the reviewer into sandbox-denied Chromium.)*
    Never reimplement gate-running in the skill; CI runs the same runner. Past
    it, the session does the ticket's **single** independent `/code-review` +
    PRD-faithfulness check against its `PRD requirement`, plus **scope**: the

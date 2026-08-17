@@ -276,6 +276,72 @@ act() { # act <step> <kind> → the subjects, comma-separated, in plan order
 [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate')" = "logic" ] \
     && ok "plan: the gate spawn carries the ticket's own tier as its pregate" \
     || bad "plan: gate pregate wrong ($(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.pregate'))"
+
+# D-TICK-43: JOR-294 declared `api`, but its mandatory acceptance named a
+# Playwright e2e spec. The API host pregate therefore omitted the required
+# browser proof, and the sandboxed reviewer tried (and was unable) to launch
+# Chromium itself. The contract raises the minimum gate/admission tier to UI
+# at the provider-neutral planner seam without rewriting tracker prose.
+jq '
+  .tickets = [(.tickets[] | select(.id == 39)
+    | .tier = "api"
+    | .contract = "## Acceptance criteria\n\n- [ ] `npx playwright test e2e/e2-wiring.spec.ts --project=e2-wiring` passes\n\n## Risk tier\n\napi")]
+  | .lanes = [] | .epics = [] | .supervised_leases = []
+  | .config.max_aux_lanes = 1
+  | .summary = {"open_tickets":1,"lanes_running":0,"impl_slots_free":0,
+                "merge_in_flight":false,"stranded":[],"repairs":[],
+                "epics_awaiting_probe":[],"ready_set_empty":true,
+                "ui_pregate_occupied":false}
+' "$FX/snap.json" > "$FX/snap-playwright-api-gate.json"
+PLAN "$FX/snap-playwright-api-gate.json" > "$T/plan-playwright-api-gate.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-api-gate.json")" = ui ]; then
+    ok "D-TICK-43: API ticket with mandatory Playwright acceptance is host-gated as UI"
+else
+    bad "D-TICK-43: mandatory browser proof stayed on an API pregate ($(jq -c '.actions' "$T/plan-playwright-api-gate.json"))"
+fi
+
+jq '
+  .tickets = [(.tickets[] | select(.id == 48 and .state == "merge-queue")
+    | .tier = "api"
+    | .contract = "## Mandatory adversarial tests\n\n- [ ] e2e/e2-wiring.spec.ts rejects an expired session\n\n## Risk tier\n\napi")]
+  | .lanes = [] | .epics = [] | .supervised_leases = []
+  | .config.max_aux_lanes = 1
+  | .summary = {"open_tickets":1,"lanes_running":0,"impl_slots_free":0,
+                "merge_in_flight":false,"stranded":[],"repairs":[],
+                "epics_awaiting_probe":[],"ready_set_empty":true,
+                "ui_pregate_occupied":false}
+' "$FX/snap.json" > "$FX/snap-playwright-api-merge.json"
+PLAN "$FX/snap-playwright-api-merge.json" > "$T/plan-playwright-api-merge.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="merge-48") | .spawn.pregate' "$T/plan-playwright-api-merge.json")" = ui ]; then
+    ok "D-TICK-43: merge preflight preserves mandatory host browser proof"
+else
+    bad "D-TICK-43: merge preflight downgraded mandatory browser proof ($(jq -c '.actions' "$T/plan-playwright-api-merge.json"))"
+fi
+
+jq '
+  .tickets[0].contract = "## Context\n\nThe API is consumed by e2e/e2-wiring.spec.ts later.\n\n## Acceptance criteria\n\n- [ ] The JSON response is stable"
+' "$FX/snap-playwright-api-gate.json" > "$FX/snap-playwright-context-only.json"
+PLAN "$FX/snap-playwright-context-only.json" > "$T/plan-playwright-context-only.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-context-only.json")" = api ]; then
+    ok "D-TICK-43: incidental e2e context does not promote an API acceptance contract"
+else
+    bad "D-TICK-43: non-mandatory browser prose caused a false UI promotion"
+fi
+
+# Planted violation: remove only the browser-derived gate floor. Both public
+# fixture plans must return to API, proving the assertions above observe the
+# owning rule instead of some unrelated UI default.
+BROWSER_TIER_MUTANT=$(mirror_scripts "$T/browser-tier-mutant")
+sed 's/if \$declared != null and requires_browser_evidence then "ui" else \$declared end;/\$declared; # mutate:browser-tier-floor/' \
+  "$BROWSER_TIER_MUTANT/lib.jq" > "$BROWSER_TIER_MUTANT/lib.jq.mut"
+mv "$BROWSER_TIER_MUTANT/lib.jq.mut" "$BROWSER_TIER_MUTANT/lib.jq"
+"$BROWSER_TIER_MUTANT/tick.sh" plan "$FX/snap-playwright-api-gate.json" \
+  > "$T/plan-playwright-api-mutant.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-api-mutant.json")" = api ]; then
+    ok "D-TICK-43 violation: deleting the browser floor recreates API-only admission"
+else
+    bad "D-TICK-43 violation: planted browser-floor deletion did not recreate the defect"
+fi
 # Live brief shape: both dependents are filtered out of tickets[] and survive
 # only in dependency_edges. With one aux slot, #289 must outrank older #239.
 jq '

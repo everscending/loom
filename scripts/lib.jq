@@ -45,6 +45,21 @@ def tier_of($labels):
     // ($labels | map(select(test("^(tier::)?(docs|logic|api|ui)$")) | ltrimstr("tier::"))
                 | first) // null;
 
+# A ticket can be classified as API work while its acceptance contract still
+# requires browser evidence. JOR-294 was exactly that shape: its declared API
+# pregate omitted the named Playwright spec, so the sandboxed reviewer tried to
+# launch Chromium and hit macOS sandbox permissions. Keep the declared tracker
+# text intact, but never select less than the UI gate/admission/scope tier when
+# an acceptance/adversarial section explicitly names Playwright or an e2e spec.
+# Consumers: snapshot/plan plus both direct gate/merge chains.
+def requires_browser_evidence:
+    (.contract // .body // .description // "") as $contract
+    | ((($contract | section("Acceptance criteria")) + "\n"
+        + ($contract | section("Mandatory adversarial tests")))
+       | test("(?i)(\\bplaywright\\b|(?:^|[^A-Za-z0-9_.-])e2e/[A-Za-z0-9_./-]+\\.spec\\.(?:[cm]?[jt]sx?))"));
+def minimum_pregate_tier($declared):
+    if $declared != null and requires_browser_evidence then "ui" else $declared end;
+
 # The gate verdict trailer, in one regex. Emits [verdict, sha, class], class
 # null when the trailer carries none — a PASS never does (lane.sh strips one
 # that rides along) and a FAIL always does. Consumers: snapshot.jq's

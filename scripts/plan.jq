@@ -57,6 +57,8 @@ def spawnable($id):
 # `stage` — one shape of id, read the same way everywhere.
 def lane_ticket($id): $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
+def planned_pregate_tier:
+    . | minimum_pregate_tier(.pregate_tier // .tier);
 def lease_why:
     "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation, gate and merge launches wait for release or expiry";
 
@@ -296,6 +298,7 @@ else
 
   ([ $tickets[] | select(.gate.eligible // false)
      | . + {
+         _pregate_tier: planned_pregate_tier,
          _dependency_releases: released_dependents_of(.id),
          _dependency_impacts: open_dependents_of(.id)
        } ]
@@ -307,20 +310,20 @@ else
 # already sees an owner must not spend a wave attempting every UI candidate.
 # When free, select the highest-priority UI gate once and let API gates retain
 # their normal parallelism and dependency-priority order.
-| ([ $gate_all[] | select(.tier == "ui") ] | first | .id) as $first_ui_gate
+| ([ $gate_all[] | select(._pregate_tier == "ui") ] | first | .id) as $first_ui_gate
 | (if $ui_pregate_occupied then null else $first_ui_gate end) as $selected_ui_gate
 | ([ $gate_all[]
-     | select(.tier != "ui"
+     | select(._pregate_tier != "ui"
               or ($selected_ui_gate != null and .id == $selected_ui_gate)) ]) as $gate_admissible
 | ([ $gate_all[]
-     | select(.tier == "ui"
+     | select(._pregate_tier == "ui"
               and ($selected_ui_gate == null or .id != $selected_ui_gate)) ]) as $gate_ui_wait
 | ($gate_admissible[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
      | (gate_lane(.id)) as $lid
      | select(spawnable($lid))
      | { step: "gate", kind: "spawn", lane: $lid, ticket: .id,
-         spawn: { id: $lid, type: "gate", provider: $provider, tier: $lane_tier, pregate: .tier,
+         spawn: { id: $lid, type: "gate", provider: $provider, tier: $lane_tier, pregate: ._pregate_tier,
                   merge_lock: false, expected_head: .gate.head,
                   cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                   brief: { step: 3,
@@ -474,12 +477,12 @@ else
 | (any($gate_actions[]; .spawn.pregate == "ui")) as $planned_ui_gate
 | ($ui_pregate_occupied or $planned_ui_gate) as $ui_reserved_after_gate
 | (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1
-       or ($merge_head.tier == "ui" and $ui_reserved_after_gate) then []
+       or (($merge_head | planned_pregate_tier) == "ui" and $ui_reserved_after_gate) then []
    else [ $merge_head
           | ("merge-\(.id)") as $lid
           | select(spawnable($lid))
           | { step: "merge", kind: "spawn", lane: $lid, ticket: .id,
-              spawn: { id: $lid, type: "merge", provider: $provider, tier: $lane_tier, pregate: .tier,
+              spawn: { id: $lid, type: "merge", provider: $provider, tier: $lane_tier, pregate: planned_pregate_tier,
                        merge_lock: true,
                        cwd_from: "the ticket's existing lane worktree (MR branch \(([.related_merge_requests[] | select(.state == "open") | .branch] | first) // "unknown"))",
                        brief: { step: 5,
@@ -495,7 +498,7 @@ else
    + (if ($sum.merge_in_flight // false)
       then [ { step: "merge",
                why: "a merge lane already holds the merge lock — a second merge waits" } ]
-      elif $merge_head != null and $merge_head.tier == "ui" and $ui_reserved_after_gate
+      elif $merge_head != null and ($merge_head | planned_pregate_tier) == "ui" and $ui_reserved_after_gate
       then [ { step: "merge", ticket: $merge_head.id,
                why: "UI host resource already reserved by live, queued, or planned UI work" } ]
       elif $merge_head != null and $aux_left < 1

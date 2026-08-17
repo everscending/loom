@@ -5,6 +5,9 @@
 git -C "$LOOM_REPO" config user.email loom@test
 git -C "$LOOM_REPO" config user.name loom
 printf 'implementation\n' > "$LOOM_REPO/product.txt"
+mkdir -p "$LOOM_REPO/scripts"
+printf '#!/bin/sh\nexit 0\n' > "$LOOM_REPO/scripts/gate.sh"
+chmod +x "$LOOM_REPO/scripts/gate.sh"
 git -C "$LOOM_REPO" add .
 git -C "$LOOM_REPO" commit -qm seed
 git -C "$LOOM_REPO" branch -M loom-236
@@ -149,6 +152,35 @@ else
     bad "implementation handoff: deferred path lost its gate metadata or brief"
 fi
 [ -z "$request" ] || mv "$request" "$LOOM_HOME/lane-launch-queue/consumed-test-request"
+
+# D-TICK-43: direct implementation handoff is a fast path around plan.jq, so
+# it must derive the same minimum host gate from the frozen live contract. An
+# API implementation whose acceptance explicitly names Playwright still queues
+# a UI pregate; otherwise the reviewer is forced to try Chromium in its sandbox.
+CHAIN_BROWSER_TRACKER="$T/chain-browser-tracker.sh"
+cat > "$CHAIN_BROWSER_TRACKER" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  issues-open) printf '%s\n' '[{"id":9,"title":"Build 9","state":"open","labels":["provider::claude"]}]' ;;
+  issue)
+    printf '%s\n' '{"id":238,"title":"API wiring with browser acceptance","state":"open","labels":["review"],"body":"## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] `npx playwright test e2e/e2-wiring.spec.ts --project=e2-wiring` passes"}' ;;
+  issue-notes) printf '%s\n' '[]' ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$CHAIN_BROWSER_TRACKER"
+TRACKER_CMD="$CHAIN_BROWSER_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+  LOOM_LANE_ID=impl-238 LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" chain-gate impl-238 >/dev/null
+browser_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ -n "$browser_request" ] \
+   && [ "$(cat "$browser_request/id" 2>/dev/null)" = gate-238 ] \
+   && [ "$(cat "$browser_request/pregate" 2>/dev/null)" = ui ]; then
+    ok "D-TICK-43: direct gate chain promotes mandatory Playwright evidence to the host UI pregate"
+else
+    bad "D-TICK-43: direct gate chain left mandatory browser evidence below UI"
+fi
+[ -z "$browser_request" ] || mv "$browser_request" "$LOOM_HOME/lane-launch-queue/consumed-browser-request"
 
 # Planted violation: remove only the implementation epilogue's chain-gate
 # branch. The same launch plist seam that caught D-TICK-33 must lose the direct

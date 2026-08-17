@@ -333,6 +333,10 @@ include "lib";
            | unique | length) as $file_surface
         | { id: $t.id, title: $t.title, url: ($t.url // null), labels: $lb,
             state: state_of($lb), tier: ($t | tier_of($lb)),
+            # Preserve declared ticket metadata in `tier`; `pregate_tier` is
+            # the effective host gate/admission/scope tier. An API change can
+            # still require a host-owned Playwright acceptance spec (JOR-294).
+            pregate_tier: ($t | minimum_pregate_tier($t | tier_of($lb))),
             fix: (($lb | index("fix")) != null),
             assignees: ($t.assignees // []),
             updated_at: ($t.updated_at // null),

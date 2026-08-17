@@ -29,7 +29,10 @@ include "lib";
     | select(state_of(.labels // []) == "merge-queue")
     | . as $t
     | { id: $t.id,
-        tier: ($t | tier_of($t.labels // [])),
+        # `tier` is the host pregate tier consumed by chain-merge. Keep the
+        # declared tracker text intact while raising browser acceptance and
+        # gate scope to UI exactly as snapshot/plan and chain-gate do (JOR-294).
+        tier: ($t | minimum_pregate_tier(tier_of($t.labels // []))),
         branch: ((($M[$t.id | tostring]) // [])
                  | map(select((.state // "") == "open")) | first | .branch // null),
         merge_attempts: merge_attempts_of(($N[$t.id | tostring]) // []),
