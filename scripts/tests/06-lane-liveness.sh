@@ -536,6 +536,41 @@ kill "$(cat "$LOOM_HOME/lanes/gate-36.pid" 2>/dev/null)" 2>/dev/null
 # 6. ntfy: payload carries event/title/click; unconfigured events do not fire.
 STUB="$T/ntfy-stub.sh"; CAP="$T/ntfy-capture"
 printf '#!/bin/sh\necho "$@" >> "%s"\n' "$CAP" > "$STUB"; chmod +x "$STUB"
+
+# D-TICK-30: notify is a public CLI used by model-authored waves. Missing or
+# partial arguments must stop at that boundary with named usage—not fall
+# through set -u as an unbound positional—and must write neither transport nor
+# local ticker side effects.
+MAL_HOME="$T/ntfy-malformed-home"; mkdir -p "$MAL_HOME"; : > "$CAP"
+malformed_ok=1
+for arity in 0 1 2; do
+    case "$arity" in
+        0) mal_out=$(LOOM_HOME="$MAL_HOME" NTFY_CMD="$STUB" "$TICK" notify 2>&1); mal_rc=$? ;;
+        1) mal_out=$(LOOM_HOME="$MAL_HOME" NTFY_CMD="$STUB" "$TICK" notify ticket_blocked 2>&1); mal_rc=$? ;;
+        2) mal_out=$(LOOM_HOME="$MAL_HOME" NTFY_CMD="$STUB" "$TICK" notify ticket_blocked "Ticket blocked" 2>&1); mal_rc=$? ;;
+    esac
+    if [ "$mal_rc" -eq 0 ] || ! printf '%s' "$mal_out" | grep -q 'notify: usage:' \
+       || printf '%s' "$mal_out" | grep -qi 'unbound variable'; then
+        malformed_ok=0
+    fi
+done
+if [ "$malformed_ok" = 1 ] && [ ! -s "$CAP" ] && [ ! -s "$MAL_HOME/events.jsonl" ]; then
+    ok "notify CLI: missing and partial arguments fail with named usage and no side effects"
+else
+    bad "notify CLI: malformed call crashed or emitted side effects (out=$mal_out; transport=$(cat "$CAP" 2>/dev/null); events=$(cat "$MAL_HOME/events.jsonl" 2>/dev/null))"
+fi
+
+# Planted violation: remove the arity boundary from a private scripts copy.
+# The zero-argument public call must regress to set -u's unbound positional,
+# proving the clean refusal above comes from the guard rather than the shell.
+MUT_NOTIFY=$(mirror_scripts "$T/mut-notify-arity")
+sed -i.bak '/# D-TICK-30$/d' "$MUT_NOTIFY/tick.sh"
+mut_out=$(LOOM_HOME="$T/mut-notify-home" NTFY_CMD="$STUB" "$MUT_NOTIFY/tick.sh" notify 2>&1); mut_rc=$?
+if [ "$mut_rc" -ne 0 ] && printf '%s' "$mut_out" | grep -qi 'unbound variable'; then
+    ok "notify CLI violation: removing the boundary recreates the set -u crash"
+else
+    bad "notify CLI violation: arity mutant did not recreate the crash (rc=$mut_rc; out=$mut_out)"
+fi
 NTFY_CMD="$STUB" "$TICK" notify ticket_blocked "T87 blocked" "missing decision" "https://x/87" >/dev/null
 if grep -q "X-Orch-Event: ticket_blocked" "$CAP" && grep -q "Click: https://x/87" "$CAP" && grep -q "test-topic" "$CAP"; then
     ok "ntfy: configured event fired with event header, click url, topic"

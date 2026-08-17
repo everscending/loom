@@ -3305,6 +3305,7 @@ cmd_kill_lane() { # kill-lane <id> — kill the lane's WHOLE process tree, then 
 }
 
 cmd_notify() {
+    case "$#" in 3|4) ;; *) die "notify: usage: tick.sh notify <event> <title> <body> [url]" ;; esac # D-TICK-30
     local event="$1" title="$2" body="$3" click="${4:-}"
     # P85: a build that reports complete while leaving worktrees behind is
     # reporting on part of its own work. build-5 posted its completion report
