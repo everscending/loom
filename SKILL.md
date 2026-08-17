@@ -218,7 +218,10 @@ refuses outside herdr anyway.
    Two residue kinds come out of the harvest, and each needs a reader. A
    `pregate-rejection` is a lane that exited **rc 7** — its pregate rejected
    the branch, not a crash: post the rejection straight from the lane log, no
-   verifier. A `merge-failed` needs the ticket **re-checked live first** —
+   verifier. Use only the concrete `.sha` and `.verb` carried by that residue;
+   they name the immutable HEAD captured when the lane launched. If `.sha` or
+   `.verb` is null, refuse the classification — never re-read the mutable
+   worktree HEAD. A `merge-failed` needs the ticket **re-checked live first** —
    chained lanes land while a wave is mid-flight, so `merge-queue` in a
    snapshot is not evidence a merge did not happen — then
    `lane.sh merge-failed <iid>` (body: what it died on). Both verbs refuse the

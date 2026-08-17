@@ -201,10 +201,17 @@ else
 # can turn into a rejection comment, so it is residue by construction.
 | ([ $lanes[] | select(.state == "dead" and .rc == "7")
      | select(ticket(lane_ticket(.id)) != null)
-     | { kind: "pregate-rejection", ticket: (lane_ticket(.id) | tonumber), lane: .id,
+     | ((.head // "")
+        | if type == "string" and test("^[0-9a-f]{40}([0-9a-f]{24})?$") then . else null end) as $head
+     | (lane_ticket(.id) | tonumber) as $iid
+     | { kind: "pregate-rejection", ticket: $iid, lane: .id, sha: $head,
          log: "\($logs)/lane-\(.id).log",
-         why: "rc 7 = the pregate rejected the branch, not a crash — post the rejection from the lane log, no verifier",
-         verb: "lane.sh verdict <iid> fail <head-sha> --class <slug> (reuse the previous class when it is the same failure)" } ])
+         why: (if $head != null
+               then "rc 7 = the pregate rejected the branch at immutable launch HEAD \($head), not a crash — post the rejection from the lane log, no verifier"
+               else "rc 7 says the pregate rejected, but this lane has no immutable launch HEAD — refuse classification; never substitute the mutable worktree HEAD" end),
+         verb: (if $head != null
+                then "lane.sh verdict \($iid) fail \($head) --class <slug> (reuse the previous class when it is the same failure)"
+                else null end) } ])
   as $res_pregate
 
 # A dead merge lane whose ticket is still `merge-queue` did not merge — but

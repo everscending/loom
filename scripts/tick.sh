@@ -2079,7 +2079,7 @@ BRIEFEOF
     if [ "$(_lane_type "$id")" = gate ]; then
         local _verdict_ticket="${id#gate-}" _verdict_head=""
         _verdict_ticket="${_verdict_ticket%-r[0-9]*}"
-        _verdict_head=$(git -C "$abs" rev-parse HEAD 2>/dev/null || echo HEAD)
+        _verdict_head="${lane_head:-HEAD}"
         if [ -n "$pregate" ]; then
             cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - The host runs the configured $pregate pregate before this review session. If the provider session starts, that host-owned check passed or explicitly declared a missing-runner reduction in the lane log; the branch was not mechanically rejected. Do not rerun that full tier. Treat the pregate as the deterministic suite evidence and spend this session only on focused adversarial checks, inspection, and the independent verdict.
@@ -2325,7 +2325,7 @@ _cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" brief="" provider="" job="" agent_tier="" lane_head="" _spawn_shift=0
     local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
@@ -2544,6 +2544,13 @@ _cmd_spawn_lane() {
         _queue_lane_launch
         return 0
     fi
+    # D-TICK-27: evidence produced by this run belongs to the commit present at
+    # this launch boundary, not whichever commit the mutable worktree happens
+    # to hold when a later wave harvests it. Capture once for every launcher
+    # and provider; the gate brief, gate lock and durable lane metadata below
+    # all consume this same value. A non-git cwd has no attributable HEAD and
+    # is recorded as such rather than guessed at classification time.
+    lane_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     # Brief staging (P28/P68/P31) — validates, copies and appends in
     # _spawn_stage_brief, which hands the rewritten command back in _SPAWN_ARGS.
     _spawn_stage_brief "$@"; set -- "${_SPAWN_ARGS[@]}"
@@ -2596,7 +2603,7 @@ _cmd_spawn_lane() {
     if [ "$(_lane_type "$id")" = "gate" ]; then
         local _gticket="${id#gate-}" _ghead
         _gticket="${_gticket%-r[0-9]*}"
-        _ghead=$(git -C "$abs" rev-parse HEAD 2>/dev/null || echo "")
+        _ghead="$lane_head"
         if [ -n "$_ghead" ]; then
             gate_lock_key="$_gticket@$_ghead"
             _gate_lock_reserve "$gate_lock_key" \
@@ -2645,6 +2652,11 @@ _cmd_spawn_lane() {
     rm -f "$LANES_DIR/$id.rc" "$LANES_DIR/$id.outcome"
     printf '%s\n' "$lane_port" > "$LANES_DIR/$id.port"
     printf '%s\n' "$abs" > "$LANES_DIR/$id.cwd"
+    if [ -n "$lane_head" ]; then
+        printf '%s\n' "$lane_head" > "$LANES_DIR/$id.head"
+    else
+        rm -f "$LANES_DIR/$id.head"
+    fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a
@@ -2690,7 +2702,7 @@ _cmd_spawn_lane() {
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
             rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
-                  "$LANES_DIR/$id.pregate"
+                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
             echo "spawn-lane: launchd refused supervised lane '$id'" >&2
@@ -2707,7 +2719,7 @@ _cmd_spawn_lane() {
     if [ ! -s "$LANES_DIR/$id.pid" ]; then
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
-        rm -f "$LANES_DIR/$id.pregate"
+        rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.head"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
     fi
@@ -3076,10 +3088,11 @@ cmd_lane_status() {
         # a spend signal, not a liveness one — `-` when no stamp exists yet.
         # `cost` (P55) comes from canonical provider-reported usage, so a
         # running build shows known spend next to progress and null otherwise.
-        # `outcome` is last so every prior column remains stable; the planner
-        # uses it to distinguish an already-recorded merge failure from an
-        # unhandled dead merge lane.
-        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl") $(cat "$LANES_DIR/$id.outcome" 2>/dev/null || echo none)"
+        # `outcome` and immutable launch `head` are appended so every prior
+        # column remains stable. The planner uses them to distinguish an
+        # already-recorded merge failure and to attribute delayed pregate
+        # evidence without re-reading the mutable worktree.
+        echo "$id $pid $state $(_lane_type "$id" || echo unknown) $(cat "$LANES_DIR/$id.rc" 2>/dev/null || echo -) $(cat "$LANES_DIR/$id.progress" 2>/dev/null || echo -) $(_lane_cost "$LOGS_DIR/lane-$id.jsonl") $(cat "$LANES_DIR/$id.outcome" 2>/dev/null || echo none) $(cat "$LANES_DIR/$id.head" 2>/dev/null || echo -)"
     done
 }
 
@@ -3190,7 +3203,7 @@ cmd_clear_lane() {
     _release_lane_port "$1" || return $?
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
-          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$launch_marker" "$launch_plist"
+          "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.head" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
