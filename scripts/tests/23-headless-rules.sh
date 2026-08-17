@@ -97,6 +97,41 @@ fi
 # not an invocation; refusing it would push waves back to inline prompts.
 printf 'Edit src/implement/queue.ts; the loom/gate script stays as is.\n' > "$BR/pathy.md"
 "$TICK" spawn-lane impl-73 --no-tick --cwd "$BR/wt" --brief "$BR/pathy.md" -- true -p @brief >/dev/null 2>&1
+# D-TICK-34: a browser that dies in the provider sandbox before opening a page
+# has not observed the product. The live E2 probe filed a product ticket for
+# Chromium's macOS Mach-port denial even though host-owned UI gates launched
+# Chromium from the same checkout. The staged probe brief is the public,
+# provider-neutral seam that must classify that boundary.
+printf 'Exercise E2 in a real browser against the running stack.\n' > "$BR/probe.md"
+"$TICK" spawn-lane probe-e2 --no-tick --cwd "$BR/wt" --brief "$BR/probe.md" \
+    -- true -p @brief >/dev/null 2>&1
+PROBE_COMPOSED="$LOOM_HOME/briefs/probe-e2.md"
+if grep -q 'before the first product request is probe infrastructure' "$PROBE_COMPOSED" \
+   && grep -q 'do not call.*lane.sh fix-ticket' "$PROBE_COMPOSED" \
+   && grep -q 'probe-result <build-iid> <epic-slug> infrastructure' "$PROBE_COMPOSED"; then
+    ok "D-TICK-34: staged probe classifies pre-product browser denial without a product fix"
+else
+    bad "D-TICK-34: staged probe can still turn provider infrastructure into a product ticket"
+fi
+
+# Planted violation: delete only the classifier from a private scripts mirror.
+# The public spawn seam must then reproduce the missing guard.
+D34_MUT=$(mirror_scripts "$T/dtick34-mutant")
+sed '/Before filing a product fix/d' "$D34_MUT/tick.sh" > "$D34_MUT/tick-mutant.sh"
+mv "$D34_MUT/tick-mutant.sh" "$D34_MUT/tick.sh"
+chmod +x "$D34_MUT/tick.sh"
+D34_HOME="$T/dtick34-mutant-home"
+d34_out=$(LOOM_HOME="$D34_HOME" "$D34_MUT/tick.sh" spawn-lane probe-e2-mutant \
+    --no-tick --cwd "$BR/wt" --brief "$BR/probe.md" -- /bin/echo mutant-ran -p @brief 2>&1)
+d34_rc=$?
+if assert_mutant_ran "$d34_rc" "$d34_out" "D-TICK-34-probe-classification-violation"; then
+    if [ "$d34_rc" -eq 0 ] \
+       && ! grep -q 'before the first product request is probe infrastructure' "$D34_HOME/briefs/probe-e2-mutant.md" 2>/dev/null; then
+        ok "D-TICK-34 mutant: removing the classifier recreates the false-product-ticket escape"
+    else
+        bad "D-TICK-34 mutant: planted classifier removal did not reach the public spawn seam (rc=$d34_rc)"
+    fi
+fi
 [ -f "$LOOM_HOME/briefs/impl-73.md" ] \
     && ok "P68: a path that merely contains a skill name is not a slash command" \
     || bad "P68: false positive — a plain path was read as a skill invocation"

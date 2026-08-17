@@ -380,7 +380,7 @@ refuses outside herdr anyway.
    enumerated backwards from the last round's tickets, and no run ever checked
    the requirement IDs the epic itself cites.)*
 
-   **Each failure files a fix ticket with
+   **Each product failure files a fix ticket with
    `lane.sh fix-ticket --title <t> --tier <tier> --milestone <epic>`** — one
    verb that applies all **five** things a schedulable fix ticket needs
    (`build-N` derived, `fix`, `tier::<tier>`, the epic's milestone, and
@@ -393,12 +393,18 @@ refuses outside herdr anyway.
    enumerate — and it sat unclaimed while every lane idled.)* Any lane filing
    a defect mid-build uses the same verb.
 
+   A failure before the first product request is **infrastructure**, not a
+   product defect: provider sandbox denial, browser/executable launch failure,
+   OS permission error, or local-stack bind failure. Preserve that evidence,
+   file no fix ticket, and report `probe-result ... infrastructure`; this keeps
+   the epic unaccepted without polluting the product backlog.
+
    **The probe prompt is the failure surface.** `spawn-lane` appends the
    headless rules to every brief — every step blocks, poll with
    **`lane.sh wait-ready`** rather than await, kill the stack, no slash
    commands — so never restate them; a `wait-ready` timeout is a failure to
    report, not a longer wait. *Report last*: fix tickets, then the epic result via
-   `lane.sh probe-result <build-iid> <epic-slug> pass|fail --file <report>` —
+   `lane.sh probe-result <build-iid> <epic-slug> pass|fail|infrastructure --file <report>` —
    one verb posts the report on the Build issue, feeds the outcome to the
    build ticker, and on PASS closes the epic's milestone (a combined probe
    calls it once per epic). A probe that only writes prose leaves the ticker

@@ -143,6 +143,8 @@ echo "epic exercised end to end, no defects" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB
     "$LANE" probe-result 36 e4 pass >/dev/null 2>&1
 echo "2 fix tickets filed" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" \
     "$LANE" probe-result 36 e5 fail >/dev/null 2>&1
+echo "Chromium denied a Mach service before page open" | LOOM_HOME="$EVH" GLAB_CMD="$GSTUB" \
+    "$LANE" probe-result 36 e2 infrastructure >/dev/null 2>&1
 grep -q '"ev":"probe_result"' "$EVH/events.jsonl" 2>/dev/null \
     && ok "ticker: probe-result appended its event" \
     || bad "ticker: probe-result wrote no event"
@@ -153,6 +155,9 @@ case "$out" in *"✓ epic e4 — acceptance probe PASSED"*) \
 case "$out" in *"✗ epic e5 — acceptance probe FAILED (fix tickets filed)"*) \
     ok "ticker: probe FAIL renders highlighted";; \
     *) bad "ticker: probe fail rendered wrong ($out)";; esac
+case "$out" in *"⚠ epic e2 — acceptance probe blocked by infrastructure (no product fix filed)"*) \
+    ok "D-TICK-34: infrastructure probe is explicit and does not claim a product fix";; \
+    *) bad "D-TICK-34: infrastructure probe rendered as a product failure ($out)";; esac
 # The requested Loom tier and provider are visible without parsing a native
 # command line. A custom test-seam command has neither and stays quiet.
 printf '{"ts":1,"ev":"lane_spawn","id":"impl-46","provider":"codex","tier":"high"}\n' >> "$EVH/events.jsonl"

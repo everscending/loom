@@ -108,7 +108,7 @@
 #                                            on a near-duplicate title among
 #                                            open fix tickets in the same
 #                                            milestone unless --force.
-#   lane.sh probe-result <build-iid> <epic-slug> pass|fail [--file F]
+#   lane.sh probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F]
 #                                            post the epic probe's report on
 #                                            the Build issue with a PASS/FAIL
 #                                            header, feed the outcome to the
@@ -911,7 +911,7 @@ cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> 
     _lane_ev fix_filed ticket "$iid" tier "$tier"
 }
 
-cmd_probe_result() { # <build-iid> <epic-slug> pass|fail [--file F]
+cmd_probe_result() { # <build-iid> <epic-slug> pass|fail|infrastructure [--file F]
     # A probe's outcome used to live only inside its report note, so the
     # ticker showed "probe started … probe ended (rc 0)" and never the
     # verdict (asked for by the human, 2026-08-02). Same shape as
@@ -920,7 +920,7 @@ cmd_probe_result() { # <build-iid> <epic-slug> pass|fail [--file F]
     local iid="${1:-}" slug="${2:-}" res="${3:-}"
     _check_iid "$iid"
     [ -n "$slug" ] || die "probe-result: need <epic-slug>"
-    case "$res" in pass|fail) ;; *) die "probe-result must be pass|fail" ;; esac
+    case "$res" in pass|fail|infrastructure) ;; *) die "probe-result must be pass|fail|infrastructure" ;; esac
     local f up; f=$(_stage_body "${@:4}")
     up=$(printf '%s' "$res" | tr 'a-z' 'A-Z')
     local hdr; hdr=$(mktemp "${TMPDIR:-/tmp}/lane-body.XXXXXX")
@@ -1449,7 +1449,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with

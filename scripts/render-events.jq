@@ -66,6 +66,8 @@ fromjson? // empty | . as $e
   elif $e.ev == "probe_result" then
     (if $e.result == "PASS"
      then $good + "✓ epic \($e.epic) — acceptance probe PASSED" + $rst
+     elif $e.result == "INFRASTRUCTURE"
+     then $warn + "⚠ epic \($e.epic) — acceptance probe blocked by infrastructure (no product fix filed)" + $rst
      else $bad + "✗ epic \($e.epic) — acceptance probe FAILED (fix tickets filed)" + $rst end)
   elif $e.ev == "sweep_held" then
     $warn + "⚠ sweep kept \($e.count) worktree(s) — mostly \($e.reason) — each needs a human" + $rst

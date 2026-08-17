@@ -2138,6 +2138,11 @@ BRIEFEOF
 - A bullet you can PROVE unsatisfiable ends the lane blocked with that proof ($(dirname "$SELF_PATH")/lane.sh transition <iid> blocked), never in review with a note explaining it.
 BRIEFEOF
     fi
+    if [ "$(_lane_type "$id")" = probe ]; then
+        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- Before filing a product fix, prove that the failure reached product behavior. A provider sandbox denial, browser/executable launch failure, OS permission error, or local-stack bind failure before the first product request is probe infrastructure, not a product defect. For infrastructure, do not call \`lane.sh fix-ticket\`; preserve the evidence and report \`lane.sh probe-result <build-iid> <epic-slug> infrastructure --file <report>\`. Only a failure observed after the probe reaches the product can create a fix ticket and report FAIL.
+BRIEFEOF
+    fi
     if [ "$(_lane_type "$id")" = gate ]; then
         local _verdict_ticket="${id#gate-}" _verdict_head=""
         _verdict_ticket="${_verdict_ticket%-r[0-9]*}"
