@@ -2643,6 +2643,144 @@ _spawn_build_epilogue() {
 # Reads, from the caller's scope: pregate, id, abs; sets pre there. The tier
 # die in here is the LAST refusal in spawn-lane — this function must always
 # be called before anything destructive.
+
+# Host gates may update committed output files as part of a successful test
+# run. The observed repositories own two such deterministic surfaces. Keep the
+# allowlist deliberately narrow: an unknown tracked modification remains dirty
+# and sweep keeps the worktree rather than guessing that the gate owned it.
+_pregate_owned_artifact_path() { # <repo-relative-path>
+    case "$1" in
+        tests/artifacts/*|docs/deploy.md) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+_pregate_artifact_validate() { # <lane-id> <cwd> -> physical cwd
+    local id="${1:-}" cwd="${2:-}" abs="" repo_main="" cwd_main="" kind="" iid=""
+    case "$id" in *[!A-Za-z0-9_-]*) die "pregate-artifacts: invalid lane id '$id'" ;; esac
+    kind=$(_lane_type "$id" 2>/dev/null || true)
+    iid=$(_supervised_lane_ticket "$id" 2>/dev/null || true)
+    case "$kind" in impl|gate|merge) [ -n "$iid" ] ;; *) false ;; esac \
+        || die "pregate-artifacts: '$id' is not an implementation, gate, or merge lane id"
+    [ -n "$cwd" ] && [ -d "$cwd" ] \
+        || die "pregate-artifacts: lane '$id' has no readable worktree '$cwd'"
+    abs=$(cd "$cwd" 2>/dev/null && pwd -P) \
+        || die "pregate-artifacts: cannot resolve worktree '$cwd'"
+    # Raw custom-command fixtures and operators may pregate a non-git
+    # directory. There is no tracked surface to clean there, so retain the
+    # historical runner behavior and make the artifact boundary a no-op.
+    if ! git -C "$abs" rev-parse --show-toplevel >/dev/null 2>&1; then
+        printf '%s\n' "$abs"
+        return 0
+    fi
+    repo_main=$(_git_main_root "$REPO_ROOT")
+    cwd_main=$(_git_main_root "$abs")
+    [ -n "$repo_main" ] && [ "$cwd_main" = "$repo_main" ] \
+        || die "pregate-artifacts: '$abs' is not a worktree of '$REPO_ROOT'"
+    printf '%s\n' "$abs"
+}
+
+_pregate_artifact_was_dirty_before() { # <path> <nul-list>
+    local path="$1" before="$2" prior=""
+    while IFS= read -r -d '' prior; do
+        [ "$prior" = "$path" ] && return 0
+    done < "$before"
+    return 1
+}
+
+cmd_pregate_artifacts_begin() { # <lane-id> <cwd>
+    [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts begin <lane-id> <cwd>"
+    local id="$1" abs="" head="" prefix="" tmp=""
+    abs=$(_pregate_artifact_validate "$id" "$2")
+    head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    prefix="$LANES_DIR/$id.pregate-artifacts"
+    if [ -z "$head" ]; then
+        : > "$prefix.before"
+        printf '%s\n' no-git > "$prefix.head"
+        printf '%s\n' "$abs" > "$prefix.cwd"
+        rm -f "$prefix.patch" "$prefix.paths"
+        return 0
+    fi
+    tmp="$prefix.before.tmp.$$"
+    git -C "$abs" diff --name-only --no-renames -z HEAD -- > "$tmp" \
+        || { rm -f "$tmp"; die "pregate-artifacts: cannot snapshot tracked changes in '$abs'"; }
+    printf '%s\n' "$head" > "$prefix.head.tmp.$$"
+    printf '%s\n' "$abs" > "$prefix.cwd.tmp.$$"
+    mv -f "$tmp" "$prefix.before"
+    mv -f "$prefix.head.tmp.$$" "$prefix.head"
+    mv -f "$prefix.cwd.tmp.$$" "$prefix.cwd"
+    rm -f "$prefix.patch" "$prefix.paths"
+}
+
+cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
+    [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts finish <lane-id> <cwd>"
+    local id="$1" abs="" prefix="" before="" expected_head="" expected_cwd=""
+    local current_head="" current="" candidates="" patch="" path="" restored=0 preexisting=0
+    abs=$(_pregate_artifact_validate "$id" "$2")
+    prefix="$LANES_DIR/$id.pregate-artifacts"
+    before="$prefix.before"
+    [ -f "$before" ] && [ -f "$prefix.head" ] && [ -f "$prefix.cwd" ] \
+        || die "pregate-artifacts: lane '$id' has no complete pre-gate snapshot"
+    expected_head=$(cat "$prefix.head" 2>/dev/null || true)
+    expected_cwd=$(cat "$prefix.cwd" 2>/dev/null || true)
+    if [ "$expected_head" = no-git ]; then
+        [ "$abs" = "$expected_cwd" ] \
+            || die "pregate-artifacts: directory identity changed during lane '$id'"
+        return 0
+    fi
+    current_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    [ -n "$expected_head" ] && [ "$current_head" = "$expected_head" ] \
+        || die "pregate-artifacts: HEAD changed during lane '$id'; leaving every tracked change untouched"
+    [ "$abs" = "$expected_cwd" ] \
+        || die "pregate-artifacts: worktree identity changed during lane '$id'; leaving every tracked change untouched"
+
+    current="$prefix.current.tmp.$$"
+    candidates="$prefix.paths.tmp.$$"
+    patch="$prefix.patch.tmp.$$"
+    : > "$candidates"; : > "$patch"
+    git -C "$abs" diff --name-only --no-renames -z HEAD -- > "$current" \
+        || { rm -f "$current" "$candidates" "$patch"; die "pregate-artifacts: cannot inspect post-gate tracked changes"; }
+    while IFS= read -r -d '' path; do
+        _pregate_owned_artifact_path "$path" || continue
+        if _pregate_artifact_was_dirty_before "$path" "$before"; then # mutate:pregate-preserve-preexisting
+            preexisting=$((preexisting + 1))
+            continue
+        fi
+        printf '%s\0' "$path" >> "$candidates"
+        git -C "$abs" diff --binary --full-index HEAD -- "$path" >> "$patch" \
+            || { rm -f "$current" "$candidates" "$patch"; die "pregate-artifacts: cannot preserve gate output '$path'; leaving tracked changes untouched"; }
+        restored=$((restored + 1))
+    done < "$current"
+    rm -f "$current"
+
+    # Publish evidence before changing an allowlisted output. Only a path that
+    # was clean at the snapshot and changed synchronously under the host gate
+    # reaches this restore. Pre-existing and unknown paths remain untouched.
+    if [ "$restored" -gt 0 ]; then
+        mv -f "$patch" "$prefix.patch"
+        mv -f "$candidates" "$prefix.paths"
+        chmod 444 "$prefix.patch" "$prefix.paths" 2>/dev/null || true
+        while IFS= read -r -d '' path; do
+            git -C "$abs" restore --source=HEAD --worktree -- "$path" \
+                || die "pregate-artifacts: could not restore gate-owned output '$path'; sweep will keep this worktree"
+            git -C "$abs" diff --quiet HEAD -- "$path" \
+                || die "pregate-artifacts: gate-owned output '$path' remains dirty; sweep will keep this worktree"
+        done < "$prefix.paths"
+        echo "--- pregate artifacts: preserved $restored tracked output(s) in $prefix.patch and restored them to HEAD; $preexisting pre-existing artifact edit(s) left untouched ---"
+    else
+        rm -f "$patch" "$candidates"
+    fi
+}
+
+cmd_pregate_artifacts() {
+    local verb="${1:-}"; [ "$#" -gt 0 ] && shift
+    case "$verb" in
+        begin)  cmd_pregate_artifacts_begin "$@" ;;
+        finish) cmd_pregate_artifacts_finish "$@" ;;
+        *) die "usage: tick.sh pregate-artifacts begin|finish <lane-id> <cwd>" ;;
+    esac
+}
+
 _spawn_build_pregate() {
     local runner tiers base_iid="" base_pre="" lane_kind
     lane_kind="$(_lane_type "$id")"
@@ -2690,12 +2828,25 @@ ui"
             pre='echo "--- pregate: this branch changes files outside the tree tier $LOOM_PREGATE_TIER owns ($LOOM_PREGATE_TREES) and the ticket names none of them ($LOOM_PREGATE_SCOPE) — rejecting with no review session (D-SKILL-16) ---"; _rc=7; '
         else
             pre='if [ -f "$LOOM_PREGATE_RUNNER" ]; then'
-            pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---";'
-            pre="$pre"' if ! bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER"; then'
+            pre="$pre"" if '$SELF_PATH' pregate-artifacts begin '$id' \"\$LOOM_LANE_CWD\"; then"
+            pre="$pre"' echo "--- pregate: $LOOM_PREGATE_RUNNER $LOOM_PREGATE_TIER ---"; _pregate_rc=0;'
+            pre="$pre"' bash "$LOOM_PREGATE_RUNNER" "$LOOM_PREGATE_TIER" || _pregate_rc=$?;'
+            pre="$pre"" if ! '$SELF_PATH' pregate-artifacts finish '$id' \"\$LOOM_LANE_CWD\"; then"
+            if [ "$lane_kind" = merge ]; then
+                pre="$pre"' echo "--- host merge preflight artifact cleanup FAILED — merge provider not started ---"; _rc=9;'
+            else
+                pre="$pre"' echo "--- pregate artifact cleanup FAILED — rejecting with no review session ---"; _rc=7;'
+            fi
+            pre="$pre"' elif [ "$_pregate_rc" -ne 0 ]; then'
             if [ "$lane_kind" = merge ]; then
                 pre="$pre"' echo "--- host merge preflight gate FAILED — merge provider not started ---"; _rc=9; fi;'
             else
                 pre="$pre"' echo "--- pregate FAILED — rejecting with no review session (P12) ---"; _rc=7; fi;'
+            fi
+            if [ "$lane_kind" = merge ]; then
+                pre="$pre"' else echo "--- host merge preflight artifact snapshot FAILED — merge provider not started ---"; _rc=9; fi;'
+            else
+                pre="$pre"' else echo "--- pregate artifact snapshot FAILED — rejecting with no review session ---"; _rc=7; fi;'
             fi
             # P60: a missing runner is a DECLARED bootstrap stage, never a
             # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
@@ -5504,6 +5655,7 @@ case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     supervise)    shift; cmd_supervise "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
+    pregate-artifacts) shift; cmd_pregate_artifacts "$@" ;;
     run-host-probe) shift; cmd_run_host_probe "$@" ;;
     drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;
     drain-lane-kills) shift; cmd_drain_lane_cleanups "$@" ;; # compatibility/readable operator alias

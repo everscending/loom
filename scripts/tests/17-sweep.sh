@@ -67,6 +67,134 @@ else
     bad "sweep: left a merged nested .worktrees lane behind"
 fi
 
+# MEND-LIVE-01: a host pregate can update a tracked test artifact even when
+# every assertion passes. That output is useful evidence, but it is not ticket
+# work: leaving it in the checkout makes the later merged-worktree sweep hold
+# the tree forever as `modified-tracked`. The host boundary must preserve the
+# output outside the worktree, restore the clean pre-gate file, and let a green
+# merged ticket sweep normally.
+GA="$T/gate-artifact-sweep"; mkdir -p "$GA"
+git -c init.defaultBranch=main init -q --bare "$GA/origin.git"
+git clone -q "$GA/origin.git" "$GA/repo" 2>/dev/null
+git -C "$GA/repo" config user.email t@t; git -C "$GA/repo" config user.name t
+mkdir -p "$GA/repo/tests/artifacts" "$GA/repo/scripts" "$GA/repo/docs/agents"
+printf '{"run":"baseline"}\n' > "$GA/repo/tests/artifacts/e8-run.json"
+printf '{"note":"baseline"}\n' > "$GA/repo/tests/artifacts/user-note.json"
+printf 'deployment baseline\n' > "$GA/repo/docs/deploy.md"
+printf 'base\n' > "$GA/repo/f"
+printf '# Issue tracker: GitLab\n' > "$GA/repo/docs/agents/issue-tracker.md"
+cat > "$GA/repo/scripts/gate.sh" <<'GATEEOF'
+#!/usr/bin/env bash
+printf '{"run":"gate-output"}\n' > tests/artifacts/e8-run.json
+printf 'deployment gate output\n' > docs/deploy.md
+[ "${GATE_WRITE_UNKNOWN:-0}" != 1 ] || printf 'unknown gate output\n' > f
+exit 0
+GATEEOF
+chmod +x "$GA/repo/scripts/gate.sh"
+printf 'runner: scripts/gate.sh\n' > "$GA/repo/.loom.yml"
+git -C "$GA/repo" add . && git -C "$GA/repo" commit -qm base
+git -C "$GA/repo" push -q origin main
+mkdir -p "$GA/repo/.worktrees"
+
+_wait_gate_artifact_lane() { # <home> <id>
+    local home="$1" id="$2" i pid
+    for i in $(seq 1 100); do [ -f "$home/lanes/$id.rc" ] && break; sleep 0.05; done
+    pid=$(cat "$home/lanes/$id.pid" 2>/dev/null || true)
+    for i in $(seq 1 100); do
+        [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null && return 0
+        sleep 0.05
+    done
+    return 0
+}
+
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/310" -b ticket-310-artifact origin/main 2>/dev/null
+GA_HOME="$GA/home-green"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_HOME" \
+  "$TICK" spawn-lane gate-310 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/310" -- touch "$GA/reviewed-310" >/dev/null
+_wait_gate_artifact_lane "$GA_HOME" gate-310
+if [ "$(cat "$GA_HOME/lanes/gate-310.rc" 2>/dev/null)" = 0 ] \
+   && grep -q '"run":"baseline"' "$GA/repo/.worktrees/310/tests/artifacts/e8-run.json" \
+   && grep -q 'deployment baseline' "$GA/repo/.worktrees/310/docs/deploy.md" \
+   && grep -q 'gate-output' "$GA_HOME/lanes/gate-310.pregate-artifacts.patch" 2>/dev/null \
+   && grep -q 'deployment gate output' "$GA_HOME/lanes/gate-310.pregate-artifacts.patch" 2>/dev/null; then
+    ok "pregate artifacts: a green gate preserves tracked output as lane evidence and restores the worktree"
+else
+    bad "pregate artifacts: green gate left its tracked output dirty or lost the evidence"
+fi
+SWEEP_MERGED="ticket-310-artifact" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_HOME" \
+  "$TICK" sweep >"$GA/sweep-green.out" 2>&1
+if [ ! -e "$GA/repo/.worktrees/310" ]; then
+    ok "pregate artifacts: a green merged ticket sweeps after its deterministic tracked output is restored"
+else
+    bad "pregate artifacts: gate-generated tracked output still holds a completed worktree ($(head -1 "$GA/sweep-green.out"))"
+fi
+
+# A genuine edit that existed before the gate is outside that ownership. The
+# gate artifact can still be restored, but the edit must remain byte-for-byte
+# and keep the completed worktree on sweep's fail-closed path.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/311" -b ticket-311-user-edit origin/main 2>/dev/null
+printf '{"note":"user edit"}\n' > "$GA/repo/.worktrees/311/tests/artifacts/user-note.json"
+GA_USER_HOME="$GA/home-user"
+GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_USER_HOME" \
+  "$TICK" spawn-lane gate-311 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/311" -- touch "$GA/reviewed-311" >/dev/null
+_wait_gate_artifact_lane "$GA_USER_HOME" gate-311
+SWEEP_MERGED="ticket-311-user-edit" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_USER_HOME" \
+  "$TICK" sweep >"$GA/sweep-user.out" 2>&1
+if [ -e "$GA/repo/.worktrees/311" ] \
+   && grep -q '"note":"user edit"' "$GA/repo/.worktrees/311/tests/artifacts/user-note.json" \
+   && grep -q 'modified tracked files' "$GA/sweep-user.out"; then
+    ok "pregate artifacts: a pre-existing tracked edit survives the gate and remains held by sweep"
+else
+    bad "pregate artifacts: a pre-existing tracked edit was erased or escaped sweep's hold"
+fi
+
+# A new modification outside the narrow deterministic-output allowlist is not
+# inferred to be gate-owned. Preserve it in place and let sweep surface it.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/313" -b ticket-313-unknown-output origin/main 2>/dev/null
+GA_UNKNOWN_HOME="$GA/home-unknown"
+GATE_WRITE_UNKNOWN=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNKNOWN_HOME" \
+  "$TICK" spawn-lane gate-313 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/313" -- touch "$GA/reviewed-313" >/dev/null
+_wait_gate_artifact_lane "$GA_UNKNOWN_HOME" gate-313
+SWEEP_MERGED="ticket-313-unknown-output" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNKNOWN_HOME" \
+  "$TICK" sweep >"$GA/sweep-unknown.out" 2>&1
+if [ -e "$GA/repo/.worktrees/313" ] \
+   && grep -qxF 'unknown gate output' "$GA/repo/.worktrees/313/f" \
+   && grep -q 'modified tracked files' "$GA/sweep-unknown.out"; then
+    ok "pregate artifacts: an unknown tracked output remains dirty and fail-closed"
+else
+    bad "pregate artifacts: an unknown tracked output was erased or escaped sweep's hold"
+fi
+
+# Planted violation: remove only the pre-gate ownership exclusion. The public
+# gate + sweep path then erases the user's tracked edit and removes the tree,
+# proving the snapshot guard is what carries the safety property.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/312" -b ticket-312-user-edit-mutant origin/main 2>/dev/null
+printf '{"note":"user edit mutant"}\n' > "$GA/repo/.worktrees/312/tests/artifacts/user-note.json"
+MUT_GATE_ARTIFACT=$(mirror_scripts "$GA/mut-gate-artifact")
+sed -i.bak 's/if _pregate_artifact_was_dirty_before "\$path" "\$before"; then # mutate:pregate-preserve-preexisting/if false; then # mutate:pregate-preserve-preexisting/' \
+  "$MUT_GATE_ARTIFACT/tick.sh"
+if cmp -s "$MUT_GATE_ARTIFACT/tick.sh" "$TICK"; then
+    bad "pregate-artifact-violation: sed did not match the pre-existing edit guard, mutant is identical to the fix"
+else
+    GA_MUT_HOME="$GA/home-mutant"
+    mut_gate_out=$(GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_MUT_HOME" \
+      "$MUT_GATE_ARTIFACT/tick.sh" spawn-lane gate-312 --no-tick --pregate ui \
+      --cwd "$GA/repo/.worktrees/312" -- touch "$GA/reviewed-312" 2>&1); mut_gate_rc=$?
+    _wait_gate_artifact_lane "$GA_MUT_HOME" gate-312
+    SWEEP_MERGED="ticket-312-user-edit-mutant" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_MUT_HOME" \
+      "$MUT_GATE_ARTIFACT/tick.sh" sweep >>"$GA/sweep-mutant.out" 2>&1
+    if assert_mutant_ran "$mut_gate_rc" "$mut_gate_out" "pregate-artifact-violation"; then
+        if [ ! -e "$GA/repo/.worktrees/312" ]; then
+            ok "pregate-artifact-violation: without the snapshot exclusion a real user edit is erased and swept"
+        else
+            bad "pregate-artifact-violation: planted omission did not recreate user-edit loss"
+        fi
+    fi
+fi
+
 # A provider-backed worker can be durably queued after its worktree is
 # prepared but before any process exists there. The queued cwd is already
 # committed launch ownership; sweep must preserve it through that host gap.
