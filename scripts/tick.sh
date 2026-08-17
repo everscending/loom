@@ -13,7 +13,7 @@
 #                                capacity returns; one that crashes retries once.
 #   resume                       clear a usage pause by hand, reset the failure
 #                                count (needed under usage_limit: stop_and_wait)
-#   spawn-lane <id> [--cwd <dir>] [--merge-lock] [--no-tick] -- <cmd...>
+#   spawn-lane <id> [--cwd <dir>] [--pregate <tier>] [--merge-lock] [--no-tick] -- <cmd...>
 #                                start a detached lane with PID file + log,
 #                                running in <dir> (default: the repo root).
 #                                The lane fires the next wave when it exits
@@ -4582,5 +4582,5 @@ case "${1:-}" in
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-merge" ;;
 esac

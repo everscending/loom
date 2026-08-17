@@ -176,4 +176,12 @@ fi
     || bad "live-lane-violation: the running lane's pid file was overwritten"
 kill "$livepid" 2>/dev/null; "$TICK" clear-lane impl-48 >/dev/null
 
+# 4i9. Manual priority launches use the same pregate contract as planned
+# launches. The parser accepted `--pregate` while the only public usage text
+# hid it, making an otherwise valid gate silently skip its deterministic tier.
+usage=$({ "$TICK" not-a-command; } 2>&1 || true)
+printf '%s' "$usage" | grep -Fq '[--pregate <tier>]' \
+    && ok "pregate: spawn-lane usage exposes the required manual gate flag" \
+    || bad "pregate: public spawn-lane usage hides --pregate from manual priority launches"
+
 test_finish
