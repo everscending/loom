@@ -4943,7 +4943,10 @@ _stamp_progress() {
     # The running wave gets the same clock (waves had none): stamp the newest
     # wave stream while the tick lock is held; clear the stamp when it drops.
     if [ -d "$LOCK_DIR" ]; then
-        local wj; wj=$(ls -t "$LOGS_DIR"/wave-*.jsonl 2>/dev/null | head -1)
+        # Initialize before the fallible empty-glob pipeline. Under the
+        # launchd Bash 3.2 `set -u` path, a declaration alone can leave this
+        # local unset when no wave JSONL exists (D-TICK-37).
+        local wj=""; wj=$(ls -t "$LOGS_DIR"/wave-*.jsonl 2>/dev/null | head -1)
         if [ -n "$wj" ]; then
             n=$(_turn_count "$wj")
             prev=$(cat "$LOOM_HOME/wave.progress" 2>/dev/null || echo -1)

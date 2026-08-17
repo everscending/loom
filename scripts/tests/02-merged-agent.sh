@@ -16,6 +16,54 @@ seed_tracker_decl "$MT/repo"
 MENV() { LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" LOOM_PLIST_DIR="$MT/agents" \
          LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 "$@"; }
 
+# D-TICK-37: the progress pass runs before every early return, including a
+# heartbeat that sees a live tick lock. On a fresh run there may be no
+# wave-*.jsonl yet. Under the launchd Bash 3.2 `set -u` path, declaring `wj`
+# without assigning it left the later `[ -n "$wj" ]` dereference unbound after
+# the fallible glob pipeline. Drive the public watcher seam from a fresh home,
+# and pin the initialization that makes an empty listing a normal empty value.
+D37_HOME="$T/dtick37-home"
+mkdir -p "$D37_HOME/tick.lock.d" "$D37_HOME/logs"
+printf '%s\n' "$$" > "$D37_HOME/tick.lock.d/pid"
+: > "$D37_HOME/loop.stopped"
+d37_out=$(LOOM_REPO="$MT/repo" LOOM_HOME="$D37_HOME" LOOM_GLOBAL_CONFIG="$T/none.yml" \
+    LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+    "$TICK" tick --provider claude --auto 2>&1)
+d37_rc=$?
+if [ "$d37_rc" -eq 0 ] \
+   && printf '%s' "$d37_out" | grep -q 'watched, no wave' \
+   && ! printf '%s' "$d37_out" | grep -q 'unbound variable' \
+   && grep -q 'local wj=""' "$TICK"; then
+    ok "D-TICK-37: held-lock watcher treats a missing wave stream as empty"
+else
+    bad "D-TICK-37: fresh held-lock watcher reached an unset wave stream (rc=$d37_rc out=$d37_out)"
+fi
+
+# Planted violation: remove the initialization in a private scripts mirror and
+# force the live Bash 3.2 postcondition observed after the empty, fallible
+# listing (the local remains unset). The same public tick seam must then die at
+# the dereference, proving the regression above guards the actual crash.
+D37_MUT=$(mirror_scripts "$T/dtick37-mutant")
+sed 's/local wj=""; wj=$(ls -t "$LOGS_DIR"\/wave-\*.jsonl 2>\/dev\/null | head -1)/local wj; wj=$(ls -t "$LOGS_DIR"\/wave-*.jsonl 2>\/dev\/null | head -1); unset wj/' \
+    "$D37_MUT/tick.sh" > "$D37_MUT/tick-mutant.sh"
+mv "$D37_MUT/tick-mutant.sh" "$D37_MUT/tick.sh"
+chmod +x "$D37_MUT/tick.sh"
+D37_MUT_HOME="$T/dtick37-mutant-home"
+mkdir -p "$D37_MUT_HOME/tick.lock.d" "$D37_MUT_HOME/logs"
+printf '%s\n' "$$" > "$D37_MUT_HOME/tick.lock.d/pid"
+: > "$D37_MUT_HOME/loop.stopped"
+d37_mut_out=$(LOOM_REPO="$MT/repo" LOOM_HOME="$D37_MUT_HOME" LOOM_GLOBAL_CONFIG="$T/none.yml" \
+    LOOM_SKIP_BOOTSTRAP=1 LOOM_SKIP_PROVIDER_CHECK=1 \
+    "$D37_MUT/tick.sh" tick --provider claude --auto 2>&1)
+d37_mut_rc=$?
+if assert_mutant_ran "$d37_mut_rc" "$d37_mut_out" "D-TICK-37-wave-stream-violation"; then
+    if [ "$d37_mut_rc" -ne 0 ] && printf '%s' "$d37_mut_out" | grep -q 'wj: unbound variable'; then
+        ok "D-TICK-37 mutant: removing initialization recreates the watcher crash"
+    else
+        bad "D-TICK-37 mutant: unset wave stream did not fail at the public watcher seam (rc=$d37_mut_rc out=$d37_mut_out)"
+    fi
+fi
+
 # The default timer is 60s and the agent runs the AUTO mode, not a bare tick:
 # a bare tick means "a human typed it" and would ignore both the switch and
 # the gap, turning the timer into an unpaced spender.
