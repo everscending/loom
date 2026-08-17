@@ -2276,7 +2276,14 @@ cmd_spawn_lane() {
   kill it first. Reusing a live lane id would overwrite its pid file and rotate
   its log away, losing the work in progress."
     fi
-    if [ -n "$provider" ] && [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ]; then
+    # A human/operator can call spawn-lane directly beneath interactive Codex,
+    # outside a provider lane or wave. That outer tool process is still an
+    # ephemeral host: a worker started here is reaped when the call returns,
+    # after already emitting lane_start and opening a viewer pane. Queue every
+    # provider-backed spawn at this boundary just as provider-authored handoffs
+    # are queued. Durable hosts and Claude retain the direct launch path.
+    if [ -n "$provider" ] \
+       && { [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ] || _codex_host_is_ephemeral; }; then
         _queue_lane_launch
         return 0
     fi
