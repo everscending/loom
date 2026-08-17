@@ -115,11 +115,11 @@ the ledger and in repair evidence.
    wave is still classifying that rejection. If tracker read-after-write lag
    transports the exact same ticket/HEAD/outcome/class verdict in two comments,
    it is still one gate round and must not consume the rejection cap twice.
-   A successful human hold release similarly leaves a durable continuation
-   request for the ordinary heartbeat: the next eligible heartbeat bypasses
-   the stale wave gap once, but a stopped loop remains stopped. Mend verifies
-   that request and the resulting lane start; it never substitutes a manual
-   tick for either.
+   A successful human hold release or supervised-repair lease release similarly
+   leaves a durable continuation request for the ordinary heartbeat: the next
+   eligible heartbeat bypasses the stale wave gap once, but a stopped loop
+   remains stopped. Mend verifies that request and the resulting lane start;
+   it never substitutes a manual tick for either.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.

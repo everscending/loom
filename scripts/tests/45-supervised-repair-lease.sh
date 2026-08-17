@@ -61,11 +61,16 @@ fi
 
 "$TICK" supervise acquire 10 --owner root/repair-286 --ttl-seconds 60 >/dev/null 2>&1
 "$TICK" supervise release 10 >/dev/null 2>&1; rc=$?
-if [ "$rc" -eq 0 ] && [ ! -e "$lease" ]; then
-    ok "supervised lease: explicit release removes ownership"
+if [ "$rc" -eq 0 ] && [ ! -e "$lease" ] && [ -f "$LOOM_HOME/continuation.request" ]; then
+    ok "supervised lease: explicit release removes ownership and requests continuation"
 else
-    bad "supervised lease: release did not remove ownership (rc=$rc)"
+    bad "supervised lease: release did not restore scheduling (rc=$rc lease=$([ -e "$lease" ] && echo yes || echo no) request=$([ -f "$LOOM_HOME/continuation.request" ] && echo yes || echo no))"
 fi
+rm -f "$LOOM_HOME/continuation.request"
+"$TICK" supervise release 10 >/dev/null 2>&1
+[ ! -f "$LOOM_HOME/continuation.request" ] \
+    && ok "supervised lease: idempotent no-op release creates no spurious continuation" \
+    || bad "supervised lease: no-op release nudged the scheduler"
 
 # Gate dispatch uses the same provider-neutral admission seam as implementation
 # dispatch, including planner visibility and the final stale-plan guard.

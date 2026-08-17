@@ -35,9 +35,10 @@ respects the switch, ignores the gap, because a handoff is work already in
 progress). The start kick is consumed only when a wave is admitted, so a lock
 or unreadable board cannot silently discard the human's request to resume now.
 
-A successful human `transition --release-hold` is also an explicit change from
-no runnable owner to runnable work, but it is not a second `start` verb and it
-does not launch a wave directly. The transition writes one durable
+A successful human `transition --release-hold` or release of an active
+supervised-repair lease is also an explicit change from no runnable owner to
+runnable work, but neither is a second `start` verb and neither launches a
+wave directly. The release writes one durable
 `continuation.request`; the ordinary heartbeat consumes it only when a wave is
 admitted. That heartbeat bypasses the stale wave gap once while still honoring
 the loop-stopped switch, quiet state, usage gate, and lock. Without this
