@@ -191,6 +191,9 @@ STATES="ready-for-agent in-progress review merge-queue blocked"
 # tracker write must never fail because the ticker could not be fed.
 TICK_SH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 _lane_ev() { "$TICK_SH" event "$@" >/dev/null 2>&1 || true; }
+_request_heartbeat_continuation() { # <ticket>
+    "$TICK_SH" request-continuation hold-release "$1" >/dev/null 2>&1 || true
+}
 
 # A tracker outcome is stronger than the provider process exit that follows
 # it. The model can complete submit/verdict/close and then lose its execution
@@ -1280,6 +1283,10 @@ cmd_transition() { # <iid> <state> [--if-current <state>] [--release-hold] [--no
     if [ "$state" = ready-for-agent ]; then _set_state "$iid" "$state" --unassign
     else _set_state "$iid" "$state"; fi
     _lane_ev ticket_transition ticket "$iid" state "$state"
+    # A hold release has no finishing lane to perform the normal immediate
+    # handoff. Ask the durable heartbeat to replan once past the old wave gap;
+    # the loop switch and every admission gate still remain authoritative.
+    [ "$releasing" -eq 0 ] || _request_heartbeat_continuation "$iid"
 }
 
 _decision_noted() { # <iid> <exact machine trailer>

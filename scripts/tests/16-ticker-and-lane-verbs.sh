@@ -329,9 +329,13 @@ GB transition 50 ready-for-agent >/dev/null 2>&1 \
 GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
     && ok "sticky-blocked: a human releasing the hold still works" \
     || bad "sticky-blocked: --release-hold refused for a human caller"
+test -f "$EVH/continuation.request" \
+    && ok "sticky-blocked: a human hold release requests a heartbeat continuation" \
+    || bad "sticky-blocked: released work can remain stranded behind the wave gap"
 # The same release, from inside a lane and from inside a wave: refused. These
 # are the only two callers that can act on ticket prose, and the env markers
 # are set by the loop itself, not by the caller asking nicely.
+rm -f "$EVH/continuation.request"
 : > "$BCAP2"
 LOOM_LANE_ID=impl-50 GB transition 50 ready-for-agent --release-hold >/dev/null 2>&1 \
     && bad "sticky-blocked: a lane released a human hold" \
@@ -342,6 +346,9 @@ LOOM_WAVE_PROMPT="/loom tick" GB transition 50 ready-for-agent --release-hold >/
 grep -q "add_labels" "$BCAP2" \
     && bad "sticky-blocked: an automated release still reached the tracker" \
     || ok "sticky-blocked: no automated release write reached the tracker"
+[ ! -f "$EVH/continuation.request" ] \
+    && ok "sticky-blocked: refused automated release requested no continuation" \
+    || bad "sticky-blocked: refused automated release nudged the scheduler"
 # `unblock --to-review` routes through the same door: the human completed the
 # work by hand, so it goes back to the gate rather than to the backlog. Before
 # P36 this direction had no door at all — `review` bounced with nothing to say.

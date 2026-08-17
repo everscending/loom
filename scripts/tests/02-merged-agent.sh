@@ -304,6 +304,57 @@ else
     bad "start kick: first=$start_first (want non-zero), second=$start_second (want 0)"
 fi
 
+# A human hold release is another explicit transition from no runnable work to
+# runnable work. It requests one durable heartbeat continuation rather than
+# launching a wave itself; the heartbeat owns the launch and consumes the
+# request only after it passes the quiet/usage gates.
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+MENV "$TICK" request-continuation hold-release 290 >/dev/null 2>&1
+MTICK tick --auto; release_first=$(_mwaves)
+MTICK tick --auto; release_second=$(_mwaves)
+if [ "$release_first" != 0 ] && [ "$release_second" = 0 ]; then
+    ok "hold release continuation: heartbeat bypasses the old gap once"
+else
+    bad "hold release continuation: first=$release_first (want non-zero), second=$release_second (want 0)"
+fi
+
+# Planted violation: make the automatic wave-gap gate ignore the durable
+# continuation marker. The public request still succeeds, but its heartbeat
+# must now strand the work exactly as the live JOR-290 incident did.
+CONT_MUT=$(mirror_scripts "$T/hold-release-continuation-mutant")
+sed 's/\[ "$continuation_kick" -eq 0 \] && \[ "$cleanup_kick"/\[ "$cleanup_kick"/' \
+    "$CONT_MUT/tick.sh" > "$CONT_MUT/tick-mutant.sh"
+mv "$CONT_MUT/tick-mutant.sh" "$CONT_MUT/tick.sh"
+chmod +x "$CONT_MUT/tick.sh"
+rm -f "$MT/home/continuation.request"
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+MENV "$CONT_MUT/tick.sh" request-continuation hold-release 290 >/dev/null 2>&1
+: > "$MWAVES"
+export LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'"
+cont_mut_out=$(MENV "$CONT_MUT/tick.sh" tick --auto 2>&1); cont_mut_rc=$?
+export LOOM_WAVE_CMD="true"
+if assert_mutant_ran "$cont_mut_rc" "$cont_mut_out" "hold-release-continuation-violation"; then
+    if [ "$(_mwaves)" = 0 ] && [ -f "$MT/home/continuation.request" ]; then
+        ok "hold release continuation mutant: ignoring the marker recreates the idle gap"
+    else
+        bad "hold release continuation mutant: violation did not strand the request (waves=$(_mwaves) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no) out=$cont_mut_out)"
+    fi
+fi
+rm -f "$MT/home/continuation.request"
+
+# The continuation is scheduling plumbing, not a second start verb. A stopped
+# loop still refuses it and leaves the request durable for an explicit start.
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+: > "$MT/home/loop.stopped"
+MENV "$TICK" request-continuation hold-release 290 >/dev/null 2>&1
+MTICK tick --auto; stopped_release=$(_mwaves)
+if [ "$stopped_release" = 0 ] && [ -f "$MT/home/continuation.request" ]; then
+    ok "hold release continuation: stopped loop stays stopped and retains request"
+else
+    bad "hold release continuation: stopped=$stopped_release request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no)"
+fi
+rm -f "$MT/home/loop.stopped" "$MT/home/continuation.request"
+
 # Decision 4: stop cuts the direct handoffs too. The chain is spawned BY the
 # lanes, so blocking waves alone would carry a ticket all the way to merged
 # after the human asked it to stop.

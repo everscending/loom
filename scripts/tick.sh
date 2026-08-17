@@ -135,6 +135,12 @@ PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 # board cannot lose the kick. (Paid for: patient-imaging Build JOR-267 waited
 # behind a 20m gap immediately after `/loom start`, 2026-08-16.)
 START_KICK_FILE="${LOOM_START_KICK_FILE:-$LOOM_HOME/start.kick}"
+# A successful human hold release can turn a halted board into runnable work
+# without a finishing lane to issue `tick --from-lane`. Keep that state change
+# as a one-shot request for the ordinary heartbeat: it bypasses only the old
+# wave gap, never the loop-stopped or quiet/usage gates, and is consumed only
+# when a wave is admitted. This is scheduler plumbing, not another start verb.
+CONTINUATION_FILE="${LOOM_CONTINUATION_FILE:-$LOOM_HOME/continuation.request}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
 # P82: a lane's brief lives HERE, never in the working tree it is about.
@@ -1401,6 +1407,17 @@ cmd_resume() {
     echo "resume: consecutive-wave-failure count reset"
 }
 
+cmd_request_continuation() { # hold-release <ticket>
+    local reason="${1:-}" ticket="${2:-}"
+    [ "$#" -eq 2 ] \
+        || die "request-continuation: usage: request-continuation hold-release <ticket>"
+    [ "$reason" = hold-release ] \
+        || die "request-continuation: unknown reason '$reason' (expected hold-release)"
+    case "$ticket" in ''|*[!0-9]*) die "request-continuation: ticket must be numeric" ;; esac
+    : > "$CONTINUATION_FILE"
+    _ev continuation_requested reason "$reason" ticket "$ticket"
+}
+
 # --- subcommands ----------------------------------------------------------
 # One-time setup, hooked to the verb actually used rather than to `start`.
 # Guarded by a sentinel in the per-repo state dir, so it costs one file test on
@@ -1549,7 +1566,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 start_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -1626,7 +1643,8 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
     [ ! -f "$START_KICK_FILE" ] || start_kick=1
-    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
+    [ ! -f "$CONTINUATION_FILE" ] || continuation_kick=1
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0
@@ -1699,6 +1717,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # Consume only at the cost boundary. A start kick that met a lock, a usage
     # pause, or a quiet-board refusal must survive for the next heartbeat.
     [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
+    [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
     tick_go=1
 }
 
@@ -5287,7 +5306,7 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
-    rm -f "$START_KICK_FILE"
+    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE"
     local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"
@@ -5471,6 +5490,7 @@ case "${1:-}" in
     report)       shift; cmd_report "$@" ;;
     retro)        shift; cmd_retro "$@" ;;
     resume)       shift; cmd_resume "$@" ;;
+    request-continuation) shift; cmd_request_continuation "$@" ;;
     clear-lane)   shift; cmd_clear_lane "$@" ;;
     kill-lane)    shift; cmd_kill_lane "$@" ;;
     snapshot)     shift; cmd_snapshot "$@" ;;
@@ -5489,5 +5509,5 @@ case "${1:-}" in
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac
