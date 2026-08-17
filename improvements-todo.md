@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 00:32 America/Chicago
+Last updated: 2026-08-17 00:37 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -21,6 +21,8 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 - [ ] **TODO — Right-size the Playwright worker budget.** `playwright.config.ts` does not set `workers`, so Playwright's local default uses 50% of logical CPUs: eight workers on this 16-thread host. Benchmark a fixed four-worker UI gate against the current eight-worker baseline for wall time, timeout rate, and peak host load. Change the configured budget only after the current UI branches finish so the gate fingerprint stays stable during review.
 
 - [x] **DONE — Add a supervised-repair lease.** Implemented in `8d41930` (`fix(wave): lease supervised repairs`), with the restricted-filesystem fail-fast follow-up in `7cf559e` (`fix(lock): fail fast on reservation I/O`). `tick.sh supervise acquire/release` writes bounded host-state leases; snapshots and plans expose them; implementation and gate admission rechecks them under a per-ticket lock for stale plans, Claude handoffs, and Codex durable drains. Expiry fails open, ordinary workers cannot self-lease, and reservation I/O denial is named instead of recursing. Verification: lease 11/11, shared-lock mutant 10/10, snapshot 124/124, planner 50/50, gate admission 9/9, and auxiliary admission 9/9. The live build now uses leases for JOR-206 and JOR-218.
+
+- [ ] **IN PROGRESS — Extend supervised leases through merge admission.** JOR-214 was leased after a known infrastructure-only merge-preflight failure, but merge admission ignored the lease and launched the same expensive UI preflight twice more. The duplicate lane was stopped and an explicit merge-failure hold recorded. A provider-neutral planner and shared spawn-boundary fix is in progress so active leases defer implementation, gate, and merge lanes—including stale direct handoffs and deferred drains.
 
 - [x] **DONE — Distinguish owned new files from missing prerequisites.** JOR-251 exposed a shared implementation-brief ambiguity: its worker treated two absent route files named in the ticket's own Scope and Files touched as foreign dependencies and blocked instead of creating them. Implemented in `0a7f5bc` (`fix(impl): create ticket-owned surfaces`): the provider-neutral skill contract now requires creation of ticket-owned surfaces and permits `unmerged-dependency` only for a prerequisite owned by a different ticket. Holding coverage in section 22 went RED 6/1 before the clarification and GREEN 7/0 afterward.
 
