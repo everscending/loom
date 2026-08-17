@@ -77,6 +77,21 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   released its supervised lease; unrelated `gate-233` and `impl-231` remained
   active.
 
+- [x] **DONE — Retain rejected-gate evidence through handoff.** JOR-233's
+  rc-7 gate handoff queued `clear-lane gate-233` before posting its prose
+  verdict. The next heartbeat retired the source launchd job and terminated
+  that handoff wave, leaving Review with no verdict at tested HEAD `14e0436`
+  and making the same failure gateable again. Implemented provider-neutrally
+  in `c5b08b9` (`fix(plan): retain rejected gate evidence`): an rc-7 lane in
+  Review is not cleanup-eligible until its immutable-HEAD verdict stands; only
+  the following plan clears it. The mend and scheduler contracts now make
+  evidence-before-cleanup ordering explicit. Verification: focused planner and
+  mend suites 74/74, full Loom suite 1,344/1,344, standalone jq/diff checks
+  clean; eager-cleanup mutation recreates the verdict-loss ordering. Mend then
+  repaired JOR-233's retained failure as `acceptance-contract`, moved it to
+  In Progress, and released the supervised lease. (`MEND-CHAIN-01`,
+  `MEND-LEARN-01`, `MEND-STATE-01`)
+
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
