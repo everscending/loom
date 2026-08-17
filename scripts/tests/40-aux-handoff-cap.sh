@@ -82,6 +82,32 @@ EOF
 chmod +x "$AGENT" "$TRACKER"
 export TRACKER_CMD="$TRACKER"
 printf 'queued gate brief\n' > "$T/aux-brief.md"
+
+# An auxiliary worker's successor replaces the slot that worker is about to
+# release. Count the live source as transferable so its provider session can
+# reserve the successor before exiting; otherwise the reservation is refused
+# at N of N, the source exits, and the slot sits idle until a later scheduling
+# wave. The queued reservation still blocks unrelated competitors.
+"$TICK" spawn-lane gate-224 --no-tick -- sleep 30 >/dev/null
+LOOM_LANE_ID=gate-224 LOOM_DEFER_LANE_LAUNCH=1 LOOM_AGENT_CMD="$AGENT" \
+  "$TICK" spawn-lane merge-224 --no-tick --provider codex --job merge --tier medium \
+  --brief "$T/aux-brief.md" --cwd "$LOOM_REPO" >/dev/null
+if find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 -type d \
+     -name 'request-*' -exec sh -c \
+     '[ "$(cat "$1/id" 2>/dev/null)" = merge-224 ] && printf "%s\n" "$1"' _ {} \; | grep -q .; then
+    ok "aux cap: an exiting auxiliary lane reserves its successor's slot"
+else
+    bad "aux cap: full-cap auxiliary handoff was discarded instead of reserved"
+fi
+"$TICK" kill-lane gate-224 >/dev/null 2>&1 || true
+LOOM_AGENT_CMD="$AGENT" "$TICK" drain-lane-launches >/dev/null
+if [ "$(aux_alive)" = 4 ] && [ -s "$LOOM_HOME/lanes/merge-224.pid" ]; then
+    ok "aux cap: the durable host fills the source lane's released slot"
+else
+    bad "aux cap: a released auxiliary slot stayed idle despite its successor handoff"
+fi
+"$TICK" kill-lane merge-224 >/dev/null 2>&1 || true
+
 LOOM_LANE_ID=impl-226 LOOM_DEFER_LANE_LAUNCH=1 LOOM_AGENT_CMD="$AGENT" \
   "$TICK" spawn-lane gate-226 --no-tick --provider codex --job gate --tier medium \
   --brief "$T/aux-brief.md" --cwd "$LOOM_REPO" >/dev/null

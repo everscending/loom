@@ -2220,10 +2220,23 @@ cmd_spawn_lane() {
             die "spawn-lane: auxiliary admission is busy — retry '$id' on the next heartbeat"
         fi
         trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
-        local aux_cap aux_used aux_rc=0
+        local aux_cap aux_used aux_source_pid="" aux_rc=0
         aux_cap=$(cfg max_aux_lanes 4)
         case "$aux_cap" in ''|*[!0-9]*) die "spawn-lane: max_aux_lanes must be a non-negative integer, got '$aux_cap'" ;; esac
         aux_used=$(_aux_capacity_usage)
+        # An aux-to-aux successor replaces the caller's own slot. Provider
+        # sessions must reserve that successor before they return to the host
+        # epilogue; counting the still-live source as permanent makes every
+        # N-of-N handoff disappear, then leaves N-1 workers until a later wave.
+        # Subtract only an actually live source lane. Other handoffs (notably
+        # impl -> gate) still consume a new aux slot, and a stale/spoofed lane
+        # id cannot borrow capacity it does not own.
+        if [ -n "$handoff_from" ] && _aux_lane_id "$handoff_from"; then
+            aux_source_pid=$(cat "$LANES_DIR/$handoff_from.pid" 2>/dev/null || true)
+            if [ "$aux_used" -gt 0 ] && _lane_process_alive "$handoff_from" "$aux_source_pid"; then
+                aux_used=$((aux_used - 1))
+            fi
+        fi
         if [ "$aux_used" -ge "$aux_cap" ]; then
             _aux_admission_refusal "$id" "$handoff_from" "$aux_used" "$aux_cap" || aux_rc=$?
             return "$aux_rc"
