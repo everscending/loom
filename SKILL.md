@@ -261,11 +261,13 @@ refuses outside herdr anyway.
 
    A host gate may update only Loom's narrow, known deterministic tracked
    output surfaces (`tests/artifacts/*` and `docs/deploy.md`) without making
-   that output ticket work. The host boundary snapshots every tracked edit
-   present before the runner, preserves newly generated allowlisted output as
-   a lane patch, and restores only allowlisted paths that were clean in that
-   snapshot. A pre-existing edit, an unknown output path, changed HEAD, or
-   failed evidence write stays dirty so sweep keeps the worktree. *(paid:
+   that output ticket work. The host boundary snapshots the exact pre-run
+   index and worktree trees, restores only those allowlisted paths to that
+   exact state after the runner (green or red), and consumes the temporary
+   snapshot. The runner transcript is the lasting gate evidence. A pre-existing
+   edit therefore survives even when the runner overwrites the same path; an
+   unknown output path, changed HEAD, or failed restore stays dirty so sweep
+   keeps the worktree. *(paid:
    Patient Imaging Portal Build JOR-267 retained nine completed worktrees;
    eight held only gate-generated `tests/artifacts/e8-run.json`, while older
    completed trees held generated `docs/deploy.md`.)*

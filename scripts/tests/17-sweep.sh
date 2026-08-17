@@ -85,9 +85,11 @@ printf 'base\n' > "$GA/repo/f"
 printf '# Issue tracker: GitLab\n' > "$GA/repo/docs/agents/issue-tracker.md"
 cat > "$GA/repo/scripts/gate.sh" <<'GATEEOF'
 #!/usr/bin/env bash
+echo "gate evidence: deterministic outputs exercised"
 printf '{"run":"gate-output"}\n' > tests/artifacts/e8-run.json
 printf 'deployment gate output\n' > docs/deploy.md
 [ "${GATE_WRITE_UNKNOWN:-0}" != 1 ] || printf 'unknown gate output\n' > f
+[ "${GATE_FORCE_FAIL:-0}" != 1 ] || { echo "gate failed intentionally" >&2; exit 23; }
 exit 0
 GATEEOF
 chmod +x "$GA/repo/scripts/gate.sh"
@@ -116,11 +118,11 @@ _wait_gate_artifact_lane "$GA_HOME" gate-310
 if [ "$(cat "$GA_HOME/lanes/gate-310.rc" 2>/dev/null)" = 0 ] \
    && grep -q '"run":"baseline"' "$GA/repo/.worktrees/310/tests/artifacts/e8-run.json" \
    && grep -q 'deployment baseline' "$GA/repo/.worktrees/310/docs/deploy.md" \
-   && grep -q 'gate-output' "$GA_HOME/lanes/gate-310.pregate-artifacts.patch" 2>/dev/null \
-   && grep -q 'deployment gate output' "$GA_HOME/lanes/gate-310.pregate-artifacts.patch" 2>/dev/null; then
-    ok "pregate artifacts: a green gate preserves tracked output as lane evidence and restores the worktree"
+   && grep -q 'gate evidence: deterministic outputs exercised' "$GA_HOME/logs/lane-gate-310.log" \
+   && ! find "$GA_HOME/lanes" -name 'gate-310.pregate-artifacts*' -print -quit | grep -q .; then
+    ok "pregate artifacts: a green gate keeps transcript evidence, restores outputs, and clears snapshot state"
 else
-    bad "pregate artifacts: green gate left its tracked output dirty or lost the evidence"
+    bad "pregate artifacts: green gate left output dirty, lost transcript evidence, or leaked snapshot state"
 fi
 SWEEP_MERGED="ticket-310-artifact" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_HOME" \
   "$TICK" sweep >"$GA/sweep-green.out" 2>&1
@@ -130,11 +132,13 @@ else
     bad "pregate artifacts: gate-generated tracked output still holds a completed worktree ($(head -1 "$GA/sweep-green.out"))"
 fi
 
-# A genuine edit that existed before the gate is outside that ownership. The
-# gate artifact can still be restored, but the edit must remain byte-for-byte
-# and keep the completed worktree on sweep's fail-closed path.
+# JOR-290 already carried a dirty generated artifact. Snapshot both its staged
+# and unstaged bytes, let the runner overwrite that SAME path, then prove the
+# exact pre-gate index/worktree state returns and keeps sweep fail-closed.
 git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/311" -b ticket-311-user-edit origin/main 2>/dev/null
-printf '{"note":"user edit"}\n' > "$GA/repo/.worktrees/311/tests/artifacts/user-note.json"
+printf '{"run":"user staged"}\n' > "$GA/repo/.worktrees/311/tests/artifacts/e8-run.json"
+git -C "$GA/repo/.worktrees/311" add tests/artifacts/e8-run.json
+printf '{"run":"user unstaged"}\n' > "$GA/repo/.worktrees/311/tests/artifacts/e8-run.json"
 GA_USER_HOME="$GA/home-user"
 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_USER_HOME" \
   "$TICK" spawn-lane gate-311 --no-tick --pregate ui \
@@ -143,11 +147,12 @@ _wait_gate_artifact_lane "$GA_USER_HOME" gate-311
 SWEEP_MERGED="ticket-311-user-edit" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_USER_HOME" \
   "$TICK" sweep >"$GA/sweep-user.out" 2>&1
 if [ -e "$GA/repo/.worktrees/311" ] \
-   && grep -q '"note":"user edit"' "$GA/repo/.worktrees/311/tests/artifacts/user-note.json" \
+   && grep -q '"run":"user unstaged"' "$GA/repo/.worktrees/311/tests/artifacts/e8-run.json" \
+   && git -C "$GA/repo/.worktrees/311" show :tests/artifacts/e8-run.json | grep -q '"run":"user staged"' \
    && grep -q 'modified tracked files' "$GA/sweep-user.out"; then
-    ok "pregate artifacts: a pre-existing tracked edit survives the gate and remains held by sweep"
+    ok "pregate artifacts: same-path staged and unstaged edits survive the runner and remain held"
 else
-    bad "pregate artifacts: a pre-existing tracked edit was erased or escaped sweep's hold"
+    bad "pregate artifacts: same-path pre-gate bytes were erased or escaped sweep's hold"
 fi
 
 # A new modification outside the narrow deterministic-output allowlist is not
@@ -168,16 +173,38 @@ else
     bad "pregate artifacts: an unknown tracked output was erased or escaped sweep's hold"
 fi
 
-# Planted violation: remove only the pre-gate ownership exclusion. The public
-# gate + sweep path then erases the user's tracked edit and removes the tree,
-# proving the snapshot guard is what carries the safety property.
+# A failing runner still owns cleanup before rc 7 is published: it leaves the
+# exact pre-gate files, never starts review, retains stdout/stderr as evidence,
+# and consumes the temporary snapshot state.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/314" -b ticket-314-red-runner origin/main 2>/dev/null
+GA_RED_HOME="$GA/home-red"
+GATE_FORCE_FAIL=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_RED_HOME" \
+  "$TICK" spawn-lane gate-314 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/314" -- touch "$GA/reviewed-314" >/dev/null
+_wait_gate_artifact_lane "$GA_RED_HOME" gate-314
+if [ "$(cat "$GA_RED_HOME/lanes/gate-314.rc" 2>/dev/null)" = 7 ] \
+   && [ ! -e "$GA/reviewed-314" ] \
+   && grep -q '"run":"baseline"' "$GA/repo/.worktrees/314/tests/artifacts/e8-run.json" \
+   && grep -q 'deployment baseline' "$GA/repo/.worktrees/314/docs/deploy.md" \
+   && grep -q 'gate failed intentionally' "$GA_RED_HOME/logs/lane-gate-314.log" \
+   && ! find "$GA_RED_HOME/lanes" -name 'gate-314.pregate-artifacts*' -print -quit | grep -q .; then
+    ok "pregate artifacts: a red runner restores exact state, keeps transcript evidence, and exits 7"
+else
+    bad "pregate artifacts: failed-runner cleanup lost state, evidence, or rejection semantics"
+fi
+
+# Planted violation: replace both exact snapshot trees with HEAD. The public
+# gate + sweep path then erases the same-path staged and unstaged edit and
+# removes the tree, proving the stash-tree pair carries the safety property.
 git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/312" -b ticket-312-user-edit-mutant origin/main 2>/dev/null
-printf '{"note":"user edit mutant"}\n' > "$GA/repo/.worktrees/312/tests/artifacts/user-note.json"
+printf '{"run":"user staged mutant"}\n' > "$GA/repo/.worktrees/312/tests/artifacts/e8-run.json"
+git -C "$GA/repo/.worktrees/312" add tests/artifacts/e8-run.json
+printf '{"run":"user unstaged mutant"}\n' > "$GA/repo/.worktrees/312/tests/artifacts/e8-run.json"
 MUT_GATE_ARTIFACT=$(mirror_scripts "$GA/mut-gate-artifact")
-sed -i.bak 's/if _pregate_artifact_was_dirty_before "\$path" "\$before"; then # mutate:pregate-preserve-preexisting/if false; then # mutate:pregate-preserve-preexisting/' \
+sed -i.bak 's@^        index_tree=.*# mutate:pregate-preserve-exact-state$@        worktree_tree="$head"; index_tree="$head" # mutate:pregate-preserve-exact-state@' \
   "$MUT_GATE_ARTIFACT/tick.sh"
 if cmp -s "$MUT_GATE_ARTIFACT/tick.sh" "$TICK"; then
-    bad "pregate-artifact-violation: sed did not match the pre-existing edit guard, mutant is identical to the fix"
+    bad "pregate-artifact-violation: sed did not match the exact-state snapshot, mutant is identical to the fix"
 else
     GA_MUT_HOME="$GA/home-mutant"
     mut_gate_out=$(GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_MUT_HOME" \
@@ -188,9 +215,9 @@ else
       "$MUT_GATE_ARTIFACT/tick.sh" sweep >>"$GA/sweep-mutant.out" 2>&1
     if assert_mutant_ran "$mut_gate_rc" "$mut_gate_out" "pregate-artifact-violation"; then
         if [ ! -e "$GA/repo/.worktrees/312" ]; then
-            ok "pregate-artifact-violation: without the snapshot exclusion a real user edit is erased and swept"
+            ok "pregate-artifact-violation: replacing exact snapshots with HEAD erases same-path edits and sweeps"
         else
-            bad "pregate-artifact-violation: planted omission did not recreate user-edit loss"
+            bad "pregate-artifact-violation: planted snapshot loss did not recreate same-path user-edit loss"
         fi
     fi
 fi

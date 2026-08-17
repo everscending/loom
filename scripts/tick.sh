@@ -2680,96 +2680,106 @@ _pregate_artifact_validate() { # <lane-id> <cwd> -> physical cwd
     printf '%s\n' "$abs"
 }
 
-_pregate_artifact_was_dirty_before() { # <path> <nul-list>
-    local path="$1" before="$2" prior=""
-    while IFS= read -r -d '' prior; do
-        [ "$prior" = "$path" ] && return 0
-    done < "$before"
-    return 1
-}
-
 cmd_pregate_artifacts_begin() { # <lane-id> <cwd>
     [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts begin <lane-id> <cwd>"
-    local id="$1" abs="" head="" prefix="" tmp=""
+    local id="$1" abs="" head="" prefix="" stash="" worktree_tree="" index_tree="" tmp=""
     abs=$(_pregate_artifact_validate "$id" "$2")
     head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     prefix="$LANES_DIR/$id.pregate-artifacts"
     if [ -z "$head" ]; then
-        : > "$prefix.before"
         printf '%s\n' no-git > "$prefix.head"
         printf '%s\n' "$abs" > "$prefix.cwd"
-        rm -f "$prefix.patch" "$prefix.paths"
+        rm -f "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
         return 0
     fi
-    tmp="$prefix.before.tmp.$$"
-    git -C "$abs" diff --name-only --no-renames -z HEAD -- > "$tmp" \
-        || { rm -f "$tmp"; die "pregate-artifacts: cannot snapshot tracked changes in '$abs'"; }
+    # `stash create` records the exact working-tree tree and index tree without
+    # changing either one or creating a stash ref. The finish half consumes
+    # both trees path-by-path, then clears these temporary references. This is
+    # what lets an already-dirty e8-run.json survive a runner that overwrites
+    # that same file, including distinct staged and unstaged bytes.
+    stash=$(git -C "$abs" stash create "loom pregate $id" 2>/dev/null) \
+        || die "pregate-artifacts: cannot snapshot pre-gate index and worktree state in '$abs'"
+    if [ -n "$stash" ]; then
+        worktree_tree=$(git -C "$abs" rev-parse --verify "$stash^{tree}" 2>/dev/null) \
+            || die "pregate-artifacts: cannot resolve pre-gate worktree tree"
+        index_tree=$(git -C "$abs" rev-parse --verify "$stash^2^{tree}" 2>/dev/null) || die "pregate-artifacts: cannot resolve pre-gate index tree" # mutate:pregate-preserve-exact-state
+    else
+        worktree_tree="$head"
+        index_tree="$head"
+    fi
+    tmp="$prefix.paths.tmp.$$"
+    git -C "$abs" ls-files -z -- tests/artifacts docs/deploy.md > "$tmp" \
+        || { rm -f "$tmp"; die "pregate-artifacts: cannot enumerate deterministic tracked outputs in '$abs'"; }
     printf '%s\n' "$head" > "$prefix.head.tmp.$$"
     printf '%s\n' "$abs" > "$prefix.cwd.tmp.$$"
-    mv -f "$tmp" "$prefix.before"
+    printf '%s\n' "$worktree_tree" > "$prefix.worktree-tree.tmp.$$"
+    printf '%s\n' "$index_tree" > "$prefix.index-tree.tmp.$$"
+    mv -f "$tmp" "$prefix.paths"
     mv -f "$prefix.head.tmp.$$" "$prefix.head"
     mv -f "$prefix.cwd.tmp.$$" "$prefix.cwd"
-    rm -f "$prefix.patch" "$prefix.paths"
+    mv -f "$prefix.worktree-tree.tmp.$$" "$prefix.worktree-tree"
+    mv -f "$prefix.index-tree.tmp.$$" "$prefix.index-tree"
 }
 
 cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
     [ "$#" -eq 2 ] || die "usage: tick.sh pregate-artifacts finish <lane-id> <cwd>"
-    local id="$1" abs="" prefix="" before="" expected_head="" expected_cwd=""
-    local current_head="" current="" candidates="" patch="" path="" restored=0 preexisting=0
+    local id="$1" abs="" prefix="" expected_head="" expected_cwd=""
+    local worktree_tree="" index_tree="" current_head="" current="" path="" restored=0
     abs=$(_pregate_artifact_validate "$id" "$2")
     prefix="$LANES_DIR/$id.pregate-artifacts"
-    before="$prefix.before"
-    [ -f "$before" ] && [ -f "$prefix.head" ] && [ -f "$prefix.cwd" ] \
-        || die "pregate-artifacts: lane '$id' has no complete pre-gate snapshot"
+    [ -f "$prefix.head" ] && [ -f "$prefix.cwd" ] \
+        || die "pregate-artifacts: lane '$id' has no pre-gate snapshot"
     expected_head=$(cat "$prefix.head" 2>/dev/null || true)
     expected_cwd=$(cat "$prefix.cwd" 2>/dev/null || true)
     if [ "$expected_head" = no-git ]; then
         [ "$abs" = "$expected_cwd" ] \
             || die "pregate-artifacts: directory identity changed during lane '$id'"
+        rm -f "$prefix.head" "$prefix.cwd" "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
         return 0
     fi
+    [ -f "$prefix.worktree-tree" ] && [ -f "$prefix.index-tree" ] && [ -f "$prefix.paths" ] \
+        || die "pregate-artifacts: lane '$id' has an incomplete exact-state snapshot"
+    worktree_tree=$(cat "$prefix.worktree-tree" 2>/dev/null || true)
+    index_tree=$(cat "$prefix.index-tree" 2>/dev/null || true)
     current_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
     [ -n "$expected_head" ] && [ "$current_head" = "$expected_head" ] \
         || die "pregate-artifacts: HEAD changed during lane '$id'; leaving every tracked change untouched"
     [ "$abs" = "$expected_cwd" ] \
         || die "pregate-artifacts: worktree identity changed during lane '$id'; leaving every tracked change untouched"
+    git -C "$abs" cat-file -e "$worktree_tree^{tree}" 2>/dev/null \
+        || die "pregate-artifacts: pre-gate worktree snapshot is unreadable"
+    git -C "$abs" cat-file -e "$index_tree^{tree}" 2>/dev/null \
+        || die "pregate-artifacts: pre-gate index snapshot is unreadable"
 
     current="$prefix.current.tmp.$$"
-    candidates="$prefix.paths.tmp.$$"
-    patch="$prefix.patch.tmp.$$"
-    : > "$candidates"; : > "$patch"
-    git -C "$abs" diff --name-only --no-renames -z HEAD -- > "$current" \
-        || { rm -f "$current" "$candidates" "$patch"; die "pregate-artifacts: cannot inspect post-gate tracked changes"; }
-    while IFS= read -r -d '' path; do
-        _pregate_owned_artifact_path "$path" || continue
-        if _pregate_artifact_was_dirty_before "$path" "$before"; then # mutate:pregate-preserve-preexisting
-            preexisting=$((preexisting + 1))
-            continue
-        fi
-        printf '%s\0' "$path" >> "$candidates"
-        git -C "$abs" diff --binary --full-index HEAD -- "$path" >> "$patch" \
-            || { rm -f "$current" "$candidates" "$patch"; die "pregate-artifacts: cannot preserve gate output '$path'; leaving tracked changes untouched"; }
-        restored=$((restored + 1))
-    done < "$current"
+    git -C "$abs" ls-files -z -- tests/artifacts docs/deploy.md > "$current" \
+        || { rm -f "$current"; die "pregate-artifacts: cannot inspect post-gate deterministic tracked outputs"; }
+    cat "$current" >> "$prefix.paths"
     rm -f "$current"
 
-    # Publish evidence before changing an allowlisted output. Only a path that
-    # was clean at the snapshot and changed synchronously under the host gate
-    # reaches this restore. Pre-existing and unknown paths remain untouched.
-    if [ "$restored" -gt 0 ]; then
-        mv -f "$patch" "$prefix.patch"
-        mv -f "$candidates" "$prefix.paths"
-        chmod 444 "$prefix.patch" "$prefix.paths" 2>/dev/null || true
-        while IFS= read -r -d '' path; do
-            git -C "$abs" restore --source=HEAD --worktree -- "$path" \
-                || die "pregate-artifacts: could not restore gate-owned output '$path'; sweep will keep this worktree"
-            git -C "$abs" diff --quiet HEAD -- "$path" \
-                || die "pregate-artifacts: gate-owned output '$path' remains dirty; sweep will keep this worktree"
-        done < "$prefix.paths"
-        echo "--- pregate artifacts: preserved $restored tracked output(s) in $prefix.patch and restored them to HEAD; $preexisting pre-existing artifact edit(s) left untouched ---"
-    else
-        rm -f "$patch" "$candidates"
-    fi
+    # The runner transcript in lane-<id>.log is the lasting test evidence.
+    # These tree ids are temporary recovery inputs with one consumer: restore
+    # every allowlisted tracked path to its exact pre-gate index and worktree
+    # state. Unknown paths are never enumerated and remain dirty/fail-closed.
+    while IFS= read -r -d '' path; do
+        _pregate_owned_artifact_path "$path" || continue
+        if git -C "$abs" diff --cached --quiet "$index_tree" -- "$path" \
+           && git -C "$abs" diff --quiet "$worktree_tree" -- "$path"; then
+            continue
+        fi
+        git -C "$abs" restore --source="$index_tree" --staged -- "$path" \
+            || die "pregate-artifacts: could not restore pre-gate index state for '$path'; sweep will keep this worktree"
+        git -C "$abs" restore --source="$worktree_tree" --worktree -- "$path" \
+            || die "pregate-artifacts: could not restore pre-gate worktree state for '$path'; sweep will keep this worktree"
+        git -C "$abs" diff --cached --quiet "$index_tree" -- "$path" \
+            || die "pregate-artifacts: index state for '$path' differs from its pre-gate snapshot"
+        git -C "$abs" diff --quiet "$worktree_tree" -- "$path" \
+            || die "pregate-artifacts: worktree state for '$path' differs from its pre-gate snapshot"
+        restored=$((restored + 1))
+    done < "$prefix.paths"
+    rm -f "$prefix.head" "$prefix.cwd" "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
+    [ "$restored" -eq 0 ] \
+        || echo "--- pregate artifacts: restored $restored deterministic tracked output(s) to their exact pre-gate index/worktree state; test evidence remains in the lane log ---"
 }
 
 cmd_pregate_artifacts() {
