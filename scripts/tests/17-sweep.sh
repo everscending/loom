@@ -98,6 +98,84 @@ if assert_mutant_ran "$mut_queued_rc" "$mut_queued_out" "queued-worktree-violati
         bad "sweep-violation: planted queued-cwd omission did not recreate deletion (rc=$mut_queued_rc)"
     fi
 fi
+
+# A supervised repair owns the matching ticket worktree even when no lane or
+# durable launch request does. This is the exact dangerous shape: clean,
+# zero-ahead work looks disposable to the ordinary sweep rules while a human
+# is about to edit it. Acquire and release from the linked checkout so this
+# also proves sweep consumes the canonical repository's lease state.
+SUP="$T/sweep-supervised"; mkdir -p "$SUP"
+git -c init.defaultBranch=main init -q --bare "$SUP/origin.git"
+git clone -q "$SUP/origin.git" "$SUP/repo" 2>/dev/null
+SUP_REPO=$(cd "$SUP/repo" && pwd -P)
+git -C "$SUP/repo" config user.email t@t; git -C "$SUP/repo" config user.name t
+echo base > "$SUP/repo/f"; git -C "$SUP/repo" add f
+git -C "$SUP/repo" commit -qm base; git -C "$SUP/repo" push -q origin main
+mkdir -p "$SUP/repo/.worktrees" "$SUP/operator-home"
+git -C "$SUP/repo" worktree add -q "$SUP/repo/.worktrees/216" -b loom-216 origin/main 2>/dev/null
+
+(cd "$SUP/repo/.worktrees/216" && env -u LOOM_HOME -u LOOM_REPO HOME="$SUP/operator-home" \
+  "$TICK" supervise acquire 216 --owner root/resolve_206 --ttl-seconds 3600 >/dev/null)
+GLAB_CMD="$SW/glab-stub.sh" env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+  "$TICK" sweep >"$SUP/active.out" 2>&1
+if [ -d "$SUP/repo/.worktrees/216" ]; then
+    ok "sweep: active canonical supervised lease preserves its ticket worktree"
+else
+    bad "sweep: deleted a clean ticket worktree under active supervised ownership"
+fi
+
+if [ -d "$SUP/repo/.worktrees/216" ]; then
+    (cd "$SUP/repo/.worktrees/216" && env -u LOOM_HOME -u LOOM_REPO HOME="$SUP/operator-home" \
+      "$TICK" supervise release 216 >/dev/null)
+else
+    env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+      "$TICK" supervise release 216 >/dev/null
+fi
+GLAB_CMD="$SW/glab-stub.sh" env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+  "$TICK" sweep >"$SUP/released.out" 2>&1
+if [ ! -e "$SUP/repo/.worktrees/216" ]; then
+    ok "sweep: released supervised worktree returns to ordinary cleanup"
+else
+    bad "sweep: released clean ticket worktree remained protected"
+fi
+
+# Expiry is intentionally fail-open for scheduling and cleanup. A stale lease
+# file must not preserve a clean checkout forever after its supervisor dies.
+git -C "$SUP/repo" worktree add -q "$SUP/repo/.worktrees/217" -b loom-217 origin/main 2>/dev/null
+(cd "$SUP/repo/.worktrees/217" && env -u LOOM_HOME -u LOOM_REPO HOME="$SUP/operator-home" \
+  "$TICK" supervise acquire 217 --owner root/expired --ttl-seconds 3600 >/dev/null)
+lease217=$(find "$SUP/operator-home/.loom" -path '*/supervised-leases/217.json' -type f -print -quit)
+jq '.expires_at = 1' "$lease217" > "$lease217.tmp" && mv "$lease217.tmp" "$lease217"
+GLAB_CMD="$SW/glab-stub.sh" env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+  "$TICK" sweep >"$SUP/expired.out" 2>&1
+if [ ! -e "$SUP/repo/.worktrees/217" ]; then
+    ok "sweep: expired supervised lease does not retain stale worktree ownership"
+else
+    bad "sweep: expired supervised lease retained a clean ticket worktree"
+fi
+
+# Planted violation: keep canonical lease reads intact but drop only their cwd
+# ownership from a private tick.sh. The same public sweep must delete the
+# leased zero-ahead checkout again, proving the new ownership fold is causal.
+git -C "$SUP/repo" worktree add -q "$SUP/repo/.worktrees/218" -b loom-218 origin/main 2>/dev/null
+(cd "$SUP/repo/.worktrees/218" && env -u LOOM_HOME -u LOOM_REPO HOME="$SUP/operator-home" \
+  "$TICK" supervise acquire 218 --owner root/mutant --ttl-seconds 3600 >/dev/null)
+MUT_SUP_SWEEP=$(mirror_scripts "$SUP/mut-no-supervised-cwd")
+sed -i.bak 's@protected_cwds="$protected_cwds $REPO_ROOT/.worktrees/$ticket $REPO_ROOT-wt-$ticket"@protected_cwds="$protected_cwds"@' \
+  "$MUT_SUP_SWEEP/tick.sh"
+mut_sup_out=$(GLAB_CMD="$SW/glab-stub.sh" env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+  "$MUT_SUP_SWEEP/tick.sh" sweep 2>&1); mut_sup_rc=$?
+if assert_mutant_ran "$mut_sup_rc" "$mut_sup_out" "supervised-sweep-violation"; then
+    if [ ! -e "$SUP/repo/.worktrees/218" ] \
+       && printf '%s' "$mut_sup_out" | grep -q 'removed merged worktree'; then
+        ok "sweep-violation: dropping supervised cwd ownership recreates deletion"
+    else
+        bad "sweep-violation: supervised-cwd omission did not recreate deletion (rc=$mut_sup_rc)"
+    fi
+fi
+env -u LOOM_HOME HOME="$SUP/operator-home" LOOM_REPO="$SUP_REPO" \
+  "$TICK" supervise release 218 >/dev/null
+
 # The safety boundary: unmerged work is never ours to delete. Fixing the crash
 # above ARMED a deletion path that had never executed, so prove it still stops.
 git -C "$SW/repo" checkout -qb live-work origin/main

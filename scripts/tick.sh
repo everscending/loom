@@ -370,6 +370,21 @@ cmd_sweep() {
                 return 0 ;;
         esac
     done
+    # JOR-216: a human supervisor owns the ticket's prepared checkout even
+    # when no lane or durable launch request exists yet. A clean zero-ahead
+    # tree is otherwise indistinguishable from disposable merged debris, so
+    # fold active leases into the same canonical cwd ownership set. The lease
+    # reader is active-only: release and expiry deliberately restore ordinary
+    # cleanup without requiring a stale-state mutation.
+    local supervised_tickets ticket
+    supervised_tickets=$(_supervised_leases_json | jq -r '.[].ticket' 2>/dev/null) || {
+        echo "sweep: supervised lease state is unreadable — skipping sweep rather than risk a supervised worktree"
+        rm -f "$SWEEP_HELD_FILE.new"
+        return 0
+    }
+    for ticket in $supervised_tickets; do
+        protected_cwds="$protected_cwds $REPO_ROOT/.worktrees/$ticket $REPO_ROOT-wt-$ticket"
+    done
     for dir in "$REPO_ROOT/.worktrees/"* "$REPO_ROOT"-wt-*; do
         [ -e "$dir" ] || continue
         case "$dir" in
