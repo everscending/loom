@@ -108,6 +108,33 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
+- [x] **DONE — Release the UI host after mechanical pregate.** Measurement on
+  Patient Imaging Portal Build JOR-267 found 134 UI gates consuming 8.13 hours;
+  54 rejected gates consumed 4.22 hours, while the single host reservation was
+  incorrectly retained through independent provider review after Chromium and
+  its fixture had exited. Implemented provider-neutrally in `a35c4fb`
+  (`fix(gates): release UI host after pregate`): `.ui-resource` now owns only
+  the active host pregate/probe, while `.pregate` remains durable attribution.
+  Direct and queued gates, merge preflights, probes, cleanup, and atomic
+  admission share the same boundary. Snapshot fixture correction `a16b214`
+  models a genuinely active host phase. Verification: focused/adjacent UI,
+  gate, probe, planner, and mend suites 53/53; full suite 1,356/1,356; retaining
+  the resource marker recreates false review-time serialization.
+  (`MEND-ADMIT-01`, `MEND-LEARN-01`)
+
+- [x] **DONE — Detect missing workers per flow stage.** A live implementation
+  previously made Mend look healthy even when Review or Merge Queue work had
+  no gate/merge owner, so the human had to identify the idle stage. Implemented
+  provider-neutrally in `eb626db` (`fix(mend): detect unowned flow stages`):
+  `mend-status` emits `MEND-FLOW-01/unowned-stage` for an In Progress, Review,
+  or Merge Queue ticket without its matching implementation, gate, or merge
+  lane, and includes its scheduled, deferred, and residue disposition. The
+  Mend contract now ranks unowned closure stages and shared-resource pressure
+  before lower-impact work and requires diagnosis in the same pass. Verification:
+  focused Mend 14/14, full suite 1,356/1,356; removing the detector recreates
+  an invisible merge queue while unrelated work remains active.
+  (`MEND-FLOW-01`, `MEND-LEARN-01`)
+
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
 
 - [x] **DONE — Classify probe infrastructure separately from product failures.** Implemented provider-neutrally in `4940b52` (`fix(probes): classify infrastructure failures`): probe briefs require proof of product contact before `fix-ticket`; sandbox, browser launch, OS permission, and local bind failures instead emit typed `probe-result ... infrastructure`, keep the epic open, and render without claiming a product defect. Claude and Codex adapters remain unchanged. Verification: ticker/verbs, staged-brief mutant, and runtime suites passed 235/235; the isolated full suite passed 1,240/1,240. Extending this typed distinction to ordinary gate retry policy remains future work.
