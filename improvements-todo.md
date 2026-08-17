@@ -135,6 +135,19 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   an invisible merge queue while unrelated work remains active.
   (`MEND-FLOW-01`, `MEND-LEARN-01`)
 
+- [ ] **IN PROGRESS — Keep viewer panes equal to active workers.** Patient
+  Imaging Portal exposed a dead viewer (`watch-panes.pid` 45610; output stopped
+  at 09:59) whose four owned panes outlived it (`impl-231`, `gate-207`,
+  `impl-253`, `gate-239`), while the only live lane `impl-291` had no pane.
+  Immediate recovery closed those confirmed orphan panes and started a fresh
+  viewer, which opened `impl-291`. Durable completion requires active-only pane
+  reconciliation on every poll, recoverable ownership across viewer death,
+  stale/PID-reuse-safe singleton detection, and automatic recovery that cannot
+  strand a live lane until a human runs `watch` again. Add public regressions
+  for viewer death with surviving panes and for a new lane arriving after that
+  death, plus a planted ownership-recovery mutation. (`MEND-LIVE-01`,
+  `MEND-LEARN-01`)
+
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
 
 - [x] **DONE — Classify probe infrastructure separately from product failures.** Implemented provider-neutrally in `4940b52` (`fix(probes): classify infrastructure failures`): probe briefs require proof of product contact before `fix-ticket`; sandbox, browser launch, OS permission, and local bind failures instead emit typed `probe-result ... infrastructure`, keep the epic open, and render without claiming a product defect. Claude and Codex adapters remain unchanged. Verification: ticker/verbs, staged-brief mutant, and runtime suites passed 235/235; the isolated full suite passed 1,240/1,240. Extending this typed distinction to ordinary gate retry policy remains future work.
