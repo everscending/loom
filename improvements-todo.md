@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-16 23:17 America/Chicago
+Last updated: 2026-08-16 23:19 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -15,6 +15,8 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 - [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206 reproduced its forged-cursor defect (`200` instead of `422`), landed and pushed the authenticated-cursor repair at `56e2ebb`, and is waiting for the serialized UI resource. JOR-286's latest reviewer found a test-proof gap rather than a new RPC defect; a supervised test-only repair is in progress. JOR-214's fixture-lease repair remains verified and awaits its serialized gate. Machine-enforced planner routing is still TODO.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
+
+- [ ] **TODO — Right-size the Playwright worker budget.** `playwright.config.ts` does not set `workers`, so Playwright's local default uses 50% of logical CPUs: eight workers on this 16-thread host. Benchmark a fixed four-worker UI gate against the current eight-worker baseline for wall time, timeout rate, and peak host load. Change the configured budget only after the current UI branches finish so the gate fingerprint stays stable during review.
 
 - [ ] **TODO — Add a supervised-repair lease.** A ticket under supervisor/sub-agent repair needs a machine-readable lease. Ordinary waves must not launch a duplicate implementer or gate until the lease is released or expires. This closes the duplicate JOR-214/JOR-287 collisions and the 23:14 JOR-286 race, where a heartbeat launched `impl-286` during supervised reconciliation; it was stopped before editing the verified worktree.
 
