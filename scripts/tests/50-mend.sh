@@ -53,6 +53,17 @@ else
     bad "mend: healthy status was not emitted (rc=$rc, out=$(printf '%s' "$out" | tr '\n' '|'), err=$(head -2 "$FX/healthy.err" | tr '\n' '|'))"
 fi
 
+jq 'del(.config.min_wave_gap_minutes, .config.stall_action)' \
+    "$FX/healthy.json" > "$FX/snapshot-config-gap.json"
+configured=$("$TICK" mend-status "$FX/snapshot-config-gap.json" 2>/dev/null)
+if printf '%s\n' "$configured" | jq -e '
+     .configuration.min_wave_gap_minutes == 10
+     and .configuration.stall_action == "resume"' >/dev/null 2>&1; then
+    ok "mend: timing policy comes from canonical layered config when snapshot omits it"
+else
+    bad "mend: timing policy disappeared at the snapshot boundary ($(printf '%s' "$configured" | jq -c '.configuration' 2>/dev/null))"
+fi
+
 # The normal human path supplies no fixture: mend-status must take its own
 # fresh tracker snapshot, then feed that exact document to the pure planner.
 LIVE_FX="$T/mend-live"; make_glab_fixture "$LIVE_FX"

@@ -4297,6 +4297,8 @@ cmd_mend_status() { # mend-status [<snapshot.json>]
     stopped=false
     _loop_stopped && stopped=true
     jq -L "$jqd" -n --argjson stopped "$stopped" \
+        --arg min_wave_gap "$(cfg min_wave_gap_minutes 10)" \
+        --arg stall_action "$(cfg stall_action resume)" \
         --slurpfile snapshot "$MEND_TMP/snapshot.json" \
         --slurpfile plan "$MEND_TMP/plan.json" \
         -f "$jqf"

@@ -39,8 +39,9 @@ $snapshot[0] as $s
       rejection_cap: $s.config.rejection_cap,
       crash_cap: $s.config.crash_cap,
       heartbeat_stale_minutes: $s.config.heartbeat_stale_minutes,
-      min_wave_gap_minutes: $s.config.min_wave_gap_minutes,
-      stall_action: $s.config.stall_action
+      min_wave_gap_minutes: ($s.config.min_wave_gap_minutes
+                             // ($min_wave_gap | tonumber? // $min_wave_gap)),
+      stall_action: ($s.config.stall_action // $stall_action)
     },
     summary: $s.summary,
     lanes: ($s.lanes // []),
