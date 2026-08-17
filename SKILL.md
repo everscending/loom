@@ -1,6 +1,6 @@
 ---
 name: loom
-description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over tracker-backed state. Verbs: plan, epics, tickets, build, tick, watch, unblock, replan, qa, retro."
+description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over tracker-backed state. Verbs: plan, epics, tickets, build, tick, watch, mend, unblock, replan, qa, retro."
 disable-model-invocation: true
 ---
 
@@ -50,6 +50,7 @@ technique of its own.
 | `start` | 5→6 | Detect/bind the provider, sync its guardrails, then kick the unattended loop; also resumes |
 | `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
 | `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
+| `mend [--once\|--observe-only]` | 6 | Contract-grounded supervision and repair while the scheduler keeps ownership |
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
@@ -73,7 +74,8 @@ and manual-drive in [references/phases-1-5.md](references/phases-1-5.md);
 [references/build-controls.md](references/build-controls.md); **setup,
 bootstrap, config, the skill/repo boundary** in
 [references/setup.md](references/setup.md); the rest of the human-run verbs
-under "Human-run verbs" below.
+under "Human-run verbs" below. **`mend`** follows the active-build supervisory
+contract in [references/mend.md](references/mend.md).
 
 ## Phase 6 · the build loop
 
@@ -484,6 +486,10 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 [references/build-controls.md](references/build-controls.md); `replan` is in
 [references/phases-1-5.md](references/phases-1-5.md).
 
+- **`mend [--once|--observe-only]`** — supervise an active build against
+  Loom's existing contracts, help rejection-cap tickets, and repair confirmed
+  runtime defects without becoming another scheduler or resuming a stopped
+  loop: [references/mend.md](references/mend.md).
 - **`triage`** — every blocked ticket on one `/lavish` surface, six actions
   each (requeue, to review, `rescope`, `model-tier`, leave, close), applied as
   a batch; `unblock <n>` is unchanged and still the one-ticket path.

@@ -4268,6 +4268,40 @@ cmd_plan() { # plan [<snapshot.json>]  (default: stdin)
     fi
 }
 
+# --- mend-status: one evidence document for the human supervisor ---------
+# `mend` is a skill-level, human-run control loop. This read-only host seam
+# gives it one canonical observation assembled from the same snapshot and
+# plan documents that drive normal scheduling; it is not another scheduler.
+cmd_mend_status() { # mend-status [<snapshot.json>]
+    command -v jq >/dev/null 2>&1 || die "mend-status: jq required"
+    local jqd jqf src stopped
+    jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    jqf="$jqd/mend.jq"
+    [ -f "$jqf" ] || die "mend-status: $jqf is missing — it holds the supervisory status rules and ships beside tick.sh"
+    src="${1:-}"
+    [ "$#" -le 1 ] || die "mend-status: unknown argument '$2' (usage: mend-status [<snapshot.json>])"
+
+    # Globals because the EXIT trap runs after this function returns under
+    # Bash 3.2. This command is top-level and never called from `cmd_tick`.
+    MEND_TMP=$(mktemp -d)
+    trap 'rm -rf "$MEND_TMP"' EXIT
+    if [ -n "$src" ]; then
+        [ -f "$src" ] || die "mend-status: '$src' is not a file"
+        cp "$src" "$MEND_TMP/snapshot.json"
+    else
+        "$SELF_PATH" snapshot > "$MEND_TMP/snapshot.json"
+    fi
+    jq -e . "$MEND_TMP/snapshot.json" >/dev/null 2>&1 \
+        || die "mend-status: snapshot is not valid JSON"
+    "$SELF_PATH" plan "$MEND_TMP/snapshot.json" > "$MEND_TMP/plan.json"
+    stopped=false
+    _loop_stopped && stopped=true
+    jq -L "$jqd" -n --argjson stopped "$stopped" \
+        --slurpfile snapshot "$MEND_TMP/snapshot.json" \
+        --slurpfile plan "$MEND_TMP/plan.json" \
+        -f "$jqf"
+}
+
 # --- report (P23): what the events add up to ------------------------------
 # Two views over one file, because "tune the loop" and "diagnose this build"
 # want the same events shaped differently. Neither reads anything but
@@ -5359,6 +5393,7 @@ case "${1:-}" in
     kill-lane)    shift; cmd_kill_lane "$@" ;;
     snapshot)     shift; cmd_snapshot "$@" ;;
     plan)         shift; cmd_plan "$@" ;;
+    mend-status)  shift; cmd_mend_status "$@" ;;
     graph)        shift; cmd_graph "$@" ;;
     gate-deps)    shift; cmd_gate_deps "$@" ;;
     resolve-config)   shift; cmd_resolve_config "$@" ;;
@@ -5372,5 +5407,5 @@ case "${1:-}" in
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac

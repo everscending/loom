@@ -1233,7 +1233,7 @@ err=$(jq -L "$(dirname "$TICK")" -n 'include "lib"; empty' 2>&1 || true)
 # includes the prelude, so there is no per-file question about which ones need
 # `-L` and no second mechanism for sharing a definition.
 noinc=""
-for jf in snapshot.jq plan.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
+for jf in snapshot.jq plan.jq mend.jq render.jq render-events.jq usage.jq report.jq report-ticket.jq retro.jq graph.jq; do
     grep -q '^include "lib";$' "$(dirname "$TICK")/$jf" || noinc="$noinc $jf"
 done
 [ -z "$noinc" ] \
