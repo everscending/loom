@@ -66,6 +66,20 @@ case "$WPROMPT" in
   *"lane.sh close"*) bad "P48: the prompt still tells lanes how to finish a merge" ;;
   *) ok "P48: the prompt says nothing about which verb finishes a merge" ;;
 esac
+
+# D-TICK-26: an implementation lane must distinguish a missing prerequisite
+# from an absent file the current ticket explicitly owns. JOR-251's ticket
+# named two new appointment route files in Scope and Files touched; the old
+# prose still told the worker to classify those absent owned files as an
+# unmerged dependency, so it blocked instead of creating them.
+SKILL_FILE="$(cd "$(dirname "$TICK")/.." && pwd)/SKILL.md"
+if grep -Fq 'Files touched' "$SKILL_FILE" \
+   && grep -Fq 'must create it' "$SKILL_FILE" \
+   && grep -Fq 'owned by a different ticket' "$SKILL_FILE"; then
+    ok "D-TICK-26: owned absent files are created; only foreign prerequisites block"
+else
+    bad "D-TICK-26: implementation brief can mistake an owned new file for a missing dependency"
+fi
 # The failing side: with the derivation removed the list could only be a
 # restatement. A doctored lane.sh proves it is read — a verb this suite has
 # never heard of reaches the prompt intact.

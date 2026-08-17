@@ -289,12 +289,15 @@ refuses outside herdr anyway.
    - `spawn-lane impl-<ticket> --provider <id> --job implementation --tier
      <tier> --brief <file> --cwd <worktree>` starts a headless session
      whose brief **inlines** the work rather than naming `/implement`
-     (headless has no slash commands): the ticket body + lessons thread — if
-     that body names a contract (endpoint, schema, route, wire shape) it
-     consumes and the freshly-fetched base lacks, block
-     (`--category unmerged-dependency`) rather than build it, since it belongs
-     to whichever ticket owns it and building it twice is an unresolvable
-     merge conflict — no trailing self-review (the gate owns review), focused
+     (headless has no slash commands): the ticket body + lessons thread. First
+     classify an absent contract by ownership: when the ticket's own Scope or
+     Files touched names a new endpoint, schema, route, wire shape, or file,
+     the ticket owns that surface and the lane must create it. Block with
+     `--category unmerged-dependency` only when the current ticket consumes a
+     prerequisite contract owned by a different ticket and the freshly-fetched
+     base lacks it; building that foreign prerequisite twice would create an
+     unresolvable merge conflict. Continue with no trailing self-review (the
+     gate owns review), focused
      checks for the changed surface only (never the full configured tier gate
      inside the provider session), a commit with
      the `Assisted-by` trailer, a push, then finishes with
