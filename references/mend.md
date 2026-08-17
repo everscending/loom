@@ -112,7 +112,9 @@ the ledger and in repair evidence.
    the build has another actionable idle defect, not a healthy deferral. An
    rc-7 gate retains its lane evidence until the prose verdict is durably
    posted; cleanup must not retire the source launchd job while its handoff
-   wave is still classifying that rejection.
+   wave is still classifying that rejection. If tracker read-after-write lag
+   transports the exact same ticket/HEAD/outcome/class verdict in two comments,
+   it is still one gate round and must not consume the rejection cap twice.
 3. Inspect every `attention` item and any plan residue. Correlate it with the
    immutable lane head/log and current tracker state. Confirm the failure at a
    public seam before calling it a defect.

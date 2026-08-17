@@ -83,6 +83,11 @@ the rejection. Only a later plan may clear the lane. Retiring the source
 launchd job first can terminate that very handoff and silently lose the
 verdict, causing the same failing HEAD to be gated again.
 
+Tracker consistency can lag an immediate cleanup replay. Exact duplicate
+verdict comments—same ticket, immutable HEAD, outcome, and class—collapse to
+one semantic gate round after the newest reset marker. Transport duplication
+must never manufacture a rejection-cap block.
+
 ## The loop switch
 
 `start` clears `$LOOM_HOME/loop.stopped`; `stop` writes it. While it exists,

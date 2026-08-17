@@ -74,7 +74,14 @@ def verdicts_after_reset($notes):
   | group_by([.i, .sha]) | map(max_by(.mi))
   | sort_by([.at, -.i, .mi])
   | if $reset == null then .
-    else map(select([.at, -.i] > [$reset.at, -$reset.i])) end;
+    else map(select([.at, -.i] > [$reset.at, -$reset.i])) end
+  # Tracker read-after-write lag can let an immediate cleanup replay post the
+  # same ticket/HEAD/outcome twice. Exact verdict identity is one gate round,
+  # regardless of how many comments transported it. A reset still permits a
+  # later review of the same HEAD because the older identity was removed above.
+  | group_by([.verdict, .sha, .class]) # mutate:duplicate-verdict-comments
+  | map(max_by([.at, -.i, .mi]))
+  | sort_by([.at, -.i, .mi]);
 
 # The active replacement scope plus every later additive amendment, not merely
 # the cutoff they create for old verdicts. `rescope` is a true replacement;

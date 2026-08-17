@@ -166,6 +166,36 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-duplicate-note.json")" = "1/marks-attribution/1" ] \
     && ok "D-SNAP-16: one note with a repeated verdict trailer counts once" \
     || bad "D-SNAP-16: one repeated trailer inflated rejection history ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-duplicate-note.json"))"
+# Read-after-write lag can also produce two separate comments with the exact
+# same verdict identity. They are one gate outcome and must not consume the
+# round-three cap twice.
+cp "$FX/notes-12.json" "$FX/notes-12-orig.json"
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T09:31:00Z","body":"retry\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:30:00Z","body":"first\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-duplicate-comments" "$TICK" snapshot > "$T/snap-duplicate-comments.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"' "$T/snap-duplicate-comments.json")" = "1/marks-attribution/1" ] \
+    && ok "snapshot: duplicate verdict comments count as one gate outcome" \
+    || bad "snapshot: tracker lag inflated one verdict into two rounds ($(jq -c '.tickets[] | select(.id==12) | .rejections' "$T/snap-duplicate-comments.json"))"
+# Planted violation: retain both comment transports instead of grouping exact
+# identities. The live false-cap shape must return immediately.
+cp "$FX/notes-12.json" "$FX/notes-12-orig.json"
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T09:31:00Z","body":"retry\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"},
+ {"system":false,"created_at":"2026-07-28T09:30:00Z","body":"first\n\n<!-- orch-verdict FAIL cccc3333 class=marks-attribution -->"}]
+EOF
+DUP_COMMENT_MUT=$(mirror_scripts "$T/duplicate-comment-mutant")
+sed 's/group_by(\[\.verdict, \.sha, \.class\]) # mutate:duplicate-verdict-comments/map([.]) # mutate:duplicate-verdict-comments/' \
+  "$DUP_COMMENT_MUT/lib.jq" > "$DUP_COMMENT_MUT/lib-mutant.jq"
+mv "$DUP_COMMENT_MUT/lib-mutant.jq" "$DUP_COMMENT_MUT/lib.jq"
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-duplicate-comments-mutant" \
+  "$DUP_COMMENT_MUT/tick.sh" snapshot > "$T/snap-duplicate-comments-mutant.json" 2>/dev/null
+cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
+[ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/snap-duplicate-comments-mutant.json")" = 2 ] \
+    && ok "snapshot violation: removing verdict identity dedupe recreates the false cap" \
+    || bad "snapshot violation: duplicate-comment mutant did not inflate rejection history"
 # 7a5b. P37: the cap belongs to the SCOPE, not the issue number. A ticket
 #      rewritten into different work carries an `orch-scope-reset` marker
 #      (lane.sh rescope), and verdicts older than the newest one stop counting.
