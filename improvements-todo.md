@@ -1,20 +1,21 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 09:20 America/Chicago
+Last updated: 2026-08-17 09:23 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
 
 - [x] **DONE — Add contract-grounded active-build supervision.** Implemented
-  as `/loom mend` in `83ca609` (`feat(mend): add build supervisor`). The
+  as `/loom mend` in `83ca609` (`feat(mend): add build supervisor`), with
+  canonical layered timing policy completed in `823477f`. The
   human-run loop now evaluates stable state, chaining, immutable-head,
   admission, liveness, hold, rejection-cap, classification, completion, and
   provider-compatibility invariants instead of inventing policy from logs. A
   read-only `tick.sh mend-status` composes the canonical snapshot and plan,
   exposes intentional stop state without restarting it, and surfaces evidence
   requiring attention. Direct Claude and durable Codex inputs yield identical
-  semantics; no adapter changed. Verification: focused mend 9/9, adjacent
+  semantics; no adapter changed. Verification: focused mend 10/10, adjacent
   scheduler/runtime 433/433, full suite 1,327/1,327, and the missing-builder
   planted violation was caught. (`MEND-STATE-01`, `MEND-COMPAT-01`)
 
