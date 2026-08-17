@@ -1,6 +1,6 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 01:00 America/Chicago
+Last updated: 2026-08-17 01:05 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
@@ -12,7 +12,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [ ] **TODO — Classify infrastructure failures separately from product verdicts.** Lock timeouts, port collisions, stale-base returns, cross-gate fixture resets, and provider/runtime failures must not increment a product rejection round. Preserve the artifact and schedule an infrastructure retry or repair without posting a product `FAIL`.
 
-- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206's supervised fixture repair passed 105/105 and merged. JOR-214's approved product fix remains under a supervised lease while it reconciles the shared fixture repair from main before one merge retry. JOR-218's repair passed 107/107 plus independent review and is waiting in the merge queue. JOR-251's round-three API-contract repair is in an active API gate at `6da6c7f`. Machine-enforced round-three routing itself is still TODO.
+- [ ] **IN PROGRESS — Require supervised diagnosis at round 3.** Current operating rule: no third blind implementation/gate cycle. Route the exact failing artifact to a focused repair worker, prove the failure or invalidate it, then permit one supervised gate. JOR-206's supervised fixture repair passed 105/105 and merged. JOR-214 reconciled that repair, passed focused verification, and is in its protected merge preflight at `205e06c`. JOR-218's repair passed 107/107 plus independent review and is waiting in the merge queue. JOR-251's mechanical API gate passed 629 unit and 28 integration tests, but independent review found a real `response-contract` gap; Loom blocked it at the rejection cap and a focused supervised repair is active. Machine-enforced round-three routing itself is still TODO.
 
 - [ ] **TODO — Reuse mechanical gate evidence by commit SHA.** Record a successful host pregate as durable evidence keyed by repository, tier, command/config fingerprint, and commit SHA. An independent reviewer should consume that evidence instead of rerunning the same full tier. Invalidate it when the commit or gate definition changes.
 
@@ -30,7 +30,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`.
 
 - [x] **DONE — Make malformed notification calls fail cleanly.** A recovery wave invoked `tick.sh notify` without arguments and tripped a `set -u` unbound-argument error after its scheduled state changes. Implemented provider-neutrally in `aef17c6` (`fix(notify): validate CLI arity`): the public boundary accepts exactly three or four arguments and otherwise returns named usage before reading positionals or touching event/transport state. Verification: notification/liveness 41/41, 254 adjacent assertions in isolation, and removing the guard recreates the unbound-variable crash.
 
-- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, JOR-244, and now JOR-206 are merged and closed. JOR-214 is the next protected merge: reconcile the shared fixture repair from #206, verify, release its lease, then retry; it unlocks JOR-224/JOR-221/JOR-231. JOR-218 passed its repaired UI gate at `8fcf7ed` (107/107 plus independent PASS) and is the other merge-ready ticket; it unlocks JOR-233/JOR-236/JOR-239. JOR-251's exact API-contract repair at `6da6c7f` is in an active API gate and directly unlocks nine tickets. Planner scoring and holding tests remain TODO.
+- [ ] **IN PROGRESS — Prioritize closure and dependency impact.** Current recovery order favors a nearly-green ticket or a ticket that unlocks dependents over queue age alone. JOR-208, JOR-287, JOR-286, JOR-244, and now JOR-206 are merged and closed. JOR-214 is actively running its protected merge preflight at `205e06c`; it unlocks JOR-224/JOR-221/JOR-231. JOR-218 passed its repaired UI gate at `8fcf7ed` (107/107 plus independent PASS) and is next in the merge queue; it unlocks JOR-233/JOR-236/JOR-239. JOR-251 is blocked under the round-three rule while a focused agent repairs the exact response-envelope escape found after its otherwise-green API gate; it directly unlocks nine tickets. Planner scoring and holding tests remain TODO.
 
 - [ ] **TODO — Make merge-lock collisions durably retryable.** A direct gate-to-merge handoff that encounters the merge lock must remain queued and retry after the current merge exits. It must not be moved to `lane-launch-queue/failed-*` while its reviewed commit is otherwise mergeable. JOR-286 exposed this gap at 23:22 while JOR-287 owned the merge lock; the separate post-merge chain scan recovered it after JOR-287 closed, but the original durable request was still misclassified as failed.
 
