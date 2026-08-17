@@ -5251,8 +5251,12 @@ _raise_viewer() {
     [ "${HERDR_ENV:-}" = 1 ] || return 0
     [ -x "$WATCH_PANES_CMD" ] || return 0
     rm -f "$LOOM_HOME/ticker-off" "$LOOM_HOME/viewer-off"
-    "$WATCH_PANES_CMD" raise >>"$LOOM_HOME/watch-panes.out" 2>&1 || :
-    echo "loom: viewer raised — a pane per live worker, plus the build ticker."
+    if "$WATCH_PANES_CMD" raise >>"$LOOM_HOME/watch-panes.out" 2>&1; then
+        echo "loom: viewer raised — a pane per live worker, plus the build ticker."
+    else
+        echo "loom: viewer raise FAILED — viewer availability is unconfirmed; inspect $LOOM_HOME/watch-panes.out" >&2
+        return 1
+    fi
 }
 
 # P88: arming a build that cannot read its own board is worse than refusing to

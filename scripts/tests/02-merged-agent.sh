@@ -437,6 +437,7 @@ fi
 # But ONLY start clears them. An automatic tick that undid a deliberate `q`
 # would make the switch worthless — the human closed it 40 seconds ago.
 : > "$WPCAP"; touch "$MT/home/ticker-off" "$MT/home/viewer-off"
+MTICK tick --auto
 MTICK tick --from-lane
 if [ -f "$MT/home/ticker-off" ] && [ -f "$MT/home/viewer-off" ] && [ ! -s "$WPCAP" ]; then
     ok "off-switches: a tick never clears them, only a typed start does"
@@ -453,6 +454,21 @@ MENV "$TICK" tick --provider claude >/dev/null 2>&1
 sleep 0.2
 [ -s "$WPCAP" ] && ok "manual tick: raises the singleton worker viewer in herdr" \
                 || bad "manual tick: ran in herdr without raising the viewer"
+
+# A requested human viewer is part of the command's visible contract. Do not
+# swallow a failed raise or print the success banner when no controller exists.
+WPFAIL="$MT/wp-fail.sh"
+printf '#!/bin/sh\necho "wp $*" >> "%s"\nexit 9\n' "$WPCAP" > "$WPFAIL"; chmod +x "$WPFAIL"
+export WATCH_PANES_CMD="$WPFAIL"; : > "$WPCAP"
+wp_fail_out=$(MENV "$TICK" tick --provider claude 2>&1); wp_fail_rc=$?
+if [ "$wp_fail_rc" -ne 0 ] \
+   && printf '%s\n' "$wp_fail_out" | grep -q 'viewer raise FAILED' \
+   && ! printf '%s\n' "$wp_fail_out" | grep -q 'viewer raised'; then
+    ok "manual tick: a failed viewer raise is visible and fails the command"
+else
+    bad "manual tick: viewer raise failure was swallowed or reported as success"
+fi
+export WATCH_PANES_CMD="$WPSTUB"
 export HERDR_ENV=
 
 # A dry run generates the plist and touches nothing else.

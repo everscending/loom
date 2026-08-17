@@ -98,14 +98,51 @@ tag_pane() { # <pane> <role> [lane] [ticket]
     "$HERDR" "${args[@]}" >/dev/null 2>&1
 }
 
-owned_role_ids() { # <pane-list-json> <role>
+owned_role_ids() { # <pane-list-json> <role>; incomplete worker metadata is inert
     printf '%s\n' "$1" | jq -r --arg owner "$OWNER_TOKEN" --arg role "$2" '
         .result.panes[]?
+        | select((.pane_id | type) == "string" and (.pane_id | length) > 0)
+        | select((.tokens | type) == "object")
         | select(.tokens.loom_viewer == $owner and .tokens.loom_role == $role)
+        | select($role != "worker" or
+                 ((.tokens.loom_lane | type) == "string" and (.tokens.loom_lane | length) > 0 and
+                  (.tokens.loom_ticket | type) == "string" and (.tokens.loom_ticket | length) > 0))
         | .pane_id // empty' 2>/dev/null
 }
 
-ensure_controller() {
+pane_expected_live() { # <pane> <controller|worker|ticker> [lane] -> 0 live, 1 dead, 2 unknown
+    local pane="$1" role="$2" lane="${3:-}" info base
+    info=$("$HERDR" pane process-info --pane "$pane" 2>/dev/null) || return 2
+    printf '%s\n' "$info" | jq -e \
+        '.result.process_info.foreground_processes | type == "array"' >/dev/null 2>&1 || return 2
+    base="${0##*/}"
+    case "$role" in
+        controller)
+            printf '%s\n' "$info" | jq -e --arg script "$0" --arg base "$base" '
+                any(.result.process_info.foreground_processes[]?.argv? // [];
+                    (. as $a
+                     | ($a | index("supervise")) != null
+                     and any($a[]?; . == $script or endswith("/" + $base))))' >/dev/null 2>&1 ;;
+        worker)
+            printf '%s\n' "$info" | jq -e --arg tick "$TICK" --arg lane "$lane" '
+                any(.result.process_info.foreground_processes[]?.argv? // [];
+                    (. as $a
+                     | ($a | index($tick)) != null
+                     and ($a | index("render-log")) != null
+                     and ($a | index($lane)) != null
+                     and ($a | index("--follow")) != null))' >/dev/null 2>&1 ;;
+        ticker)
+            printf '%s\n' "$info" | jq -e --arg tick "$TICK" '
+                any(.result.process_info.foreground_processes[]?.argv? // [];
+                    (. as $a
+                     | ($a | index($tick)) != null
+                     and ($a | index("render-events")) != null
+                     and ($a | index("--follow")) != null))' >/dev/null 2>&1 ;;
+        *) return 2 ;;
+    esac
+}
+
+_ensure_controller_locked() {
     [ "${HERDR_ENV:-}" = 1 ] || return 0
     command -v "$HERDR" >/dev/null 2>&1 || {
         echo "watch-panes: herdr is not on PATH" >&2
@@ -115,7 +152,7 @@ ensure_controller() {
         echo "watch-panes: jq is required" >&2
         return 1
     }
-    local panes controllers keep pane out cmd q
+    local panes controllers live="" dead="" keep pane out cmd q live_rc
     panes=$(pane_list) || {
         viewer_note "viewer degraded: cannot discover Herdr panes; controller creation deferred"
         return 1
@@ -125,16 +162,32 @@ ensure_controller() {
         return 1
     }
     controllers=$(owned_role_ids "$panes" controller)
-    keep=$(printf '%s\n' "$controllers" | sed -n '1p')
+    for pane in $controllers; do
+        if pane_expected_live "$pane" controller; then
+            live="$live $pane"
+        else
+            live_rc=$?
+            if [ "$live_rc" -eq 1 ]; then
+                dead="$dead $pane"
+            else
+                viewer_note "viewer degraded: cannot verify controller pane $pane; no controller changes made"
+                return 1
+            fi
+        fi
+    done
+    keep=$(printf '%s\n' $live | sed -n '1p')
     if [ -n "$keep" ]; then
-        # Exact owner metadata is cleanup authority; close duplicate
-        # controllers but never infer ownership from labels or process text.
-        printf '%s\n' "$controllers" | sed '1d' | while read -r pane; do
+        # Exact metadata plus verified command liveness is authority. Retire
+        # stale and duplicate controllers only after every read succeeded.
+        for pane in $dead $(printf '%s\n' $live | sed '1d'); do
             [ -n "$pane" ] && "$HERDR" pane close "$pane" >/dev/null 2>&1 || :
         done
         echo "watch-panes: already running in controller pane $keep — nothing to do."
         return 0
     fi
+    for pane in $dead; do
+        "$HERDR" pane close "$pane" >/dev/null 2>&1 || :
+    done
     [ -n "${HERDR_PANE_ID:-}" ] || {
         echo "watch-panes: no caller pane is available for the viewer controller" >&2
         return 1
@@ -186,6 +239,87 @@ process_start_identity() { # <pid>
     printf '%s\n' "${started:-unavailable}"
 }
 
+CONTROLLER_LOCK="$ORCH_HOME/watch-controller.lock"
+
+controller_lock_acquire() {
+    local tries=0 incomplete=0 pid start live_start
+    while [ "$tries" -lt 200 ]; do
+        if mkdir "$CONTROLLER_LOCK" 2>/dev/null; then
+            printf '%s\n' "$$" > "$CONTROLLER_LOCK/pid"
+            process_start_identity $$ > "$CONTROLLER_LOCK/start"
+            return 0
+        fi
+        pid=$(cat "$CONTROLLER_LOCK/pid" 2>/dev/null || :)
+        start=$(cat "$CONTROLLER_LOCK/start" 2>/dev/null || :)
+        live_start=""
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            live_start=$(process_start_identity "$pid")
+            # A transient ps failure is unknown, not proof that a live PID was
+            # reused. Keep waiting rather than risk a duplicate controller.
+            if [ "$live_start" = unavailable ] || [ "$start" = unavailable ]; then
+                live_start="$start"
+            fi
+        fi
+        if [ -z "$pid" ] || [ -z "$start" ]; then
+            incomplete=$((incomplete + 1))
+        else
+            incomplete=0
+        fi
+        # Reclamation is itself an atomic transaction. Only one waiter may
+        # inspect and retire a stale lock, and it re-reads identity after
+        # winning the claim. Missing metadata gets a one-second grace period:
+        # it can be the mkdir winner between its two tiny writes.
+        if { [ -n "$pid" ] && [ -n "$start" ] && [ "$live_start" != "$start" ]; } \
+           || [ "$incomplete" -ge 20 ]; then
+            if mkdir "$CONTROLLER_LOCK/reap" 2>/dev/null; then
+                pid=$(cat "$CONTROLLER_LOCK/pid" 2>/dev/null || :)
+                start=$(cat "$CONTROLLER_LOCK/start" 2>/dev/null || :)
+                live_start=""
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    live_start=$(process_start_identity "$pid")
+                    if [ "$live_start" = unavailable ] || [ "$start" = unavailable ]; then
+                        live_start="$start"
+                    fi
+                fi
+                if { [ -n "$pid" ] && [ -n "$start" ] && [ "$live_start" != "$start" ]; } \
+                   || { { [ -z "$pid" ] || [ -z "$start" ]; } && [ "$incomplete" -ge 20 ]; }; then
+                    rm -f "$CONTROLLER_LOCK/pid" "$CONTROLLER_LOCK/start"
+                    rmdir "$CONTROLLER_LOCK/reap" 2>/dev/null || :
+                    rmdir "$CONTROLLER_LOCK" 2>/dev/null || :
+                else
+                    rmdir "$CONTROLLER_LOCK/reap" 2>/dev/null || :
+                fi
+            fi
+        fi
+        sleep 0.05
+        tries=$((tries + 1))
+    done
+    echo "watch-panes: timed out acquiring the repo controller lock" >&2
+    return 1
+}
+
+controller_lock_release() {
+    local start tries=0
+    start=$(process_start_identity $$)
+    if [ "$(cat "$CONTROLLER_LOCK/pid" 2>/dev/null || :)" = "$$" ] \
+       && [ "$(cat "$CONTROLLER_LOCK/start" 2>/dev/null || :)" = "$start" ]; then
+        while [ -d "$CONTROLLER_LOCK/reap" ] && [ "$tries" -lt 20 ]; do
+            sleep 0.01
+            tries=$((tries + 1))
+        done
+        rm -f "$CONTROLLER_LOCK/pid" "$CONTROLLER_LOCK/start"
+        rmdir "$CONTROLLER_LOCK" 2>/dev/null || :
+    fi
+}
+
+ensure_controller() {
+    local rc
+    controller_lock_acquire || return 1
+    if _ensure_controller_locked; then rc=0; else rc=$?; fi
+    controller_lock_release
+    return "$rc"
+}
+
 owns_pid_record() { # <pid> <start>
     [ "$(cat "$WP_PID" 2>/dev/null)" = "$1" ] \
         && [ "$(cat "$WP_PID_START" 2>/dev/null)" = "$2" ]
@@ -227,7 +361,6 @@ supervise() {
         child=""
         set -e
         [ -f "$VIEWER_OFF" ] && break
-        [ "$rc" -eq 0 ] && break
         viewer_note "viewer polling worker exited rc $rc; controller restarting it"
         sleep "${WATCH_RESTART_SECONDS:-1}"
     done
@@ -306,8 +439,12 @@ if [ "${1:-}" = "off" ] || [ "${1:-}" = "on" ]; then
         echo "watch-panes: off — the controller closes its owned panes and exits within one poll."
     else
         rm -f "$VIEWER_OFF"
-        echo "watch-panes: on."
-        ensure_controller
+        if ensure_controller; then
+            echo "watch-panes: on."
+            exit 0
+        fi
+        echo "watch-panes: on FAILED — viewer availability is unconfirmed." >&2
+        exit 1
     fi
     exit 0
 fi
@@ -333,9 +470,11 @@ if [ -f "$VIEWER_OFF" ] && [ -z "$WORKER_MODE" ]; then
 fi
 MAP="$(mktemp)"                     # reconstructed each poll: <pane> <lane> <ticket>
 USED="$(mktemp)"
+LIVE="$(mktemp)"                    # verified: <pane> <role> <lane|-> <ticket|->
+DEAD="$(mktemp)"                    # complete owned records with no expected follower
 _wp_cleanup() {
     local rc=$?
-    rm -f "$MAP" "$MAP.new" "$USED"
+    rm -f "$MAP" "$MAP.new" "$USED" "$LIVE" "$DEAD"
     return $rc
 }
 trap _wp_cleanup EXIT
@@ -399,10 +538,7 @@ PANE_JSON=""
 # column split off one of its own lane panes is not a column.
 reanchor() {
     local ws="${ANCHOR%%:*}" ids ordered cand
-    ids=$(printf '%s\n' "$PANE_JSON" | jq -r --arg owner "$OWNER_TOKEN" '
-        .result.panes[]?
-        | select(.tokens.loom_viewer == $owner)
-        | .pane_id // empty' 2>/dev/null) || ids=""
+    ids=$(awk '$2 != "ticker" {print $1}' "$LIVE" 2>/dev/null) || ids=""
     [ -n "$ids" ] || return 1
     ordered=$( { printf '%s\n' "$ids" | grep "^$ws:" || :; printf '%s\n' "$ids" | grep -v "^$ws:" || :; } )
     while read -r cand; do
@@ -530,23 +666,52 @@ DISCOVERY_NOTED=""
 pane_unused() { ! grep -qxF "$1" "$USED" 2>/dev/null; }
 use_pane() { printf '%s\n' "$1" >> "$USED"; }
 
-worker_candidates() { # exact-lane|ticket <value>
-    local field="$1" value="$2"
-    printf '%s\n' "$PANE_JSON" | jq -r --arg owner "$OWNER_TOKEN" --arg value "$value" --arg field "$field" '
-        .result.panes[]?
-        | select(.tokens.loom_viewer == $owner and .tokens.loom_role == "worker")
-        | select(if $field == "lane" then .tokens.loom_lane == $value else .tokens.loom_ticket == $value end)
-        | .pane_id // empty' 2>/dev/null
+worker_candidates() { # exact-lane|ticket <value> <ticket-if-exact>
+    local field="$1" value="$2" ticket="${3:-}"
+    if [ "$field" = lane ]; then
+        awk -v lane="$value" -v ticket="$ticket" \
+            '$2 == "worker" && $3 == lane && $4 == ticket {print $1}' "$LIVE"
+    else
+        awk -v ticket="$value" '$2 == "worker" && $4 == ticket {print $1}' "$LIVE"
+    fi
 }
 
 owned_worker_ids() { owned_role_ids "$PANE_JSON" worker; }
 
+classify_owned_panes() {
+    local role pane lane ticket live_rc
+    : > "$LIVE"
+    : > "$DEAD"
+    for role in controller worker ticker; do
+        for pane in $(owned_role_ids "$PANE_JSON" "$role"); do
+            lane="-"; ticket="-"
+            if [ "$role" = worker ]; then
+                lane=$(printf '%s\n' "$PANE_JSON" | jq -r --arg pane "$pane" \
+                    '.result.panes[] | select(.pane_id == $pane) | .tokens.loom_lane' 2>/dev/null)
+                ticket=$(printf '%s\n' "$PANE_JSON" | jq -r --arg pane "$pane" \
+                    '.result.panes[] | select(.pane_id == $pane) | .tokens.loom_ticket' 2>/dev/null)
+            fi
+            if pane_expected_live "$pane" "$role" "$lane"; then
+                printf '%s %s %s %s\n' "$pane" "$role" "$lane" "$ticket" >> "$LIVE"
+            else
+                live_rc=$?
+                if [ "$live_rc" -eq 1 ]; then
+                    printf '%s %s %s %s\n' "$pane" "$role" "$lane" "$ticket" >> "$DEAD"
+                else
+                    return 2
+                fi
+            fi
+        done
+    done
+}
+
 ensure_ticker() {
-    local enabled=1 tickers keep tp tcmd
+    local enabled=1 tickers live_tickers keep tp tcmd
     [ "${WATCH_TICKER:-1}" = 1 ] || enabled=0
     [ -f "$TICKER_OFF" ] && enabled=0
     tickers=$(owned_role_ids "$PANE_JSON" ticker)
-    keep=$(printf '%s\n' "$tickers" | sed -n '1p')
+    live_tickers=$(awk '$2 == "ticker" {print $1}' "$LIVE")
+    keep=$(printf '%s\n' "$live_tickers" | sed -n '1p')
     if [ "$enabled" = 0 ]; then
         printf '%s\n' "$tickers" | while read -r tp; do
             [ -n "$tp" ] && "$HERDR" pane close "$tp" >/dev/null 2>&1 || :
@@ -556,11 +721,16 @@ ensure_ticker() {
     fi
     if [ -n "$keep" ]; then
         TICKER_PANE="$keep"
-        printf '%s\n' "$tickers" | sed '1d' | while read -r tp; do
-            [ -n "$tp" ] && "$HERDR" pane close "$tp" >/dev/null 2>&1 || :
+        for tp in $tickers; do
+            [ "$tp" = "$keep" ] || "$HERDR" pane close "$tp" >/dev/null 2>&1 || :
         done
         return 0
     fi
+    # Every complete ticker record was verified dead. Retire those stale
+    # shells before creating the one replacement follower.
+    for tp in $tickers; do
+        "$HERDR" pane close "$tp" >/dev/null 2>&1 || :
+    done
     tp=$(new_pane down "$ANCHOR" 0.75)
     [ -n "$tp" ] || {
         echo "watch-panes: could not open a ticker pane (run '$TICK render-events --follow' anywhere instead)" >&2
@@ -599,7 +769,10 @@ open_worker_pane() { # prints a new pane id; caller tags it before use
     # prefer the bottom-most active worker; if none exists, split below the
     # controller. A direct foreground worker falls back to its explicit caller.
     base=$(tail -1 "$MAP" 2>/dev/null | awk '{print $1}')
-    [ -n "$base" ] || base="$CONTROLLER_PANE"
+    if [ -z "$base" ] && [ -n "$CONTROLLER_PANE" ] \
+       && grep -q "^$CONTROLLER_PANE controller " "$LIVE" 2>/dev/null; then
+        base="$CONTROLLER_PANE"
+    fi
     [ -n "$base" ] && pane=$(new_pane down "$base")
     if [ -z "$pane" ] && [ -s "$MAP" ]; then
         # Panes registered earlier in this same poll are already tagged, even
@@ -647,6 +820,14 @@ while :; do
         finish_poll
         continue
     fi
+    if ! classify_owned_panes; then
+        if [ -z "$DISCOVERY_NOTED" ]; then
+            viewer_note "viewer degraded: cannot verify owned pane followers; no pane changes made"
+            DISCOVERY_NOTED=1
+        fi
+        finish_poll
+        continue
+    fi
     DISCOVERY_NOTED=""
 
     if [ -f "$VIEWER_OFF" ]; then
@@ -666,7 +847,7 @@ while :; do
     for lane in $running; do
         t=$(tkey "$lane")
         pane=""
-        for cand in $(worker_candidates lane "$lane"); do
+        for cand in $(worker_candidates lane "$lane" "$t"); do
             if pane_unused "$cand"; then pane="$cand"; break; fi
         done
         if [ -n "$pane" ]; then
