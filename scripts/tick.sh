@@ -1173,6 +1173,21 @@ _bootstrap_once() {
     return 0
 }
 
+# Start an already-requested lane-style tick across either host lifecycle.
+# launchd reaps background descendants when its one-shot job exits, so its
+# handoff stays supervised. The legacy nohup host has no such boundary and
+# keeps the detached behavior that lets its caller finish promptly.
+_start_handoff_tick() {
+    if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
+        LOOM_LANE_EPILOGUE=1 "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1 || true
+    else
+        ( nohup "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
+            >>"$LOGS_DIR/self-trigger.log" 2>&1 </dev/null & )
+    fi
+    return 0
+}
+
 # cmd_tick's exit path, replacing lock_acquire's plain lock removal. Order is the
 # whole point: the lock is released FIRST, because a follow-up tick fired while
 # this process still held it would find the lock taken and skip — reproducing the
@@ -1184,8 +1199,7 @@ _tick_exit() {
         rm -f "$PENDING_FILE"
         _ev tick_replayed
         echo "tick: a lane finished during this wave — re-ticking once"
-        ( nohup "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
-            >>"$LOGS_DIR/self-trigger.log" 2>&1 </dev/null & )
+        _start_handoff_tick
     fi
     return $rc
 }
@@ -2532,14 +2546,7 @@ _render_stream() { # _render_stream <jsonl> <log>
 # keep it supervised there. The legacy nohup launcher does not have that
 # boundary and retains the detached fallback it has always used.
 _chain_merge_fallback() {
-    if [ "${LOOM_LANE_LAUNCHER:-}" = launchd ]; then
-        LOOM_LANE_EPILOGUE=1 "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
-            >>"$LOGS_DIR/self-trigger.log" 2>&1 || true
-    else
-        ( "$SELF_PATH" tick --from-lane --provider "${LOOM_PROVIDER:-}" \
-            >>"$LOGS_DIR/self-trigger.log" 2>&1 & )
-    fi
-    return 0
+    _start_handoff_tick
 }
 
 # P93: the merge lane's post-exit hook calls this INSTEAD of firing a wave,

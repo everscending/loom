@@ -60,6 +60,87 @@ n=$(wc -l < "$WAVES" | tr -d ' ')
     && ok "pending: three mid-wave kicks replayed as exactly one re-tick" \
     || bad "pending: expected 2 waves (original + one replay), saw $n"
 
+# `_wait_waves` observes the replay when its command starts, not when the wave
+# releases the scheduler lock. Do not let that prior detached-host replay race
+# the launchd lifecycle scenario below and consume its first-wave marker.
+for _ in $(seq 1 80); do
+    [ ! -d "$LOOM_HOME/tick.lock.d" ] && break
+    sleep 0.05
+done
+
+# D-TICK-29: launchd also owns the scheduler job's process group. A lane exit
+# that lands during a wave sets tick.pending; the wave's EXIT trap must keep
+# that replay supervised just like a lane epilogue. Otherwise launchd reaps
+# the background replay after `tick_replayed` is recorded but before the next
+# `wave_start`. A delayed second-wave mark makes return-before-completion
+# observable at the public tick boundary.
+LR_STATE="$T/launchd-replay-state" LR_MARK="$T/launchd-replay-finished"
+export LR_STATE LR_MARK
+LR_CMD="$T/launchd-replay-wave.sh"
+cat > "$LR_CMD" <<'EOF'
+#!/usr/bin/env bash
+if mkdir "$LR_STATE" 2>/dev/null; then
+  sleep 1
+else
+  sleep 1
+  : > "$LR_MARK"
+fi
+EOF
+chmod +x "$LR_CMD"
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending" "$LR_MARK"; rm -rf "$LR_STATE"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$LR_CMD" "$TICK" tick >/dev/null 2>&1 &
+lr_holder=$!
+for _ in $(seq 1 80); do
+    [ -d "$LOOM_HOME/tick.lock.d" ] && [ -d "$LR_STATE" ] && break
+    sleep 0.05
+done
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$LR_CMD" "$TICK" tick --from-lane >/dev/null 2>&1
+wait "$lr_holder"
+if [ -f "$LR_MARK" ]; then
+    ok "pending: launchd supervises a replay until the next wave completes"
+else
+    bad "pending: launchd wave exited before its recorded replay completed"
+fi
+for _ in $(seq 1 40); do [ -f "$LR_MARK" ] && break; sleep 0.1; done
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
+
+# Planted violation: background only `_start_handoff_tick` in a private copy.
+# The public two-tick scenario must return early again, proving the lifecycle
+# branch—not timing elsewhere—is what holds the replay alive.
+MUT_REPLAY=$(mirror_scripts "$T/mut-replay")
+sed -i.bak '/_start_handoff_tick()/,/^}/ s/if \[ "${LOOM_LANE_LAUNCHER:-}" = launchd \]; then/if false; then/' \
+  "$MUT_REPLAY/tick.sh"
+LR_MUT_STATE="$T/launchd-replay-mut-state" LR_MUT_MARK="$T/launchd-replay-mut-finished"
+export LR_MUT_STATE LR_MUT_MARK
+LR_MUT_CMD="$T/launchd-replay-mut-wave.sh"
+cat > "$LR_MUT_CMD" <<'EOF'
+#!/usr/bin/env bash
+if mkdir "$LR_MUT_STATE" 2>/dev/null; then
+  sleep 1
+else
+  sleep 1
+  : > "$LR_MUT_MARK"
+fi
+EOF
+chmod +x "$LR_MUT_CMD"
+rm -rf "$LOOM_HOME/tick.lock.d" "$LR_MUT_STATE"; rm -f "$LOOM_HOME/tick.pending" "$LR_MUT_MARK"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$LR_MUT_CMD" "$MUT_REPLAY/tick.sh" tick >/dev/null 2>&1 &
+lr_mut_holder=$!
+for _ in $(seq 1 80); do
+    [ -d "$LOOM_HOME/tick.lock.d" ] && [ -d "$LR_MUT_STATE" ] && break
+    sleep 0.05
+done
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$LR_MUT_CMD" \
+  "$MUT_REPLAY/tick.sh" tick --from-lane >/dev/null 2>&1
+wait "$lr_mut_holder"
+if [ ! -f "$LR_MUT_MARK" ]; then
+    ok "pending-violation: backgrounding launchd replay recreates the lost wave"
+else
+    bad "pending-violation: planted background replay remained supervised"
+fi
+for _ in $(seq 1 40); do [ -f "$LR_MUT_MARK" ] && break; sleep 0.1; done
+rm -rf "$LOOM_HOME/tick.lock.d"; rm -f "$LOOM_HOME/tick.pending"
+
 # 1e. Planted violation: point the skipped ticks' note somewhere the holder never
 #     looks. That is precisely the old drop-on-the-floor path, and the loop must
 #     be seen dying after a single wave — no replay, no second line.
