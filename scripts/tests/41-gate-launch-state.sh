@@ -169,7 +169,44 @@ if [ -f "$STALE_RUNNER" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null; then
 else
     bad "gate base: the freshness guard suppressed a current branch"
 fi
+base_sha=$(git -C "$LOOM_REPO" rev-parse origin/main)
+head_sha=$(git -C "$LOOM_REPO" rev-parse HEAD)
+if grep -Fq "canonical review base is \`origin/main\` at \`$base_sha\`" "$LOOM_HOME/briefs/gate-335.md" \
+   && grep -Fq "\`$base_sha...$head_sha\`" "$LOOM_HOME/briefs/gate-335.md" \
+   && grep -Fq 'Never compare against a local base branch' "$LOOM_HOME/briefs/gate-335.md"; then
+    ok "gate review base: staged brief pins the canonical remote base and immutable diff range"
+else
+    bad "gate review base: reviewer can compare against a stale local main and invent scope creep"
+fi
 "$TICK" kill-lane gate-335 >/dev/null 2>&1 || true
+
+# Planted violation: delete only launch-time canonical-base capture while
+# leaving the existing stale-base preflight intact. The provider still starts,
+# but its staged brief again has no immutable comparison range — exactly the
+# seam that let JOR-289 compare against a stale local main.
+BASE_MIRROR=$(mirror_scripts "$T/gate-base-review-mutant")
+sed '/# D-TICK-38:/,/^    fi$/d' "$BASE_MIRROR/tick.sh" > "$BASE_MIRROR/tick-mutant.sh"
+chmod +x "$BASE_MIRROR/tick-mutant.sh"
+rm -f "$AGENT_CALLS"
+printf 'review\n' > "$STATE_FILE"
+out=$("$BASE_MIRROR/tick-mutant.sh" spawn-lane gate-336 --no-tick --pregate logic \
+  --provider claude --job gate --tier medium --brief "$T/gate-brief.md" \
+  --cwd "$LOOM_REPO" 2>&1); rc=$?
+out="$out
+mutant-ran rc=$rc"
+for _ in $(seq 1 60); do
+    [ -s "$LOOM_HOME/lanes/gate-336.pid" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null && break
+    sleep 0.1
+done
+pid=$(cat "$LOOM_HOME/lanes/gate-336.pid" 2>/dev/null || echo "")
+if assert_mutant_ran "$rc" "$out" "gate review base mutant" \
+   && [ -n "$pid" ] && grep -q '^run ' "$AGENT_CALLS" 2>/dev/null \
+   && ! grep -Fq 'canonical review base' "$LOOM_HOME/briefs/gate-336.md"; then
+    ok "gate-review-base-violation: deleting canonical capture recreates an unpinned reviewer"
+else
+    bad "gate-review-base-violation: planted capture deletion did not recreate the missing base contract"
+fi
+"$TICK" kill-lane gate-336 >/dev/null 2>&1 || true
 
 # Planted violation: retain the production call site but make its write-side
 # base check always claim current. The stale branch must again burn both the

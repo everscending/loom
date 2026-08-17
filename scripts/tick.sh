@@ -2235,6 +2235,11 @@ BRIEFEOF
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - A prose verdict is not a completed gate. Before exit, write the review body to a scratch file and run exactly one tracker verdict for the reviewed HEAD. PASS: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket pass $_verdict_head --file <verdict-body-file>\`. FAIL: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket fail $_verdict_head --class <kebab-defect-class> --file <verdict-body-file>\`. Do not merely print PASS/FAIL in your final response; the verdict verb is the required ticket outcome.
 BRIEFEOF
+        if [ -n "${lane_base_head:-}" ] && [ -n "${lane_base_ref:-}" ] && [ -n "${lane_head:-}" ]; then
+            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The canonical review base is \`$lane_base_ref\` at \`$lane_base_head\`. Inspect the ticket diff with the exact range \`$lane_base_head...$lane_head\`. Never compare against a local base branch such as \`main\`: local branches are optional convenience state and may be stale even when the host freshness check passed against \`$lane_base_ref\`.
+BRIEFEOF
+        fi
     fi
     if [ "$(_lane_type "$id")" = merge ] && [ -n "$pregate" ]; then
         local _merge_ticket="${id#merge-}"
@@ -2551,7 +2556,7 @@ _cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" lane_head="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" lane_head="" lane_base_head="" lane_base_ref="" _spawn_shift=0
     local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
@@ -2783,6 +2788,18 @@ _cmd_spawn_lane() {
     # all consume this same value. A non-git cwd has no attributable HEAD and
     # is recorded as such rather than guessed at classification time.
     lane_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    # D-TICK-38: the same gate can have two very different-looking diffs when
+    # a review session reads an optional stale local base branch. JOR-289 was
+    # current with origin/main and changed exactly two files, but the reviewer
+    # used `main...HEAD`, counted 62 files, and filed a false scope-creep
+    # verdict. Pin the canonical remote-tracking base alongside launch HEAD.
+    # The runtime freshness guard fetches and suppresses the provider if this
+    # ref advances after staging, so any provider that starts sees a valid,
+    # immutable pair. Provider adapters remain ignorant of repository policy.
+    if [ "$(_lane_type "$id")" = gate ]; then
+        lane_base_ref="origin/$(_detect_base "$REPO_ROOT")"
+        lane_base_head=$(git -C "$abs" rev-parse --verify "refs/remotes/$lane_base_ref^{commit}" 2>/dev/null || true)
+    fi
     # Brief staging (P28/P68/P31) — validates, copies and appends in
     # _spawn_stage_brief, which hands the rewritten command back in _SPAWN_ARGS.
     _spawn_stage_brief "$@"; set -- "${_SPAWN_ARGS[@]}"
@@ -3110,7 +3127,7 @@ cmd_chain_gate() { # <impl-lane-id>
     lane_path="$(dirname "$SELF_PATH")/lane.sh"
     {
         printf '# Independent gate for ticket #%s\n\n' "$iid"
-        printf 'Review the implementation at immutable MR HEAD `%s` in this worktree. Do not implement fixes. Inspect the complete diff against `%s`, then test the highest-risk acceptance and adversarial seams that are not already established by the host pregate.\n\n' "$mr_head" "$(_detect_base "$REPO_ROOT")"
+        printf 'Review the implementation at immutable MR HEAD `%s` in this worktree. Do not implement fixes. Inspect the complete diff against canonical remote base `origin/%s`, then test the highest-risk acceptance and adversarial seams that are not already established by the host pregate.\n\n' "$mr_head" "$(_detect_base "$REPO_ROOT")"
         printf '## Ticket title\n\n%s\n\n## Ticket body and acceptance contract\n\n%s\n' \
             "$(printf '%s' "$issue" | jq -r '.title // ""')" \
             "$(printf '%s' "$issue" | jq -r '.body // ""')"
