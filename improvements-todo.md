@@ -39,15 +39,20 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   making new work visible, and a stale-base gate transition was misclassified
   as a dead lane's partial submit, looping JOR-231 back to Review without ever
   reconciling its branch. Implemented provider-neutrally in `acdf377`
-  (`fix(mend): close scheduler progress gaps`). Durable post-wave cleanup now
+  (`fix(mend): close scheduler progress gaps`) and completed from live proof in
+  `285c381` (`fix(mend): close recovery-edge gaps`). Durable post-wave cleanup now
   requests one coalesced scheduler replay from the resulting lane state. Gate
   base deferral writes a tracker-resident, current-HEAD `orch-base-stale`
   decision; snapshot suppresses the false review repair, plan routes the
   stranded ticket to reconciliation, and direct/deferred brief staging carries
-  the decision until a new HEAD automatically retires it. `mend` now owns
+  the decision until a new HEAD automatically retires it. The follow-up closes
+  both live recovery variants: a heartbeat that inherits queued cleanup admits
+  its own wave past the old gap, and a non-hold transition deduplicates by its
+  exact machine-decision trailer instead of mistaking historical unblock notes
+  for the current decision. `mend` now owns
   `MEND-LEARN-01`: every confirmed avoidable gap must become a public
   reproduction, shared-core repair, regression, and planted mutation rather
-  than a one-off ticket nudge. Verification: full Loom suite 1,337/1,337,
+  than a one-off ticket nudge. Verification: final full Loom suite 1,341/1,341,
   syntax/jq/diff checks clean; deleting cleanup replay recreates the wave-gap
   stall, and deleting the stale-transition exclusion recreates the review
   loop. (`MEND-FLOW-01`, `MEND-CHAIN-01`, `MEND-LEARN-01`)
