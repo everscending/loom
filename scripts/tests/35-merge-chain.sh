@@ -124,6 +124,32 @@ else
     bad "merge-queue: read failed rc=$rc ($(cat "$T/mq.err"))"
 fi
 
+# D-TICK-44: chain-merge bypasses the full snapshot/plan, but its narrow read
+# consumes the same active replacement scope. Exercise both directions against
+# one API queue member so neither stale original nor missing new browser work
+# can choose the host preflight tier.
+cat > "$FX/notes-30.json" <<'EOF'
+[{"created_at":"2026-08-17T18:01:00Z","body":"## Acceptance criteria\n\n- [ ] The JSON response is stable\n\n<!-- orch-scope-reset 2026-08-17T18:01:00Z -->"}]
+EOF
+GQ > "$T/mq-rescope-removes.json"
+[ "$(jq -r '.[] | select(.id==30) | .tier' "$T/mq-rescope-removes.json")" = api ] \
+    && ok "D-TICK-44: narrow merge read honors rescope removing browser acceptance" \
+    || bad "D-TICK-44: narrow merge read used superseded original browser acceptance"
+
+cp "$FX/open.json" "$T/open-browser-original.json"
+jq 'map(if .iid == 30 then .description = "## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] The JSON response is stable" else . end)' \
+  "$FX/open.json" > "$FX/open.json.tmp"
+mv "$FX/open.json.tmp" "$FX/open.json"
+cat > "$FX/notes-30.json" <<'EOF'
+[{"created_at":"2026-08-17T18:02:00Z","body":"## Acceptance criteria\n\n- [ ] `npx playwright test e2e/rescoped.spec.ts` passes\n\n<!-- orch-scope-reset 2026-08-17T18:02:00Z -->"}]
+EOF
+GQ > "$T/mq-rescope-adds.json"
+[ "$(jq -r '.[] | select(.id==30) | .tier' "$T/mq-rescope-adds.json")" = ui ] \
+    && ok "D-TICK-44: narrow merge read honors rescope adding browser acceptance" \
+    || bad "D-TICK-44: narrow merge read ignored rescoped browser acceptance"
+cp "$T/open-browser-original.json" "$FX/open.json"
+echo '[]' > "$FX/notes-30.json"
+
 # A2. Planted violation: a ticket at the attempt cap is excluded, same rule
 #     plan.jq's own $merge_head applies — a narrow read that forgot the cap
 #     would re-offer a poisoned ticket forever.

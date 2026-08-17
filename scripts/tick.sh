@@ -3398,11 +3398,6 @@ cmd_chain_gate() { # <impl-lane-id>
       and (((.labels // []) | index("review")) != null)
     ' >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
     jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
-    tier=$(printf '%s' "$issue" | jq -r -L "$jqd" '
-      include "lib";
-      . as $t | $t | minimum_pregate_tier(tier_of(.labels)) // empty
-    ' 2>/dev/null)
-    [ -n "$tier" ] || { _chain_merge_fallback; return 0; }
     # Scope resets replace ticket prose and completed supervised repairs are
     # evidence the next independent reviewer must assess. Derive both from the
     # live tracker thread with the exact shared ordering definitions used by
@@ -3416,6 +3411,18 @@ cmd_chain_gate() { # <impl-lane-id>
     ' 2>/dev/null) || { _chain_merge_fallback; return 0; }
     scope_body=$(printf '%s' "$evidence" | jq -r '.scope.body // empty')
     repair_body=$(printf '%s' "$evidence" | jq -r '.repair.body // empty')
+    # The active rescope is replacement authority for browser admission too.
+    # Compute the floor only after reading it so a reset can add Playwright or
+    # retire obsolete browser acceptance in the original ticket (D-TICK-44).
+    tier=$(printf '%s' "$issue" | jq -r -L "$jqd" --arg scope "$scope_body" '
+      include "lib";
+      . as $t
+      | ($t | tier_of(.labels)) as $declared
+      | ($t + {active_scope_reset:
+                 (if $scope == "" then null else {body: $scope} end)})
+      | minimum_pregate_tier($declared) // empty
+    ' 2>/dev/null)
+    [ -n "$tier" ] || { _chain_merge_fallback; return 0; }
     mrs=$("$FORGE_SH" mr-for-ticket "$iid" 2>>"$LOGS_DIR/self-trigger.log") \
         || { _chain_merge_fallback; return 0; }
     branch=$(printf '%s' "$mrs" | jq -r '[.[] | select(.state == "open")][0].branch // empty' 2>/dev/null)

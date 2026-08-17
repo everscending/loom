@@ -248,8 +248,10 @@ refuses outside herdr anyway.
    A ticket whose acceptance or mandatory adversarial contract explicitly
    names Playwright or an `e2e/*.spec.*` test has UI as its minimum pregate
    even when its implementation risk tier is API. The host browser result is
-   authoritative; a missing UI runner fails closed before review, and the
-   reviewer never substitutes Chromium inside its provider sandbox. *(paid:
+   authoritative; an active supervisor rescope replaces the original ticket
+   for this derivation in both directions. A missing UI runner fails closed
+   before review, and the reviewer never substitutes Chromium inside its
+   provider sandbox. *(paid:
    Patient Imaging Portal JOR-294 was API-gated, omitted its named browser
    proof, and sent the reviewer into sandbox-denied Chromium.)*
    Never reimplement gate-running in the skill; CI runs the same runner. Past

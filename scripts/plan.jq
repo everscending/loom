@@ -58,7 +58,9 @@ def spawnable($id):
 def lane_ticket($id): $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
 def planned_pregate_tier:
-    . | minimum_pregate_tier(.pregate_tier // .tier);
+    # Recompute from the frozen effective contract instead of trusting an old
+    # producer's pregate_tier. An active rescope may add OR remove browser work.
+    . | minimum_pregate_tier(.tier);
 def lease_why:
     "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation, gate and merge launches wait for release or expiry";
 

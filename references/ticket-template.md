@@ -110,7 +110,9 @@ rediscover a figure the closing lane already knew.)*
 When Acceptance criteria or Mandatory adversarial tests explicitly name
 Playwright or an `e2e/*.spec.*` test, Loom mechanically raises the effective
 host pregate/admission tier to `ui` without rewriting this section. UI scope
-rules then apply; cross-tree paths remain legal when the ticket names them.
+rules then apply; cross-tree paths remain legal when the ticket names them. An
+active supervisor rescope replaces the original acceptance contract for this
+derivation, so it can add or retire the browser requirement.
 A missing UI runner fails closed before the review provider starts; browser
 evidence is never reconstructed inside an agent sandbox. *(Paid: Patient
 Imaging Portal JOR-294.)*

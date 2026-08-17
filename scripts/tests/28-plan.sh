@@ -328,6 +328,35 @@ else
     bad "D-TICK-43: non-mandatory browser prose caused a false UI promotion"
 fi
 
+# An active supervisor rescope replaces conflicting original acceptance. The
+# browser floor must read that effective contract in both directions: a reset
+# can add mandatory browser evidence, or remove obsolete browser acceptance.
+jq '
+  .tickets[0].active_scope_reset = {
+    "at":"2026-08-17T18:00:00Z",
+    "body":"## Acceptance criteria\n\n- [ ] `npx playwright test e2e/rescoped.spec.ts` passes\n\n<!-- orch-scope-reset 2026-08-17T18:00:00Z -->"
+  }
+' "$FX/snap-playwright-context-only.json" > "$FX/snap-playwright-rescope-adds.json"
+PLAN "$FX/snap-playwright-rescope-adds.json" > "$T/plan-playwright-rescope-adds.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-rescope-adds.json")" = ui ]; then
+    ok "D-TICK-44: active rescope adding Playwright raises the host gate to UI"
+else
+    bad "D-TICK-44: browser requirement added by active rescope was ignored"
+fi
+
+jq '
+  .tickets[0].active_scope_reset = {
+    "at":"2026-08-17T18:01:00Z",
+    "body":"## Acceptance criteria\n\n- [ ] The JSON response is stable\n\n<!-- orch-scope-reset 2026-08-17T18:01:00Z -->"
+  }
+' "$FX/snap-playwright-api-gate.json" > "$FX/snap-playwright-rescope-removes.json"
+PLAN "$FX/snap-playwright-rescope-removes.json" > "$T/plan-playwright-rescope-removes.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-rescope-removes.json")" = api ]; then
+    ok "D-TICK-44: active rescope removing Playwright restores the declared API gate"
+else
+    bad "D-TICK-44: superseded original browser acceptance still forced UI"
+fi
+
 # Planted violation: remove only the browser-derived gate floor. Both public
 # fixture plans must return to API, proving the assertions above observe the
 # owning rule instead of some unrelated UI default.
@@ -341,6 +370,21 @@ if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-
     ok "D-TICK-43 violation: deleting the browser floor recreates API-only admission"
 else
     bad "D-TICK-43 violation: planted browser-floor deletion did not recreate the defect"
+fi
+
+RESCOPE_BROWSER_MUTANT=$(mirror_scripts "$T/rescope-browser-mutant")
+sed 's#\.active_scope_reset\.body // ##' \
+  "$RESCOPE_BROWSER_MUTANT/lib.jq" > "$RESCOPE_BROWSER_MUTANT/lib.jq.mut"
+mv "$RESCOPE_BROWSER_MUTANT/lib.jq.mut" "$RESCOPE_BROWSER_MUTANT/lib.jq"
+"$RESCOPE_BROWSER_MUTANT/tick.sh" plan "$FX/snap-playwright-rescope-adds.json" \
+  > "$T/plan-playwright-rescope-adds-mutant.json" 2>/dev/null
+"$RESCOPE_BROWSER_MUTANT/tick.sh" plan "$FX/snap-playwright-rescope-removes.json" \
+  > "$T/plan-playwright-rescope-removes-mutant.json" 2>/dev/null
+if [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-rescope-adds-mutant.json")" = api ] \
+   && [ "$(jq -r '.actions[] | select(.lane=="gate-39") | .spawn.pregate' "$T/plan-playwright-rescope-removes-mutant.json")" = ui ]; then
+    ok "D-TICK-44 violation: ignoring active scope recreates both stale-contract gate tiers"
+else
+    bad "D-TICK-44 violation: planted active-scope deletion did not recreate both defects"
 fi
 # Live brief shape: both dependents are filtered out of tickets[] and survive
 # only in dependency_edges. With one aux slot, #289 must outrank older #239.

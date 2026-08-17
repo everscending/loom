@@ -53,7 +53,10 @@ def tier_of($labels):
 # an acceptance/adversarial section explicitly names Playwright or an e2e spec.
 # Consumers: snapshot/plan plus both direct gate/merge chains.
 def requires_browser_evidence:
-    (.contract // .body // .description // "") as $contract
+    # A supervisor rescope is replacement authority, not an amendment to the
+    # original ticket. Browser admission must therefore read it exclusively
+    # when present in both add/remove directions (D-TICK-44).
+    (.active_scope_reset.body // .contract // .body // .description // "") as $contract
     | ((($contract | section("Acceptance criteria")) + "\n"
         + ($contract | section("Mandatory adversarial tests")))
        | test("(?i)(\\bplaywright\\b|(?:^|[^A-Za-z0-9_.-])e2e/[A-Za-z0-9_./-]+\\.spec\\.(?:[cm]?[jt]sx?))"));

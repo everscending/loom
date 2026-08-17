@@ -158,17 +158,21 @@ fi
 # API implementation whose acceptance explicitly names Playwright still queues
 # a UI pregate; otherwise the reviewer is forced to try Chromium in its sandbox.
 CHAIN_BROWSER_TRACKER="$T/chain-browser-tracker.sh"
+CHAIN_BROWSER_ISSUE_JSON="$T/chain-browser-issue.json"
+CHAIN_BROWSER_NOTES_JSON="$T/chain-browser-notes.json"
+export CHAIN_BROWSER_ISSUE_JSON CHAIN_BROWSER_NOTES_JSON
 cat > "$CHAIN_BROWSER_TRACKER" <<'EOF'
 #!/usr/bin/env bash
 case "$1" in
   issues-open) printf '%s\n' '[{"id":9,"title":"Build 9","state":"open","labels":["provider::claude"]}]' ;;
-  issue)
-    printf '%s\n' '{"id":238,"title":"API wiring with browser acceptance","state":"open","labels":["review"],"body":"## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] `npx playwright test e2e/e2-wiring.spec.ts --project=e2-wiring` passes"}' ;;
-  issue-notes) printf '%s\n' '[]' ;;
+  issue) cat "$CHAIN_BROWSER_ISSUE_JSON" ;;
+  issue-notes) cat "$CHAIN_BROWSER_NOTES_JSON" ;;
   *) exit 2 ;;
 esac
 EOF
 chmod +x "$CHAIN_BROWSER_TRACKER"
+printf '%s\n' '{"id":238,"title":"API wiring with browser acceptance","state":"open","labels":["review"],"body":"## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] `npx playwright test e2e/e2-wiring.spec.ts --project=e2-wiring` passes"}' > "$CHAIN_BROWSER_ISSUE_JSON"
+printf '%s\n' '[]' > "$CHAIN_BROWSER_NOTES_JSON"
 TRACKER_CMD="$CHAIN_BROWSER_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
   LOOM_LANE_ID=impl-238 LOOM_DEFER_LANE_LAUNCH=1 \
   "$TICK" chain-gate impl-238 >/dev/null
@@ -181,6 +185,36 @@ else
     bad "D-TICK-43: direct gate chain left mandatory browser evidence below UI"
 fi
 [ -z "$browser_request" ] || mv "$browser_request" "$LOOM_HOME/lane-launch-queue/consumed-browser-request"
+
+printf '%s\n' '{"id":239,"title":"Rescoped API wiring","state":"open","labels":["review"],"body":"## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] `npx playwright test e2e/obsolete.spec.ts` passes"}' > "$CHAIN_BROWSER_ISSUE_JSON"
+printf '%s\n' '[{"created_at":"2026-08-17T18:01:00Z","body":"## Acceptance criteria\n\n- [ ] The JSON response is stable\n\n<!-- orch-scope-reset 2026-08-17T18:01:00Z -->"}]' > "$CHAIN_BROWSER_NOTES_JSON"
+TRACKER_CMD="$CHAIN_BROWSER_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+  LOOM_LANE_ID=impl-239 LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" chain-gate impl-239 >/dev/null
+rescope_remove_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ -n "$rescope_remove_request" ] \
+   && [ "$(cat "$rescope_remove_request/id" 2>/dev/null)" = gate-239 ] \
+   && [ "$(cat "$rescope_remove_request/pregate" 2>/dev/null)" = api ]; then
+    ok "D-TICK-44: direct gate chain honors rescope removing browser acceptance"
+else
+    bad "D-TICK-44: direct gate chain used superseded original browser acceptance"
+fi
+[ -z "$rescope_remove_request" ] || mv "$rescope_remove_request" "$LOOM_HOME/lane-launch-queue/consumed-rescope-remove-request"
+
+printf '%s\n' '{"id":240,"title":"Rescoped browser wiring","state":"open","labels":["review"],"body":"## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] The JSON response is stable"}' > "$CHAIN_BROWSER_ISSUE_JSON"
+printf '%s\n' '[{"created_at":"2026-08-17T18:02:00Z","body":"## Acceptance criteria\n\n- [ ] `npx playwright test e2e/rescoped.spec.ts` passes\n\n<!-- orch-scope-reset 2026-08-17T18:02:00Z -->"}]' > "$CHAIN_BROWSER_NOTES_JSON"
+TRACKER_CMD="$CHAIN_BROWSER_TRACKER" FORGE_CMD="$CHAIN_FORGE" LOOM_AGENT_CMD="$CHAIN_AGENT" \
+  LOOM_LANE_ID=impl-240 LOOM_DEFER_LANE_LAUNCH=1 \
+  "$TICK" chain-gate impl-240 >/dev/null
+rescope_add_request=$(find "$LOOM_HOME/lane-launch-queue" -maxdepth 1 -type d -name 'request-*' | head -1)
+if [ -n "$rescope_add_request" ] \
+   && [ "$(cat "$rescope_add_request/id" 2>/dev/null)" = gate-240 ] \
+   && [ "$(cat "$rescope_add_request/pregate" 2>/dev/null)" = ui ]; then
+    ok "D-TICK-44: direct gate chain honors rescope adding browser acceptance"
+else
+    bad "D-TICK-44: direct gate chain ignored rescoped browser acceptance"
+fi
+[ -z "$rescope_add_request" ] || mv "$rescope_add_request" "$LOOM_HOME/lane-launch-queue/consumed-rescope-add-request"
 
 # Planted violation: remove only the implementation epilogue's chain-gate
 # branch. The same launch plist seam that caught D-TICK-33 must lose the direct

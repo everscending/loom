@@ -28,15 +28,18 @@ include "lib";
 | ([$members[]
     | select(state_of(.labels // []) == "merge-queue")
     | . as $t
+    | (($N[$t.id | tostring]) // []) as $ticket_notes
+    | active_scope_reset_of($ticket_notes) as $scope_reset
     | { id: $t.id,
         # `tier` is the host pregate tier consumed by chain-merge. Keep the
         # declared tracker text intact while raising browser acceptance and
         # gate scope to UI exactly as snapshot/plan and chain-gate do (JOR-294).
-        tier: ($t | minimum_pregate_tier(tier_of($t.labels // []))),
+        tier: (($t + {active_scope_reset: $scope_reset})
+               | minimum_pregate_tier($t | tier_of($t.labels // []))),
         branch: ((($M[$t.id | tostring]) // [])
                  | map(select((.state // "") == "open")) | first | .branch // null),
-        merge_attempts: merge_attempts_of(($N[$t.id | tostring]) // []),
-        merge_hold: merge_hold_of(($N[$t.id | tostring]) // []; $open_iids) }]
+        merge_attempts: merge_attempts_of($ticket_notes),
+        merge_hold: merge_hold_of($ticket_notes; $open_iids) }]
    | sort_by(.id)) as $queue
 | [$queue[] | select(.merge_attempts < $merge_cap and .merge_hold == null)
             | {id, branch, tier}]
