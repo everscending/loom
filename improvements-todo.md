@@ -57,6 +57,19 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   stall, and deleting the stale-transition exclusion recreates the review
   loop. (`MEND-FLOW-01`, `MEND-CHAIN-01`, `MEND-LEARN-01`)
 
+- [x] **DONE — Isolate host spawn preflight failures.** Continued live mend
+  supervision found that one dirty gate checkout aborted `_prepare_wave_plan`
+  before `wave_start`, suppressing dead-lane cleanup and every unrelated safe
+  action in the same deterministic plan. Implemented provider-neutrally in
+  `cd5377d` (`fix(wave): isolate spawn preflight failures`): host worktree
+  preparation now defers only the unsafe spawn as `host-preflight-failed`,
+  emits `wave_spawn_deferred`, renumbers the surviving immutable actions, and
+  still launches the wave. The `mend` verb now names this as a
+  `MEND-FLOW-01`/`MEND-LEARN-01` obligation rather than healthy pacing.
+  Verification: focused runtime and mend suites 60/60, full Loom suite
+  1,343/1,343, syntax/diff checks clean; restoring the all-or-nothing return
+  recreates the pre-provider build gap.
+
 - [x] **DONE — Make scheduling resource-aware.** Serialize every host `ui` pregate, including merge preflights, while API gates, API merges, probes, and the general auxiliary lane pool remain parallel. Implemented in `97c529e` (`fix(gates): serialize shared UI pregates`). Holding coverage: UI gate ↔ UI gate, UI gate ↔ UI merge, simultaneous handoffs, durable queued reservations, retry after release, cleanup, and unaffected API work. Focused result: 37/37.
 
 - [x] **DONE — Guard tracker writes with compare-and-set state.** Planner transitions carry the state observed in their snapshot; `lane.sh transition --if-current` re-reads live state and refuses stale mutations. Implemented in `68426b2` (`fix(wave): reject stale transitions`). Focused result: 72/72.
