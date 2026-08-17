@@ -184,4 +184,87 @@ else
 fi
 kill "$group_root" "$group_leaf" 2>/dev/null || true
 
+# A durable host can itself exit after atomically claiming a cleanup request
+# but before it runs the action. A later heartbeat must recover that abandoned
+# running claim; otherwise queue deduplication sees it forever and clear-lane
+# can only report "already queued" while the dead lane remains visible.
+sleep 60 & abandoned_worker=$!
+abandoned_id=gate-393
+abandoned_claim="$LOOM_HOME/lane-cleanup-queue/running-abandoned-$abandoned_id"
+mkdir -p "$abandoned_claim"
+printf '%s\n' "$abandoned_id" > "$abandoned_claim/id"
+printf '%s\n' kill > "$abandoned_claim/action"
+printf '%s\n' "$abandoned_worker" > "$abandoned_claim/pid"
+printf '%s\n' "$abandoned_worker" > "$LOOM_HOME/lanes/$abandoned_id.pid"
+# Legacy claims did not carry a drainer owner. Only an aged legacy claim is
+# safe to recover across a rolling skill update.
+touch -t 202001010000 "$abandoned_claim"
+
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= \
+  "$TICK" drain-lane-cleanups >/dev/null 2>&1
+if ! kill -0 "$abandoned_worker" 2>/dev/null \
+   && [ ! -e "$LOOM_HOME/lanes/$abandoned_id.pid" ] \
+   && [ ! -e "$abandoned_claim" ]; then
+    ok "lane cleanup: a later durable heartbeat reclaims an abandoned running request"
+else
+    bad "lane cleanup: an abandoned running request remains wedged"
+    kill "$abandoned_worker" 2>/dev/null || true
+fi
+
+# Current claims name their owning drainer. A concurrent heartbeat must leave
+# a live owner alone, then recover the same claim as soon as that owner dies.
+sleep 60 & claim_owner=$!
+owned_id=gate-394
+owned_claim="$LOOM_HOME/lane-cleanup-queue/running-pid-$claim_owner-owned-$owned_id"
+mkdir -p "$owned_claim"
+printf '%s\n' "$owned_id" > "$owned_claim/id"
+printf '%s\n' clear > "$owned_claim/action"
+: > "$owned_claim/pid"
+printf '%s\n' "$T/owned-worktree" > "$LOOM_HOME/lanes/$owned_id.cwd"
+
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= \
+  "$TICK" drain-lane-cleanups >/dev/null 2>&1
+if [ -e "$owned_claim" ] && [ -e "$LOOM_HOME/lanes/$owned_id.cwd" ]; then
+    ok "lane cleanup: a live drainer retains exclusive ownership of its running request"
+else
+    bad "lane cleanup: a concurrent heartbeat stole a live drainer's request"
+fi
+
+kill "$claim_owner" 2>/dev/null || true
+wait "$claim_owner" 2>/dev/null || true
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= \
+  "$TICK" drain-lane-cleanups >/dev/null 2>&1
+if [ ! -e "$owned_claim" ] && [ ! -e "$LOOM_HOME/lanes/$owned_id.cwd" ]; then
+    ok "lane cleanup: a dead drainer's owned request is reclaimed immediately"
+else
+    bad "lane cleanup: a dead drainer's owned request remains wedged"
+fi
+
+# Planted violation: delete only the recovery call from a private script copy.
+# The public drain command must recreate the production wedge, proving the
+# holding checks above are sensitive to the mechanism rather than incidental
+# cleanup elsewhere in the command.
+cleanup_mutant_dir=$(mirror_scripts "$T/cleanup-mutant")
+sed '/^    _reclaim_lane_cleanup_claims$/d' "$cleanup_mutant_dir/tick.sh" \
+  > "$cleanup_mutant_dir/tick-mutant.sh"
+chmod +x "$cleanup_mutant_dir/tick-mutant.sh"
+mutant_id=gate-395
+mutant_claim="$LOOM_HOME/lane-cleanup-queue/running-pid-999999-mutant-$mutant_id"
+mkdir -p "$mutant_claim"
+printf '%s\n' "$mutant_id" > "$mutant_claim/id"
+printf '%s\n' clear > "$mutant_claim/action"
+: > "$mutant_claim/pid"
+printf '%s\n' "$T/mutant-worktree" > "$LOOM_HOME/lanes/$mutant_id.cwd"
+mutant_rc=0
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= \
+  "$cleanup_mutant_dir/tick-mutant.sh" drain-lane-cleanups >/dev/null 2>&1 \
+  || mutant_rc=$?
+if [ "$mutant_rc" -eq 0 ] \
+   && [ -e "$mutant_claim" ] \
+   && [ -e "$LOOM_HOME/lanes/$mutant_id.cwd" ]; then
+    ok "lane-cleanup-violation: deleting stale-claim recovery recreates the wedge"
+else
+    bad "lane-cleanup-violation: planted omission did not recreate the wedge"
+fi
+
 test_finish

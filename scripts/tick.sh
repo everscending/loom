@@ -1990,12 +1990,43 @@ _queue_lane_cleanup() { # <lane-id> kill|clear — provider → durable host
     echo "lane $id: $action queued for the durable host"
 }
 
+_reclaim_lane_cleanup_claims() {
+    local running base owner rest name request
+    for running in "$LANE_CLEANUP_DIR"/running-*; do
+        [ -d "$running" ] || continue
+        base="${running##*/}"
+        case "$base" in
+            running-pid-*)
+                rest="${base#running-pid-}"
+                owner="${rest%%-*}"
+                name="${rest#*-}"
+                case "$owner" in ''|*[!0-9]*) continue ;; esac
+                kill -0 "$owner" 2>/dev/null && continue
+                ;;
+            *)
+                # Older Loom versions did not identify the drainer. Do not
+                # steal a claim during a rolling update; one minute is enough
+                # for an in-flight cleanup to finish, while a crashed claim is
+                # recovered by the following durable heartbeat.
+                find "$running" -prune -mmin +0 -print 2>/dev/null | grep -q . \
+                    || continue
+                name="${base#running-}"
+                ;;
+        esac
+        request="$LANE_CLEANUP_DIR/request-$name"
+        [ ! -e "$request" ] || continue
+        mv "$running" "$request" 2>/dev/null || continue
+        _ev lane_cleanup_reclaimed id "$(cat "$request/id" 2>/dev/null || echo unknown)"
+    done
+}
+
 _drain_lane_cleanups() {
     local request name running id action expected current cleanup_rc rc=0
+    _reclaim_lane_cleanup_claims
     for request in "$LANE_CLEANUP_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
-        running="$LANE_CLEANUP_DIR/running-$name"
+        running="$LANE_CLEANUP_DIR/running-pid-${BASHPID:-$$}-$name"
         mv "$request" "$running" 2>/dev/null || continue
         id=$(cat "$running/id" 2>/dev/null || true)
         action=$(cat "$running/action" 2>/dev/null || true)
