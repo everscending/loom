@@ -86,7 +86,7 @@ export ORPHAN_PID ORPHAN_CWD ORPHAN_PORT
 cat > "$T/orphan-bin/lsof" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
-  *"-tiTCP:$ORPHAN_PORT"*) printf '%s\n' "$ORPHAN_PID" ;;
+  *"-tiTCP:$ORPHAN_PORT"*) kill -0 "$ORPHAN_PID" 2>/dev/null && printf '%s\n' "$ORPHAN_PID" ;;
   *"-p $ORPHAN_PID -d cwd -Fn"*) printf 'p%s\nfcwd\nn%s\n' "$ORPHAN_PID" "$ORPHAN_CWD" ;;
   *) exit 1 ;;
 esac
@@ -118,5 +118,70 @@ else
     bad "lane clear: durable cleanup left the orphan listener or lane state"
     kill "$orphan_pid" 2>/dev/null || true
 fi
+
+# A Playwright webServer can detach a process group whose listening process is
+# the deepest child. Killing only that child is a false reap: the group leader
+# stays alive and can recreate the listener after clear-lane has already
+# erased the port/cwd recovery evidence. Resolve the verified group leader and
+# retire the entire lane-owned tree before declaring cleanup complete.
+group_cwd="$T/group-lane-worktree"; mkdir -p "$group_cwd" "$T/group-bin"
+GROUP_LEAF_FILE="$T/group-leaf.pid"
+export GROUP_LEAF_FILE
+(
+  cd "$group_cwd"
+  sleep 60 & printf '%s\n' "$!" > "$GROUP_LEAF_FILE"
+  while :; do sleep 60; done
+) & group_root=$!
+for _ in $(seq 1 50); do [ -s "$GROUP_LEAF_FILE" ] && break; sleep 0.1; done
+group_leaf=$(cat "$GROUP_LEAF_FILE")
+group_id=merge-392
+group_port=45192
+GROUP_ROOT="$group_root" GROUP_LEAF="$group_leaf" GROUP_CWD="$group_cwd" GROUP_PORT="$group_port"
+export GROUP_ROOT GROUP_LEAF GROUP_CWD GROUP_PORT
+cat > "$T/group-bin/lsof" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-tiTCP:$GROUP_PORT"*)
+    state=$(/bin/ps -o state= -p "$GROUP_LEAF" 2>/dev/null | tr -d '[:space:]')
+    case "$state" in ''|Z*) ;; *) printf '%s\n' "$GROUP_LEAF" ;; esac
+    ;;
+  *"-p $GROUP_LEAF -d cwd -Fn"*|*"-p $GROUP_ROOT -d cwd -Fn"*)
+    printf 'p%s\nfcwd\nn%s\n' "$GROUP_ROOT" "$GROUP_CWD"
+    ;;
+  *) exit 1 ;;
+esac
+EOF
+cat > "$T/group-bin/ps" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  *"-o pgid= -p $GROUP_LEAF"*) printf ' %s\n' "$GROUP_ROOT" ;;
+  *) exec /bin/ps "$@" ;;
+esac
+EOF
+chmod +x "$T/group-bin/lsof" "$T/group-bin/ps"
+printf '%s\n' "$group_port" > "$LOOM_HOME/lanes/$group_id.port"
+printf '%s\n' "$group_cwd" > "$LOOM_HOME/lanes/$group_id.cwd"
+
+CODEX_THREAD_ID= CODEX_SESSION_ID= CODEX_CI= PATH="$T/group-bin:$PATH" \
+  "$TICK" clear-lane "$group_id" >/dev/null 2>&1
+for _ in $(seq 1 30); do
+    group_root_state=$(/bin/ps -o state= -p "$group_root" 2>/dev/null | tr -d '[:space:]')
+    group_leaf_state=$(/bin/ps -o state= -p "$group_leaf" 2>/dev/null | tr -d '[:space:]')
+    case "$group_root_state:$group_leaf_state" in
+      ''|Z*:|:Z*|Z*:Z*) break ;;
+    esac
+    sleep 0.1
+done
+group_root_state=$(/bin/ps -o state= -p "$group_root" 2>/dev/null | tr -d '[:space:]')
+group_leaf_state=$(/bin/ps -o state= -p "$group_leaf" 2>/dev/null | tr -d '[:space:]')
+if { [ -z "$group_root_state" ] || [ "${group_root_state#Z}" != "$group_root_state" ]; } \
+   && { [ -z "$group_leaf_state" ] || [ "${group_leaf_state#Z}" != "$group_leaf_state" ]; } \
+   && [ ! -e "$LOOM_HOME/lanes/$group_id.port" ] \
+   && [ ! -e "$LOOM_HOME/lanes/$group_id.cwd" ]; then
+    ok "lane clear: a detached lane-owned server group is fully retired before its evidence"
+else
+    bad "lane clear: killing only the listener left its lane-owned server group alive"
+fi
+kill "$group_root" "$group_leaf" 2>/dev/null || true
 
 test_finish

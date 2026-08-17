@@ -2816,7 +2816,8 @@ cmd_lane_status() {
 _lanes_alive() { cmd_lane_status 2>/dev/null | awk '$3=="running"||$3=="stale"'; }
 
 _release_lane_port() { # <lane-id> — reap only a listener owned by this lane cwd
-    local id="$1" port expected pids pid actual
+    local id="$1" port expected pids pid actual pgid group_actual owner remaining i
+    local -a reaped_pids=() reaped_roots=()
     port=$(cat "$LANES_DIR/$id.port" 2>/dev/null || true)
     expected=$(cat "$LANES_DIR/$id.cwd" 2>/dev/null || true)
     case "$port" in ''|*[!0-9]*) return 0 ;; esac
@@ -2834,13 +2835,55 @@ _release_lane_port() { # <lane-id> — reap only a listener owned by this lane c
         fi
         case "$actual" in
             "$expected"|"$expected"/*)
-                _kill_tree "$pid"
-                _ev lane_port_reaped id "$id" port "$port" pid "$pid" cwd "$actual"
+                owner="$pid"
+                # Playwright's webServer fixture starts a detached process
+                # group: the TCP listener is its deepest child, while the
+                # group leader owns the restart/wait loop. Killing the leaf
+                # reports success but leaves that owner alive to recreate the
+                # listener. Promote cleanup to the group leader only when its
+                # cwd independently proves it belongs to this lane.
+                pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+                case "$pgid" in
+                    ''|*[!0-9]*|1) ;;
+                    *)
+                        group_actual=$(lsof -a -p "$pgid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
+                        if [ -d "$group_actual" ]; then
+                            group_actual=$(cd "$group_actual" 2>/dev/null && pwd -P) || group_actual=""
+                        fi
+                        case "$group_actual" in
+                            "$expected"|"$expected"/*) owner="$pgid" ;;
+                        esac
+                        ;;
+                esac
+                _kill_tree "$owner"
+                reaped_pids+=("$pid")
+                reaped_roots+=("$owner")
                 ;;
             *)
                 echo "clear-lane: refusing to reap pid $pid on port $port — cwd '${actual:-unknown}' is not lane '$id' cwd '$expected'" >&2
                 ;;
         esac
+    done
+
+    # Do not erase the only port/cwd recovery evidence on kill denial or a
+    # parent that recreated its listener. A later durable heartbeat can retry.
+    remaining=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    for pid in $remaining; do
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        actual=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1 || true)
+        if [ -d "$actual" ]; then
+            actual=$(cd "$actual" 2>/dev/null && pwd -P) || actual=""
+        fi
+        case "$actual" in
+            "$expected"|"$expected"/*)
+                echo "clear-lane: listener pid $pid still owns lane '$id' port $port — preserving cleanup evidence" >&2
+                return 1
+                ;;
+        esac
+    done
+    for ((i=0; i<${#reaped_pids[@]}; i++)); do
+        _ev lane_port_reaped id "$id" port "$port" pid "${reaped_pids[$i]}" \
+            root "${reaped_roots[$i]}" cwd "$expected"
     done
 }
 
@@ -2867,7 +2910,7 @@ cmd_clear_lane() {
         fi
     fi
     [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
-    _release_lane_port "$1"
+    _release_lane_port "$1" || return $?
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
           "$LANES_DIR/$1.cwd" "$launch_marker" "$launch_plist"
