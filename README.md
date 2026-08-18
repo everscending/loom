@@ -5,10 +5,9 @@ merged product — mostly while you are not watching.
 
 You bring a PRD. Loom grills the open architecture and design questions with
 you until none are left, breaks the work into epics and tickets on your issue
-tracker, and
-then runs an unattended loop that implements those tickets in parallel, reviews
-each one, merges the passing ones, and tests each epic like a user would. It
-tells you when it needs a decision and when it is done.
+tracker, and then runs an unattended loop that implements those tickets in
+parallel, reviews each one, merges the passing ones, and tests each epic like a
+user would. It tells you when it needs a decision and when it is done.
 
 It is an agent-agnostic coding skill: provider-neutral instructions and shell
 machinery with Claude Code and Codex adapters. It is not a service, and there
@@ -24,15 +23,18 @@ the build. The sixth phase runs on its own until the work is finished or it
 hits something only you can decide.
 
 **Runs several tickets at the same time.** Each in-flight ticket gets its own
-git worktree and its own headless coding-agent session ("a lane"). The default is
-four implementation lanes plus a smaller pool for review, merge, and test
-lanes.
+git worktree and its own headless coding-agent session ("a lane"). The defaults
+allow four implementation lanes and four auxiliary lanes for repair, review,
+merge, and acceptance work. Merge and host-browser work are still serialized
+at their single-writer boundaries.
 
-**Keeps all its state in the tracker.** Every decision about a ticket lives on
+**Keeps all build state in the tracker.** Every decision about a ticket lives on
 the board as a label, a link, or a comment. A ticket moves
 `ready-for-agent` → `in-progress` → `review` → `merge-queue` → closed, with
-`blocked` as the escape hatch. Nothing important lives in a file on your
-laptop, so a fresh session can pick up a running build by reading the tracker.
+`blocked` as the escape hatch. No build decision lives only in a local file, so
+a fresh session can reconstruct a running build from the tracker. Local files
+hold only runtime plumbing such as locks, leases, process records, and pause
+markers.
 
 **Reviews before it merges.** Every ticket branch first runs the repo's own
 gate commands (lint, tests, whatever you configure per risk tier). If those
@@ -42,18 +44,23 @@ to the merge queue; a fail sends it back with a written rejection.
 
 **Merges one at a time, safely.** A single merge lane holds a lock, merges the
 integration base into the branch (never a rebase — force-push is denied),
-re-installs dependencies if the merge moved a lockfile, re-runs the gates, then
-merges the merge request and closes the ticket.
+re-installs dependencies if the merge moved a lockfile, and proves the branch's
+configured gate at the host boundary before the provider is allowed to merge
+the merge request and close the ticket.
 
 **Tests each epic like a person would.** When every ticket in an epic is
 closed, Loom runs an acceptance probe against a really-running stack, using the
 epic's own written acceptance criteria. Failures become new fix tickets, which
 get built and merged like any other, and then the epic is probed again.
 
-**Knows when to stop and ask.** Repeated review rejections, repeated crashes, a
-wedged session, a runaway turn count, or a missing product decision all end the
-same way: the ticket is marked `blocked` with a written report saying what was
-tried and what single decision is needed, and you get a notification.
+**Repairs what it can and asks only when it must.** At the rejection cap, and on
+the first failed gate after a supervised repair, the scheduler creates one
+diagnosis hold and dispatches one focused `repair-<ticket>` lane. Same-scope
+technical repairs return through the ordinary review gate. Product or UX
+decisions, scope changes, credentials, permissions, external prerequisites,
+or policy changes stay `blocked` as `supervision::awaiting-human`, with one
+notification naming the required decision. Crash and merge caps still prevent
+infinite retries.
 
 **Shows you what is happening.** A build ticker prints one line per event
 (claimed, sent to review, verdict, merged). Inside herdr — a terminal
@@ -74,11 +81,11 @@ time and money went and writes up proposals for improving the next one.
 | **Claude Code or Codex** | The interactive provider starts the build; every headless job then runs through Loom's matching adapter. Provider identity is recorded on the Build issue. |
 | **A git repository** | Each in-flight ticket gets its own linked worktree under the ignored `.worktrees/` directory. Local-only repos will not work — lanes always branch from the remote. |
 | **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. Loom scripts and every provider job read that file directly, so there is no second tracker setting that can drift. Without it, every Loom verb refuses. |
-| **A board Loom drives** — GitLab or Linear | Epics, issues, labels, blocking links and comments are where **all** build state lives. Loom needs a board it can create labels in. Every board call goes through `scripts/trackers/<name>.sh`, the one file that knows that tracker; a repo declaring anything else is refused by name until a driver for it exists. |
-| **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom **derives** it rather than asking: a board that is itself a code host is its own forge, and otherwise your `origin` remote decides. |
-| **`glab`** or **`gh`**, logged in — or `LINEAR_API_KEY` | Whatever your drivers need. GitLab and GitHub are driven through their command-line tools: run `glab auth status` (or `gh auth status`) in the repo first, because a tool that cannot resolve the project makes Loom read the board as unknown and skip the wave. Linear has no CLI and is driven over its API, so it wants `LINEAR_API_KEY` in a `secrets:` block in `~/.loom/config.yml` — not in `.loom.yml`, which is committed, and not in your shell profile, which the launchd agent never reads. |
+| **A board Loom drives** — GitLab or Linear | Epics, issues, state labels or statuses, blocking links and comments are where **all** build state lives. Loom creates labels on GitLab and workflow statuses on Linear. Every board call goes through `scripts/trackers/<name>.sh`; an unsupported declaration is refused by name. |
+| **A forge** — GitLab or GitHub | Where branches and merge requests live, which on GitLab is the same service as the board and on Linear is not. Loom derives it from the board or `origin`; when neither is conclusive, an interactive verb asks once and records the answer as `forge:` in `.loom.yml`. |
+| **The driver credentials** | GitLab and GitHub use their logged-in CLIs (`glab` and `gh`). Linear additionally needs `LINEAR_API_KEY` in a `secrets:` block in `~/.loom/config.yml` or this repo's `$LOOM_HOME/config.yml` — never in committed `.loom.yml` or only in a shell profile that launchd does not read. A Linear board on GitHub therefore needs both the Linear key and `gh`. |
 | **`jq`** | Every snapshot, dependency graph, report, and log render is a `jq` query. Missing `jq` is a hard error, not a downgrade. macOS 15 and later ship it at `/usr/bin/jq`; on anything older, `brew install jq`. |
-| **A scheduler — launchd (macOS) or cron** | The once-a-minute heartbeat that watches lanes, makes the first wave fire, and resumes a build after a full stall. `/loom start` writes and loads the launchd agent for you. Without one, a build only advances when a lane hands off to the next lane, and a single wedge stops it for good. |
+| **A durable scheduler** | The current `/loom start` installer uses launchd on macOS for the once-a-minute heartbeat. On another host, an equivalent cron/service must run `tick.sh tick --auto --provider <id>` with the repo environment; Loom does not install that transport for you. Without a heartbeat, a single wedge can stop the build permanently. |
 | **A gate runner in your repo** | `scripts/gate.sh <tier>` — yours, not Loom's. Every branch is gated by it before review and again before merge. You do not have to write it up front — it is normally the first epic of your first build. |
 | **A trusted workspace and synced guardrails** | Claude uses `.claude/settings.json`; Codex uses `.codex/rules/loom.rules`. `/loom start` preflights the selected provider and refuses if its project policy would be ignored. |
 
@@ -112,8 +119,8 @@ commands, so a wave inlines that work instead.
 
 ## Setup
 
-Almost nothing. Loom sets itself up on its first tick; what is left is the two
-things a program is not allowed to do for you.
+Loom bootstraps each target repo on its first tick. You still install Loom,
+declare and authenticate the tracker/forge, and trust the repo.
 
 ### 1. Install Loom and its sibling skills
 
@@ -158,16 +165,17 @@ why.
 
 **On the first tick in a repo**, `scripts/bootstrap.sh all` runs by itself and
 then the wave proceeds. It writes `~/.loom/config.yml` (machine-wide Loom
-preferences) and creates the ticket-state labels on the board. `/loom start`
-has already synced the selected provider's repo-local guardrail artifact. A failed
-bootstrap writes no sentinel, so the next tick just retries. Running
-`bootstrap.sh all` by hand is safe and idempotent, but it buys you nothing.
+preferences) and creates missing ticket-state labels or Linear statuses on the
+board. `/loom start` has already synced the selected provider's repo-local
+guardrail artifact and bound the Build issue to one provider and one supervision
+policy. A failed bootstrap writes no sentinel, so the next tick retries.
+Running `bootstrap.sh all` by hand is safe and idempotent, but buys you nothing.
 
-**One thing does need you afterward: commit the provider guardrail artifact**
-(`.claude/settings.json` or `.codex/rules/loom.rules`). Lane
-worktrees are cut from `origin/<base>`, so an uncommitted allowlist reaches no
-lane. Bootstrap prints a warning rather than committing it, because a
-permission surface entering your history is your call.
+**Guardrails follow the provider's storage model.** Claude reads
+`.claude/settings.json`; keep that file available on the remote base so linked
+worktrees inherit it. Codex's `.codex/rules/loom.rules` is generated local
+metadata: Loom excludes it from Git and copies it into each linked worktree.
+Loom never accepts workspace trust for you.
 
 **Configuration is mostly derived, not written.** Keys resolve
 **repo → derived → global → built-in default**, and the derived layer reads
@@ -186,8 +194,9 @@ with the CI pipeline and any `.loom.yml` line no detector can infer, is
 normally the first epic of the first build, and every other epic blocks on it.
 Details: [references/setup.md](references/setup.md).
 
-**The scheduler is installed by `/loom start`.** No `launchctl`, no plist, no
-cron entry to write, and a finished build unloads its own agent.
+**The scheduler is installed by `/loom start`.** On macOS there is no
+`launchctl` or plist work to do by hand, and a finished build unloads its own
+agent. Other hosts must supply the equivalent cron/service transport.
 
 ### Optional tuning — `.loom.yml`
 
@@ -197,10 +206,15 @@ only to override a default or state a fact no detector can infer:
 ```yaml
 max_lanes: 4                    # 1-6; each lane is a full worktree
 ui_capacity: 2                  # opt in above default 1 after a paired host proof
-rejection_cap: 2                # review rejections before a ticket is blocked
+max_aux_lanes: 4                # repair/gate/merge/probe lane capacity
+rejection_cap: 2                # failed gates before focused supervision
 crash_cap: 2                    # crashes before blocked (crashes are not rejections)
+merge_attempt_cap: 2            # failed merge attempts before intervention
+lane_turn_cap: 150              # provider turns before a lane is treated as runaway
 heartbeat_stale_minutes: 30     # alive but silent this long = wedged
 usage_limit: pause_and_resume   # pause_and_resume | stop_and_wait | downshift_tier
+min_wave_gap_minutes: 10        # paces automatic paid waves, not lane handoffs
+stall_action: resume            # resume | notify_only
 base: develop                   # integration base branch
 
 wave_tier: medium               # provider adapter resolves the native profile
@@ -216,10 +230,13 @@ gates:                          # tier keys are fixed: docs | logic | api | ui
   logic: ["uv run ruff check .", "uv run pytest -q"]
   api:   ["uv run ruff check .", "uv run pytest -q"]
   ui:    ["uv run ruff check .", "uv run pytest -q", "uv run playwright test"]
+
+trees:                          # optional write scope enforced by the pregate
+  api: ["apps/api/**"]
+  ui:  ["apps/console/**", "packages/ui/**"]
 ```
 
-Gate values are literal shell commands, fastest first. The full key reference,
-including every enum option, is in
+Gate values are literal shell commands, fastest first. The detailed reference is
 [references/loom-config.md](references/loom-config.md).
 
 There is deliberately no tick-interval setting. The timer is a fixed backstop;
@@ -244,8 +261,9 @@ Every closed decision becomes an architecture decision record, folded into
 `ARCHITECTURE.md`. It then repeats the whole thing for the user interface and
 produces a written UX spec with annotated mockups.
 
-**Done when** a ticket writer with no access to you could answer every "which
-way?" from the architecture records and the UX spec alone.
+**Done when** a fresh ticket writer can draft the complete breakdown from the
+ADRs, UX spec, and pinned seam documents, with every truly blocking ambiguity
+closed in a document of record or recorded as a GAP with a contingency.
 
 ### Step 2 — `/loom epics`
 
@@ -265,9 +283,10 @@ before anything is published, because cross-ticket contradictions are invisible
 from inside any single ticket.
 
 Each ticket carries: design decisions already made, the exact shape of any
-interface it shares with another ticket, tests for inputs that must be
-*rejected*, a risk tier (`docs`, `logic`, `api`, `ui`) that picks its gate
-suite, and the PRD requirement it satisfies.
+interface it shares with another ticket, files touched, tests for inputs that
+must be *rejected*, a live check for claims about the running app, a risk tier
+(`docs`, `logic`, `api`, `ui`) that picks its gate suite, and the PRD requirement
+it satisfies. Fix tickets also carry a measurable terminal condition.
 
 Every epic ends with a **wiring ticket** — blocked by every other member, and
 checked against the running app with real data. Without it, nothing judges the
@@ -284,6 +303,8 @@ every member ticket `build-N` — from then on the scheduler's whole universe is
 It then reports the build's *shape*: how many tickets can start at once, how
 deep the chains run. A narrow start means every lane idles, and the fix is to
 go back and split a blocker. An epic with no wiring ticket is refused outright.
+The build is also refused when a gate dependency is not supplied by a ticket
+that blocks every ticket whose tier needs it.
 
 This step spends nothing and starts nothing.
 
@@ -291,15 +312,18 @@ This step spends nothing and starts nothing.
 
 The trigger. It detects the interactive provider (or accepts one explicit
 `--provider` override), records exactly one `provider::<id>` label on the active
-Build issue, syncs that provider's guardrails, installs a repo-specific
-scheduler carrying the same provider as a consistency check, clears the stop
-switch, and fires the first wave. Inside herdr it also raises the viewer.
+Build issue, syncs that provider's guardrails, binds the Build issue to
+`supervision::autonomous-repair-v1`, installs a repo-specific scheduler carrying
+the same provider as a consistency check, clears the stop switch, and fires the
+first wave. Inside herdr it also raises the viewer.
 
-This is the only thing you run to go unattended. No `launchctl`, no plist file,
-no cron entry to write.
+On macOS this is the only thing you run to go unattended: no `launchctl` or
+plist work by hand. Other hosts must supply the equivalent cron/service
+transport.
 
-It is also **resume**: after clearing a blocked ticket, or after a `stop`,
-`start` picks the build back up with no replanning.
+It is also **resume** after a `stop`, with no replanning. Releasing a blocked
+ticket through `unblock` writes its own durable continuation request; an armed
+heartbeat can resume it without another `start`.
 
 ### Step 6 — the loop runs
 
@@ -310,29 +334,31 @@ it consider starting a wave, and only if at least `min_wave_gap_minutes`
 the loop moves at the speed of the work; the timer is only a slow backstop for
 the first kick and for recovering from a full stall.
 
-Each wave does the same seven things:
+The script derives an immutable action plan from one snapshot before a wave
+executes it. Each wave then follows the same flow:
 
-1. **Read** one JSON snapshot of the build — tickets, labels, blocking edges,
-   epic rollup, lane states.
+1. **Read and plan** from one JSON snapshot — tickets, labels, blocking edges,
+   epic rollup, lane states, exact actions, residue, and capacity deferrals.
 2. **Harvest** finished and wedged lanes. A crash is resumed from its surviving
    worktree. A wedged lane is killed properly (killing it by hand orphans the
    session inside, which keeps pushing). Caps turn repeated failure into a
-   `blocked` ticket instead of an infinite retry.
-3. **Review** every ticket sitting in `review`. The repo's gate commands run
-   first in plain shell, so a mechanically broken branch is rejected in seconds
-   having spent no model time. Past that, a session does the code review and
-   the PRD-faithfulness check. Pass → merge queue. Fail → back to
-   `in-progress` with a written rejection naming the kind of failure.
+   diagnosis hold or a human block instead of an infinite retry.
+3. **Review** planned tickets in dependency-impact order. The repo's gate
+   runner executes first on the host, so a mechanically broken branch is
+   rejected without model spend. Past that, a separate session does the code
+   review, PRD-faithfulness, and scope checks. Pass → merge queue. Fail → back
+   to `in-progress` with a written rejection naming the defect class.
 4. **Fill lanes**, rework before new work. Tickets that just got rejected are
-   closest to done, so they get slots first — but two rejections of the *same
-   kind* stop the ticket for a design decision rather than a third guess. Then
-   fix tickets, then the rest of the ready set. Ready means every blocker's
-   merge request has actually merged. Each new ticket gets a fresh worktree cut
-   from the freshly fetched remote base.
-5. **Merge** the oldest ticket in the queue, one at a time under a lock. If the
-   gates go red only *after* merging the base in, the same check is re-run
-   against a clean base — the same failure there means the base is broken, not
-   this ticket, so a fix ticket is filed and this ticket parks until it lands.
+   closest to done, so they get slots first. Two failed gate rounds, regardless
+   of defect class, enter focused start-owned supervision instead of a third
+   blind implementation round. Then fix tickets, then the rest of the ready
+   set. Ready means every blocker's merge request has actually merged. Each new
+   ticket gets a fresh worktree cut from the freshly fetched remote base.
+5. **Merge** the oldest ticket in the queue, one at a time under a lock. The
+   host first reconciles the remote base and runs the configured gate. A
+   conflict or red gate prevents the provider from starting and is harvested
+   as one failed merge attempt; a green preflight leaves the provider only the
+   narrow `lane.sh merge` operation.
 6. **Probe** every epic whose tickets are all closed, exercising it the way a
    user would against a running stack, using that epic's acceptance criteria
    plus regression checks for anything the epic has broken before. Each failure
@@ -343,11 +369,16 @@ Each wave does the same seven things:
    closes the `Build N` issue, and unloads the repo's own agent. A finished
    build leaves nothing running.
 
+The once-a-minute heartbeat can also dispatch an already-planned supervised
+repair directly, without buying a scheduling-agent wave merely to rediscover
+that decision.
+
 ### While it runs
 
 | Command | What it does |
 |---|---|
 | `/loom watch` | Narrated summary of every lane, the merge queue, and the blocked list. In herdr, raises live panes. Read-only. |
+| `/loom mend [--once\|--observe-only]` | Assert that start-owned supervision, scheduler, leases, capacity, continuations, and panes agree. Repairs confirmed Loom mechanism defects; never takes over the build queue. |
 | `/loom unblock <n>` | Post your decision, clear `blocked`, release the ticket back to the queue. `--to-review` if you did the work yourself. |
 | `/loom triage` | Every blocked ticket on one surface, six actions each, applied as a batch. |
 | `/loom tick` | Force one wave now. |
@@ -369,10 +400,13 @@ belongs:
 
 ## Safety
 
-- **Force-push, `reset --hard`, and `rm -rf` are denied** in every permission
-  mode, in every lane. The merge step merges; it never rebases.
-- **Lanes never bypass approvals or sandboxing.** Each adapter supplies its
-  provider-native non-interactive safety settings explicitly.
+- **Force-push, rebase, `reset --hard`, `git clean`, and unscoped recursive
+  deletion are denied** in every provider path. The merge step merges; it never
+  rewrites branch history.
+- **Every adapter supplies explicit non-interactive approval and sandbox
+  settings.** Codex defaults to `workspace-write`; a broader sandbox requires
+  an explicit host-side `LOOM_CODEX_SANDBOX` choice. Hard Git denials remain in
+  force either way.
 - **Every tracker write in a lane goes through `scripts/lane.sh`**, never a
   hand-rolled `glab` call. A lane that needs something `lane.sh` cannot do has
   found a missing verb, not a reason for a wider allowlist.
@@ -388,26 +422,36 @@ belongs:
 
 ```
 SKILL.md                  the skill itself: phase order, gate rules, failure policy
+AGENTS.md                 repository maintenance rules and ledgers
+CONTRIBUTING.md            contributor workflow, proof, and coordination rules
 references/
   setup.md                bootstrap, config layers, the skill/repo boundary
-  loom-config.md          every configuration key, with its options
+  loom-config.md          configuration schema, examples, and caveats
   phases-1-5.md           the conversational front half, in full
+  scheduling.md           heartbeat, pacing, continuation, and stop switch
+  supervision.md          start-owned deterministic repair policy
+  mend.md                 human audit/repair contract for that policy
   ticket-template.md      what a ticket body must contain
   triage.md  retro.md  qa.md  optimize.md  prop.md  fix.md
 scripts/
   tick.sh                 the scheduler: lock, spawn, watch, snapshot, notify
   lane.sh                 every tracker write a lane is allowed to make
-  bootstrap.sh            one-time repo setup (the only script that writes setup state)
+  bootstrap.sh            idempotent repo/tracker bootstrap writes
+  agent.sh  agents/       provider-neutral runtime and Claude/Codex adapters
+  trackers/  forges/      board and merge-request drivers
+  worktree.sh             deterministic linked-worktree preparation
   watch-panes.sh          the herdr viewer
-  tick-test.sh            the test suite for tick.sh
-  *.jq                    snapshot, graph, report, and render queries
+  tick-test.sh  tests/     test driver and sectioned suite
+  *.jq                    snapshot, plan, graph, report, and render queries
 OPEN_DEFECTS.md           confirmed defects awaiting a fix
-PROPOSALS.md              improvements proposed by retros, awaiting implementation
+LOOM-PLANNING-LESSONS.md  failures in phases 1–5 and the rules they paid for
+PROPOSALS.md              open improvements awaiting implementation
+PROPOSALS_ARCHIVED.md     shipped/dropped proposals and QA review evidence
 ```
 
 `tick.sh` is **read-only against the tracker** by design — a wave re-runs it
-constantly, so a mutating call there would be unsafe to repeat, and the test
-suite enforces it. Everything that writes lives in `lane.sh` and
+constantly, so a mutating board call there would be unsafe to repeat, and the
+test suite enforces it. Tracker writes live in `lane.sh`; setup writes live in
 `bootstrap.sh`.
 
 ---
@@ -417,11 +461,11 @@ suite enforces it. Everything that writes lives in `lane.sh` and
 | Command | What it does |
 |---|---|
 | `/loom qa` | Review the skill's own files and report defects. Reports; never fixes. |
-| `/loom fix <Dn>` | Implement one confirmed defect fix from `OPEN_DEFECTS.md`, prove it with a failing-first test, close the entry. |
+| `/loom fix <Dn>\|<severity>` | Implement one confirmed defect, or each open defect at a severity in order; prove each with a failing-first test and close it. |
 | `/loom prop <Pn>` | Implement one proposal from `PROPOSALS.md`, test it, archive it. |
 | `/loom optimize` | Compact `SKILL.md` without changing what it makes an agent do. |
 
-Two rules govern every change:
+Core maintenance rules:
 
 **Every rule is paid for by a failure.** A new rule is added only after a real
 build failure, as one line, citing that failure. Most of `SKILL.md` reads as a
@@ -429,3 +473,10 @@ list of scars, and that is deliberate.
 
 **Route, don't teach.** Technique belongs in other skills. `SKILL.md` holds
 only phase order, gate criteria, scheduling, and failure policy.
+
+**No shadow state; no orphan artifacts.** The tracker is the only mutable build
+state, and every artifact must name the consumer that reads it.
+
+**Keep the hot path small.** Prefer changes in `scripts/`, then `references/`,
+and change `SKILL.md` only when machinery cannot carry the rule. Sibling skills
+are shared dependencies and are outside Loom's maintenance scope.
