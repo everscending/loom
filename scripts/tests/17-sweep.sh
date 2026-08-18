@@ -93,6 +93,7 @@ printf 'deployment gate output\n' > docs/deploy.md
 [ "${GATE_COLLIDE_DELETED:-0}" != 1 ] || printf '{"deleted":"runner overwrite"}\n' > tests/artifacts/deleted.json
 [ "${GATE_COLLIDE_UNTRACKED:-0}" != 1 ] || printf '{"untracked":"runner overwrite"}\n' > tests/artifacts/untracked.json
 [ "${GATE_CREATE_UNTRACKED:-0}" != 1 ] || printf '{"generated":"runner"}\n' > tests/artifacts/generated.json
+[ "${GATE_CREATE_STAGED:-0}" != 1 ] || { printf '{"staged":"runner"}\n' > tests/artifacts/staged.json; git add tests/artifacts/staged.json; }
 [ "${GATE_FORCE_FAIL:-0}" != 1 ] || { echo "gate failed intentionally" >&2; exit 23; }
 exit 0
 GATEEOF
@@ -169,12 +170,14 @@ GATE_WRITE_UNKNOWN=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME=
 _wait_gate_artifact_lane "$GA_UNKNOWN_HOME" gate-313
 SWEEP_MERGED="ticket-313-unknown-output" GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_UNKNOWN_HOME" \
   "$TICK" sweep >"$GA/sweep-unknown.out" 2>&1
-if [ -e "$GA/repo/.worktrees/313" ] \
+if [ "$(cat "$GA_UNKNOWN_HOME/lanes/gate-313.rc" 2>/dev/null)" = 7 ] \
+   && [ ! -e "$GA/reviewed-313" ] \
+   && [ -e "$GA/repo/.worktrees/313" ] \
    && grep -qxF 'unknown gate output' "$GA/repo/.worktrees/313/f" \
    && grep -q 'modified tracked files' "$GA/sweep-unknown.out"; then
-    ok "pregate artifacts: an unknown tracked output remains dirty and fail-closed"
+    ok "pregate artifacts: an unknown tracked output remains dirty and suppresses review"
 else
-    bad "pregate artifacts: an unknown tracked output was erased or escaped sweep's hold"
+    bad "pregate artifacts: an unknown tracked output was erased, reviewed, or escaped sweep's hold"
 fi
 
 # A failing runner still owns cleanup before rc 7 is published: it leaves the
@@ -251,6 +254,24 @@ if [ "$(cat "$GA_GENERATED_HOME/lanes/gate-318.rc" 2>/dev/null)" = 0 ] \
     ok "pregate artifacts: runner-created untracked output returns to exact pre-run absence"
 else
     bad "pregate artifacts: runner-created untracked output survived cleanup or blocked review"
+fi
+
+# A newly staged allowlisted output is absent from both pre-run trees. Restore
+# its index absence, then remove the now-untracked worktree file before review.
+git -C "$GA/repo" worktree add -q "$GA/repo/.worktrees/319" -b ticket-319-generated-staged origin/main 2>/dev/null
+GA_STAGED_HOME="$GA/home-staged"
+GATE_CREATE_STAGED=1 GLAB_CMD="$SW/glab-stub.sh" LOOM_REPO="$GA/repo" LOOM_HOME="$GA_STAGED_HOME" \
+  "$TICK" spawn-lane gate-319 --no-tick --pregate ui \
+  --cwd "$GA/repo/.worktrees/319" -- touch "$GA/reviewed-319" >/dev/null
+_wait_gate_artifact_lane "$GA_STAGED_HOME" gate-319
+if [ "$(cat "$GA_STAGED_HOME/lanes/gate-319.rc" 2>/dev/null)" = 0 ] \
+   && [ -e "$GA/reviewed-319" ] \
+   && [ ! -e "$GA/repo/.worktrees/319/tests/artifacts/staged.json" ] \
+   && git -C "$GA/repo/.worktrees/319" diff --quiet \
+   && git -C "$GA/repo/.worktrees/319" diff --cached --quiet; then
+    ok "pregate artifacts: newly staged deterministic output returns to exact pre-run absence"
+else
+    bad "pregate artifacts: newly staged deterministic output survived cleanup or blocked review"
 fi
 
 # Planted collision violation: bypass only the pre-run untracked refusal. The

@@ -2784,8 +2784,10 @@ cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
         fi
         git -C "$abs" restore --source="$index_tree" --staged -- "$path" \
             || die "pregate-artifacts: could not restore pre-gate index state for '$path'; sweep will keep this worktree"
-        git -C "$abs" restore --source="$worktree_tree" --worktree -- "$path" \
-            || die "pregate-artifacts: could not restore pre-gate worktree state for '$path'; sweep will keep this worktree"
+        if git -C "$abs" cat-file -e "$worktree_tree:$path" 2>/dev/null; then
+            git -C "$abs" restore --source="$worktree_tree" --worktree -- "$path" \
+                || die "pregate-artifacts: could not restore pre-gate worktree state for '$path'; sweep will keep this worktree"
+        fi
         git -C "$abs" diff --cached --quiet "$index_tree" -- "$path" \
             || die "pregate-artifacts: index state for '$path' differs from its pre-gate snapshot"
         git -C "$abs" diff --quiet "$worktree_tree" -- "$path" \
@@ -2812,6 +2814,10 @@ cmd_pregate_artifacts_finish() { # <lane-id> <cwd>
         removed=$((removed + 1))
     done < "$untracked"
     rm -f "$untracked"
+    git -C "$abs" diff --cached --quiet "$index_tree" -- \
+        || die "pregate-artifacts: runner changed tracked index state outside the deterministic-output allowlist; review will not start"
+    git -C "$abs" diff --quiet "$worktree_tree" -- \
+        || die "pregate-artifacts: runner changed tracked worktree state outside the deterministic-output allowlist; review will not start"
     rm -f "$prefix.head" "$prefix.cwd" "$prefix.worktree-tree" "$prefix.index-tree" "$prefix.paths"
     [ "$restored" -eq 0 ] && [ "$removed" -eq 0 ] \
         || echo "--- pregate artifacts: restored $restored deterministic tracked output(s) and $removed generated untracked output(s) to exact pre-gate state; test evidence remains in the lane log ---"
