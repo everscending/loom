@@ -942,6 +942,11 @@ cfg_ntfy_events() {
 # and having); the pid file names the owner; an owner that is gone gets its
 # lock broken by the next attempt, so the worst case is one skipped
 # tick/merge/gate and never two at once.
+_lock_owner_valid() { # <pid> — ownership must be a provable positive process id
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$1" -gt 0 ] 2>/dev/null
+}
+
 _lock_reserve() { # <dir> → 0 reserved (pid stamped), 1 genuinely held
     local dir="$1" owner parent
     parent=$(dirname "$dir")
@@ -956,6 +961,7 @@ _lock_reserve() { # <dir> → 0 reserved (pid stamped), 1 genuinely held
     fi
     [ -d "$dir" ] || return 2
     owner=$(cat "$dir/pid" 2>/dev/null || echo "")
+    _lock_owner_valid "$owner" || return 2 # mutate:lock-owner-shape
     if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
         return 1                          # genuinely held
     fi
@@ -1104,6 +1110,23 @@ _ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retry
     fi
     _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+    [ -n "$from" ] && return 0
+    return 1
+}
+
+_merge_lock_admission_refusal() { # <id> <from-lane> <owner> — soft for handoff, retryable for drain
+    local id="$1" from="$2" owner="$3"
+    echo "spawn-lane: merge lock held by pid $owner — one merge at a time; not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current merge."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason merge_lock_busy owner "$owner"
+    # JOR-286's Codex gate handoff was already a durable request when JOR-287
+    # won the lock. Treating the collision as a generic launch error moved the
+    # request to failed-* even though nothing was wrong with it. Match the
+    # shared aux/UI admission contract: a durable drain puts the exact request
+    # back for the next heartbeat; a direct lane handoff remains a soft no-op.
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75 # mutate:merge-lock-retry
     [ -n "$from" ] && return 0
     return 1
 }
@@ -2219,7 +2242,7 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
 }
 
 _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/host_probe/repair token/locks
-    local base request n=0 existing
+    local base request n=0 existing queued_head=""
     # Do not let two commands in one provider session enqueue the same lane id.
     # There is no pid yet for the ordinary live-lane guard to see.
     for existing in "$LANE_LAUNCH_DIR"/request-* "$LANE_LAUNCH_DIR"/launching-*; do
@@ -2244,6 +2267,12 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     printf '%s\n' "$repair_block_token" > "$request/repair-block-token"
     printf '%s\n' "$merge_lock" > "$request/merge-lock"
     printf '%s\n' "$on_done" > "$request/on-done"
+    if [ "$(_lane_type "$id")" = merge ]; then
+        queued_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+        [ -n "$queued_head" ] \
+          || { rm -rf "$request"; die "spawn-lane: deferred merge '$id' has no committed HEAD to preserve"; }
+    fi
+    printf '%s\n' "$queued_head" > "$request/expected-head"
     cp "$brief" "$request/brief.md" \
       || { rm -rf "$request"; die "spawn-lane: cannot stage deferred brief '$brief'"; }
     # Codex provider sessions queue their launch for a durable host, so the
@@ -2262,7 +2291,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done launch_rc rc=0
+    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done expected_head launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -2281,6 +2310,7 @@ _drain_lane_launches() {
         repair_block_token=$(cat "$launching/repair-block-token" 2>/dev/null || true)
         merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
         on_done=$(cat "$launching/on-done" 2>/dev/null || true)
+        expected_head=$(cat "$launching/expected-head" 2>/dev/null || true)
         local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
                     --brief "$launching/brief.md" --cwd "$cwd")
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
@@ -2289,6 +2319,7 @@ _drain_lane_launches() {
         [ -z "$repair_block_token" ] || args+=(--repair-block-token "$repair_block_token")
         [ "$merge_lock" = 1 ] && args+=(--merge-lock)
         [ "$on_done" = 0 ] && args+=(--no-tick)
+        [ -z "$expected_head" ] || args+=(--expected-head "$expected_head")
         launch_rc=0
         LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
           "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
@@ -2424,7 +2455,8 @@ _codex_host_is_ephemeral() {
 
 # Flag parsing for spawn-lane, accepting the flags before OR after the id
 # (order-tolerant). Sets, in the caller's scope: id, on_done, cwd, merge_lock,
-# pregate, host_probe, repair_block_token, brief — and _spawn_shift, the count of arguments consumed, which
+# pregate, host_probe, repair_block_token, brief, expected_head — and
+# _spawn_shift, the count of arguments consumed, which
 # the caller shifts away to stand on the lane command. A malformed flag dies
 # here; the missing-id and missing-command guards are the caller's, because
 # only it sees the remainder.
@@ -2442,6 +2474,8 @@ _spawn_parse_flags() {
             --repair-block-token) shift; [ $# -gt 0 ] || die "spawn-lane: --repair-block-token needs a value"
                                   repair_block_token="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --merge-lock) merge_lock=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
+            --expected-head) shift; [ $# -gt 0 ] || die "spawn-lane: --expected-head needs a commit"
+                             expected_head="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --cwd) shift; [ $# -gt 0 ] || die "spawn-lane: --cwd needs a directory"
                    cwd="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --brief) shift; [ $# -gt 0 ] || die "spawn-lane: --brief needs a file"
@@ -3054,7 +3088,7 @@ _cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" lane_head="" lane_base_head="" lane_base_ref="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" expected_head="" lane_head="" lane_base_head="" lane_base_ref="" _spawn_shift=0
     local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
@@ -3156,6 +3190,14 @@ _cmd_spawn_lane() {
         _cwd_main=$(_git_main_root "$abs")
         [ -n "$_repo_main" ] && [ "$_cwd_main" = "$_repo_main" ] \
           || die "spawn-lane: provider cwd '$abs' is not the main clone or a linked worktree of '$REPO_ROOT'"
+    fi
+    if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ] && [ "$(_lane_type "$id")" = merge ]; then
+        [ -n "$expected_head" ] \
+          || die "spawn-lane: deferred merge '$id' has no immutable expected HEAD — refusing malformed request"
+    fi
+    if [ -n "$expected_head" ]; then
+        [ "$(_lane_type "$id")" = merge ] && [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ] \
+          || die "spawn-lane: --expected-head is reserved for a deferred merge drain"
     fi
     if [ -n "$provider" ] && [ -z "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ]; then
         [ -x "$AGENT_SH" ] || die "spawn-lane: provider runtime missing: $AGENT_SH"
@@ -3304,6 +3346,13 @@ _cmd_spawn_lane() {
     # all consume this same value. A non-git cwd has no attributable HEAD and
     # is recorded as such rather than guessed at classification time.
     lane_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
+    if [ -n "$expected_head" ] \
+       && { [ -z "$lane_head" ] || [ "$lane_head" != "$expected_head" ]; }; then
+        echo "spawn-lane: deferred merge '$id' expected HEAD $expected_head but worktree is ${lane_head:-unreadable} — retaining request."
+        _ev lane_launch_deferred id "$id" reason expected_head_changed \
+            expected "$expected_head" current "${lane_head:-unreadable}"
+        return 75 # mutate:deferred-merge-head
+    fi
     # D-TICK-38: the same gate can have two very different-looking diffs when
     # a review session reads an optional stale local base branch. JOR-289 was
     # current with origin/main and changed exactly two files, but the reviewer
@@ -3357,7 +3406,21 @@ _cmd_spawn_lane() {
     # Reserve the merge lock BEFORE spawning: a refusal must leave no lane and
     # no pid file behind, exactly like the other spawn guards.
     if [ "$merge_lock" -eq 1 ]; then
-        _merge_lock_reserve || die "spawn-lane: merge lock held by pid $(_merge_lock_owner) — one merge at a time"
+        local merge_lock_rc=0 merge_lock_owner=""
+        _merge_lock_reserve || merge_lock_rc=$?
+        case "$merge_lock_rc" in
+            0) ;;
+            1)
+                merge_lock_owner=$(_merge_lock_owner)
+                merge_lock_rc=0
+                _merge_lock_admission_refusal "$id" "$handoff_from" "$merge_lock_owner" \
+                    || merge_lock_rc=$?
+                return "$merge_lock_rc"
+                ;;
+            *)
+                die "spawn-lane: cannot reserve the merge lock safely — refusing '$id'"
+                ;;
+        esac
     fi
     # P67: same guard, for a gate lane against its own ticket+HEAD. Keyed off
     # the worktree's actual commit, read here rather than trusted from the id,
@@ -3519,7 +3582,7 @@ _cmd_spawn_lane() {
 # and start after acquire had already returned success. If spawn wins the lock,
 # acquire says to retry; if acquire wins, the inner launch observes the lease.
 cmd_spawn_lane() {
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" expected_head="" _spawn_shift=0
     local iid="" rc=0 lock_rc=0
     _spawn_parse_flags "$@"
     iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || iid=""
