@@ -116,7 +116,8 @@ p=$(_probe 0 "the copy's real stdout")
 # that adds this file (mutate.sh's own comment 3 says why: a fresh entry's
 # verdict is read once, not re-asserted here on every run).
 MF="$T/mutfix"; mkdir -p "$MF/src/tests"
-cp "$(dirname "$TICK")/tick-test.sh" "$(dirname "$TICK")/test-lib.sh" "$MF/src/"
+cp "$(dirname "$TICK")/tick-test.sh" "$(dirname "$TICK")/test-lib.sh" \
+   "$(dirname "$TICK")/host-admission.sh" "$MF/src/"
 printf '#!/usr/bin/env bash\nGUARD_OK=1  # mutate:demo-guard\n' > "$MF/src/tick.sh"
 chmod +x "$MF/src/tick.sh"
 printf 'demo-guard\ttick.sh\tdelete\n' > "$MF/registry.tsv"
