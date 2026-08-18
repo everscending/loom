@@ -252,7 +252,13 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   139/139 browser tests using one worker, 30/30 focused unit tests, 2/2 real
   PostgreSQL integration tests, TypeScript, ESLint, and diff checks. Completion
   requires an authorized upstream merge; the dirty, 198-commit-behind main
-  checkout remains deliberately untouched.
+  checkout remains deliberately untouched. Host calibration then ran two
+  isolated full `gate:ui` processes concurrently twice; all four passed with
+  761/761 unit, 44/44 integration, 8/8 E8, 1/1 E8 Playwright, and 139/139
+  product/E2 assertions per process. Loom commit `3548887` keeps the portable
+  `ui_capacity` default at 1 and permits the proven machine override of 2; it
+  is integrated in `f077037`. This evidence does not replace the required
+  product-branch merge.
 
 - [x] **DONE — Scope fake-auth provider counters to the request identity.**
   Parallel Playwright workers shared one fake auth server, so global counters
@@ -388,30 +394,43 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [x] **DONE — Make the planner reserve the serialized UI resource.** Implemented provider-neutrally in `d1223af` (`fix(plan): reserve shared UI resource`): snapshot freezes live/queued UI ownership, the pure planner selects no UI work while occupied and exactly the highest-priority UI gate when free, and a planned UI gate also reserves the same-wave UI merge seam. API gates and API merges remain parallel; final admission remains the atomic race guard. RED was 2 pass/3 fail with duplicate UI gates and an overlapping UI merge; GREEN is 6/6 focused, 199/199 snapshot/planner, 67/67 adjacent admission/chaining, and full Loom 1,307/1,307. A planted selection mutant recreates the overlap.
 
-- [ ] **TODO — Keep Loom self-validation from starving active product gates.**
+- [x] **DONE — Keep Loom self-validation from starving active product gates.**
   JOR-293's unchanged merge preflight crossed 30-second Vitest limits while two
   Loom full suites consumed the same host; its unit phase took 373 seconds.
-  Runtime publication currently serializes only with another publication, not
-  with the product UI resource. Completion requires one shared heavyweight-host
-  admission boundary for product gates and Loom full-suite validation, while
-  focused checks and API work remain concurrent, plus a regression proving
-  maintenance defers while occupied and resumes after release.
+  Implemented provider-neutrally in `1901542` (`fixes MEND-ADMIT-01: coordinate
+  host validation`) and integrated in `f077037`: runtime publication and direct
+  no-argument Loom suites take one host-global maintenance claim, while product
+  UI admission publishes its local queue or PID-backed ownership atomically.
+  Maintenance waits for every active UI slot and resumes after release;
+  focused checks, lint, and API work remain concurrent. The marker-before-PID
+  race is covered explicitly. Focused host/runtime coverage is 56/56, the
+  source full suite is 1,520/1,520, and the final combined serial suite is
+  1,546/1,546.
 
-- [ ] **TODO — Wake the scheduler immediately after Mend releases work.**
+- [x] **DONE — Wake the scheduler immediately after Mend releases work.**
   Releasing JOR-293's supervised lease wrote the durable continuation at
   23:16:11Z, but the next heartbeat did not start a wave until 23:19:03Z or its
-  gate until 23:20:00Z. The current marker prevents a full quiet-window delay
-  but still waits for periodic launchd. Completion requires one admission-safe
-  wake after Mend tracker or lease writes that respects the stop switch,
-  coalesces duplicates, and never creates a second scheduler or launches a
-  worker directly.
+  gate until 23:20:00Z. Implemented provider-neutrally in `b683c4a` (`fixes
+  MEND-FLOW-01: wake released work immediately`) and integrated in `f077037`.
+  Mend writes one coalesced durable request plus the existing pending replay;
+  the active heartbeat claims generations under the continuation lock, and an
+  exit-boundary PID marker makes a late writer wait for the old launchd job to
+  finish before the ordinary kick. Stop, quiet, and usage gates remain
+  authoritative; no second scheduler or direct worker path was added. Focused
+  continuation coverage is 53/53, lock/replay coverage is 93/93, and the final
+  combined serial suite is 1,546/1,546.
 
-- [ ] **TODO — Make snapshot ticket population total or fail visibly.**
+- [x] **DONE — Make snapshot ticket population total or fail visibly.**
   Linear reported 28 open build tickets and all 26 dependency rows, while three
   full snapshots returned only 21, 15, and 15 ticket rows with no warning.
-  Missing rows varied between calls. Completion requires a deterministic
-  driver/batch regression and either exact population agreement between the
-  foundational and batched reads or a named refusal before planning.
+  Missing rows varied between calls. Implemented provider-neutrally in
+  `d6fda9e` (`fixes MEND-STATE-01: refuse partial snapshots`) and integrated in
+  `f077037`: every supported batched board read must return a JSON array whose
+  sorted member IDs exactly equal the foundational population, including empty
+  populations. Malformed output, read failure, or disagreement refuses before
+  planning; only explicit capability rc 2 uses fan-out. Focused tracker and
+  snapshot coverage is 140/140, and the final combined serial suite is
+  1,546/1,546.
 
 ## Supporting safety work completed during this build
 
