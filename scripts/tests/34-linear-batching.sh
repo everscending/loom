@@ -300,6 +300,69 @@ env $(API_ENV | tr '\n' ' ') REQ_LOG="$TD/req.log" FORGE_CMD="$TD/forge" \
     && ok "snapshot: no per-member edge or comment call at all — one board read replaced the fan-out" \
     || bad "snapshot still fanned out: $(count links) link and $(count notes) note requests"
 
+# A partial foundational page and a complete batched page must never become a
+# valid plan. The two reads are independently paginated, so either can lose a
+# page while still returning syntactically valid, non-empty JSON.
+jq '.data.issues.nodes |= map(select(.number != 3))' "$TD/issues.json" > "$TD/issues-partial.json"
+rm -f "$TD/partial-plan.json"
+fresh
+env $(API_ENV | tr '\n' ' ') ISSUES_JSON="$TD/issues-partial.json" REQ_LOG="$TD/req.log" \
+    FORGE_CMD="$TD/forge" LOOM_HOME="$TD/home-partial" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+    "$TICK" snapshot > "$TD/snap-partial.json" 2> "$TD/snap-partial.err"; rc=$?
+if [ "$rc" != 0 ] \
+   && grep -q "foundational and batched ticket populations disagree" "$TD/snap-partial.err"; then
+    ok "snapshot refuses a partial foundational/batched population before planning"
+else
+    "$TICK" plan "$TD/snap-partial.json" > "$TD/partial-plan.json" 2>/dev/null || true
+    bad "partial ticket population reached planning (snapshot rc=$rc, tickets=$(jq -c '[.tickets[].id]' "$TD/snap-partial.json" 2>/dev/null), actions=$(jq -c '.actions' "$TD/partial-plan.json" 2>/dev/null))"
+fi
+
+jq '.data.issues.nodes |= map(select(.number == 1))' "$TD/issues.json" > "$TD/issues-build-only.json"
+env $(API_ENV | tr '\n' ' ') ISSUES_JSON="$TD/issues-build-only.json" REQ_LOG=/dev/null \
+    FORGE_CMD="$TD/forge" LOOM_HOME="$TD/home-foundational-empty" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+    "$TICK" snapshot > "$TD/snap-foundational-empty.json" \
+    2> "$TD/snap-foundational-empty.err"; rc=$?
+[ "$rc" != 0 ] \
+   && grep -q "foundational and batched ticket populations disagree" "$TD/snap-foundational-empty.err" \
+    && ok "snapshot compares the batch when the foundational member set is empty" \
+    || bad "empty foundational member set skipped population agreement (rc=$rc)"
+
+jq '.data.issues.nodes = []' "$TD/board.json" > "$TD/board-empty.json"
+env $(API_ENV | tr '\n' ' ') BOARD_JSON="$TD/board-empty.json" REQ_LOG=/dev/null \
+    FORGE_CMD="$TD/forge" LOOM_HOME="$TD/home-batch-empty" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+    "$TICK" snapshot > "$TD/snap-batch-empty.json" 2> "$TD/snap-batch-empty.err"; rc=$?
+[ "$rc" != 0 ] \
+   && grep -q "foundational and batched ticket populations disagree" "$TD/snap-batch-empty.err" \
+    && ok "snapshot compares a successful empty batch with foundational members" \
+    || bad "successful empty batch fell back around population agreement (rc=$rc)"
+
+cat > "$TD/lin-board-fail.sh" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = board ] && { echo "linear board query failed" >&2; exit 1; }
+exec "$LIN" "\$@"
+EOF
+chmod +x "$TD/lin-board-fail.sh"
+env $(API_ENV | tr '\n' ' ') TRACKER_CMD="$TD/lin-board-fail.sh" REQ_LOG=/dev/null \
+    FORGE_CMD="$TD/forge" LOOM_HOME="$TD/home-batch-fail" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+    "$TICK" snapshot > "$TD/snap-batch-fail.json" 2> "$TD/snap-batch-fail.err"; rc=$?
+[ "$rc" != 0 ] && grep -q "batched board read failed" "$TD/snap-batch-fail.err" \
+    && ok "snapshot refuses a supported driver's failed batch read" \
+    || bad "failed supported batch read fell back to the foundational population (rc=$rc)"
+
+cat > "$TD/lin-board-malformed.sh" <<EOF
+#!/usr/bin/env bash
+[ "\${1:-}" = board ] && { echo '{"partial":true}'; exit 0; }
+exec "$LIN" "\$@"
+EOF
+chmod +x "$TD/lin-board-malformed.sh"
+env $(API_ENV | tr '\n' ' ') TRACKER_CMD="$TD/lin-board-malformed.sh" REQ_LOG=/dev/null \
+    FORGE_CMD="$TD/forge" LOOM_HOME="$TD/home-batch-malformed" LOOM_GLOBAL_CONFIG="$TD/g.yml" \
+    "$TICK" snapshot > "$TD/snap-batch-malformed.json" \
+    2> "$TD/snap-batch-malformed.err"; rc=$?
+[ "$rc" != 0 ] && grep -q "batched board read was not a JSON array" "$TD/snap-batch-malformed.err" \
+    && ok "snapshot refuses a supported driver's malformed batch read" \
+    || bad "malformed supported batch read fell back to the foundational population (rc=$rc)"
+
 # A driver with no `board` verb — which is GitLab, and any tracker added later.
 cat > "$TD/lin-noboard.sh" <<EOF
 #!/usr/bin/env bash
