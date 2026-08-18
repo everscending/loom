@@ -151,6 +151,7 @@ else
 # the same six-minute gate again.)
   ([ $tickets[]
      | select(.state != "blocked" and .blocked_report != null
+              and (.blocked_report.diagnosis_source // null) == null
               and ((.blocked_report.released // false) == false)) ]) as $reported_blocks
 | ([ $reported_blocks[] | .id ]) as $reported_block_ids
 
@@ -183,8 +184,10 @@ else
 
   (open_pairs) as $pairs
 | ([ $tickets[]
-     | select(.state == "blocked")
      | select((.blocked_report.at // null) != null)
+     | select((.state == "blocked" and (.blocked_report.diagnosis_source // null) == null)
+              or ((.blocked_report.diagnosis_source // null) != null
+                  and ((.blocked_report.released // false) == false)))
      | select(.supervised_lease == null)
      | select(.supervision_attention == null)
      | . as $candidate
@@ -233,6 +236,7 @@ else
                          else "the existing ticket worktree at blocked MR head \($mr.sha)" end),
                brief:{ticket_contract:(.contract // null),
                       blocked_report:(.blocked_report // null),
+                      active_supervised_repair:(.active_supervised_repair // null),
                       block_token:(.blocked_report.at // null),
                       dependency_impact:._dependency_impact,
                       direct_dependents:._direct_dependents,
@@ -243,7 +247,9 @@ else
 | ([ $repair_attention[] ]
    + [ $tickets[]
        | select(.state == "blocked" and .supervision_attention == null
-                and (.blocked_report.at // null) == null)
+                and ((.blocked_report.at // null) == null
+                     or ((.blocked_report.diagnosis_source // null) != null
+                         and (.blocked_report.released // false))))
        | {step:"supervise", kind:"repair-report-missing", ticket:.id,
           why:"autonomous repair requires a structured blocked report with a generation token"} ]
    + (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
@@ -477,25 +483,35 @@ else
 # really in — and a lane spawned from the stale label would be working on a
 # ticket that has already left this step. (paid: the P63 shapes, four
 # stranded finishes in one build.)
-| (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids) as $repairing
+| (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids
+   + [$repairable_blockers[].id]) as $repairing
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
      | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded_candidates
 | ([ $stranded_candidates[] | select(.supervised_lease != null) ]) as $stranded_leased
 | ([ $stranded_candidates[] | select(.supervised_lease == null) ]) as $stranded
 
 # Two rejections mean stop, not respawn: round three needs diagnosis even when
-# the failure classes differ. Alternating labels are not evidence of healthy
-# convergence; JOR-220 reached round six by oscillating between an exact 204
-# contract, the central response guard, and ticket scope.
-| ([ $stranded[] | select((.rejections.total // 0) >= $rejection_cap) ]) as $rejection_spent  # mutate:rejection-total-cap
+# the failure classes differ. The first failure after a supervised repair also
+# returns to diagnosis: silently starting a fresh blind implementation cycle
+# would discard the evidence that supervision was meant to accumulate.
+| ([ $stranded[]
+     | select((.rejections.total // 0) >= $rejection_cap
+              or ((.active_supervised_repair // null) != null
+                  and (.rejections.total // 0) >= 1)) ]) as $rejection_spent  # mutate:rejection-total-cap
 | ([ $rejection_spent[]
-     | { step: "fill", kind: "transition", ticket: .id,
-         via: "lane.sh", argv: transition_argv(.id; "blocked"),
-         why: "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three needs diagnosis, rescope, or prerequisite work instead of another automatic guess",
-         needs_report: true } ])
+     | { step: "fill", kind: "diagnosis-hold", ticket: .id,
+         via: "lane.sh",
+         argv: ["diagnosis-hold", (.id | tostring),
+                "--if-current", .state,
+                "--expected-generation", (.rejections.generation // "")],
+         why: (if (.active_supervised_repair // null) != null
+                  and (.rejections.total // 0) < $rejection_cap
+               then "the first gate failure after supervised repair requires renewed diagnosis before more implementation"
+               else "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three requires supervised diagnosis before more implementation" end) } ])
   as $block_rejections
 
-| ([ $stranded[] | select((.rejections.total // 0) < $rejection_cap) ]) as $rework
+| ([ $stranded[]
+     | select((.id as $id | any($rejection_spent[]; .id == $id)) | not) ]) as $rework
 # Then the backlog. Ready means unblocked (every blocker issue closed, not
 # merely opened — auto-merge is async), unclaimed, and a member of this build;
 # `fix: true` tickets come first, because every open fix ticket holds an
@@ -669,7 +685,7 @@ else
 # trailer.
 # =========================================================================
 
-| ([ ($block_overrun + $block_rejections + $block_merge_cap)[]
+| ([ ($block_overrun + $block_merge_cap)[]
      | { kind: "blocked-report", ticket: .ticket,
          why: .why,
          verb: "lane.sh blocked-report \(.ticket) --category <slug> (body on stdin), then the `transition` action above" } ])

@@ -30,6 +30,12 @@ head, structured blocked report, dependency impact, and the allowed outcomes.
 It does not choose the next ticket, expand scope, weaken a gate, change caps,
 grant permissions, or interpret ticket prose as authority.
 
+At the rejection cap, and on the first FAIL after a supervised repair, the
+deterministic layer writes one exact note-owned diagnosis hold and the
+start-owned scheduler dispatches one focused repair. It never starts a third
+blind implementation/gate cycle. A human is required only for rescope, the
+named product decision, or release of a sticky hold.
+
 ## Repair outcomes
 
 A technical repair within the existing ticket contract returns to `review` at
