@@ -335,11 +335,12 @@ fi
 # continuation marker. The public request still succeeds, but its heartbeat
 # must now strand the work exactly as the live JOR-290 incident did.
 CONT_MUT=$(mirror_scripts "$T/hold-release-continuation-mutant")
-sed 's/\[ "$continuation_kick" -eq 0 \] && \[ "$cleanup_kick"/\[ "$cleanup_kick"/' \
+sed -e 's/\[ "$continuation_kick" -eq 0 \] && \[ "$cleanup_kick"/\[ "$cleanup_kick"/' \
+    -e 's/ && \[ "$pending_kick" -eq 0 \]//' \
     "$CONT_MUT/tick.sh" > "$CONT_MUT/tick-mutant.sh"
 mv "$CONT_MUT/tick-mutant.sh" "$CONT_MUT/tick.sh"
 chmod +x "$CONT_MUT/tick.sh"
-rm -f "$MT/home/continuation.request"
+rm -f "$MT/home/tick.pending" "$MT/home/continuation.request" "$MT/home/continuation.claimed"
 printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
 MENV "$CONT_MUT/tick.sh" request-continuation hold-release 290 >/dev/null 2>&1
 : > "$MWAVES"
@@ -347,13 +348,15 @@ export LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'"
 cont_mut_out=$(MENV "$CONT_MUT/tick.sh" tick --auto 2>&1); cont_mut_rc=$?
 export LOOM_WAVE_CMD="true"
 if assert_mutant_ran "$cont_mut_rc" "$cont_mut_out" "hold-release-continuation-violation"; then
-    if [ "$(_mwaves)" = 0 ] && [ -f "$MT/home/continuation.request" ]; then
+    if [ "$(_mwaves)" = 0 ] \
+       && [ ! -f "$MT/home/continuation.request" ] \
+       && [ -f "$MT/home/continuation.claimed" ]; then
         ok "hold release continuation mutant: ignoring the marker recreates the idle gap"
     else
-        bad "hold release continuation mutant: violation did not strand the request (waves=$(_mwaves) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no) out=$cont_mut_out)"
+        bad "hold release continuation mutant: violation did not strand the claim (waves=$(_mwaves) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no) claim=$([ -f "$MT/home/continuation.claimed" ] && echo yes || echo no) out=$cont_mut_out)"
     fi
 fi
-rm -f "$MT/home/continuation.request"
+rm -f "$MT/home/tick.pending" "$MT/home/continuation.request" "$MT/home/continuation.claimed"
 
 # The continuation is scheduling plumbing, not a second start verb. A stopped
 # loop still refuses it and leaves the request durable for an explicit start.
@@ -366,7 +369,395 @@ if [ "$stopped_release" = 0 ] && [ -f "$MT/home/continuation.request" ]; then
 else
     bad "hold release continuation: stopped=$stopped_release request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no)"
 fi
-rm -f "$MT/home/loop.stopped" "$MT/home/continuation.request"
+mv "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+MTICK tick --auto; stopped_claim_wave=$(_mwaves)
+MENV "$TICK" install 60 >/dev/null 2>&1
+MTICK tick --auto; resumed_claim_wave=$(_mwaves)
+if [ "$stopped_claim_wave" = 0 ] \
+   && [ "$resumed_claim_wave" != 0 ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: stop preserves an owned claim and start resumes it"
+else
+    bad "continuation wake: stop/start lost or stranded an owned claim"
+fi
+
+# A continuation is useful only when the periodic heartbeat notices it. Mend
+# releases work from a human process with no finishing lane, so wake the one
+# already-armed scheduler immediately. The durable marker remains the source
+# of truth: duplicate requests coalesce, and stop suppresses the wake without
+# consuming the request. `kickstart` names the existing label only; this path
+# must never bootstrap a second scheduler or launch a wave itself.
+: > "$LCTL_CALLS"
+rm -f "$MT/home/continuation.request"
+MENV "$TICK" request-continuation hold-release 290 >/dev/null 2>&1
+MENV "$TICK" request-continuation fix-ticket 292 >/dev/null 2>&1
+wake_count=$(grep -c '^kickstart gui/' "$LCTL_CALLS" 2>/dev/null || true)
+if [ "$wake_count" = 1 ] \
+   && ! grep -q '^bootstrap\|^bootout' "$LCTL_CALLS" \
+   && [ -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: one armed scheduler is kicked immediately and duplicate requests coalesce"
+else
+    bad "continuation wake: expected one existing-label kick without scheduler creation (count=$wake_count calls=$(tr '\n' '|' < "$LCTL_CALLS"))"
+fi
+
+# `kickstart` without replacement cannot wake a launchd job that is already
+# running. Hold one heartbeat after it has acquired the tick lock, then release
+# new Mend work. The durable pending flag must make that same process re-tick
+# immediately when its current wave exits.
+ACTIVE_WAVES="$T/continuation-active-waves"
+ACTIVE_STARTED="$T/continuation-active-started"
+ACTIVE_RELEASE="$T/continuation-active-release"
+export ACTIVE_WAVES ACTIVE_STARTED ACTIVE_RELEASE
+ACTIVE_CMD="$T/continuation-active-wave.sh"
+cat > "$ACTIVE_CMD" <<'ACTIVE_WAVE'
+#!/bin/sh
+echo wave >> "$ACTIVE_WAVES"
+if [ "$(wc -l < "$ACTIVE_WAVES" | tr -d ' ')" = 1 ]; then
+    : > "$ACTIVE_STARTED"
+    while [ ! -f "$ACTIVE_RELEASE" ]; do sleep 0.01; done
+fi
+ACTIVE_WAVE
+chmod +x "$ACTIVE_CMD"
+: > "$ACTIVE_WAVES"
+rm -f "$ACTIVE_STARTED" "$ACTIVE_RELEASE" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$ACTIVE_CMD" \
+  MENV "$TICK" tick >/dev/null 2>&1 &
+active_tick=$!
+for _ in $(seq 1 200); do
+    [ -f "$ACTIVE_STARTED" ] && [ -d "$MT/home/tick.lock.d" ] && break
+    sleep 0.01
+done
+MENV "$TICK" request-continuation fix-ticket 397 >/dev/null 2>&1
+: > "$ACTIVE_RELEASE"
+wait "$active_tick"
+active_wave_count=$(wc -l < "$ACTIVE_WAVES" | tr -d ' ')
+if [ "$active_wave_count" = 2 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: a request after active planning replays immediately"
+else
+    bad "continuation wake: running launchd job stranded the request (waves=$active_wave_count pending=$([ -f "$MT/home/tick.pending" ] && echo yes || echo no) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no))"
+fi
+
+# Freeze a private tick after its EXIT trap has observed no pending work but
+# before the launchd-owned process actually exits. A writer in that window
+# must wait for the process boundary; a non-replacing kick while it is still
+# alive is accepted by launchctl but starts nothing.
+EXIT_RACE=$(mirror_scripts "$T/continuation-exit-race")
+sed '/return $rc # mutate:continuation-exit-boundary/i\
+    if [ -n "${LOOM_TEST_EXIT_READY:-}" ]; then\
+        : > "$LOOM_TEST_EXIT_READY"\
+        while [ ! -f "$LOOM_TEST_EXIT_RELEASE" ]; do sleep 0.01; done\
+    fi' "$EXIT_RACE/tick.sh" > "$EXIT_RACE/tick-race.sh"
+mv "$EXIT_RACE/tick-race.sh" "$EXIT_RACE/tick.sh"
+chmod +x "$EXIT_RACE/tick.sh"
+EXIT_READY="$T/continuation-exit-ready"
+EXIT_RELEASE="$T/continuation-exit-release"
+EXIT_CALLS="$T/continuation-exit-launchctl"
+EXIT_LCTL="$T/continuation-exit-launchctl.sh"
+cat > "$EXIT_LCTL" <<'EXIT_LAUNCHCTL'
+#!/bin/sh
+state=dead
+kill -0 "$EXIT_OWNER" 2>/dev/null && state=alive
+echo "$1 $state" >> "$EXIT_CALLS"
+exit 0
+EXIT_LAUNCHCTL
+chmod +x "$EXIT_LCTL"
+rm -rf "$MT/home/tick.lock.d" "$MT/home/continuation.lock.d"
+rm -f "$EXIT_READY" "$EXIT_RELEASE" "$EXIT_CALLS" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+: > "$MWAVES"
+export LOOM_TEST_EXIT_READY="$EXIT_READY" LOOM_TEST_EXIT_RELEASE="$EXIT_RELEASE"
+LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'" \
+  MENV "$EXIT_RACE/tick.sh" tick >/dev/null 2>&1 &
+exit_tick=$!
+exit_ready_seen=0
+for _ in $(seq 1 200); do
+    if [ -f "$EXIT_READY" ]; then exit_ready_seen=1; break; fi
+    sleep 0.01
+done
+export EXIT_OWNER="$exit_tick" EXIT_CALLS
+MENV env LAUNCHCTL_CMD="$EXIT_LCTL" "$EXIT_RACE/tick.sh" \
+  request-continuation fix-ticket 394 >/dev/null 2>&1 &
+exit_request=$!
+for _ in $(seq 1 100); do
+    grep -q '^kickstart ' "$EXIT_CALLS" 2>/dev/null && break
+    sleep 0.01
+done
+early_exit_kick=0
+grep -q '^kickstart ' "$EXIT_CALLS" 2>/dev/null && early_exit_kick=1
+: > "$EXIT_RELEASE"
+wait "$exit_tick"
+wait "$exit_request"
+unset LOOM_TEST_EXIT_READY LOOM_TEST_EXIT_RELEASE
+exit_kick_state=$(sed -n 's/^kickstart //p' "$EXIT_CALLS" | tail -1)
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'" \
+  MENV "$TICK" tick --auto >/dev/null 2>&1
+exit_wave_count=$(_mwaves)
+if [ "$exit_ready_seen" = 1 ] \
+   && [ "$early_exit_kick" = 0 ] && [ "$exit_kick_state" = dead ] \
+   && [ "$exit_wave_count" = 2 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: exit-boundary writer waits and kicks the stopped job"
+else
+    bad "continuation wake: exit-boundary request raced the running job (ready=$exit_ready_seen early=$early_exit_kick state=$exit_kick_state waves=$exit_wave_count)"
+fi
+
+# The same flag exists before an idle kick acquires the lock. That tick owns
+# it and consumes it at admission, so its successful wave must not self-replay.
+: > "$ACTIVE_WAVES"
+rm -f "$ACTIVE_STARTED" "$ACTIVE_RELEASE" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+MENV "$TICK" request-continuation fix-ticket 398 >/dev/null 2>&1
+idle_pending=0; [ -f "$MT/home/tick.pending" ] && idle_pending=1
+: > "$ACTIVE_RELEASE"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$ACTIVE_CMD" \
+  MENV "$TICK" tick --auto >/dev/null 2>&1
+idle_wave_count=$(wc -l < "$ACTIVE_WAVES" | tr -d ' ')
+if [ "$idle_pending" = 1 ] \
+   && [ "$idle_wave_count" = 1 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: an idle scheduler consumes its pending replay without a double wave"
+else
+    bad "continuation wake: idle scheduler did not own exactly one pending request (before=$idle_pending waves=$idle_wave_count pending=$([ -f "$MT/home/tick.pending" ] && echo yes || echo no))"
+fi
+
+# Planted violation: if successful lock acquisition does not consume the
+# pending work it already owns, the first idle wave exits into a redundant
+# second wave.
+PENDING_MUT=$(mirror_scripts "$T/continuation-pending-owner-mutant")
+sed 's/rm -f "$PENDING_FILE" # mutate:continuation-pending-owner/: # mutate:continuation-pending-owner/' \
+    "$PENDING_MUT/tick.sh" > "$PENDING_MUT/tick-mutant.sh"
+mv "$PENDING_MUT/tick-mutant.sh" "$PENDING_MUT/tick.sh"
+chmod +x "$PENDING_MUT/tick.sh"
+: > "$ACTIVE_WAVES"
+rm -f "$ACTIVE_STARTED" "$ACTIVE_RELEASE" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+MENV "$PENDING_MUT/tick.sh" request-continuation fix-ticket 398 >/dev/null 2>&1
+: > "$ACTIVE_RELEASE"
+pending_mut_out=$(LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="$ACTIVE_CMD" \
+  MENV "$PENDING_MUT/tick.sh" tick --auto 2>&1); pending_mut_rc=$?
+pending_mut_waves=$(wc -l < "$ACTIVE_WAVES" | tr -d ' ')
+if assert_mutant_ran "$pending_mut_rc" "$pending_mut_out" "continuation-pending-owner-violation"; then
+    if [ "$pending_mut_waves" = 2 ]; then
+        ok "continuation pending mutant: retaining owned replay recreates the idle double wave"
+    else
+        bad "continuation pending mutant: planted owner violation ran $pending_mut_waves waves instead of two"
+    fi
+fi
+
+# Freeze a private copy immediately after its first continuation claim. This
+# makes the otherwise tiny claim->wave-gap->tick-lock window deterministic
+# without adding a production test hook.
+CLAIM_LOCK_RACE=$(mirror_scripts "$T/continuation-claim-lock-race")
+sed '/continuation_kick=$(\(_continuation_claim\))/a\
+    if [ -n "${LOOM_TEST_CONTINUATION_READY:-}" ]; then\
+        : > "$LOOM_TEST_CONTINUATION_READY"\
+        while [ ! -f "$LOOM_TEST_CONTINUATION_RELEASE" ]; do sleep 0.01; done\
+    fi' "$CLAIM_LOCK_RACE/tick.sh" > "$CLAIM_LOCK_RACE/tick-race.sh"
+mv "$CLAIM_LOCK_RACE/tick-race.sh" "$CLAIM_LOCK_RACE/tick.sh"
+chmod +x "$CLAIM_LOCK_RACE/tick.sh"
+RACE_READY="$T/continuation-claim-lock-ready"
+RACE_RELEASE="$T/continuation-claim-lock-release"
+export LOOM_TEST_CONTINUATION_READY="$RACE_READY"
+export LOOM_TEST_CONTINUATION_RELEASE="$RACE_RELEASE"
+
+# A request after the empty first claim must itself bypass the recent-wave gap
+# and be claimed at successful lock acquisition. Otherwise this firing returns
+# before it owns either a trap or a claim, leaving the immediate wake stranded.
+rm -rf "$MT/home/tick.lock.d"
+rm -f "$RACE_READY" "$RACE_RELEASE" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+printf '{"t":"now","ts":%s,"ev":"wave_start"}\n' "$(date +%s)" > "$MT/home/events.jsonl"
+: > "$MWAVES"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'" \
+  MENV "$CLAIM_LOCK_RACE/tick.sh" tick --auto >/dev/null 2>&1 &
+claim_gap_tick=$!
+for _ in $(seq 1 200); do [ -f "$RACE_READY" ] && break; sleep 0.01; done
+MENV "$CLAIM_LOCK_RACE/tick.sh" request-continuation fix-ticket 395 >/dev/null 2>&1
+: > "$RACE_RELEASE"
+wait "$claim_gap_tick"
+claim_gap_waves=$(_mwaves)
+if [ "$claim_gap_waves" = 1 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: a request after initial claim is owned before the wave gap"
+else
+    bad "continuation wake: claim-to-lock request was stranded (waves=$claim_gap_waves pending=$([ -f "$MT/home/tick.pending" ] && echo yes || echo no) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no))"
+fi
+
+# If the first pass already owns an older claim, a later request is a distinct
+# generation. The successful lock acquisition must leave its pending marker
+# for EXIT replay instead of consuming it with the old claim.
+rm -rf "$MT/home/tick.lock.d"
+rm -f "$RACE_READY" "$RACE_RELEASE" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+: > "$MT/home/continuation.claimed"
+: > "$MWAVES"
+LOOM_LANE_LAUNCHER=launchd LOOM_WAVE_CMD="sh -c 'echo w >> $MWAVES'" \
+  MENV "$CLAIM_LOCK_RACE/tick.sh" tick --auto >/dev/null 2>&1 &
+old_claim_tick=$!
+for _ in $(seq 1 200); do [ -f "$RACE_READY" ] && break; sleep 0.01; done
+MENV "$CLAIM_LOCK_RACE/tick.sh" request-continuation fix-ticket 396 >/dev/null 2>&1
+: > "$RACE_RELEASE"
+wait "$old_claim_tick"
+old_claim_waves=$(_mwaves)
+if [ "$old_claim_waves" = 2 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: an older claim preserves a later request for replay"
+else
+    bad "continuation wake: older claim consumed the later replay (waves=$old_claim_waves pending=$([ -f "$MT/home/tick.pending" ] && echo yes || echo no) request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no))"
+fi
+unset LOOM_TEST_CONTINUATION_READY LOOM_TEST_CONTINUATION_RELEASE
+
+# Concurrent Mend completions must share one atomic absent->present decision.
+# A check followed by truncate lets several callers all decide they are first
+# and kick the same launchd label; the marker lock makes the burst one request.
+: > "$LCTL_CALLS"
+rm -f "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+CONT_START="$T/continuation-race-start"; rm -f "$CONT_START"
+for ticket in $(seq 300 331); do
+    ( while [ ! -f "$CONT_START" ]; do sleep 0.001; done
+      MENV "$TICK" request-continuation fix-ticket "$ticket" >/dev/null 2>&1 ) &
+done
+touch "$CONT_START"
+wait
+concurrent_wakes=$(grep -c '^kickstart gui/' "$LCTL_CALLS" 2>/dev/null || true)
+if [ "$concurrent_wakes" = 1 ] && [ -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: concurrent requests atomically coalesce to one scheduler kick"
+else
+    bad "continuation wake: concurrent absent-to-present race kicked $concurrent_wakes times"
+fi
+
+# The shared lock follows the scheduler's other mkdir locks: a dead owner is
+# reclaimed, so one crashed requester cannot strand every later completion.
+rm -f "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+mkdir -p "$MT/home/continuation.lock.d"
+printf '999999\n' > "$MT/home/continuation.lock.d/pid"
+MENV "$TICK" request-continuation fix-ticket 398 >/dev/null 2>&1
+if [ -f "$MT/home/continuation.request" ] \
+   && [ ! -e "$MT/home/continuation.lock.d" ]; then
+    ok "continuation wake: a dead request-lock owner is reclaimed"
+else
+    bad "continuation wake: stale request lock stranded the durable marker"
+fi
+
+# Planted violation: leave the request in place instead of atomically moving
+# it to the scheduler's owned claim. A later request then sees the old marker,
+# coalesces into it, and the scheduler can erase both generations together.
+CLAIM_MUT=$(mirror_scripts "$T/continuation-claim-mutant")
+sed 's/if ! mv "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE"; then # mutate:continuation-claim/if ! :; then # mutate:continuation-claim/' \
+    "$CLAIM_MUT/tick.sh" > "$CLAIM_MUT/tick-mutant.sh"
+mv "$CLAIM_MUT/tick-mutant.sh" "$CLAIM_MUT/tick.sh"
+chmod +x "$CLAIM_MUT/tick.sh"
+printf '%s\n' "$(( $(date +%s) + 300 ))" > "$MT/home/usage.pause"
+claim_mut_out=$(LOOM_LANE_LAUNCHER=launchd MENV "$CLAIM_MUT/tick.sh" tick --auto 2>&1); claim_mut_rc=$?
+rm -f "$MT/home/usage.pause"
+if assert_mutant_ran "$claim_mut_rc" "$claim_mut_out" "continuation-claim-violation"; then
+    if [ -f "$MT/home/continuation.request" ] \
+       && [ ! -f "$MT/home/continuation.claimed" ]; then
+        ok "continuation claim mutant: removing the atomic move recreates the shared generation"
+    else
+        bad "continuation claim mutant: violation unexpectedly isolated the scheduler generation"
+    fi
+fi
+rm -f "$MT/home/tick.pending"
+
+# The scheduler must claim the generation it is consuming before it clears it.
+# A later request then creates the next marker instead of coalescing into a
+# marker the scheduler is about to delete. A usage pause holds the first claim
+# short of the cost boundary, making that interleaving deterministic.
+printf '%s\n' "$(( $(date +%s) + 300 ))" > "$MT/home/usage.pause"
+MTICK tick --auto
+claim_shape=0
+[ -f "$MT/home/continuation.claimed" ] \
+  && [ ! -f "$MT/home/continuation.request" ] && claim_shape=1
+: > "$LCTL_CALLS"
+MENV "$TICK" request-continuation hold-release 399 >/dev/null 2>&1
+rm -f "$MT/home/usage.pause"
+LOOM_LANE_LAUNCHER=launchd MTICK tick --auto; first_claim_wave=$(_mwaves)
+if [ "$claim_shape" = 1 ] && [ "$first_claim_wave" = 2 ] \
+   && [ ! -f "$MT/home/tick.pending" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ] \
+   && [ ! -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: consuming one claim immediately replays the later generation"
+else
+    bad "continuation wake: scheduler consumption stranded a later request (claim=$claim_shape waves=$first_claim_wave request=$([ -f "$MT/home/continuation.request" ] && echo yes || echo no))"
+fi
+MTICK tick --auto; second_claim_wave=$(_mwaves)
+if [ "$second_claim_wave" = 0 ] \
+   && [ ! -f "$MT/home/continuation.request" ] \
+   && [ ! -f "$MT/home/continuation.claimed" ]; then
+    ok "continuation wake: replayed generation does not create a third wave"
+else
+    bad "continuation wake: replayed generation left another wave behind (wave=$second_claim_wave)"
+fi
+
+# Claiming is not consuming. A quiet-board refusal happens after the claim but
+# before the cost boundary, and must leave it for the next eligible heartbeat.
+QUIET_BIN="$T/continuation-quiet-bin"; mkdir -p "$QUIET_BIN"
+cat > "$QUIET_BIN/glab" <<'QUIET_GLAB'
+#!/bin/sh
+case "$*" in
+  *"state=opened"*) echo '[{"iid":402,"labels":["build-quiet","blocked"]}]' ;;
+  *) echo '[]' ;;
+esac
+QUIET_GLAB
+chmod +x "$QUIET_BIN/glab"
+printf 'build-quiet\n' > "$MT/home/.build-label"
+: > "$MT/home/events.jsonl"
+MENV "$TICK" request-continuation fix-ticket 402 >/dev/null 2>&1
+quiet_out=$(PATH="$QUIET_BIN:$PATH" LOOM_QUIET_SETTLE=0 MENV "$TICK" tick --auto 2>&1)
+if printf '%s' "$quiet_out" | grep -q 'every open ticket is blocked' \
+   && [ -f "$MT/home/continuation.claimed" ] \
+   && [ ! -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: quiet-board refusal preserves the owned claim"
+else
+    bad "continuation wake: quiet-board refusal consumed or failed to claim the request"
+fi
+rm -f "$MT/home/.build-label" "$MT/home/quiet.state" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+
+: > "$LCTL_CALLS"
+: > "$MT/home/loop.stopped"
+rm -f "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+MENV "$TICK" request-continuation hold-release 290 >/dev/null 2>&1
+if ! grep -q '^kickstart ' "$LCTL_CALLS" \
+   && [ -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: stopped loop retains the request without waking its scheduler"
+else
+    bad "continuation wake: stop did not suppress the wake or lost its request (calls=$(tr '\n' '|' < "$LCTL_CALLS"))"
+fi
+rm -f "$MT/home/loop.stopped" "$MT/home/tick.pending" \
+      "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+
+: > "$LCTL_CALLS"
+rm -f "$MT/agents"/*.plist "$MT/home/continuation.request" "$MT/home/continuation.claimed"
+UNARMED_LCTL="$T/launchctl-unarmed.sh"
+cat > "$UNARMED_LCTL" <<UNARMED
+#!/bin/sh
+echo "\$@" >> "$LCTL_CALLS"
+case "\$1" in print|list) exit 1 ;; esac
+exit 0
+UNARMED
+chmod +x "$UNARMED_LCTL"
+MENV env LAUNCHCTL_CMD="$UNARMED_LCTL" "$TICK" request-continuation fix-ticket 401 >/dev/null 2>&1
+if ! grep -q '^kickstart\|^bootstrap\|^bootout' "$LCTL_CALLS" \
+   && [ -f "$MT/home/continuation.request" ]; then
+    ok "continuation wake: unarmed loop retains the request without starting a scheduler"
+else
+    bad "continuation wake: unarmed request started a scheduler or lost its marker (calls=$(tr '\n' '|' < "$LCTL_CALLS"))"
+fi
+rm -f "$MT/home/tick.pending" "$MT/home/continuation.request" "$MT/home/continuation.claimed"
 
 # Decision 4: stop cuts the direct handoffs too. The chain is spawned BY the
 # lanes, so blocking waves alone would carry a ticket all the way to merged
