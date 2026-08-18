@@ -234,6 +234,13 @@ LIB_SH="$LIB_DIR/lib.sh"
     || { echo "tick.sh: $LIB_SH is missing — it holds the shared derivations and ships beside tick.sh" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
+HOST_ADMISSION_SH="$LIB_DIR/host-admission.sh"
+_load_host_admission() {
+    command -v host_admission_product_allowed >/dev/null 2>&1 && return 0
+    [ -f "$HOST_ADMISSION_SH" ] \
+      || die "$HOST_ADMISSION_SH is missing — it owns heavyweight host admission"
+    . "$HOST_ADMISSION_SH"
+}
 
 # P86: every tracker read this file makes goes through the driver for the
 # repo's declared tracker, so `glab` is named in scripts/trackers/gitlab.sh and
@@ -1133,6 +1140,18 @@ _ui_pregate_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for h
         echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
     fi
     _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy used "$used" cap "$cap"
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+    [ -n "$from" ] && return 0
+    return 1
+}
+
+_host_maintenance_admission_refusal() { # <id> <from-lane>
+    local id="$1" from="$2"
+    echo "spawn-lane: the full Loom test suite owns the heavyweight host resource — not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  The ordinary heartbeat retries after the full suite releases the host."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason host_maintenance_busy
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
     [ -n "$from" ] && return 0
     return 1
@@ -3906,7 +3925,7 @@ _cmd_spawn_lane() {
             fi
             die "spawn-lane: auxiliary admission is busy — retry '$id' on the next heartbeat"
         fi
-        trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
+        trap 'command -v host_admission_product_unlock >/dev/null 2>&1 && host_admission_product_unlock >/dev/null 2>&1 || true; rm -rf "$AUX_LOCK_DIR"' EXIT
         local aux_cap aux_used aux_source_pid="" aux_rc=0
         # An aux-to-aux successor replaces the caller's own slot. Provider
         # sessions must reserve that successor before they return to the host
@@ -3929,6 +3948,20 @@ _cmd_spawn_lane() {
                 _aux_admission_refusal "$id" "$handoff_from" "$aux_used" "$aux_cap" || aux_rc=$?
                 return "$aux_rc"
             fi
+        fi
+        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+            local host_admission_rc=0 host_admission_root product_home product_key
+            _load_host_admission
+            host_admission_root=$(host_admission_home)
+            product_home=$(cd "$LOOM_HOME" 2>/dev/null && pwd -P) \
+              || die "spawn-lane: cannot resolve product host state '$LOOM_HOME'"
+            product_key="product-$(printf '%s' "$product_home" | cksum | cut -d' ' -f1)"
+            host_admission_product_acquire "$host_admission_root" "$product_key" "$product_home" \
+              || host_admission_rc=$?
+            case "$host_admission_rc" in
+                1) _host_maintenance_admission_refusal "$id" "$handoff_from" || aux_rc=$?; return "$aux_rc" ;;
+                2) die "spawn-lane: heavyweight host admission state is unreadable — refusing '$id'" ;;
+            esac
         fi
         # UI pregates share identity fixtures and other host-scoped state.
         # Reserve that one resource before a paid worker exists: a Codex
@@ -3987,6 +4020,8 @@ _cmd_spawn_lane() {
     if [ -n "$provider" ] \
        && { [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ] || _codex_host_is_ephemeral; }; then
         _queue_lane_launch
+        command -v host_admission_product_unlock >/dev/null 2>&1 \
+          && host_admission_product_unlock
         return 0
     fi
     # D-TICK-27: evidence produced by this run belongs to the commit present at
@@ -4215,6 +4250,12 @@ _cmd_spawn_lane() {
               "$LANES_DIR/$id.host-probe.json"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
+    fi
+    # The UI marker and its live PID form one host claim. Keep the global
+    # admission lock until both are durable so maintenance can only observe
+    # the complete pair; launch failures release through the EXIT trap.
+    if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+        host_admission_product_unlock
     fi
     _ev lane_spawn id "$id" type "$(_lane_type "$id")" job "${job:-custom}" \
         provider "${provider:-custom}" tier "$lane_tier" \

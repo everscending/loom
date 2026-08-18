@@ -26,6 +26,23 @@
 set -uo pipefail
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+JOBS_DIR=""
+
+_suite_cleanup() {
+    command -v host_admission_maintenance_release >/dev/null 2>&1 \
+      && host_admission_maintenance_release >/dev/null 2>&1 || true
+    [ -z "$JOBS_DIR" ] || rm -rf "$JOBS_DIR"
+}
+
+# Only the real no-argument suite is heavyweight maintenance. Focused sections,
+# lint, and fixture drivers with their own LOOM_TEST_DIR stay concurrent.
+if [ $# -eq 0 ] && [ -z "${LOOM_TEST_DIR:-}" ]; then
+    . "$DIR/host-admission.sh"
+    HOST_ADMISSION_ROOT=$(host_admission_home)
+    trap _suite_cleanup EXIT
+    host_admission_maintenance_acquire "$HOST_ADMISSION_ROOT" \
+      || { echo "tick-test: heavyweight host admission is unreadable" >&2; exit 1; }
+fi
 
 case "${1:-}" in
     --lint)   shift; exec "$DIR/lint-tests.sh" "$@" ;;
@@ -74,7 +91,7 @@ case "$MAXJOBS" in *[!0-9]*) MAXJOBS=4;; esac
 [ "$MAXJOBS" -gt 8 ] && MAXJOBS=8
 [ "$MAXJOBS" -lt 1 ] && MAXJOBS=1
 
-JOBS_DIR=$(mktemp -d); trap 'rm -rf "$JOBS_DIR"' EXIT
+JOBS_DIR=$(mktemp -d); trap _suite_cleanup EXIT
 names=(); logs=(); counts=()
 i=0
 for f in "${run[@]}"; do

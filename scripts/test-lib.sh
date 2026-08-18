@@ -11,6 +11,7 @@ set -uo pipefail
 TICK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 T=$(mktemp -d)
 export LOOM_HOME="$T/home" LOOM_REPO="$T/repo"
+export LOOM_HOST_ADMISSION_HOME="$T/host-admission"
 mkdir -p "$LOOM_REPO"
 
 # P86: loom refuses to run in a repo that has not declared its issue tracker,
