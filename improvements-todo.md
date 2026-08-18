@@ -6,8 +6,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
 
-- [ ] **IN PROGRESS — Move proactive blocker supervision into `/loom start`.**
-  The isolated implementation binds a tracker-resident Build policy before
+- [x] **DONE — Move proactive blocker supervision into `/loom start`.**
+  Implemented provider-neutrally in `d5a390b` (`feat(start): supervise blocked
+  repairs`). It binds a tracker-resident Build policy before
   scheduler install, deterministically ranks blocked tickets by downstream
   impact, directly dispatches all-blocked repair lanes without a scheduling
   agent, shares implementation/UI capacity, freezes block generation and MR
@@ -15,9 +16,10 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   either return a clean pushed head to independent Review or persist one
   awaiting-human disposition. Crash cleanup releases exact ownership. Mend is
   now a read-only assertion and fails an unowned candidate after one heartbeat
-  grace. Focused supervision is 22/22; the pre-audit full suite was
-  1,383/1,383. Remaining before DONE: rerun the full suite after the final Mend
-  audit tightening, commit, and record the implementation revision.
+  grace. Verification: focused supervision 22/22, diagnostic attribution
+  29/29, adjacent runtime/planner/Mend 556/556, and final full Loom suite
+  1,385/1,385. The block-generation and planner-deletion planted violations
+  both recreate the unsafe gap and are caught.
 
 - [x] **DONE — Add contract-grounded active-build supervision.** Implemented
   as `/loom mend` in `83ca609` (`feat(mend): add build supervisor`), with
