@@ -388,6 +388,31 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [x] **DONE — Make the planner reserve the serialized UI resource.** Implemented provider-neutrally in `d1223af` (`fix(plan): reserve shared UI resource`): snapshot freezes live/queued UI ownership, the pure planner selects no UI work while occupied and exactly the highest-priority UI gate when free, and a planned UI gate also reserves the same-wave UI merge seam. API gates and API merges remain parallel; final admission remains the atomic race guard. RED was 2 pass/3 fail with duplicate UI gates and an overlapping UI merge; GREEN is 6/6 focused, 199/199 snapshot/planner, 67/67 adjacent admission/chaining, and full Loom 1,307/1,307. A planted selection mutant recreates the overlap.
 
+- [ ] **TODO — Keep Loom self-validation from starving active product gates.**
+  JOR-293's unchanged merge preflight crossed 30-second Vitest limits while two
+  Loom full suites consumed the same host; its unit phase took 373 seconds.
+  Runtime publication currently serializes only with another publication, not
+  with the product UI resource. Completion requires one shared heavyweight-host
+  admission boundary for product gates and Loom full-suite validation, while
+  focused checks and API work remain concurrent, plus a regression proving
+  maintenance defers while occupied and resumes after release.
+
+- [ ] **TODO — Wake the scheduler immediately after Mend releases work.**
+  Releasing JOR-293's supervised lease wrote the durable continuation at
+  23:16:11Z, but the next heartbeat did not start a wave until 23:19:03Z or its
+  gate until 23:20:00Z. The current marker prevents a full quiet-window delay
+  but still waits for periodic launchd. Completion requires one admission-safe
+  wake after Mend tracker or lease writes that respects the stop switch,
+  coalesces duplicates, and never creates a second scheduler or launches a
+  worker directly.
+
+- [ ] **TODO — Make snapshot ticket population total or fail visibly.**
+  Linear reported 28 open build tickets and all 26 dependency rows, while three
+  full snapshots returned only 21, 15, and 15 ticket rows with no warning.
+  Missing rows varied between calls. Completion requires a deterministic
+  driver/batch regression and either exact population agreement between the
+  foundational and batched reads or a named refusal before planning.
+
 ## Supporting safety work completed during this build
 
 - [x] **DONE — Forbid branch-history rewrites in both provider paths.** `938467b` denies `git rebase` for Claude and Codex and denies Codex `git push --force-with-lease`; focused runtime result 44/44.
