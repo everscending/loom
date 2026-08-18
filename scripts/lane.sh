@@ -431,6 +431,11 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     _post_note issue "$iid" "$f"
     if [ "$res" = pass ]; then _set_state "$iid" merge-queue
     else _set_state "$iid" in-progress; fi
+    # The host UI pregate candidate is not reusable until this tracker-backed
+    # transition succeeds. tick.sh records only the verdict handoff here; the
+    # gate's host epilogue performs the actual promotion after the provider
+    # exits. A FAIL immediately invalidates any evidence for this ticket.
+    "$TICK_SH" record-gate-verdict "$iid" "$res" "$sha" >/dev/null 2>&1 || true
     _lane_ev gate_verdict ticket "$iid" verdict "$up" sha "$sha"
     _mark_lane_outcome gate-verdict
 }
@@ -643,6 +648,7 @@ cmd_rescope() { # <iid> [--extend] [--file F]
     printf '\n\n<!-- %s %s -->\n' "$marker" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
     _post_note issue "$iid" "$f"
     _lane_ev ticket_rescope ticket "$iid" mode "$([ "$extend" = 1 ] && printf extend || printf replace)"
+    "$TICK_SH" invalidate-ui-attestation "$iid" scope-changed >/dev/null 2>&1 || true
     if [ "$extend" = 1 ]; then
         echo "lane.sh: issue $iid scope extended — active replacement preserved; earlier rejections and merge attempts no longer count"
     else
@@ -666,6 +672,7 @@ cmd_verdict_reset() { # <iid> [--file F]
     printf '\n\n<!-- orch-verdict-reset %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
     _post_note issue "$iid" "$f"
     _lane_ev ticket_verdict_reset ticket "$iid"
+    "$TICK_SH" invalidate-ui-attestation "$iid" verdict-reset >/dev/null 2>&1 || true
     echo "lane.sh: issue $iid — verdicts and rejections recorded before this note no longer count"
 }
 
@@ -686,6 +693,7 @@ cmd_supervised_repair() { # <iid> [--file F]
     printf '\n\n<!-- orch-supervised-repair %s -->\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
     _post_note issue "$iid" "$f"
     _lane_ev ticket_supervised_repair ticket "$iid"
+    "$TICK_SH" invalidate-ui-attestation "$iid" supervised-repair >/dev/null 2>&1 || true
     echo "lane.sh: issue $iid — valid gate defects repaired under supervision; prior verdicts and rejections no longer count"
 }
 
