@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Host-global readers/writer admission for product UI work and Loom validation.
-# Sourced by tick.sh, runtime.sh, and tick-test.sh; no filesystem work at source.
+# Host-global readers/writer admission for product UI work and Loom's full suite.
+# Sourced by tick.sh and tick-test.sh; no filesystem work at source.
 
 HOST_ADMISSION_CLAIM=""
 HOST_ADMISSION_PRODUCT_LOCK_HOME=""
@@ -210,8 +210,8 @@ host_admission_product_unlock() {
     _host_admission_lock_release "$home"
 }
 
-host_admission_maintenance_acquire() { # <global-home> [key product-home [release|full]]
-    local home="$1" key="${2:-}" product="${3:-}" purpose="${4:-release}"
+host_admission_maintenance_acquire() { # <global-home> [key product-home]
+    local home="$1" key="${2:-}" product="${3:-}"
     local claim="$1/heavy-host-maintenance.d" lock_rc state_rc deferred=0
     [ -n "$home" ] || { _host_admission_error "host admission home is required"; return 2; }
     while :; do
@@ -233,11 +233,7 @@ host_admission_maintenance_acquire() { # <global-home> [key product-home [releas
             0)
                 _host_admission_lock_release "$home" || return 2
                 if [ "$deferred" -eq 0 ]; then
-                    if [ "$purpose" = full ]; then
-                        echo "loom-tests: product UI work owns the heavyweight host; deferring full suite until it releases"
-                    else
-                        echo "loom-runtime: product UI work owns the heavyweight host; deferring release validation until it releases"
-                    fi
+                    echo "loom-tests: product UI work owns the heavyweight host; deferring full suite until it releases"
                     deferred=1
                 fi
                 sleep 0.05
@@ -251,11 +247,8 @@ host_admission_maintenance_acquire() { # <global-home> [key product-home [releas
           || { rmdir "$claim" 2>/dev/null || true; _host_admission_lock_release "$home" >/dev/null 2>&1 || true; _host_admission_error "cannot stamp maintenance claim: $claim"; return 2; }
         HOST_ADMISSION_CLAIM="$claim"
         _host_admission_lock_release "$home" || return 2
-        if [ "$deferred" -eq 1 ]; then
-            [ "$purpose" = full ] \
-              && echo "loom-tests: product UI work released; starting full suite" \
-              || echo "loom-runtime: product UI work released; starting release validation"
-        fi
+        [ "$deferred" -eq 0 ] \
+          || echo "loom-tests: product UI work released; starting full suite"
         return 0
     done
 }

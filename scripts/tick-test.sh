@@ -34,14 +34,13 @@ _suite_cleanup() {
     [ -z "$JOBS_DIR" ] || rm -rf "$JOBS_DIR"
 }
 
-# Only the no-argument suite is heavyweight maintenance. Focused sections and
-# lint stay concurrent with product gates. Runtime publication already owns
-# this claim and marks the nested driver so it cannot deadlock on itself.
-if [ $# -eq 0 ] && [ "${LOOM_RUNTIME_VALIDATING:-}" != 1 ]; then
+# Only a no-argument suite is heavyweight maintenance. The harness marks its
+# own nested no-argument self-tests so they cannot wait behind their parent.
+if [ $# -eq 0 ] && [ "${LOOM_TEST_DRIVER_NESTED:-}" != 1 ]; then
     . "$DIR/host-admission.sh"
     HOST_ADMISSION_ROOT=$(host_admission_home)
     trap _suite_cleanup EXIT
-    host_admission_maintenance_acquire "$HOST_ADMISSION_ROOT" "" "" full \
+    host_admission_maintenance_acquire "$HOST_ADMISSION_ROOT" \
       || { echo "tick-test: heavyweight host admission is unreadable" >&2; exit 1; }
 fi
 

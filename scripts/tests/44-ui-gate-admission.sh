@@ -29,9 +29,8 @@ lane_alive() { # <lane-id>
 HOST_ADMISSION_HOME="$LOOM_HOST_ADMISSION_HOME"
 DRIVER="$(dirname "$TICK")/tick-test.sh"
 
-# Runtime self-validation is heavyweight host work too. Its exclusive claim
-# must hold only UI work: focused/API gates remain free to run while release
-# validation owns the browser-class resource.
+# A direct full-suite run is heavyweight host work. Its exclusive claim must
+# hold only UI work: focused/API gates remain free to run.
 mkdir -p "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
 printf '%s\n' "$$" > "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid"
 rc=0
@@ -40,8 +39,8 @@ out=$("$TICK" spawn-lane gate-348 --no-tick --pregate ui \
 "$TICK" spawn-lane gate-349 --no-tick --pregate api \
   --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
 if [ "$rc" -ne 0 ] && ! lane_alive gate-348 && lane_alive gate-349 \
-   && printf '%s' "$out" | grep -q 'runtime validation'; then
-    ok "host admission: runtime validation defers UI work but not focused API gates"
+   && printf '%s' "$out" | grep -q 'full Loom test suite'; then
+    ok "host admission: full-suite validation defers UI work but not focused API gates"
 else
     bad "host admission: maintenance claim did not isolate only heavyweight UI work (rc=$rc; out=$out)"
 fi
@@ -99,7 +98,7 @@ RACE_PAUSED="$RACE_PAUSED" RACE_GO="$RACE_GO" PATH="$RACE_BIN:$PATH" \
   --cwd "$LOOM_REPO" -- sleep 30 >"$RACE_SPAWN_OUT" 2>&1 & race_spawn_pid=$!
 for _wait in $(seq 1 100); do [ -f "$RACE_PAUSED" ] && break; sleep 0.02; done
 RACE_SUITE_ATTEMPTS="$RACE_SUITE_ATTEMPTS" PATH="$RACE_BIN:$PATH" \
-  LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$RACE_TESTS" \
+  LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$RACE_TESTS" \
   bash "$DRIVER" >"$RACE_SUITE_OUT" 2>&1 & race_suite_pid=$!
 for _wait in $(seq 1 100); do
     [ "$(wc -l < "$RACE_SUITE_ATTEMPTS" 2>/dev/null | tr -d ' ')" -ge 2 ] 2>/dev/null && break

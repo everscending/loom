@@ -48,7 +48,7 @@ ok "planted: a pass printed before the death"
 echo "\$THIS_IS_NOT_SET"
 test_finish
 EOF
-h_out=$(LOOM_TEST_DIR="$HP/dies" bash "$DRIVER" 2>&1); h_rc=$?
+h_out=$(LOOM_TEST_DRIVER_NESTED=1 LOOM_TEST_DIR="$HP/dies" bash "$DRIVER" 2>&1); h_rc=$?
 if [ "$h_rc" != 0 ] && printf '%s' "$h_out" | grep -q "without reporting counts" \
    && printf '%s' "$h_out" | grep -q "== 0 passed, 1 failed =="; then
     ok "suite: a section that dies early is reported as a failure, not counted as zero"
@@ -68,7 +68,7 @@ ok "planted $n b"
 test_finish
 EOF
 done
-h_out=$(LOOM_TEST_DIR="$HP/two" bash "$DRIVER" 2>&1); h_rc=$?
+h_out=$(LOOM_TEST_DRIVER_NESTED=1 LOOM_TEST_DIR="$HP/two" bash "$DRIVER" 2>&1); h_rc=$?
 # Four planted passes plus the pane guard each section runs for itself.
 [ "$h_rc" = 0 ] && printf '%s' "$h_out" | grep -q "== 6 passed, 0 failed ==" \
     && ok "suite: the driver totals the sections' own counts" \
@@ -90,9 +90,9 @@ h_out=$(LOOM_TEST_DIR="$HP/two" bash "$DRIVER" 02 2>&1); h_rc=$?
     && ok "suite: a filter runs the section it names and no other" \
     || bad "suite: the filter ran the wrong set (rc=$h_rc, $(printf '%s' "$h_out" | tail -1))"
 
-# MEND-ADMIT-01: a no-argument developer suite is the same heavyweight host
-# workload as runtime publication. It has no product LOOM_HOME, so the public
-# driver and product spawn boundary must rendezvous through host-global state.
+# MEND-ADMIT-01: a no-argument developer suite is heavyweight host work. It has
+# no product LOOM_HOME, so the public driver and product spawn boundary must
+# rendezvous through host-global state.
 FULL_TESTS="$HP/full-tests"
 FULL_STARTED="$HP/full-started"
 FULL_RELEASE="$HP/full-release"
@@ -112,7 +112,7 @@ chmod +x "$FULL_TESTS/01-heavy.sh"
 printf '%s\n' "$$" > "$PRODUCT_HOME/lanes/gate-900.pid"
 printf 'ui\n' > "$PRODUCT_HOME/lanes/gate-900.ui-resource"
 rm -f "$FULL_STARTED" "$FULL_RELEASE" "$FULL_OUT"
-LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
+LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
   bash "$DRIVER" >"$FULL_OUT" 2>&1 & full_pid=$!
 for _wait in $(seq 1 100); do
     grep -q 'deferring full suite' "$FULL_OUT" 2>/dev/null && break
@@ -133,7 +133,7 @@ else
 fi
 
 rm -f "$FULL_STARTED" "$FULL_RELEASE" "$FULL_OUT"
-LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
+LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
   bash "$DRIVER" >"$FULL_OUT" 2>&1 & full_pid=$!
 for _wait in $(seq 1 100); do
     [ -f "$FULL_STARTED" ] && [ -f "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid" ] && break
@@ -151,7 +151,7 @@ lint_out=$(LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" bash "$DRIVER" --lint
 if [ "$ui_rc" -ne 0 ] && [ ! -e "$LOOM_HOME/lanes/gate-901.pid" ] \
    && [ -n "$api_pid" ] && kill -0 "$api_pid" 2>/dev/null \
    && [ "$focused_rc" -eq 0 ] && [ "$lint_rc" -eq 0 ] \
-   && printf '%s' "$ui_out" | grep -q 'validation'; then
+   && printf '%s' "$ui_out" | grep -q 'full Loom test suite'; then
     ok "suite admission: direct full validation defers UI but not API, focused, or lint work"
 else
     bad "suite admission: direct validation covered non-heavy work (ui=$ui_rc focused=$focused_rc lint=$lint_rc; $ui_out $focused_out $lint_out)"
@@ -160,23 +160,6 @@ fi
 "$TICK" kill-lane gate-902 >/dev/null 2>&1 || true
 : > "$FULL_RELEASE"
 wait "$full_pid"
-
-# Runtime publication already owns the maintenance claim before it invokes the
-# no-argument driver. The explicit validation marker must suppress reacquire;
-# otherwise the suite deadlocks behind its own PID-owned claim.
-mkdir -p "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
-printf '%s\n' "$$" > "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid"
-rm -f "$FULL_STARTED"; : > "$FULL_RELEASE"
-nested_out=$(LOOM_RUNTIME_VALIDATING=1 LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" \
-  LOOM_TEST_DIR="$FULL_TESTS" bash "$DRIVER" 2>&1); nested_rc=$?
-if [ "$nested_rc" -eq 0 ] && [ -e "$FULL_STARTED" ] \
-   && [ "$(cat "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid" 2>/dev/null)" = "$$" ]; then
-    ok "suite admission: runtime-nested full validation reuses its outer host claim"
-else
-    bad "suite admission: runtime-nested validation deadlocked or disturbed its outer claim ($nested_out)"
-fi
-rm -f "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid"
-rmdir "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
 
 # --- D-TEST-15: the one thing sections share -------------------------------
 # Each section gets its own process and its own $T, so the driver runs them at

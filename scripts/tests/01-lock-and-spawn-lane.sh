@@ -452,18 +452,7 @@ esac
 EOF
 chmod +x "$DEFER_AGENT"
 printf 'deferred provider brief\n' > "$T/deferred-brief.md"
-PIN_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-RUNTIME_DISPATCH="$T/runtime-dispatch.sh"; RUNTIME_CALLS="$T/runtime-calls"
-cat > "$RUNTIME_DISPATCH" <<'EOF'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "${RUNTIME_CALLS:?}"
-[ "$1" = run ] && [ "$2" = --release ] && release="$3" && [ "$4" = -- ] && [ "$5" = tick ] || exit 2
-shift 5
-LOOM_RUNTIME_RELEASE="$release" exec "${PIN_TICK:?}" "$@"
-EOF
-chmod +x "$RUNTIME_DISPATCH"
 TRACKER_CMD="$REVIEW_TRACKER" LOOM_AGENT_CMD="$DEFER_AGENT" LOOM_DEFER_LANE_LAUNCH=1 \
-  LOOM_RUNTIME_RELEASE="$PIN_A" LOOM_RUNTIME_LAUNCHER="$RUNTIME_DISPATCH" \
   "$TICK" spawn-lane gate-90 --no-tick --provider codex --job gate --tier medium \
   --brief "$T/deferred-brief.md" --cwd "$LOOM_REPO" >/dev/null
 if [ ! -f "$LOOM_HOME/lanes/gate-90.pid" ] \
@@ -472,21 +461,13 @@ if [ ! -f "$LOOM_HOME/lanes/gate-90.pid" ] \
 else
   bad "deferred launch: provider session spawned directly or lost its request"
 fi
-TRACKER_CMD="$REVIEW_TRACKER" DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" \
-  RUNTIME_CALLS="$RUNTIME_CALLS" PIN_TICK="$TICK" LOOM_RUNTIME_LAUNCHER="$RUNTIME_DISPATCH" \
-  "$TICK" drain-lane-launches >/dev/null
+TRACKER_CMD="$REVIEW_TRACKER" DEFER_MARK="$DEFER_MARK" LOOM_AGENT_CMD="$DEFER_AGENT" "$TICK" drain-lane-launches >/dev/null
 for _ in $(seq 1 100); do [ -f "$DEFER_MARK" ] && break; sleep 0.05; done
 pid=$(cat "$LOOM_HOME/lanes/gate-90.pid" 2>/dev/null || echo "")
 if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -f "$DEFER_MARK" ]; then
   ok "deferred launch: host drain starts a surviving worker"
 else
   bad "deferred launch: host drain did not start the queued worker"
-fi
-if grep -q "run --release $PIN_A -- tick spawn-lane" "$RUNTIME_CALLS" \
-   && [ "$(cat "$LOOM_HOME/lanes/gate-90.release" 2>/dev/null)" = "$PIN_A" ]; then
-  ok "deferred launch: host drain preserves the creator runtime release"
-else
-  bad "deferred launch: active host substituted its runtime for the queued creator"
 fi
 if grep -q "lane.sh verdict 90 pass" "$LOOM_HOME/briefs/gate-90.md" \
    && grep -q "lane.sh verdict 90 fail" "$LOOM_HOME/briefs/gate-90.md"; then
@@ -953,6 +934,11 @@ _wave_scratch_tick() { # run one tick whose wave stamps its own scratch dir
 _wave_scratch_tick; w1=$?
 _wave_scratch_tick; w2=$?
 rm -rf "$LOOM_HOME/tick.lock.d"
+for _wait in $(seq 1 100); do
+    WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    [ "$WAVES" -ge 2 ] && break
+    sleep 0.05
+done
 WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ "$WAVES" -ge 2 ] && ok "scratch: consecutive waves get separate directories" \
     || bad "scratch: two waves shared a scratch directory ($WAVES marker(s); ticks rc $w1/$w2)"

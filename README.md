@@ -79,7 +79,6 @@ time and money went and writes up proposals for improving the next one.
 | Dependency | Why Loom needs it |
 |---|---|
 | **Claude Code or Codex** | The interactive provider starts the build; every headless job then runs through Loom's matching adapter. Provider identity is recorded on the Build issue. |
-| **A published Loom runtime** | `/loom publish` validates and atomically selects a committed immutable release. `/loom start` refuses when no validated release is selected. |
 | **A git repository** | Each in-flight ticket gets its own linked worktree under the ignored `.worktrees/` directory. Local-only repos will not work — lanes always branch from the remote. |
 | **A declared issue tracker** | `docs/agents/issue-tracker.md`, committed, with `# Issue tracker: <Name>` as its heading. Loom scripts and every provider job read that file directly, so there is no second tracker setting that can drift. Without it, every Loom verb refuses. |
 | **A board Loom drives** — GitLab or Linear | Epics, issues, state labels or statuses, blocking links and comments are where **all** build state lives. Loom creates labels on GitLab and workflow statuses on Linear. Every board call goes through `scripts/trackers/<name>.sh`; an unsupported declaration is refused by name. |
@@ -120,26 +119,15 @@ commands, so a wave inlines that work instead.
 
 ## Setup
 
-Loom bootstraps each target repo on its first tick. You still install and
-publish Loom, declare and authenticate the tracker/forge, and trust the repo.
+Loom bootstraps each target repo on its first tick. You still install Loom,
+declare and authenticate the tracker/forge, and trust the repo.
 
-### 1. Install and publish Loom, then install its sibling skills
+### 1. Install Loom and its sibling skills
 
 Put this directory in your provider's skill directory — the scripts locate
 Loom from their own path. Install `lavish`, `grilling`, `to-tickets`, `implement`,
 `code-review`, `domain-modeling`, and `prototype` beside it; the planning
 verbs hand off to them.
-
-Before the first `/loom start`, publish the committed Loom checkout once:
-
-```text
-/loom publish
-```
-
-Publication validates the complete exported release and atomically selects it.
-`start` refuses when no validated release is selected. Later compatible releases
-can be published while builds run; the first publication and any `--migrate`
-publication require Loom to be stopped with no live or queued work.
 
 ### 2. Declare the tracker, authenticate, and trust the repo
 
@@ -217,8 +205,8 @@ only to override a default or state a fact no detector can infer:
 
 ```yaml
 max_lanes: 4                    # 1-6; each lane is a full worktree
-max_aux_lanes: 4                # repair/gate/merge/probe lane capacity
 ui_capacity: 2                  # opt in above default 1 after a paired host proof
+max_aux_lanes: 4                # repair/gate/merge/probe lane capacity
 rejection_cap: 2                # failed gates before focused supervision
 crash_cap: 2                    # crashes before blocked (crashes are not rejections)
 merge_attempt_cap: 2            # failed merge attempts before intervention
@@ -327,8 +315,7 @@ The trigger. It detects the interactive provider (or accepts one explicit
 Build issue, syncs that provider's guardrails, binds the Build issue to
 `supervision::autonomous-repair-v1`, installs a repo-specific scheduler carrying
 the same provider as a consistency check, clears the stop switch, and fires the
-first wave from the selected immutable runtime release. Inside herdr it also
-raises the viewer.
+first wave. Inside herdr it also raises the viewer.
 
 On macOS this is the only thing you run to go unattended: no `launchctl` or
 plist work by hand. Other hosts must supply the equivalent cron/service
@@ -399,14 +386,6 @@ that decision.
 | `/loom replan` | Diff an amended PRD and regenerate only the affected tickets. |
 | `/loom retro` | Where a finished build's time and money went, written up as proposals. |
 
-Runtime releases have separate human controls:
-
-| Command | What it does |
-|---|---|
-| `/loom publish [--migrate] [git-ref]` | Validate and atomically select a committed immutable Loom release. |
-| `/loom rollback` | Select the previous compatible release for future heartbeats; running work stays pinned. |
-| `/loom runtime-status` | Show active and previous releases plus live lane and queued-handoff pins. |
-
 Two more knobs live in the tracker itself, because that is where every decision
 belongs:
 
@@ -452,7 +431,6 @@ references/
   scheduling.md           heartbeat, pacing, continuation, and stop switch
   supervision.md          start-owned deterministic repair policy
   mend.md                 human audit/repair contract for that policy
-  runtime-releases.md     publish, rollback, and runtime status
   ticket-template.md      what a ticket body must contain
   triage.md  retro.md  qa.md  optimize.md  prop.md  fix.md
 scripts/
@@ -461,7 +439,6 @@ scripts/
   bootstrap.sh            idempotent repo/tracker bootstrap writes
   agent.sh  agents/       provider-neutral runtime and Claude/Codex adapters
   trackers/  forges/      board and merge-request drivers
-  runtime.sh              immutable release publication and selection
   worktree.sh             deterministic linked-worktree preparation
   watch-panes.sh          the herdr viewer
   tick-test.sh  tests/     test driver and sectioned suite

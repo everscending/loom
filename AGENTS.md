@@ -87,9 +87,6 @@ next verb, and it never writes production code by hand.
 | `unblock <n> [--to-review]` | 6 | Post the decision, clear `blocked`, release the ticket |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop; `--now` also kills live lanes |
-| `publish [--migrate] [git-ref]` | any | Validate and atomically select a committed immutable Loom release |
-| `rollback` | any | Select the previous compatible release for future heartbeats |
-| `runtime-status` | any | Show active/previous releases and live or queued runtime pins |
 | `replan` | any | Diff an amended PRD, regenerate only affected tickets |
 
 ### Maintenance verbs (human-run; a wave never invokes these)
@@ -114,7 +111,6 @@ SKILL.md                  the skill: phase order, gate rules, scheduling, failur
 AGENTS.md                 this file
 README.md                 the human-facing introduction: what Loom does, dependencies, setup
 CONTRIBUTING.md           contributor coordination, proof, review, and PR workflow
-runtime-abi               compatibility boundary for immutable host-state releases
 references/
   phases-1-5.md           the conversational front half, in full
   setup.md                bootstrap, config layers, the skill/repo boundary
@@ -123,7 +119,6 @@ references/
   scheduling.md           heartbeat, pacing, continuation, and loop switch
   supervision.md          start-owned deterministic repair policy
   mend.md                 audit and repair contract for supervision
-  runtime-releases.md     publish, rollback, runtime status, and compatibility
   ticket-template.md      what a ticket body must contain
   merge-brief.md          the rendered merge-lane brief (P93)
   triage.md retro.md qa.md optimize.md prop.md fix.md
@@ -133,7 +128,6 @@ scripts/
   bootstrap.sh            idempotent repo, tracker, and guardrail setup writes
   agent.sh agents/        provider-neutral runtime and Claude/Codex adapters
   trackers/ forges/       tracker and merge-request driver contracts
-  runtime.sh              immutable release publication and selection
   worktree.sh             deterministic linked-worktree preparation
   lib.sh lib.jq           shared derivations
   watch-panes.sh          the herdr viewer
@@ -323,13 +317,6 @@ contributor branches use the ignored `.loom-worktrees/` directory.
   the steps in `SKILL.md` decide what a wave does. (Paid for: a hold comment
   ending "Release: when #48 merges, `/loom unblock 67`" was executed by a wave.)
 
-**Published runtimes are immutable.** Fresh commands and heartbeats use the
-selected release; running waves, lanes, epilogues, and queued handoffs remain
-pinned to their creator release. An incompatible host-state change updates
-`runtime-abi` and requires the migration boundary in
-[`references/runtime-releases.md`](references/runtime-releases.md).
-
 **Run state never lives here.** Per-repository state lives under
-`~/.loom/<repo>/`; published releases live under `~/.loom/runtime`. `.gitignore`
-covers `logs/`, `lanes/`, `*.pid` and `*.progress` against a mis-set
-`LOOM_HOME`.
+`~/.loom/<repo>/`. `.gitignore` covers `logs/`, `lanes/`, `*.pid` and
+`*.progress` against a mis-set `LOOM_HOME`.

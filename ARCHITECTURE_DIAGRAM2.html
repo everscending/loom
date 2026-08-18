@@ -670,7 +670,6 @@
 
           <!-- edges: systems of record and control -->
           <path class="edge" data-kind="read" data-from="config" data-to="scheduler" d="M153 413 V566"/>
-          <path class="edge" data-kind="read" data-from="runtime" data-to="scheduler" d="M1320 413 V548 H335 V566"/>
           <path class="edge" data-kind="read" data-from="tracker" data-to="snapshot" d="M575 413 V574 H526"/>
           <path class="edge" data-kind="read" data-from="forge" data-to="snapshot" d="M1012 413 V548 H586 V574"/>
           <path class="edge" data-kind="spawn" data-from="heartbeat" data-to="scheduler" d="M178 634 H206"/>
@@ -770,12 +769,6 @@
             <rect class="node-box" x="900" y="306" width="224" height="107" rx="4"/><rect class="node-accent" x="900" y="306" width="7" height="107"/>
             <text class="node-title" x="918" y="332">forge · code record</text><text class="node-copy" x="918" y="352">GitLab or GitHub</text><text class="node-copy" x="918" y="368">origin/base · branches · MRs</text>
             <text class="node-code" x="918" y="393">derived from tracker / remote</text>
-          </g>
-
-          <g class="arch-node observe" data-id="runtime" data-layer="schedule observe" tabindex="0" role="button" aria-label="Immutable Loom runtime releases">
-            <rect class="node-box" x="1170" y="306" width="302" height="107" rx="4"/><rect class="node-accent" x="1170" y="306" width="7" height="107"/>
-            <text class="node-title" x="1188" y="332">immutable runtime selector</text><text class="node-copy" x="1188" y="352">published current + previous release</text><text class="node-copy" x="1188" y="368">live lanes stay pinned to creator tree</text>
-            <text class="node-code" x="1188" y="393">publish · rollback · runtime-status</text>
           </g>
 
           <!-- control plane -->
@@ -978,8 +971,8 @@
   </section>
 
   <footer>
-    <span>Architecture sources: SKILL.md · README.md · references/phases-1-5.md · setup.md · scheduling.md · supervision.md · runtime-releases.md · build-controls.md</span>
-    <span>Machinery sources: tick.sh · lane.sh · agent.sh · runtime.sh · worktree.sh · bootstrap.sh · watch-panes.sh · trackers/ · forges/ · agents/ · *.jq</span>
+    <span>Architecture sources: SKILL.md · README.md · references/phases-1-5.md · setup.md · scheduling.md · supervision.md · build-controls.md</span>
+    <span>Machinery sources: tick.sh · lane.sh · agent.sh · worktree.sh · bootstrap.sh · watch-panes.sh · trackers/ · forges/ · agents/ · *.jq</span>
   </footer>
 </main>
 
@@ -1055,13 +1048,6 @@
         summary: "GitLab or GitHub stores the remote base, ticket branches, merge requests, immutable heads, and merge truth. Loom derives the forge from the board or origin remote.",
         bullets: ["New work always branches from freshly fetched origin/base.", "Implementation opens or refreshes one ticket MR through lane.sh submit.", "Merge closes a ticket only after the forge reports the MR actually merged."],
         files: ["scripts/forges/gitlab.sh", "scripts/forges/github.sh", "references/setup.md"], color: "warp"
-      },
-      runtime: {
-        kicker: "Host plumbing",
-        title: "Immutable Loom runtime",
-        summary: "Published, validated Loom trees are selected atomically. Fresh heartbeats use the active release while existing waves, lanes, and queued handoffs remain pinned to their creator release.",
-        bullets: ["Publish validates shell files and the full suite before changing the selector.", "Rollback swaps current and previous without killing running work.", "Runtime release state is host plumbing, never tracker build state."],
-        files: ["scripts/runtime.sh", "references/runtime-releases.md"], color: "ink"
       },
       heartbeat: {
         kicker: "Scheduling entry points",
@@ -1151,7 +1137,7 @@
         kicker: "Replaceable mechanism state",
         title: "Run directory",
         summary: "Per-repository Loom state keeps locks, pids, logs, briefs, pause and viewer markers, leases, queued host work, and stop switches needed to operate the machine.",
-        bullets: ["It contains no product or ticket decision and is not reconstructible by design.", "Losing it can interrupt the loop or erase local history, but cannot change what the build means.", "Immutable runtime pins are host plumbing under ~/.loom/runtime for the same reason."],
+        bullets: ["It contains no product or ticket decision and is not reconstructible by design.", "Losing it can interrupt the loop or erase local history, but cannot change what the build means."],
         files: ["references/setup.md", "references/scheduling.md", "scripts/tick.sh"], color: "ink"
       },
       worktree: {

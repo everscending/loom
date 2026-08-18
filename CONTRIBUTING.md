@@ -22,7 +22,7 @@ contract; this file is the contributor-facing workflow.
    and formatting into separate work.
 5. Announce before editing a high-collision surface: `README.md`, `SKILL.md`,
    `scripts/tick.sh`, `scripts/lane.sh`, shared `lib.*` or test harness files,
-   `scripts/plan.jq`, `runtime-abi`, or any ledger file.
+   `scripts/plan.jq`, or any ledger file.
 
 ## The rules that do not bend
 
@@ -102,10 +102,10 @@ Report exact commands and pass/fail counts. If a check was not run, say why.
 
 ## Keep documentation synchronized
 
-Any change must also ensure [README.md](README.md) matches the current runtime
-releases, supervision, scheduling, provider guardrails, configuration, workflow,
-and maintenance commands. Update it in the same pull request whenever one of
-those surfaces changes; do not leave documentation as a follow-up.
+Any change must also ensure [README.md](README.md) matches the current
+supervision, scheduling, provider guardrails, configuration, workflow, and
+maintenance commands. Update it in the same pull request whenever one of those
+surfaces changes; do not leave documentation as a follow-up.
 
 Also update the document closest to the behavior:
 
@@ -114,8 +114,6 @@ Also update the document closest to the behavior:
 - phases 1–5: `references/phases-1-5.md`;
 - scheduler timing or continuation: `references/scheduling.md`;
 - supervision or Mend: `references/supervision.md` and `references/mend.md`;
-- runtime publication or compatibility: `references/runtime-releases.md` and,
-  for an incompatible host-state API change, `runtime-abi`.
 
 Documentation must describe shipped behavior, not an intended future state.
 Change only the affected README sections; a drive-by rewrite makes concurrent
@@ -131,7 +129,7 @@ Include:
 - focused and full test commands with counts, or an explicit docs-only note;
 - the `SKILL.md` line delta and reason for every added line;
 - README/reference updates, or why the behavior has no documentation surface;
-- known limitations, rollout or runtime-ABI impact, and the revert path.
+- known limitations, rollout impact, and the revert path.
 
 Before requesting review:
 
@@ -160,8 +158,8 @@ Review the failure and proof, not only the final diff. In particular, check:
 - no contributor widened scope, permissions, or configuration speculatively.
 
 Contributors do not approve or merge their own pull requests. Changes to
-`runtime-abi`, tracker-state transitions, hard security denials, or runtime
-publication require explicit maintainer review.
+tracker-state transitions or hard security denials require explicit maintainer
+review.
 
 Prefer a follow-up issue for unrelated improvements. A focused pull request is
 easier to coordinate, prove, merge, and revert.
