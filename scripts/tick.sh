@@ -2037,7 +2037,9 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         echo "tick: host epilogue already owns --from-lane for '$LOOM_LANE_ID' — no action needed; finish the ticket normally"
         return 0
     fi
-    [ "$mode" != manual ] || _raise_viewer
+    if [ "$mode" = manual ] && [ ! -f "$LOOM_HOME/viewer-off" ]; then
+        _raise_viewer on || :
+    fi
     # D-TICK-20: before the environment is cleared, because the exiting lane's
     # id is the only way to find its transcript — and before `_usage_gate`
     # below, which is what actually refuses. A handoff from a lane the account's
@@ -6096,11 +6098,16 @@ cmd_install_settings() { # install-settings [--force]
 # is already up (watch-panes is a singleton per repo) and outside herdr.
 # (Asked for by the human, 2026-08-04.)
 _raise_viewer() {
+    local verb="${1:-raise}"
     [ "${HERDR_ENV:-}" = 1 ] || return 0
     [ -x "$WATCH_PANES_CMD" ] || return 0
-    rm -f "$LOOM_HOME/ticker-off" "$LOOM_HOME/viewer-off"
-    nohup "$WATCH_PANES_CMD" >>"$LOOM_HOME/watch-panes.out" 2>&1 &
-    echo "loom: viewer raised — a pane per live worker, plus the build ticker."
+    [ "$verb" != raise ] || rm -f "$LOOM_HOME/ticker-off" "$LOOM_HOME/viewer-off"
+    if "$WATCH_PANES_CMD" "$verb" >>"$LOOM_HOME/watch-panes.out" 2>&1; then
+        echo "loom: viewer raised — a pane per live worker, plus the build ticker."
+    else
+        echo "loom: viewer raise FAILED — viewer availability is unconfirmed; inspect $LOOM_HOME/watch-panes.out" >&2
+        return 1
+    fi
 }
 
 # P88: arming a build that cannot read its own board is worse than refusing to

@@ -192,10 +192,11 @@ stretch, not a running commentary. *(paid: six silent minutes of probe prep
 read as a wedge.)*
 
 **A manual tick inside herdr also raises the viewer** (`$HERDR_ENV` is `1`):
-after firing the tick, launch `scripts/watch-panes.sh` detached. It is a
-singleton per repo (a second launch exits quietly), so doing this on every
-manual tick is safe. Headless waves have no herdr and skip it; watch-panes
-refuses outside herdr anyway.
+after firing the tick, `scripts/watch-panes.sh raise` ensures the repo's tagged
+Herdr controller pane. The controller is the singleton and restarts its
+polling worker, so doing this on every manual tick is safe without trusting a
+detached descendant or a PID alone. Headless waves have no herdr and skip it;
+watch-panes refuses outside herdr anyway.
 
 1. **Read, then plan**: `tick.sh snapshot --brief | tick.sh plan`. The
    snapshot is the board — one JSON document: open `build-N` tickets (labels,
