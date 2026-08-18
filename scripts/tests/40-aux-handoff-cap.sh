@@ -3,6 +3,8 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
 printf '\nmax_aux_lanes: 4\n' >> "$LOOM_REPO/.loom.yml"
+git -C "$LOOM_REPO" add .loom.yml docs/agents/issue-tracker.md
+git -C "$LOOM_REPO" commit -qm 'seed auxiliary handoff fixture'
 
 aux_alive() {
     "$TICK" lane-status 2>/dev/null \
