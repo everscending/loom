@@ -6,14 +6,15 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
 
-- [ ] **IN PROGRESS — Let Mend repair Loom without owning the build queue.**
-  The corrected contract keeps `mend-status` and live build state read-only,
+- [x] **DONE — Let Mend repair Loom without owning the build queue.**
+  Implemented in `d6cae5d` (`fix(mend): repair Loom mechanism defects`). The
+  corrected contract keeps `mend-status` and live build state read-only,
   while default Mend and `--once` may implement, test, commit, install, and
   reassert a confirmed Loom mechanism repair. Manual worker dispatch, ticket
   mutation, hold release, lease acquisition, start, and resume remain outside
   Mend; they stay owned by the process installed by `/loom start`. Public
-  contract RED reproduced in sections 50 and 51; focused GREEN is 36/36.
-  Remaining before DONE: full suite, commit, install, and record the revision.
+  contract RED reproduced in sections 50 and 51. Verification: focused GREEN
+  36/36 and full Loom suite 1,385/1,385.
 
 - [x] **DONE — Move proactive blocker supervision into `/loom start`.**
   Implemented provider-neutrally in `d5a390b`, installed as `f520d1b`
