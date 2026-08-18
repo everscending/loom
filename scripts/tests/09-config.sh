@@ -77,20 +77,30 @@ sed -i.bak '/^rework_tier: high$/d' "$RC/global.yml"
 # only from the source: not in `resolve-config`, and not in `snapshot` either,
 # so there was no way to ask what the build would actually do. `max_aux_lanes`
 # is the milder case — `snapshot` publishes it, `resolve-config` did not.
-printf 'stall_action: notify_only\nmax_aux_lanes: 2\n' >> "$RC/global.yml"
+printf 'stall_action: notify_only\nmax_aux_lanes: 2\nui_capacity: 3\n' >> "$RC/global.yml"
 out=$(rc "$RC/bare" "$RC/global.yml")
 [ "$(echo "$out" | jq -r '.scalars.stall_action | "\(.value)/\(.source)"')" = "notify_only/global" ] \
     && [ "$(echo "$out" | jq -r '.scalars.max_aux_lanes | "\(.value)/\(.source)"')" = "2/global" ] \
-    && ok "resolve-config: stall_action and max_aux_lanes surfaced with their layer" \
-    || bad "resolve-config: hidden ($(echo "$out" | jq -c '.scalars | {stall_action, max_aux_lanes}'))"
-sed -i.bak '/^stall_action: notify_only$/d;/^max_aux_lanes: 2$/d' "$RC/global.yml"
+    && [ "$(echo "$out" | jq -r '.scalars.ui_capacity | "\(.value)/\(.source)"')" = "3/global" ] \
+    && ok "resolve-config: stall action and host capacities surface with their layer" \
+    || bad "resolve-config: hidden ($(echo "$out" | jq -c '.scalars | {stall_action, max_aux_lanes, ui_capacity}'))"
+sed -i.bak '/^stall_action: notify_only$/d;/^max_aux_lanes: 2$/d;/^ui_capacity: 3$/d' "$RC/global.yml"
 # Planted violation: with nothing set anywhere, both must report the SAME
 # defaults `tick.sh` itself falls back to. A published value that disagrees
 # with the code is worse than no value — it is a confident wrong answer.
 [ "$(rc "$RC/bare" | jq -r '.scalars.stall_action | "\(.value)/\(.source)"')" = "resume/default" ] \
     && [ "$(rc "$RC/bare" | jq -r '.scalars.max_aux_lanes.value')" = "4" ] \
-    && ok "resolve-config: unset stall_action/max_aux_lanes report the real defaults" \
-    || bad "resolve-config: default disagrees with the code ($(rc "$RC/bare" | jq -c '.scalars | {stall_action, max_aux_lanes}'))"
+    && [ "$(rc "$RC/bare" | jq -r '.scalars.ui_capacity.value')" = "1" ] \
+    && ok "resolve-config: unset stall action and host capacities report the real defaults" \
+    || bad "resolve-config: default disagrees with the code ($(rc "$RC/bare" | jq -c '.scalars | {stall_action, max_aux_lanes, ui_capacity}'))"
+printf 'ui_capacity: 0\n' >> "$RC/bare/.loom.yml"
+invalid=$(rc "$RC/bare" 2>&1); invalid_rc=$?
+if [ "$invalid_rc" -ne 0 ] && printf '%s' "$invalid" | grep -q 'positive integer'; then
+    ok "resolve-config: invalid UI capacity fails closed"
+else
+    bad "resolve-config: invalid UI capacity was accepted (rc=$invalid_rc; out=$invalid)"
+fi
+sed -i.bak '/^ui_capacity: 0$/d' "$RC/bare/.loom.yml"
 
 # 8d³. P52: lane_turn_cap bounds EFFORT, unlike rejection_cap/crash_cap which
 # bound failures — hidden here is a wave silently never noticing a runaway lane.

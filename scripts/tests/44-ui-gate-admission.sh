@@ -2,7 +2,7 @@
 # UI gate pregates share one host resource without shrinking auxiliary capacity
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
-printf '\nmax_aux_lanes: 4\n' >> "$LOOM_REPO/.loom.yml"
+printf '\nmax_aux_lanes: 4\nui_capacity: 1\n' >> "$LOOM_REPO/.loom.yml"
 UI_RUNNER="$T/ui-pregate-runner.sh"
 UI_RELEASE="$T/ui-pregate-release"
 UI_STARTED="$T/ui-pregate-started"
@@ -233,5 +233,58 @@ else
 fi
 LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-380 >/dev/null 2>&1 || true
 LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-381 >/dev/null 2>&1 || true
+
+# The host has now demonstrated two isolated product UI gates at once. Raising
+# the existing admission interface to two must admit exactly two claims, while
+# retaining the same atomic final guard for the third.
+sed -i.bak 's/^ui_capacity: 1$/ui_capacity: 2/' "$LOOM_REPO/.loom.yml"
+rm -f "$LOOM_REPO/.loom.yml.bak" "$UI_RELEASE" "$UI_STARTED"
+"$TICK" spawn-lane gate-390 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+"$TICK" spawn-lane gate-391 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+rc=0
+out=$("$TICK" spawn-lane gate-392 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && lane_alive gate-390 && lane_alive gate-391 && ! lane_alive gate-392 \
+   && printf '%s' "$out" | grep -q '2 of 2'; then
+    ok "ui gate capacity: configured capacity two admits two claims and atomically refuses the third"
+else
+    bad "ui gate capacity: expected exactly two live UI claims (rc=$rc; out=$out)"
+fi
+touch "$UI_RELEASE"
+for id in gate-390 gate-391 gate-392; do "$TICK" kill-lane "$id" >/dev/null 2>&1 || true; done
+
+# Planted violation: collapsing the capacity comparison back to one recreates
+# the old ticket-level bottleneck even though ui_capacity resolves to two.
+CAP_MUT=$(mirror_scripts "$T/ui-capacity-mutant")
+sed 's/\[ "$ui_used" -ge "$ui_cap" \]/[ "$ui_used" -ge 1 ]/' \
+  "$CAP_MUT/tick.sh" > "$CAP_MUT/tick-mutant.sh"
+mv "$CAP_MUT/tick-mutant.sh" "$CAP_MUT/tick.sh"
+chmod +x "$CAP_MUT/tick.sh"
+if [ "$(grep -Fc '[ "$ui_used" -ge 1 ]' "$CAP_MUT/tick.sh")" = 1 ]; then
+    ok "ui-capacity-violation: planted guard replaced the configured comparison"
+else
+    bad "ui-capacity-violation: mutation did not change exactly one admission guard"
+fi
+CAP_MUT_HOME="$T/ui-capacity-mutant-home"
+rm -rf "$CAP_MUT_HOME"; mkdir -p "$CAP_MUT_HOME"
+rm -f "$UI_RELEASE" "$UI_STARTED"
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" spawn-lane gate-393 --no-tick \
+  --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+if LOOM_HOME="$CAP_MUT_HOME" lane_alive gate-393; then
+    ok "ui-capacity-violation: first UI lane is live before the planted refusal"
+else
+    bad "ui-capacity-violation: first UI lane never established the tested contention"
+fi
+mut_rc=0
+mut_out=$(LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" spawn-lane gate-394 \
+  --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || mut_rc=$?
+if [ "$mut_rc" -ne 0 ] && ! LOOM_HOME="$CAP_MUT_HOME" lane_alive gate-394 \
+   && printf '%s' "$mut_out" | grep -q 'UI host capacity full (1 of 2'; then
+    ok "ui-capacity-violation: a one-slot comparison recreates serialized ticket gates"
+else
+    bad "ui-capacity-violation: planted one-slot guard did not recreate serialization (rc=$mut_rc; out=$mut_out)"
+fi
+touch "$UI_RELEASE"
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" kill-lane gate-393 >/dev/null 2>&1 || true
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" kill-lane gate-394 >/dev/null 2>&1 || true
 
 test_finish
