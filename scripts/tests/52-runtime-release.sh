@@ -15,7 +15,7 @@ printf 'host_state_api 1\n' > "$SRC/runtime-abi"
 for name in lane agent; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/$name.sh"
 done
-printf '#!/usr/bin/env bash\n[ "${1:-}" = --lint ] || [ "${LOOM_TEST_JOBS:-}" = 1 ]\n' > "$SRC/scripts/tick-test.sh"
+printf '#!/usr/bin/env bash\n[ "${1:-}" = --lint ] || { [ "${LOOM_TEST_JOBS:-}" = 1 ] && [ -z "${LINEAR_API_KEY:-}" ]; }\n' > "$SRC/scripts/tick-test.sh"
 printf '#!/usr/bin/env bash\nprintf "A:%%s:%%s\\n" "$LOOM_RUNTIME_RELEASE" "$0"\n' > "$SRC/scripts/tick.sh"
 chmod +x "$SRC/scripts"/*.sh
 git -C "$SRC" init -q
@@ -26,7 +26,7 @@ git -C "$SRC" commit -qm A
 A=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
 
 run_runtime() {
-    LOOM_RUNTIME_HOME="$RT" LOOM_RUNTIME_SELECTOR="$SELECTOR" \
+    LINEAR_API_KEY=must-not-reach-validation LOOM_RUNTIME_HOME="$RT" LOOM_RUNTIME_SELECTOR="$SELECTOR" \
       LOOM_RUNTIME_SOURCE="$SRC" LOOM_HOME="$CUTOVER_HOME" LOOM_RUNTIME_CUTOVER_UNARMED=1 \
       "$RUNTIME" "$@"
 }

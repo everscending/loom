@@ -189,9 +189,11 @@ check_tree() { # <staging>
 validate_tree() { # <staging>
     local log="$1/.loom-test.log"
     check_tree "$1"
-    ( cd "$1" && LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh --lint ) \
+    ( cd "$1" && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+        LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh --lint ) \
       || die "release test lint failed"
-    if ! ( cd "$1" && LOOM_TEST_JOBS=1 LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh ) \
+    if ! ( cd "$1" && env -i HOME="$HOME" PATH="$PATH" TMPDIR="${TMPDIR:-/tmp}" \
+             LOOM_TEST_JOBS=1 LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh ) \
          > "$log" 2>&1; then
         grep -E '^(FAIL:|== )' "$log" >&2 || tail -20 "$log" >&2
         die "release test suite failed"
