@@ -175,8 +175,8 @@ jq '.tickets = [{
       "tier_selection": {"effective": "high", "source": "rework_tier"},
       "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
       "active_supervised_repair": {
-        "at": "2026-08-10T09:59:00Z",
-        "body": "Fixed valid response defects at a84fcf3.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"
+        "at": "2026-08-10T10:05:00Z",
+        "body": "Fixed valid response defects at a84fcf3.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->\n\nRemoved the shared recipient scope guard at c0ffee2.\n\n<!-- orch-supervised-repair 2026-08-10T10:05:00Z -->"
       },
       "merge_attempts": 1, "merge_hold": null,
       "related_merge_requests": [{"id": 103, "state": "open", "branch": "t53", "sha": "ffff777"}],
@@ -191,7 +191,8 @@ jq '.tickets = [{
 PLAN "$FX/snap-supervised-repair.json" > "$T/plan-supervised-repair.json" 2>/dev/null
 if jq -e '.actions | length == 1
           and .[0].lane == "gate-53"
-          and (.[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+          and (.[0].spawn.brief.active_supervised_repair.body as $body
+               | ($body | index("a84fcf3")) < ($body | index("c0ffee2")))' \
           "$T/plan-supervised-repair.json" >/dev/null 2>&1; then
     ok "plan: completed supervised repair advances to gate with immutable evidence"
 else
@@ -223,10 +224,12 @@ for provider in claude codex; do
         > "$T/plan-supervised-repair-$provider.json" 2>/dev/null
 done
 if jq -e '.actions[0].spawn.provider == "claude"
-          and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+          and (.actions[0].spawn.brief.active_supervised_repair.body
+               | contains("a84fcf3") and contains("c0ffee2"))' \
           "$T/plan-supervised-repair-claude.json" >/dev/null 2>&1 \
    && jq -e '.actions[0].spawn.provider == "codex"
-             and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
+             and (.actions[0].spawn.brief.active_supervised_repair.body
+                  | contains("a84fcf3") and contains("c0ffee2"))' \
           "$T/plan-supervised-repair-codex.json" >/dev/null 2>&1; then
     ok "plan: Claude and Codex share the provider-neutral supervised-repair action"
 else

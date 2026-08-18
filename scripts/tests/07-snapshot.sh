@@ -310,10 +310,14 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 # the gate was invalid or the work was replaced. Its narrower marker must not
 # retire merge-attempt history, and its reason must remain visible to the plan.
 cat > "$FX/notes-12-supervised-repair.json" <<'EOF'
-[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Fixed both valid response-contract defects at a84fcf3 and reconciled main.\n\n<!-- orch-supervised-repair 2026-07-28T10:00:00Z -->"},
+[{"system":false,"created_at":"2026-07-28T10:10:00Z","author":{"username":"human"},"body":"Removed the shared recipient scope guard at c0ffee2.\n\n<!-- orch-supervised-repair 2026-07-28T10:10:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Fixed both valid response-contract defects at a84fcf3 and reconciled main.\n\n<!-- orch-supervised-repair 2026-07-28T10:00:00Z -->"},
  {"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=response-contract -->"},
  {"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"merge"},"body":"combined gate failed\n\n<!-- orch-merge-attempt 1 -->"},
- {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=response-contract -->"}]
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=response-contract -->"},
+ {"system":false,"created_at":"2026-07-28T09:05:00Z","author":{"username":"human"},"body":"Also preserve the cold-hydration acceptance.\n\n<!-- orch-scope-extend 2026-07-28T09:05:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T09:00:00Z","author":{"username":"human"},"body":"Replacement scope starts here.\n\n<!-- orch-scope-reset 2026-07-28T09:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T08:50:00Z","author":{"username":"human"},"body":"Superseded repair from the replaced scope at dead111.\n\n<!-- orch-supervised-repair 2026-07-28T08:50:00Z -->"}]
 EOF
 cp "$FX/notes-12-supervised-repair.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-supervised-repair" "$TICK" snapshot > "$T/snap-supervised-repair.json" 2>/dev/null
@@ -324,11 +328,14 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(jq -r '.tickets[] | select(.id==12) | .merge_attempts' "$T/snap-supervised-repair.json")" = "1" ] \
     && ok "snapshot: supervised repair preserves merge-attempt history" \
     || bad "snapshot: supervised repair incorrectly retired merge history"
-case "$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.body // ""' "$T/snap-supervised-repair.json")" in
-    *"a84fcf3"*"reconciled main"*)
-        ok "snapshot: supervised repair reason crosses the tracker boundary whole" ;;
-    *)  bad "snapshot: supervised repair reason is missing from the ticket row" ;;
-esac
+repair_evidence=$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.body // ""' "$T/snap-supervised-repair.json")
+if [[ "$repair_evidence" == *"a84fcf3"*"c0ffee2"* ]] \
+   && [[ "$repair_evidence" != *"dead111"* ]] \
+   && [ "$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.at' "$T/snap-supervised-repair.json")" = "2026-07-28T10:10:00Z" ]; then
+    ok "snapshot: supervised repairs accumulate in tracker order after the latest replacement scope"
+else
+    bad "snapshot: a later repair erased earlier active evidence or revived replaced scope ($(printf '%s' "$repair_evidence" | tr '\n' ' '))"
+fi
 # Planted mutant: remove only the supervised-repair marker from the shared
 # verdict cutoff and drive the same public snapshot seam. The two historical
 # rejections must reappear, proving the GREEN result depends on this marker.
@@ -398,6 +405,38 @@ rb() { jq -r ".tickets[] | select(.id==12) | .blocked_report | $1" "$T/snap-bloc
 [ "$(rb .released)" = "false" ] && [ "$(rb .category)" = "external-dep" ] \
     && ok "snapshot: a re-blocked ticket asks for its second decision" \
     || bad "snapshot: stale release note swallowed the new block ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedre.json"))"
+# Verdict and scope resets retire the old hold as well as its verdict counts.
+# Use equal tracker timestamps so the newest-first note index proves the same
+# deterministic ordering used by verdict history. The planner must then leave
+# the retired report as history instead of repairing the ticket back to blocked.
+for reset_marker in verdict-reset scope-reset scope-extend; do
+    cat > "$FX/notes-12.json" <<EOF
+[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"human"},"body":"Reset the obsolete hold.\n\n<!-- orch-$reset_marker 2026-07-28T14:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"wave"},"body":"Old hold.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T14:00:00Z -->"}]
+EOF
+    GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blocked-$reset_marker" \
+        "$TICK" snapshot > "$T/snap-blocked-$reset_marker.json" 2>/dev/null
+    "$TICK" plan "$T/snap-blocked-$reset_marker.json" \
+        > "$T/plan-blocked-$reset_marker.json" 2>/dev/null
+    if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-blocked-$reset_marker.json")" = "true" ] \
+       && ! jq -e 'any(.actions[]; .ticket == 12 and .kind == "repair" and .argv[2] == "blocked")' \
+            "$T/plan-blocked-$reset_marker.json" >/dev/null; then
+        ok "snapshot: $reset_marker retires an earlier blocked report before planning"
+    else
+        bad "snapshot: $reset_marker left blocked-report repair residue"
+    fi
+done
+# The inverse timestamp tie matters too: a genuinely newer block after a reset
+# is a new hold and must remain unreleased.
+cat > "$FX/notes-12.json" <<'EOF'
+[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"wave"},"body":"New hold.\n\n<!-- orch-blocked category=external-dep 2026-07-28T14:00:00Z -->"},
+ {"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"human"},"body":"Reset the old hold.\n\n<!-- orch-verdict-reset 2026-07-28T14:00:00Z -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blocked-after-reset" \
+    "$TICK" snapshot > "$T/snap-blocked-after-reset.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-blocked-after-reset.json")" = "false" ] \
+    && ok "snapshot: a newer block after a reset remains current" \
+    || bad "snapshot: an older reset retired a newer blocked report"
 # A thread with no trailer yields null rather than guessing which comment was
 # the report — the state every ticket blocked before this verb existed is in.
 cp "$FX/notes-12-orig.json" "$FX/notes-12.json"

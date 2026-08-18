@@ -203,15 +203,22 @@ include "lib";
          | sort_by([.at, -.i]) | last) as $r
       | if $r == null then null
         else
-          ([$notes[] | select((.body // "") | test("orch-unblock"))
-            | .created_at // ""] | sort | last) as $u
+          ([$notes | to_entries[]
+            | select((.value.body // "") | test("<!-- orch-unblock "))
+            | {at: (.value.created_at // ""), i: .key}]
+           | sort_by([.at, -.i]) | last) as $u
+        | ([$notes | to_entries[]
+            | select((.value.body // "") | test("<!-- orch-(scope-(reset|extend)|verdict-reset) "))
+            | {at: (.value.created_at // ""), i: .key}]
+           | sort_by([.at, -.i]) | last) as $reset
         | { at: $r.at,
             category: ($r.body | (capture("orch-blocked category=(?<c>[A-Za-z0-9._-]+)").c // null)),
             # The trailer is machinery, not report: a human reading this field
             # on a surface should see what the lane wrote and nothing else.
             body: ($r.body | sub("\\n*<!-- orch-blocked[^>]*-->\\n*"; "") | ltrimstr("\n") | rtrimstr("\n")),
             ticket_state: $ticket_state,
-            released: ($u != null and $u > $r.at) }
+            released: (($u != null and [$u.at, -$u.i] > [$r.at, -$r.i]) or
+                       ($reset != null and [$reset.at, -$reset.i] > [$r.at, -$r.i])) } # mutate:blocked-report-reset-cutoff
         end;
     # Which Loom tier this ticket's next IMPLEMENTATION job gets. Provider
     # execution profiles are resolved later, inside agent.sh.
