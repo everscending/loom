@@ -254,6 +254,7 @@ def merge_hold_of($notes; $open_iids):
 def ref: if test("^[0-9]+$") then "#\(.)" else . end;
 def stage($id):
   if   ($id | startswith("impl-"))  then {t: ($id | ltrimstr("impl-")  | ref), s: "implementation"}
+  elif ($id | startswith("repair-")) then {t: ($id | ltrimstr("repair-") | ref), s: "supervised repair"}
   elif ($id | startswith("gate-"))  then {t: ($id | ltrimstr("gate-")  | sub("-r[0-9]+$"; "") | ref), s: "gate review"}
   elif ($id | startswith("merge-")) then {t: ($id | ltrimstr("merge-") | ref), s: "merge"}
   elif ($id | startswith("probe-")) then {t: "epic \($id | ltrimstr("probe-"))", s: "acceptance probe"}

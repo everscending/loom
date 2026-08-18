@@ -61,6 +61,11 @@ out=$(EVENV "$TICK" report --ticket 77 2>&1)
 case "$out" in *"impl-77"*"on codex/high"*) ok "report: a lane's provider/tier appears in the per-ticket trace" ;;
                *) bad "report: provider/tier missing from the ticket trace ($(printf '%s' "$out" | tr '\n' '|'))" ;;
 esac
+EVENV "$TICK" event lane_spawn id repair-77 type repair job repair provider codex tier high log /tmp/repair-77.log
+out=$(EVENV "$TICK" report --ticket 77 2>&1)
+case "$out" in *"repair-77"*"still running"*) ok "report: start-owned repair work is attributed to its ticket" ;;
+               *) bad "report: repair lane missing from the ticket trace ($(printf '%s' "$out" | tr '\n' '|'))" ;;
+esac
 
 # 11d. Planted violation: the record must never feed a decision. If a wave read
 #      it, it would be shadow state and constitution rule 1 would be broken — so

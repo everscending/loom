@@ -65,7 +65,7 @@ include "lib";
      | map({id: .[0].id, first: (map(.ts) | min), last: (map(.ts) | max)})) as $tk
   | ($tk | map(. as $t
       | . + {work: ($lanes
-                    | map(select(.id | test("^(impl|gate|merge)-\($t.id)(-|$)")))
+                    | map(select(.id | test("^(impl|gate|merge|repair)-\($t.id)(-|$)")))
                     | map(.secs) | add // 0)}
       | . + {open: (.last - .first)}
       | . + {wait: (.open - .work)})) as $tw
@@ -86,7 +86,7 @@ include "lib";
      | (if $wave_cost > 0 then . + [{type: "wave", cost: $wave_cost}] else . end)
      | sort_by(-.cost)) as $by_kind
   | ($tw | map(. as $t | . + {cost: ($lanes_c
-       | map(select(.id | test("^(impl|gate|merge)-\($t.id)(-|$)")))
+       | map(select(.id | test("^(impl|gate|merge|repair)-\($t.id)(-|$)")))
        | map(.cost) | map(select(. != null)) | add // 0)})) as $twc
   | ($lanes_c | map(select(.cost != null)) | sort_by(-.cost) | [limit(5; .[])]) as $top
   | ($tk | map({key: .id, value: .last}) | from_entries) as $closed_at

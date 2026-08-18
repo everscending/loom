@@ -202,7 +202,7 @@ _request_heartbeat_continuation() { # <ticket> [hold-release|fix-ticket]
 # consumes this marker and retains both values in the lane_exit event.
 _mark_lane_outcome() { # <review|merge-queue|blocked|gate-verdict|merge-failed|closed|probe-result>
     [ -n "${LOOM_HOME:-}" ] && [ -n "${LOOM_LANE_ID:-}" ] || return 0
-    case "$LOOM_LANE_ID" in impl-*|gate-*|merge-*|probe-*) ;; *) return 0 ;; esac
+    case "$LOOM_LANE_ID" in impl-*|repair-*|gate-*|merge-*|probe-*) ;; *) return 0 ;; esac
     mkdir -p "$LOOM_HOME/lanes" 2>/dev/null || return 0
     local tmp="$LOOM_HOME/lanes/$LOOM_LANE_ID.outcome.$$"
     printf '%s\n' "$1" > "$tmp" 2>/dev/null \
@@ -817,6 +817,131 @@ cmd_build_provider() { # <provider> — human-only Build N mutation
     "$TRACKER" issue-relabel "$build" --add "provider::$provider"
     _lane_ev build_provider build "$build" provider "$provider"
     echo "lane.sh: Build #$build → provider::$provider"
+}
+
+cmd_build_supervision() { # autonomous-repair-v1 — human-only Build N policy
+    local policy="${1:-}" raw build labels count current available target
+    [ "$policy" = "autonomous-repair-v1" ] \
+      || die "build-supervision: policy must be autonomous-repair-v1"
+    _automated_caller && die "build-supervision is human-only: waves and lanes consume the Build issue policy and may not change it"
+    target="supervision::$policy"
+    available=$("$TRACKER" labels | jq -r '.[].name') \
+      || die "build-supervision: could not read labels"
+    printf '%s\n' "$available" | grep -qxF "$target" \
+      || die "build-supervision: $target does not exist; run bootstrap.sh supervision-labels first"
+    raw=$("$TRACKER" issues-open) || die "build-supervision: could not read open issues"
+    build=$(printf '%s' "$raw" | jq -r '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
+    [ -n "$build" ] || die "build-supervision: no open Build N issue"
+    labels=$(printf '%s' "$raw" | jq -r --argjson id "$build" \
+      '.[]|select(.id==$id)|[.labels[]?|select(startswith("supervision::") and .!="supervision::awaiting-human")]|join(",")')
+    count=$(printf '%s' "$raw" | jq -r --argjson id "$build" \
+      '.[]|select(.id==$id)|[.labels[]?|select(startswith("supervision::") and .!="supervision::awaiting-human")]|length')
+    [ "$count" -le 1 ] \
+      || die "build-supervision: Build #$build carries multiple supervision policies ($labels); repair it in the tracker before starting"
+    current="${labels#supervision::}"
+    if [ -n "$current" ] && [ "$current" != "$policy" ]; then
+      die "build-supervision: Build #$build is already bound to '$current'; refusing a silent policy switch"
+    fi
+    if [ "$current" = "$policy" ]; then
+      echo "lane.sh: Build #$build already uses $target"; return 0
+    fi
+    "$TRACKER" issue-relabel "$build" --add "$target"
+    _lane_ev build_supervision build "$build" policy "$policy"
+    echo "lane.sh: Build #$build → $target"
+}
+
+_repair_result_authority() { # <iid> <block-token> — exact lane, lease, policy, block
+    local iid="$1" token="$2" lane="repair-$1" lease raw build policies notes latest now
+    [ "${LOOM_LANE_ID:-}" = "$lane" ] \
+      || die "repair-result: only lane '$lane' may resolve ticket #$iid (caller: ${LOOM_LANE_ID:-human/wave})"
+    [ -n "${LOOM_HOME:-}" ] \
+      || die "repair-result: LOOM_HOME is missing; the matching supervised lease cannot be verified"
+    lease="$LOOM_HOME/supervised-leases/$iid.json"
+    now=$(date +%s)
+    jq -e --arg lane "$lane" --argjson iid "$iid" --argjson now "$now" '
+      .schema == 1 and .ticket == $iid and .owner == $lane
+      and (.expires_at | type) == "number" and .expires_at > $now
+    ' "$lease" >/dev/null 2>&1 \
+      || die "repair-result: ticket #$iid has no active supervised lease owned by '$lane'"
+    raw=$("$TRACKER" issues-open) \
+      || die "repair-result: cannot verify the active Build supervision policy"
+    build=$(printf '%s' "$raw" | jq -r \
+      '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
+    [ -n "$build" ] || die "repair-result: no open Build N issue"
+    policies=$(printf '%s' "$raw" | jq -r --argjson id "$build" \
+      '[.[]|select(.id==$id)|.labels[]?|select(startswith("supervision::") and .!="supervision::awaiting-human")]|join(",")')
+    [ "$policies" = "supervision::autonomous-repair-v1" ] \
+      || die "repair-result: Build #$build is not bound to exactly supervision::autonomous-repair-v1"
+    _read_issue "$iid" "refusing a repair result against unknown ticket state."
+    _closed_guard "$iid" "refusing to record a repair result on finished work."
+    printf '%s' "$_ISSUE_JSON" | jq -e '.labels | index("blocked")' >/dev/null 2>&1 \
+      || die "repair-result: issue #$iid is no longer blocked; this repair brief is stale"
+    notes=$("$TRACKER" issue-notes "$iid" --limit 30) \
+      || die "repair-result: cannot verify the current block generation"
+    latest=$(printf '%s' "$notes" | jq -r '
+      [.[] | select((.body // "") | test("<!-- orch-blocked"))]
+      | sort_by(.created_at // "") | last | .created_at // empty')
+    [ -n "$token" ] && [ "$latest" = "$token" ] \
+      || die "repair-result: block generation changed (expected '$token', current '${latest:-none}'); replan instead of applying stale authority"
+}
+
+cmd_repair_result() { # <iid> resolved|human-attention --block-token <at> [--file F]
+    local iid="${1:-}" result="${2:-}" token="" bodyargs=() f raw mrrow mrsha head branch remote
+    _check_iid "$iid"
+    case "$result" in resolved|human-attention) ;; *) die "repair-result: outcome must be resolved|human-attention" ;; esac
+    set -- "${@:3}"
+    while [ $# -gt 0 ]; do case "$1" in
+      --block-token) token="${2:-}"; [ -n "$token" ] || die "repair-result: --block-token needs a value"; shift 2 ;;
+      --file) bodyargs+=("$1" "${2:-}"); shift 2 ;;
+      *) die "repair-result: unknown option '$1'" ;;
+    esac; done
+    [ -n "$token" ] || die "repair-result: --block-token is required"
+    _repair_result_authority "$iid" "$token"
+    f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
+    if [ "$result" = human-attention ]; then
+        # Suppression lands first. If the following note fails, the safe
+        # partial state is a held ticket that Mend flags, never an automatic
+        # respawn that asks another agent the same human-only question.
+        "$TRACKER" issue-relabel "$iid" --add "supervision::awaiting-human"
+        printf '\n\n<!-- orch-blocked category=human-attention %s -->\n' \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+        _post_note issue "$iid" "$f"
+        _lane_ev repair_human_attention ticket "$iid" block_token "$token"
+        "$TICK_SH" notify ticket_blocked "Ticket #$iid needs human attention" \
+          "$(head -c 500 "$f")" >/dev/null 2>&1 || true
+        "$TICK_SH" repair-lease-release "$iid" >/dev/null 2>&1 || true
+        _mark_lane_outcome blocked
+        echo "lane.sh: issue $iid remains blocked with supervision::awaiting-human"
+        return 0
+    fi
+
+    [ -z "$(git status --porcelain 2>/dev/null)" ] \
+      || die "repair-result: worktree is dirty; commit every repair before releasing the hold"
+    head=$(git rev-parse HEAD 2>/dev/null || true)
+    branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    [ -n "$head" ] && [ -n "$branch" ] && [ "$branch" != HEAD ] \
+      || die "repair-result: repaired work must be on a branch at a committed HEAD"
+    remote=$(git ls-remote origin "refs/heads/$branch" 2>/dev/null | awk 'NR==1{print $1}')
+    [ "$remote" = "$head" ] \
+      || die "repair-result: origin/$branch is at ${remote:-missing}, not repaired HEAD $head; push first"
+    raw=$("$FORGE" mr-for-ticket "$iid") \
+      || die "repair-result: cannot verify the ticket's open merge request"
+    mrrow=$(printf '%s' "$raw" | jq -c '[.[]|select(.state=="open")]|if length==1 then .[0] else empty end')
+    [ -n "$mrrow" ] || die "repair-result: ticket #$iid must have exactly one open merge request"
+    mrsha=$(printf '%s' "$mrrow" | jq -r '.sha // empty')
+    [ "$mrsha" = "$head" ] \
+      || die "repair-result: open merge request is at ${mrsha:-missing}, not repaired HEAD $head"
+    printf '\n\n<!-- orch-supervised-repair %s -->\n<!-- orch-unblock %s -->\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issue "$iid" "$f"
+    "$TRACKER" issue-relabel "$iid" --add review \
+      --remove "ready-for-agent,in-progress,merge-queue,blocked,supervision::awaiting-human"
+    _forget_issue
+    _lane_ev repair_resolved ticket "$iid" head "$head" block_token "$token"
+    _mark_lane_outcome review
+    "$TICK_SH" repair-lease-release "$iid" >/dev/null 2>&1 || true
+    _request_heartbeat_continuation "$iid" supervised-release
+    echo "lane.sh: issue $iid repaired at $head → review; the independent gate remains authoritative"
 }
 
 cmd_fix_ticket() { # --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F]
@@ -1516,7 +1641,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | rescope <iid> [--extend] [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | repair-result <iid> resolved|human-attention --block-token <at> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | build-supervision autonomous-repair-v1 | rescope <iid> [--extend] [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1551,6 +1676,8 @@ case "${1:-}" in
     blocked-report) shift; cmd_blocked_report "$@" ;;
     model-tier) shift; cmd_model_tier "$@" ;;
     build-provider) shift; cmd_build_provider "$@" ;;
+    build-supervision) shift; cmd_build_supervision "$@" ;;
+    repair-result) shift; cmd_repair_result "$@" ;;
     base-check) shift; cmd_base_check "$@" ;;
     wait-ready) shift; cmd_wait_ready "$@" ;;
     fix-ticket) shift; cmd_fix_ticket "$@" ;;

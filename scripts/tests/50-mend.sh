@@ -234,19 +234,13 @@ SKILL="$(dirname "$(dirname "$TICK")")/SKILL.md"
 MEND_REF="$(dirname "$TICK")/../references/mend.md"
 if grep -q '| `mend' "$SKILL" \
    && grep -q 'references/mend.md' "$SKILL" \
-   && grep -q 'Normative contract' "$MEND_REF" 2>/dev/null \
-   && grep -q 'improvements-todo.md' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Claude' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Codex' "$MEND_REF" 2>/dev/null \
-   && grep -q 'never starts or resumes' "$MEND_REF" 2>/dev/null \
+   && grep -q 'assert start-owned supervision' "$MEND_REF" 2>/dev/null \
+   && grep -q 'Mend is read-only' "$MEND_REF" 2>/dev/null \
+   && grep -q 'releases a hold, edits Loom' "$MEND_REF" 2>/dev/null \
    && grep -q 'MEND-FLOW-01' "$MEND_REF" 2>/dev/null \
-   && grep -q 'unowned-stage' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Host preflight is isolated per spawn' "$MEND_REF" 2>/dev/null \
-   && grep -q 'wave_spawn_deferred' "$MEND_REF" 2>/dev/null \
-   && grep -q 'rc-7 gate retains its lane evidence' "$MEND_REF" 2>/dev/null \
-   && grep -q 'must not consume the rejection cap twice' "$MEND_REF" 2>/dev/null \
-   && grep -q 'do not end the mend turn' "$MEND_REF" 2>/dev/null; then
-    ok "mend: the human verb is routed to a grounded provider-neutral supervisory contract"
+   && grep -q 'Do not compensate from Mend' "$MEND_REF" 2>/dev/null \
+   && grep -q 'Route a confirmed Loom defect to the `fix` verb' "$MEND_REF" 2>/dev/null; then
+    ok "mend: the human verb is a read-only assertion of start-owned supervision"
 else
     bad "mend: the skill/reference contract is absent or incomplete"
 fi

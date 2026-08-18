@@ -522,9 +522,10 @@ EOF
 # is the wrong tool to reach for from bash on a hot-path string. A NEW LANE
 # KIND HAS TO BE ADDED IN BOTH PLACES — that is the whole reason each names the
 # other, since a kind added here alone renders as a bare "lane" in the ticker.
-_lane_type() { # <id> → impl | gate | probe | merge, or fails
+_lane_type() { # <id> → impl | repair | gate | probe | merge, or fails
     case "$1" in
         impl-[0-9]*)          echo impl  ;;
+        repair-[0-9]*)        echo repair ;;
         gate-[0-9]*)          echo gate  ;;
         merge-[0-9]*)         echo merge ;;
         probe-[A-Za-z0-9]*)   echo probe ;;

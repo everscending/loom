@@ -385,6 +385,14 @@ provider-label`, bind it to the active Build issue through the human-only
 same-provider label is resume; an unlabeled build is bound here. A different,
 multiple, or unknown label is a refusal, never a silent migration.
 
+Bind the same Build issue to the recognized start-supervision policy before
+installing the scheduler. This tracker-resident policy is the authority for
+bounded `repair-<ticket>` lanes; neither the invocation transcript nor ticket
+prose can substitute for it. The scheduler's deterministic-first supervision
+contract, repair outcomes, and human-attention boundary are in
+[supervision.md](supervision.md). `start` refuses to install when that policy
+is missing, unknown, or ambiguous.
+
 Then `tick.sh install --provider <id>` generates this repo's launchd agent
 (label + state dir + logs all derived from the repo path → unique per repo),
 clears the loop switch a previous `stop` left, and loads it. One agent, firing

@@ -628,6 +628,49 @@ _quiet_check() { # prints: active | stalled | halted | complete | unknown | unre
     return 0
 }
 
+# An all-blocked board is not halted when the policy bound by `/loom start`
+# gives the ordinary scheduler one or more repair actions. Derive that fact
+# from the same snapshot -> plan pipeline the wave consumes; never spend a
+# model interaction merely to discover whether a repair lane should exist.
+# This runs only after the cheap quiet read says `halted`. Legacy section
+# fixtures set LOOM_SKIP_SUPERVISION_CHECK and therefore stay on the old
+# no-policy path unless they provide an explicit plan document for this seam.
+_derive_start_supervision_plan() { # <dir> — writes snapshot.json + plan.json
+    local out="$1"
+    mkdir -p "$out" || return 1
+    if [ -n "${LOOM_SKIP_SUPERVISION_CHECK:-}" ]; then
+        [ -n "${LOOM_TEST_SUPERVISION_PLAN:-}" ] \
+          && [ -f "$LOOM_TEST_SUPERVISION_PLAN" ] || return 1
+        cp "$LOOM_TEST_SUPERVISION_PLAN" "$out/plan.json" || return 1
+        if [ -n "${LOOM_TEST_SUPERVISION_SNAPSHOT:-}" ] \
+           && [ -f "$LOOM_TEST_SUPERVISION_SNAPSHOT" ]; then
+            cp "$LOOM_TEST_SUPERVISION_SNAPSHOT" "$out/snapshot.json" || return 1
+        else
+            printf '{}\n' > "$out/snapshot.json"
+        fi
+        return 0
+    fi
+    "$SELF_PATH" snapshot --brief > "$out/snapshot.json" \
+      && "$SELF_PATH" plan "$out/snapshot.json" > "$out/plan.json"
+}
+
+_start_supervision_actionable() {
+    local tmp plan
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/loom-supervision.XXXXXX") || return 1
+    if ! _derive_start_supervision_plan "$tmp"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    plan="$tmp/plan.json"
+    if jq -e 'any(.actions[]?; .step == "supervise" and .kind == "spawn")' \
+        "$plan" >/dev/null 2>&1; then
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
 # The "once per state change" core, written four times before this: the quiet
 # states, workspace trust, the un-armed heartbeat, and the two stale flags. A
 # per-tick warning is fifteen stderr lines into a log nobody reads, or five
@@ -657,7 +700,9 @@ _notify_quiet() { # <state> — notify once per state change; activity re-arms
     # Both carve-outs stay HERE, not in the core: `unreadable` is this reader's
     # own third answer, and re-arming on activity is this state machine's rule
     # about which states mean "the build is moving again".
-    if [ "$state" = active ] || [ "$state" = unknown ]; then rm -f "$sentinel"; return 0; fi
+    if [ "$state" = active ] || [ "$state" = unknown ] || [ "$state" = supervisable ]; then
+        rm -f "$sentinel"; return 0
+    fi
     _once_per_state "$sentinel" "$state" || return 0
     case "$state" in
         complete) cmd_notify build_complete "Build complete" \
@@ -1017,6 +1062,7 @@ _ui_pregate_occupied() { # one shared UI host: active browser phase or durable r
         [ -n "$queued_id" ] || continue
         [ "$queued_id" != "$drain_id" ] || continue
         if [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] \
+           || [ "$(cat "$request/reserve-ui" 2>/dev/null || true)" = 1 ] \
            || [ -s "$request/host-probe" ]; then
             return 0
         fi
@@ -1196,6 +1242,66 @@ _supervised_leases_json() { # active-only array; expiry requires no cleanup writ
     done | jq -s '.'
 }
 
+# Called only while cmd_spawn_lane holds this ticket's supervised-admission
+# lock. The Build policy is tracker authority; the lease is bounded runtime
+# ownership. A queued Codex repair re-enters here with the same owner and is
+# idempotent, while any other owner fails closed.
+_repair_lease_ensure_locked() { # <ticket> <repair-lane>
+    local iid="$1" owner="$2" file="$SUPERVISED_LEASE_DIR/$1.json" existing="" now expires tmp
+    existing=$(_supervised_lease_read "$iid" 2>/dev/null) || existing=""
+    if [ -n "$existing" ]; then
+        [ "$(printf '%s' "$existing" | jq -r '.owner')" = "$owner" ] \
+          || die "spawn-lane: ticket #$iid already has a supervised lease owned by $(printf '%s' "$existing" | jq -r '.owner')"
+        return 0
+    fi
+    _assert_build_supervision_for_install
+    now=$(_now); expires=$((now + 21600)); tmp="$SUPERVISED_LEASE_DIR/.$iid.$$.tmp"
+    jq -n --argjson ticket "$iid" --arg owner "$owner" \
+          --argjson acquired_at "$now" --argjson expires_at "$expires" \
+          '{schema:1,kind:"supervised-repair",ticket:$ticket,owner:$owner,
+            acquired_at:$acquired_at,expires_at:$expires_at}' > "$tmp" \
+      || die "spawn-lane: could not encode repair lease"
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv "$tmp" "$file" || die "spawn-lane: could not publish repair lease"
+    _ev supervised_lease_acquired ticket "$iid" owner "$owner" expires_at "$expires" source start-supervisor
+}
+
+_repair_spawn_authority_locked() { # <ticket> <repair-lane> <block-token>
+    local iid="$1" owner="$2" token="$3" issue notes latest
+    [ -n "$token" ] \
+      || die "spawn-lane: '$owner' is missing its frozen repair block token"
+    issue=$("$TRACKER_SH" issue "$iid" 2>/dev/null) \
+      || die "spawn-lane: cannot verify current blocked state for repair ticket #$iid"
+    printf '%s' "$issue" | jq -e '
+      (.state // "open") == "open"
+      and (((.labels // []) | index("blocked")) != null)
+    ' >/dev/null 2>&1 \
+      || die "spawn-lane: repair ticket #$iid is no longer blocked; discard the stale plan"
+    notes=$("$TRACKER_SH" issue-notes "$iid" --limit 30 2>/dev/null) \
+      || die "spawn-lane: cannot verify current block generation for repair ticket #$iid"
+    latest=$(printf '%s' "$notes" | jq -r '
+      [.[] | select((.body // "") | test("<!-- orch-blocked"))]
+      | sort_by(.created_at // "") | last | .created_at // empty')
+    [ -n "$latest" ] && [ "$latest" = "$token" ] \
+      || die "spawn-lane: repair ticket #$iid block generation changed (planned '$token', current '${latest:-none}'); replan before acquiring a lease"
+}
+
+cmd_repair_lease_release() { # <ticket>; internal repair-lane epilogue
+    local iid="${1:-}" expected="repair-${1:-}" lease owner lock_rc=0
+    case "$iid" in ''|*[!0-9]*) die "repair-lease-release: ticket must be numeric" ;; esac
+    [ "${LOOM_LANE_ID:-}" = "$expected" ] \
+      || die "repair-lease-release: only $expected may release this lease"
+    _lock_reserve "$SUPERVISED_ADMISSION_DIR/$iid.lock.d" || lock_rc=$?
+    [ "$lock_rc" -eq 0 ] || die "repair-lease-release: ticket #$iid admission is busy"
+    lease=$(_supervised_lease_read "$iid" 2>/dev/null) || lease=""
+    owner=$(printf '%s' "$lease" | jq -r '.owner // empty' 2>/dev/null)
+    if [ "$owner" = "$expected" ]; then
+        rm -f "$SUPERVISED_LEASE_DIR/$iid.json"
+        _ev supervised_lease_released ticket "$iid" owner "$expected" source repair_epilogue
+    fi
+    rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
+}
+
 cmd_supervise() { # acquire <iid> --owner <id> [--ttl-seconds N] | release <iid>
     local verb="${1:-}" iid="${2:-}" owner="" ttl=3600 now expires tmp file lock_rc=0 had_lease=0
     shift 2 2>/dev/null || die "supervise: use acquire <ticket> --owner <id> [--ttl-seconds N] or release <ticket>"
@@ -1263,6 +1369,7 @@ _supervised_lane_ticket() { # ordinary impl/gate/merge lane id → ticket iid
     local id="$1" iid
     case "$id" in
         impl-*) iid="${id#impl-}" ;;
+        repair-*) iid="${id#repair-}" ;;
         gate-*) iid="${id#gate-}"; iid="${iid%%-r*}" ;;
         merge-*) iid="${id#merge-}" ;;
         *) return 1 ;;
@@ -1294,6 +1401,24 @@ _assert_build_provider() { # <provider> — tracker is canonical, argument is tr
       || die "tick: '$provider' has no registered provider adapter"
     current=$(_canonical_build_provider) || return $?
     [ "$current" = "$provider" ] || die "tick: scheduler transport says '$provider' but the active Build says '$current' — refusing before model invocation"
+}
+
+_assert_build_supervision_for_install() {
+    [ -n "${LOOM_SKIP_SUPERVISION_CHECK:-}" ] && return 0
+    local raw build labels count current
+    raw=$("$TRACKER_SH" issues-open) \
+      || die "install: cannot verify supervision — open Build issue read failed"
+    build=$(printf '%s' "$raw" | jq -r '[.[]|select((.title//"")|test("^Build [0-9]+$"))]|sort_by(.id)|last|.id//empty')
+    [ -n "$build" ] || die "install: cannot verify supervision — no open Build N issue"
+    labels=$(printf '%s' "$raw" | jq -r --argjson id "$build" \
+      '.[]|select(.id==$id)|[.labels[]?|select(startswith("supervision::") and .!="supervision::awaiting-human")]|join(",")')
+    count=$(printf '%s' "$raw" | jq -r --argjson id "$build" \
+      '.[]|select(.id==$id)|[.labels[]?|select(startswith("supervision::") and .!="supervision::awaiting-human")]|length')
+    [ "$count" -eq 1 ] \
+      || die "install: Build #$build must carry exactly one supervision policy label (found ${count}: ${labels:-none}); run bootstrap.sh supervision-labels and lane.sh build-supervision autonomous-repair-v1"
+    current="${labels#supervision::}"
+    [ "$current" = autonomous-repair-v1 ] \
+      || die "install: Build #$build carries unknown supervision policy '$current'"
 }
 
 # Deterministic handoffs normally inherit the provider chosen by their lane's
@@ -1522,6 +1647,10 @@ _wave_gap_ok() {
 _watch_pass() {
     { _stamp_progress; _notify_stale; } >&2
     local q; q=$(_quiet_check)
+    if [ "$q" = halted ] && _start_supervision_actionable; then
+        q=supervisable
+        _ev start_supervision_actionable reason blocked_repair_available >&2
+    fi
     _notify_quiet "$q" >&2
     printf '%s' "$q"
 }
@@ -1685,9 +1814,10 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     cmd_sweep || true
     # No separate watcher to arm any more: this tick already watched, above,
     # before it took the lock.
-    # Quiescence gate: classify before spending a wave. halted → nothing is
-    # schedulable, skip (a heartbeat on a halted build otherwise burns a
-    # model session every 15 min just to be told so). stalled with
+    # Quiescence gate: classify before spending a wave. An all-blocked board
+    # with a start-owned repair action was promoted to `stalled` by the watch
+    # pass, so `halted` now means nothing is schedulable. Skip it rather than
+    # burning a model session every 15 min just to be told so. stalled with
     # stall_action=notify_only → ping the human and wait (testbed fizzle
     # protocol); default resume → the wave IS the recovery. complete → let
     # the wave run: it posts the completion report and tears the agent down.
@@ -1720,6 +1850,14 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
                      _ev tick_skipped reason unreadable
                      return 0
                  fi ;;
+        supervisable)
+                 # No scheduling agent is needed to rediscover this choice:
+                 # the snapshot plan already names exact repair lanes.
+                 [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
+                 [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
+                 _dispatch_start_supervision
+                 _ev tick_deterministic_supervision
+                 return 0 ;;
         stalled) if [ "$(cfg stall_action resume)" = "notify_only" ]; then
                      echo "tick: stalled and stall_action=notify_only — notified, waiting for the human"
                      _ev tick_skipped reason stalled_notify_only
@@ -1758,7 +1896,7 @@ _resolve_wave_spawn_cwd() { # <lane> <ticket> <base> <branch> <head> <type>
     }
     [ -z "$branch" ] || has_open_mr=1
     if [ -z "$branch" ]; then
-        [ "$lane_type" = implementation ] || {
+        { [ "$lane_type" = implementation ] || [ "$lane_type" = repair ]; } || {
             echo "wave: spawn '$lane' needs an existing worktree but its ticket has no open MR branch" >&2
             return 1
         }
@@ -1768,7 +1906,7 @@ _resolve_wave_spawn_cwd() { # <lane> <ticket> <base> <branch> <head> <type>
     fi
     cwd=$(_worktree_for_branch "$REPO_ROOT" "$branch")
     if [ -n "$cwd" ]; then
-        if [ "$lane_type" = gate ]; then
+        if [ "$lane_type" = gate ] || { [ "$lane_type" = repair ] && [ -n "$expected_head" ]; }; then
             [ -n "$expected_head" ] || {
                 echo "wave: gate '$lane' has no immutable MR head in its planned action" >&2
                 return 1
@@ -1783,7 +1921,8 @@ _resolve_wave_spawn_cwd() { # <lane> <ticket> <base> <branch> <head> <type>
     # An implementation with no MR may contain uncommitted-only work;
     # recreating loom-<ticket> from a branch tip would silently lose it. Rework
     # with an open MR is durable forge state and can be reconstructed.
-    if [ "$lane_type" = implementation ] && [ "$has_open_mr" -eq 0 ]; then
+    if { [ "$lane_type" = implementation ] || [ "$lane_type" = repair ]; } \
+       && [ "$has_open_mr" -eq 0 ]; then
         echo "wave: stranded implementation '$lane' has no surviving worktree on branch '$branch'" >&2
         return 1
     fi
@@ -1797,6 +1936,78 @@ _resolve_wave_spawn_cwd() { # <lane> <ticket> <base> <branch> <head> <type>
     else
         "$worktree_sh" prepare --repo "$REPO_ROOT" --ticket "$ticket" --branch "$branch" --base "$base"
     fi
+}
+
+_dispatch_start_supervision() {
+    local tmp plan snapshot count=0 started=0
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/loom-supervision-dispatch.XXXXXX") \
+      || die "start supervision: cannot create deterministic dispatch scratch"
+    if ! _derive_start_supervision_plan "$tmp"; then
+        rm -rf "$tmp"
+        die "start supervision: could not refresh the blocked repair plan"
+    fi
+    plan="$tmp/plan.json"; snapshot="$tmp/snapshot.json"
+    if [ -n "${LOOM_SKIP_SUPERVISION_CHECK:-}" ] \
+       && [ -n "${LOOM_TEST_SUPERVISION_DISPATCH_CMD:-}" ]; then
+        "$LOOM_TEST_SUPERVISION_DISPATCH_CMD" "$plan"
+        rm -rf "$tmp"
+        return 0
+    fi
+    export LOOM_WAVE_PLAN="$plan"
+    local lane ticket planned_provider tier ui block_token expected_head base branch cwd brief error_log
+    while IFS="$(printf '\034')" read -r lane ticket planned_provider tier ui block_token expected_head base branch; do
+        [ -n "$lane" ] || continue
+        count=$((count + 1))
+        error_log="$tmp/$lane.preflight.err"
+        if ! cwd=$(_resolve_wave_spawn_cwd "$lane" "$ticket" "$base" "$branch" \
+          "$expected_head" repair 2>"$error_log"); then
+            _ev repair_spawn_deferred lane "$lane" ticket "$ticket" reason host_preflight
+            continue
+        fi
+        brief="$tmp/$lane.md"
+        jq -r --arg lane "$lane" '
+          [.actions[] | select(.lane == $lane)][0] as $a
+          | "# Start-owned supervised repair\n\n"
+            + "Work only ticket #\($a.ticket). The scheduler selected it deterministically; do not choose or inspect another blocked ticket.\n\n"
+            + "Frozen evidence:\n\n```json\n" + ($a | tojson) + "\n```\n\n"
+            + "Diagnose and implement only a technical repair already inside the frozen ticket contract. Preserve the immutable MR head and current block generation. Commit and push the repaired branch. Run focused checks only; the independent gate remains the arbiter.\n\n"
+            + (if $a.spawn.ui_resource then "The host UI resource is reserved for this lane. Release it with tick.sh release-ui-resource \($a.lane) immediately after the focused browser phase.\n\n" else "" end)
+            + "Finish with exactly one result file and one restricted result command:\n"
+            + "- Same-scope technical repair: lane.sh repair-result \($a.ticket) resolved --block-token \($a.block_token) --file <evidence-file>\n"
+            + "- Product/UX interpretation, scope widening, credentials/permissions, external prerequisites, gate weakening, or cap/config changes: lane.sh repair-result \($a.ticket) human-attention --block-token \($a.block_token) --file <exact-decision-file>\n"
+            + "Do not release the blocked hold by any other verb. Do not end by asking a question."
+        ' "$plan" > "$brief" \
+          || die "start supervision: could not render immutable brief for '$lane'"
+        local args=("$SELF_PATH" spawn-lane "$lane" --provider "$planned_provider" \
+                    --job repair --tier "$tier" --repair-block-token "$block_token" \
+                    --brief "$brief" --cwd "$cwd")
+        [ "$ui" != true ] || args+=(--reserve-ui)
+        if "${args[@]}"; then
+            started=$((started + 1))
+            _ev repair_dispatched lane "$lane" ticket "$ticket" source deterministic_start
+        else
+            _ev repair_spawn_deferred lane "$lane" ticket "$ticket" reason admission_refused
+        fi
+    done < <(jq -r --slurpfile snap "$snapshot" '
+      .actions[] | select(.step == "supervise" and .kind == "spawn")
+      | ((.ticket // "") | tostring) as $ticket
+      | ((.spawn.prepare.argv // []) as $a
+         | ($a | index("--base")) as $i
+         | if $i == null then "" else ($a[$i + 1] // "") end) as $base
+      | ([ $snap[0].tickets[]?
+           | select((.id | tostring) == $ticket)
+           | .related_merge_requests[]?
+           | select(.state == "open")
+           | .branch ] | first // "") as $branch
+      | [.lane, $ticket, .spawn.provider, .spawn.tier,
+         (.spawn.ui_resource // false), (.block_token // ""), (.spawn.expected_head // ""),
+         $base, $branch] | join("\u001c")' "$plan")
+    unset LOOM_WAVE_PLAN
+    rm -rf "$tmp"
+    [ "$count" -gt 0 ] \
+      || die "start supervision: supervisable state produced no repair actions on refresh"
+    echo "tick: deterministic start supervision dispatched $started/$count repair lane(s); no scheduling agent spent"
+    return 0
 }
 
 _defer_wave_spawn() { # <plan> <lane> <ticket> <error-log>
@@ -1913,7 +2124,7 @@ Wave context from tick.sh — trust it over rediscovery:
 - tick.sh: $SELF_PATH
 - state dir: $LOOM_HOME
 - FIRST action: $first_action The plan's .actions[] are already decided: run them in order (each carries via + argv, or everything a spawn needs but its brief). .residue[] is what needs prose from you; .deferred[] is what a cap or a hold cut. Absence of .loom.yml is normal (config resolves from derived/global layers).
-- Every spawn action carries a Loom tier. Spawn with --provider $provider --job <kind> --tier <medium|high>; never construct provider-native flags.
+- Every spawn action carries a Loom tier. Spawn with --provider $provider --job <kind> --tier <medium|high>; when .spawn.ui_resource is true, include --reserve-ui. Never construct provider-native flags.
 - Lanes make EVERY tracker write through the verb script $lane_path (${verb_txt}long bodies via stdin or --file; run it bare for usage).
 - Long lane briefs travel as FILES: write the brief, then spawn-lane <id> --provider $provider --job <kind> --tier <tier> --brief <file> --cwd <wt>. spawn-lane stages it outside the worktree and agent.sh invokes the selected provider. A brief that tells the session to invoke a skill by slash command is refused; inline the work instead. Never hand-roll tracker mutations in a lane prompt.
 - You are headless: no human will ever read a question. If truly blocked, post a comment on the Build issue and exit. A wave that ends by asking questions is a failed wave."
@@ -2007,7 +2218,7 @@ _run_wave() { # _run_wave <stem> <provider> <tier> <brief> → exit code
     return $rc
 }
 
-_queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/host_probe/locks
+_queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/host_probe/repair token/locks
     local base request n=0 existing
     # Do not let two commands in one provider session enqueue the same lane id.
     # There is no pid yet for the ordinary live-lane guard to see.
@@ -2029,6 +2240,8 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     printf '%s\n' "$abs" > "$request/cwd"
     printf '%s\n' "$pregate" > "$request/pregate"
     printf '%s\n' "$host_probe" > "$request/host-probe"
+    printf '%s\n' "$reserve_ui" > "$request/reserve-ui"
+    printf '%s\n' "$repair_block_token" > "$request/repair-block-token"
     printf '%s\n' "$merge_lock" > "$request/merge-lock"
     printf '%s\n' "$on_done" > "$request/on-done"
     cp "$brief" "$request/brief.md" \
@@ -2049,7 +2262,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate host_probe merge_lock on_done launch_rc rc=0
+    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -2064,12 +2277,16 @@ _drain_lane_launches() {
         cwd=$(cat "$launching/cwd" 2>/dev/null || true)
         pregate=$(cat "$launching/pregate" 2>/dev/null || true)
         host_probe=$(cat "$launching/host-probe" 2>/dev/null || true)
+        reserve_ui=$(cat "$launching/reserve-ui" 2>/dev/null || true)
+        repair_block_token=$(cat "$launching/repair-block-token" 2>/dev/null || true)
         merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
         on_done=$(cat "$launching/on-done" 2>/dev/null || true)
         local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
                     --brief "$launching/brief.md" --cwd "$cwd")
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
         [ -z "$host_probe" ] || args+=(--host-probe "$host_probe")
+        [ "$reserve_ui" = 1 ] && args+=(--reserve-ui)
+        [ -z "$repair_block_token" ] || args+=(--repair-block-token "$repair_block_token")
         [ "$merge_lock" = 1 ] && args+=(--merge-lock)
         [ "$on_done" = 0 ] && args+=(--no-tick)
         launch_rc=0
@@ -2207,7 +2424,7 @@ _codex_host_is_ephemeral() {
 
 # Flag parsing for spawn-lane, accepting the flags before OR after the id
 # (order-tolerant). Sets, in the caller's scope: id, on_done, cwd, merge_lock,
-# pregate, host_probe, brief — and _spawn_shift, the count of arguments consumed, which
+# pregate, host_probe, repair_block_token, brief — and _spawn_shift, the count of arguments consumed, which
 # the caller shifts away to stand on the lane command. A malformed flag dies
 # here; the missing-id and missing-command guards are the caller's, because
 # only it sees the remainder.
@@ -2221,6 +2438,9 @@ _spawn_parse_flags() {
                        pregate="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --host-probe) shift; [ $# -gt 0 ] || die "spawn-lane: --host-probe needs an id"
                           host_probe="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
+            --reserve-ui) reserve_ui=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
+            --repair-block-token) shift; [ $# -gt 0 ] || die "spawn-lane: --repair-block-token needs a value"
+                                  repair_block_token="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
             --merge-lock) merge_lock=1; shift; _spawn_shift=$((_spawn_shift+1)) ;;
             --cwd) shift; [ $# -gt 0 ] || die "spawn-lane: --cwd needs a directory"
                    cwd="$1"; shift; _spawn_shift=$((_spawn_shift+2)) ;;
@@ -2563,6 +2783,10 @@ _spawn_build_epilogue() {
     # successor, so the next UI gate can launch immediately rather than wait
     # for a heartbeat. clear-lane owns the hard-kill path for the same file.
     epi="$epi rm -f '$LANES_DIR/$id.pregate' '$LANES_DIR/$id.ui-resource'; "
+    if [ "$(_lane_type "$id")" = repair ]; then
+        local _repair_ticket="${id#repair-}"
+        epi="$epi '$SELF_PATH' repair-lease-release '$_repair_ticket' >>'$LOGS_DIR/repair-leases.log' 2>&1 || true; "
+    fi
     # A provider lane may have queued its successor. Its host shell reaches
     # this epilogue only after the provider session exits, so the successor is
     # safe to detach here. Do this after releasing locks and before firing the
@@ -2830,7 +3054,7 @@ _cmd_spawn_lane() {
     # shape; `--no-tick` is the deliberate opt-out for a lane that must not
     # advance the loop. `--on-done-tick` is still accepted, now a no-op, so any
     # caller written against the old contract keeps working.
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" lane_head="" lane_base_head="" lane_base_ref="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" lane_head="" lane_base_head="" lane_base_ref="" _spawn_shift=0
     local handoff_from="${LOOM_LANE_ID:-}"
     _spawn_parse_flags "$@"; shift "$_spawn_shift"
     # Require a real id, and fail LOUDLY on a missing id or command. A
@@ -2850,11 +3074,11 @@ _cmd_spawn_lane() {
     esac
     _lane_type "$id" >/dev/null || die "spawn-lane: '$id' is not a structured
   lane id, so the scheduler could not tell what kind of lane it is (P10). Use
-  impl-<ticket>, gate-<ticket>[-r<round>], merge-<ticket>, or probe-<epic>."
+  impl-<ticket>, repair-<ticket>, gate-<ticket>[-r<round>], merge-<ticket>, or probe-<epic>."
     if [ -n "$provider" ]; then
         "$AGENT_SH" detect --provider "$provider" >/dev/null \
           || die "spawn-lane: no registered adapter for '$provider'"
-        case "$job" in implementation|gate|merge|probe) ;; *) die "spawn-lane: --job must be implementation|gate|merge|probe";; esac
+        case "$job" in implementation|repair|gate|merge|probe) ;; *) die "spawn-lane: --job must be implementation|repair|gate|merge|probe";; esac
         case "$agent_tier" in medium|high) ;; *) die "spawn-lane: --tier must be medium|high";; esac
         [ -n "$brief" ] || die "spawn-lane: provider jobs require --brief"
         [ $# -eq 0 ] || die "spawn-lane: provider jobs accept no raw command after --"
@@ -2867,18 +3091,35 @@ _cmd_spawn_lane() {
           || die "spawn-lane: --host-probe is valid only for a provider-backed probe lane"
         [ -z "$pregate" ] || die "spawn-lane: --host-probe and --pregate cannot be combined"
     fi
+    if [ "$reserve_ui" -eq 1 ]; then
+        [ -n "$provider" ] && [ "$job" = repair ] && [ "$(_lane_type "$id")" = repair ] \
+          || die "spawn-lane: --reserve-ui is valid only for a provider-backed repair lane"
+        [ -z "$pregate" ] && [ -z "$host_probe" ] \
+          || die "spawn-lane: --reserve-ui cannot be combined with --pregate or --host-probe"
+    fi
+    if [ -n "$repair_block_token" ]; then
+        [ -n "$provider" ] && [ "$job" = repair ] && [ "$(_lane_type "$id")" = repair ] \
+          || die "spawn-lane: --repair-block-token is valid only for a provider-backed repair lane"
+    fi
     # Planner deferral is explanatory, not the authority: a wave may hold an
     # old plan, a lane can chain directly, and a Codex request can wait in the
     # durable host queue. Re-read the lease at the final launch boundary so
     # all providers and all three paths enforce the same current fact.
     local _lease_iid="" _lease_json="" _lease_owner="" _lease_exp=""
     _lease_iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || _lease_iid=""
+    if [ "$(_lane_type "$id")" = repair ]; then
+        _repair_spawn_authority_locked "$_lease_iid" "$id" "$repair_block_token"
+        _repair_lease_ensure_locked "$_lease_iid" "$id"
+    fi
     if [ -n "$_lease_iid" ]; then
         _lease_json=$(_supervised_lease_read "$_lease_iid" 2>/dev/null) || _lease_json=""
     fi
     if [ -n "$_lease_json" ]; then
         _lease_owner=$(printf '%s' "$_lease_json" | jq -r '.owner')
         _lease_exp=$(printf '%s' "$_lease_json" | jq -r '.expires_at')
+        if [ "$(_lane_type "$id")" = repair ] && [ "$_lease_owner" = "$id" ]; then
+            : # the start-owned repair lane is the lease owner
+        else
         echo "spawn-lane: ticket #$_lease_iid has an active supervised-repair lease owned by $_lease_owner until $_lease_exp — not launching '$id'."
         _ev lane_launch_deferred id "$id" ticket "$_lease_iid" reason supervised_repair \
             owner "$_lease_owner" expires_at "$_lease_exp"
@@ -2889,6 +3130,7 @@ _cmd_spawn_lane() {
             return 0
         fi
         return 1
+        fi
     fi
     # Decision 4: `stop` cuts the direct handoffs too, so a ticket already in
     # flight finishes its CURRENT worker and nothing follows it. The chain
@@ -2965,7 +3207,7 @@ _cmd_spawn_lane() {
        && { [ -n "$provider" ] || [ -n "$handoff_from" ] || [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; }; then
         needs_aux_admission=1
     fi
-    if [ "$needs_aux_admission" -eq 1 ] || [ "$pregate" = ui ] || [ -n "$host_probe" ]; then
+    if [ "$needs_aux_admission" -eq 1 ] || [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
         if ! _lock_reserve "$AUX_LOCK_DIR"; then
             if [ "${LOOM_AUX_DRAIN_ID:-}" = "$id" ]; then return 75; fi
             if [ -n "$handoff_from" ]; then
@@ -3005,7 +3247,7 @@ _cmd_spawn_lane() {
         # handoff lives in the durable queue, while Claude/direct hosts record
         # the pregate beside the live lane. API pregates and non-UI lanes do
         # not enter this resource-specific admission path.
-        if { [ "$pregate" = ui ] || [ -n "$host_probe" ]; } && _ui_pregate_occupied; then
+        if { [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; } && _ui_pregate_occupied; then
             _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
             return "$aux_rc"
         fi
@@ -3165,7 +3407,7 @@ _cmd_spawn_lane() {
     else
         rm -f "$LANES_DIR/$id.pregate"
     fi
-    if [ "$pregate" = ui ] || [ -n "$host_probe" ]; then
+    if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
         printf '%s\n' ui > "$LANES_DIR/$id.ui-resource"
     else
         rm -f "$LANES_DIR/$id.ui-resource"
@@ -3277,7 +3519,7 @@ _cmd_spawn_lane() {
 # and start after acquire had already returned success. If spawn wins the lock,
 # acquire says to retry; if acquire wins, the inner launch observes the lease.
 cmd_spawn_lane() {
-    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
+    local id="" on_done=1 cwd="" merge_lock=0 pregate="" host_probe="" reserve_ui=0 repair_block_token="" brief="" provider="" job="" agent_tier="" _spawn_shift=0
     local iid="" rc=0 lock_rc=0
     _spawn_parse_flags "$@"
     iid=$(_supervised_lane_ticket "$id" 2>/dev/null) || iid=""
@@ -3291,6 +3533,11 @@ cmd_spawn_lane() {
     [ "$lock_rc" -eq 0 ] \
         || die "spawn-lane: cannot reserve ticket #$iid supervised-repair admission in '$SUPERVISED_ADMISSION_DIR'"
     _cmd_spawn_lane "$@" || rc=$?
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 75 ] \
+       && [ "$(_lane_type "$id" 2>/dev/null || true)" = repair ]; then
+        rm -f "$SUPERVISED_LEASE_DIR/$iid.json"
+        _ev supervised_lease_released ticket "$iid" owner "$id" source spawn_failure
+    fi
     rm -rf "$SUPERVISED_ADMISSION_DIR/$iid.lock.d"
     return "$rc"
 }
@@ -3834,6 +4081,20 @@ cmd_clear_lane() {
     fi
     [ -z "$launch_label" ] || "$LAUNCHCTL_CMD" remove "$launch_label" >/dev/null 2>&1 || true
     _release_lane_port "$1" || return $?
+    if [ "$(_lane_type "$1" 2>/dev/null || true)" = repair ]; then
+        local _repair_iid="${1#repair-}" _repair_lock_rc=0 _repair_owner=""
+        _lock_reserve "$SUPERVISED_ADMISSION_DIR/$_repair_iid.lock.d" || _repair_lock_rc=$?
+        [ "$_repair_lock_rc" -eq 0 ] || {
+            echo "clear-lane: repair lease admission for ticket #$_repair_iid is busy — preserving lane metadata for retry" >&2
+            return 1
+        }
+        _repair_owner=$(jq -r '.owner // empty' "$SUPERVISED_LEASE_DIR/$_repair_iid.json" 2>/dev/null || true)
+        if [ "$_repair_owner" = "$1" ]; then
+            rm -f "$SUPERVISED_LEASE_DIR/$_repair_iid.json"
+            _ev supervised_lease_released ticket "$_repair_iid" owner "$1" source clear_lane
+        fi
+        rm -rf "$SUPERVISED_ADMISSION_DIR/$_repair_iid.lock.d"
+    fi
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
           "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.ui-resource" "$LANES_DIR/$1.head" \
@@ -4400,7 +4661,7 @@ cmd_plan() { # plan [<snapshot.json>]  (default: stdin)
 # plan documents that drive normal scheduling; it is not another scheduler.
 cmd_mend_status() { # mend-status [<snapshot.json>]
     command -v jq >/dev/null 2>&1 || die "mend-status: jq required"
-    local jqd jqf src stopped
+    local jqd jqf src stopped armed
     jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
     jqf="$jqd/mend.jq"
     [ -f "$jqf" ] || die "mend-status: $jqf is missing — it holds the supervisory status rules and ships beside tick.sh"
@@ -4422,7 +4683,14 @@ cmd_mend_status() { # mend-status [<snapshot.json>]
     "$SELF_PATH" plan "$MEND_TMP/snapshot.json" > "$MEND_TMP/plan.json"
     stopped=false
     _loop_stopped && stopped=true
-    jq -L "$jqd" -n --argjson stopped "$stopped" \
+    armed=false
+    if [ -n "${LOOM_SKIP_SUPERVISION_CHECK:-}" ] \
+       && [ -n "${LOOM_TEST_SCHEDULER_ARMED:-}" ]; then
+        [ "$LOOM_TEST_SCHEDULER_ARMED" = 1 ] && armed=true
+    elif _agent_armed; then
+        armed=true
+    fi
+    jq -L "$jqd" -n --argjson stopped "$stopped" --argjson armed "$armed" \
         --arg min_wave_gap "$(cfg min_wave_gap_minutes 10)" \
         --arg stall_action "$(cfg stall_action resume)" \
         --slurpfile snapshot "$MEND_TMP/snapshot.json" \
@@ -5293,6 +5561,7 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
     _require_tracker "$REPO_ROOT" "install" >/dev/null
     _require_credential "install"
     _assert_build_provider "$provider"
+    _assert_build_supervision_for_install
     [ -n "${LOOM_SKIP_AGENT_PREFLIGHT:-}" ] || \
       "$AGENT_SH" preflight --provider "$provider" --job wave --tier "$(_tier_cfg wave_tier medium)" --cwd "$REPO_ROOT" >/dev/null
     if [ "$dry" -eq 1 ]; then
@@ -5503,6 +5772,7 @@ cmd_agent_status() {
 case "${1:-}" in
     tick)         shift; cmd_tick "$@" ;;
     supervise)    shift; cmd_supervise "$@" ;;
+    repair-lease-release) shift; cmd_repair_lease_release "$@" ;;
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
     run-host-probe) shift; cmd_run_host_probe "$@" ;;
     drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;

@@ -12,7 +12,7 @@
 include "lib";
   ($iid) as $n
   | (map(select(.ev == "lane_spawn" or .ev == "lane_exit"))
-     | map(select(.id | test("^(impl|gate|merge)-\($n)(-|$)")))) as $ls
+     | map(select(.id | test("^(impl|gate|merge|repair)-\($n)(-|$)")))) as $ls
   | (map(select(.ev == "snapshot"))
      | map({ts, t, state: (.tickets[$n] // null)})
      | map(select(.state != null))) as $st

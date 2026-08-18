@@ -276,6 +276,10 @@ include "lib";
     | ([($bi.labels // [])[] | select(startswith("provider::"))]) as $provider_labels
     | (($provider_labels[0] // "") | ltrimstr("provider::")
        | if length > 0 then . else null end) as $provider
+    | ([($bi.labels // [])[]
+        | select(. == "supervision::autonomous-repair-v1")]) as $supervision_labels
+    | (if ($supervision_labels | length) == 1
+       then "autonomous-repair-v1" else null end) as $supervision_policy
     | ($bi.project? // null) as $home
     | ($links[0]) as $L | ($mrs[0]) as $M | ($tnotes[0]) as $N
     | ($supervised_leases[0] // []) as $SL
@@ -288,7 +292,7 @@ include "lib";
     # by `summary.stranded` (in-progress AND absent here) and the P51 brief
     # filter (present here, in ANY state) so the two definitions cannot drift.
     | ($lanes | map(select(.state != "dead")
-                 | .id | sub("^(impl|gate|merge|probe)-"; "")
+                 | .id | sub("^(impl|repair|gate|merge|probe)-"; "")
                  | sub("-r[0-9]+$"; ""))) as $working
     # Which tickets already have a verifier on them. Needed because a lane may
     # now spawn its own gate (P6), and the completion tick it fires lands on a
@@ -361,6 +365,11 @@ include "lib";
                 ((($M[$t.id | tostring]) // [])
                  | map(select((.state // "") == "open")) | first | .sha // null))),
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
+            supervision_attention:
+              (if ($lb | index("supervision::awaiting-human")) != null
+               then {category: ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).category) // "human-attention"),
+                     body: ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).body) // null)}
+               else null end),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),
             tier_selection: tier_of_job($lb; $rej; $config),
@@ -534,7 +543,9 @@ include "lib";
     | { generated_at: $generated_at, logs_dir: $logs_dir, config: $config,
         build: (if $bi == null then null
                 else { id: $bi.id, label: $label, title: $bi.title, url: ($bi.url // null),
-                       provider: $provider, provider_labels: $provider_labels } end),
+                       provider: $provider, provider_labels: $provider_labels,
+                       supervision_policy: $supervision_policy,
+                       supervision_labels: $supervision_labels } end),
         # P57: --brief drops `acceptance` from every epic that isn't awaiting
         # a probe — it's 88% of the epics block and only step 6's probe-brief
         # assembly ever reads it. `needs_probe` IS `epics_awaiting_probe`'s own
@@ -549,7 +560,9 @@ include "lib";
         # just not carried here — `other_iids` is the bare list so a wave can
         # still name one without a second read. Plain `snapshot` (the default)
         # never filters: `$brief` is false and every ticket keeps its row.
-        tickets: (if $brief then [$tickets[] | select(is_actionable(.; $working))]
+        tickets: (if $brief then [$tickets[]
+                                  | select(is_actionable(.; $working)
+                                           or (.state == "blocked" and $supervision_policy != null))]
                   else $tickets end),
         # Gate priority needs blocked dependents even when --brief correctly
         # collapses their full rows. Carry only the immutable graph fields the
@@ -557,7 +570,10 @@ include "lib";
         dependency_edges: [$tickets[]
                            | select((.blocked_by | length) > 0)
                            | {id, blocked_by: [.blocked_by[] | {id, closed}]}],
-        other_iids: (if $brief then [$tickets[] | select(is_actionable(.; $working) | not) | .id]
+        other_iids: (if $brief then [$tickets[]
+                                     | select((is_actionable(.; $working)
+                                               or (.state == "blocked" and $supervision_policy != null)) | not)
+                                     | .id]
                      else [] end),
         supervised_leases: $SL,
         lanes: $lanes,
@@ -588,7 +604,7 @@ include "lib";
             # Only `impl` fills `max_lanes`; gates, merges and probes share
             # `max_aux_lanes` so they can never crowd out implementers (P10).
             lanes_running_by_type:
-              (["impl","gate","merge","probe","unknown"]
+              (["impl","repair","gate","merge","probe","unknown"]
                | map(. as $t | {key: $t,
                      value: ($lanes | map(select(lane_holds_capacity and .type == $t)) | length)})
                | from_entries),
@@ -597,7 +613,7 @@ include "lib";
             # fills and therefore does not force an otherwise empty wave.
             impl_slots_free: ((($config.max_lanes | tonumber?) // 4)
                               - ($lanes | map(select(lane_holds_capacity
-                                 and .type == "impl")) | length)),
+                                 and (.type == "impl" or .type == "repair"))) | length)),
             # A merge is in flight in its own lane; scheduling continues around
             # it, but a second merge waits (P5).
             merge_in_flight: ($merge_owner != ""),

@@ -145,4 +145,15 @@ RTENV "$TICK" retro --nonsense >/dev/null 2>&1 \
     && bad "retro: an unknown argument was accepted" \
     || ok "retro: an unknown argument is refused rather than ignored"
 
+# Start-owned repair workers are implementation capacity and must contribute
+# to the ticket's work/cost attribution. Otherwise autonomous supervision
+# makes the build retro under-report the very repair effort it initiated.
+_lane 2198 repair-2 repair 0 30
+out=$(RTENV "$TICK" retro --build build-r 2>&1)
+case "$out" in
+    *"#2   open 20m0s   work 4m40s   wait 15m20s"*)
+        ok "retro: repair work is attributed to its ticket" ;;
+    *) bad "retro: repair lane missing from ticket work ($(printf '%s' "$out" | grep '#2 '))" ;;
+esac
+
 test_finish

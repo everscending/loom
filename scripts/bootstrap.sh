@@ -281,6 +281,32 @@ cmd_provider_label() { # provider-label <provider> [--dry-run]
     echo "provider-label: created provider::$provider"
 }
 
+cmd_supervision_labels() { # supervision-labels [--dry-run]
+    local dry=0 existing label color description
+    [ "${1:-}" = --dry-run ] && dry=1
+    [ "$#" -le 1 ] || die "supervision-labels: usage: supervision-labels [--dry-run]"
+    _require_repo supervision-labels
+    _require_tracker "$REPO_ROOT" supervision-labels >/dev/null
+    local TRACKER
+    TRACKER="$(_tracker_cmd "${LIB_SH%/*}" "$REPO_ROOT")"
+    existing=$("$TRACKER" labels | jq -r '.[].name') \
+      || die "supervision-labels: could not read labels"
+    while IFS="$(printf '\034')" read -r label color description; do
+      [ -n "$label" ] || continue
+      if printf '%s\n' "$existing" | grep -qxF "$label"; then
+        echo "supervision-labels: $label already present"
+      elif [ "$dry" -eq 1 ]; then
+        echo "supervision-labels: would create $label"
+      else
+        "$TRACKER" label-create "$label" "$color" "$description" >/dev/null
+        echo "supervision-labels: created $label"
+      fi
+    done <<EOF
+supervision::autonomous-repair-v1$(printf '\034')#34495E$(printf '\034')Start-bound authority for same-scope technical repair lanes
+supervision::awaiting-human$(printf '\034')#D35400$(printf '\034')Supervisor found a decision or external action only a human can provide
+EOF
+}
+
 # `all` used to discard its arguments entirely, so `bootstrap.sh all --dry-run`
 # really created labels and really wrote settings — the exact opposite of what
 # the flag promises. Only --dry-run is meaningful here (it belongs to labels
@@ -329,8 +355,9 @@ case "${1:-}" in
     states)        shift; cmd_states "$@" ;;
     guardrails)    shift; cmd_guardrails "$@" ;;
     provider-label) shift; cmd_provider_label "$@" ;;
+    supervision-labels) shift; cmd_supervision_labels "$@" ;;
     settings)      shift; cmd_settings "$@" ;;
     all)           shift; cmd_all "$@" ;;
     "")            cmd_all ;;
-    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | states [--dry-run] | guardrails <provider> | provider-label <provider> [--dry-run] | settings [--force]" ;;
+    *) die "usage: bootstrap.sh [all [--dry-run]] | global-config [--force] | labels [--dry-run] | states [--dry-run] | guardrails <provider> | provider-label <provider> [--dry-run] | supervision-labels [--dry-run] | settings [--force]" ;;
 esac

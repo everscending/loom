@@ -1,10 +1,23 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 13:04 America/Chicago
+Last updated: 2026-08-17 20:09 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
+
+- [ ] **IN PROGRESS — Move proactive blocker supervision into `/loom start`.**
+  The isolated implementation binds a tracker-resident Build policy before
+  scheduler install, deterministically ranks blocked tickets by downstream
+  impact, directly dispatches all-blocked repair lanes without a scheduling
+  agent, shares implementation/UI capacity, freezes block generation and MR
+  head, and rechecks both before lease publication. Restricted repair outcomes
+  either return a clean pushed head to independent Review or persist one
+  awaiting-human disposition. Crash cleanup releases exact ownership. Mend is
+  now a read-only assertion and fails an unowned candidate after one heartbeat
+  grace. Focused supervision is 22/22; the pre-audit full suite was
+  1,383/1,383. Remaining before DONE: rerun the full suite after the final Mend
+  audit tightening, commit, and record the implementation revision.
 
 - [x] **DONE — Add contract-grounded active-build supervision.** Implemented
   as `/loom mend` in `83ca609` (`feat(mend): add build supervisor`), with

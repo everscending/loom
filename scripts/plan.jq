@@ -49,13 +49,13 @@ include "lib";
 def spawnable($id):
     ($id | type) == "string"
     and ($id | test("^[A-Za-z0-9_-]+$"))
-    and ($id | test("^(impl|gate|merge)-[0-9]+(-r[0-9]+)?$")
+    and ($id | test("^(impl|repair|gate|merge)-[0-9]+(-r[0-9]+)?$")
             or test("^probe-[A-Za-z0-9][A-Za-z0-9_-]*$"));
 
 # The ticket a lane belongs to, as a string; a probe id yields itself and
 # never matches a ticket. Same split as snapshot.jq's `$working` and lib.jq's
 # `stage` — one shape of id, read the same way everywhere.
-def lane_ticket($id): $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
+def lane_ticket($id): $id | sub("^(impl|repair|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 def lane_round($id): (($id | capture("-r(?<n>[0-9]+)$") | .n | tonumber) // 1);
 def lease_why:
     "supervised repair lease owned by \(.supervised_lease.owner) until epoch \(.supervised_lease.expires_at) — ordinary implementation, gate and merge launches wait for release or expiry";
@@ -116,7 +116,7 @@ else
 | (($cfg.merge_attempt_cap | tonumber?) // 2) as $merge_cap
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
 | (($cfg.rejection_cap | tonumber?) // 2) as $rejection_cap
-| (($sum.impl_slots_free | tonumber?) // 0) as $impl_free
+| (($sum.impl_slots_free | tonumber?) // 0) as $impl_slots_free
 | (($sum.ui_pregate_occupied // false) == true) as $ui_pregate_occupied
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
@@ -149,6 +149,115 @@ else
      | select(.state != "blocked" and .blocked_report != null
               and ((.blocked_report.released // false) == false)) ]) as $reported_blocks
 | ([ $reported_blocks[] | .id ]) as $reported_block_ids
+
+# =========================================================================
+# Start-owned supervision. A blocked ticket is not ordinary implementation
+# work, but a Build issue explicitly bound to autonomous-repair-v1 authorizes
+# the scheduler to place same-scope technical diagnosis in a repair lane. All
+# selection is deterministic; the repair agent receives one frozen choice.
+# =========================================================================
+
+| def open_pairs:
+    [ $dependency_edges[] as $dependent
+      | ($dependent.blocked_by // [])[]
+      | select((.closed // false) != true)
+      | {blocker: .id, dependent: $dependent.id} ];
+  def downstream($frontier; $pairs; $seen):
+    ($frontier | unique
+     | map(. as $candidate | select(($seen | index($candidate)) == null))) as $new
+    | if ($new | length) == 0 then $seen
+      else ([ $pairs[] as $pair
+              | select(($new | index($pair.blocker)) != null)
+              | $pair.dependent ] | unique) as $next
+      | downstream($next; $pairs; (($seen + $new) | unique))
+      end;
+  def direct_dependents($iid; $pairs):
+    [$pairs[] | select(.blocker == $iid) | .dependent] | unique | length;
+  def dependency_impact($iid; $pairs):
+    downstream([$iid]; $pairs; [])
+    | map(select(. != $iid)) | unique | length;
+
+  (open_pairs) as $pairs
+| ([ $tickets[]
+     | select(.state == "blocked")
+     | select((.blocked_report.at // null) != null)
+     | select(.supervised_lease == null)
+     | select(.supervision_attention == null)
+     | . as $candidate
+     | select(any($lanes[];
+                  lane_holds_capacity
+                  and .type == "repair"
+                  and lane_ticket(.id) == ($candidate.id | tostring)) | not)
+     | . + {_direct_dependents: direct_dependents(.id; $pairs),
+            _dependency_impact: dependency_impact(.id; $pairs)} ]
+   | sort_by([(-._dependency_impact), (-._direct_dependents),
+              (.blocked_report.at // ""), .id])) as $repairable_blockers
+| ([ $tickets[]
+     | select(.state == "blocked" and .supervision_attention != null)
+     | {step:"supervise", kind:"awaiting-human", ticket:.id,
+        why:(.supervision_attention.body // .blocked_report.body // "human decision required")} ])
+  as $repair_attention
+| (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
+   then (reduce $repairable_blockers[] as $candidate
+          ({items:[], slots:$impl_slots_free, ui:$ui_pregate_occupied};
+           if .slots <= 0 then .
+           elif ($candidate.tier == "ui" and .ui) then .
+           else .items += [$candidate]
+              | .slots -= 1
+              | if $candidate.tier == "ui" then .ui = true else . end
+           end) | .items)
+   else [] end) as $repair_take
+| ([$repair_take[].id]) as $repair_take_ids
+| (any($repair_take[]; .tier == "ui")) as $repair_takes_ui
+| ([ $repair_take[]
+     | ([.related_merge_requests[]? | select(.state == "open")] | first) as $mr
+     | ("repair-\(.id)") as $lid
+     | select(spawnable($lid))
+     | {step:"supervise", kind:"spawn", lane:$lid, ticket:.id,
+        dependency_impact:._dependency_impact,
+        direct_dependents:._direct_dependents,
+        block_token:(.blocked_report.at // null),
+        spawn:{id:$lid, type:"repair", provider:$provider,
+               tier:($cfg.rework_tier // "high"), pregate:null,
+               ui_resource:(.tier == "ui"), merge_lock:false,
+               expected_head:($mr.sha // null),
+               prepare:(if $mr == null
+                        then {via:"worktree.sh",argv:["prepare","--repo","<repo-root>","--ticket",(.id|tostring),"--base",($cfg.base // "<base>")]}
+                        else null end),
+               cwd_from:(if $mr == null
+                         then "the ticket worktree prepared from the integration base"
+                         else "the existing ticket worktree at blocked MR head \($mr.sha)" end),
+               brief:{ticket_contract:(.contract // null),
+                      blocked_report:(.blocked_report // null),
+                      block_token:(.blocked_report.at // null),
+                      dependency_impact:._dependency_impact,
+                      direct_dependents:._direct_dependents,
+                      allowed_outcomes:["same-scope technical repair to independent review",
+                                        "one durable human-attention result"]}},
+        why:"start-owned supervision selected this unowned blocker by downstream impact"} ])
+  as $repair_actions
+| ([ $repair_attention[] ]
+   + [ $tickets[]
+       | select(.state == "blocked" and .supervision_attention == null
+                and (.blocked_report.at // null) == null)
+       | {step:"supervise", kind:"repair-report-missing", ticket:.id,
+          why:"autonomous repair requires a structured blocked report with a generation token"} ]
+   + (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
+      then [ $repairable_blockers[]
+             | . as $candidate
+             | select(($repair_take_ids | index($candidate.id)) == null)
+             | if .tier == "ui" and ($ui_pregate_occupied or $repair_takes_ui)
+               then {step:"supervise", kind:"ui-resource", ticket:.id,
+                     why:"the shared host UI resource is already reserved"}
+               else {step:"supervise", kind:"capacity", ticket:.id,
+                     why:"no implementation/repair slot free"}
+               end ]
+      elif ($repairable_blockers | length) > 0
+      then [{step:"supervise", kind:"supervision-policy-missing",
+             why:"the active Build issue is not bound to supervision::autonomous-repair-v1"}]
+      else [] end)) as $repair_deferred
+| (($impl_slots_free - ($repair_actions | length))
+   | if . < 0 then 0 else . end) as $impl_free
 
 # =========================================================================
 # Step 2 — harvest. The lane states are already classified by `lane-status`
@@ -584,7 +693,7 @@ else
 # requires an EMPTY board — an unaccepted epic or a ticket parked in any state
 # means the build is not finished, however many tickets merged. (paid:
 # build-2's completion wave closed the build over three unprobed epics.)
-| (if ($sum.all_blocked // false)
+| (if ($sum.all_blocked // false) and ($repair_actions | length) == 0
    then [ { kind: "halted-report", build: ($s.build.id),
             why: "every open ticket is blocked or waiting on a blocker — the build is halted and a human has to move it",
             verb: "tick.sh notify build_halted …" } ]
@@ -606,11 +715,11 @@ else
 # =========================================================================
 
 | ($kill_stale + $kill_overrun + $block_overrun + $repairs + $blocked_repairs + $clear_dead
-   + $gate_actions + $block_rejections + $fill_actions
+   + $repair_actions + $gate_actions + $block_rejections + $fill_actions
    + $block_merge_cap + $merge_actions + $probe_actions) as $actions
 | ($res_pregate + $res_merge_failed + $res_blocked + $res_merged_open + $res_probe_criteria + $res_build)
   as $residue
-| ($gate_deferred + $fill_deferred + $merge_deferred + $probe_deferred) as $deferred
+| ($repair_deferred + $gate_deferred + $fill_deferred + $merge_deferred + $probe_deferred) as $deferred
 | { generated_at: $s.generated_at,
     build: { id: $s.build.id, label: $s.build.label, provider: $provider },
     reason: (if ($actions | length) == 0 and ($residue | length) == 0

@@ -5,6 +5,11 @@
 
 include "lib";
 
+def iso_epoch:
+  if type == "string"
+  then (sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601?)
+  else null end;
+
 def actionable_idle_of($s; $p; $stopped):
   if ($stopped == false)
      and (($s.summary.lanes_running // 0) == 0)
@@ -18,7 +23,7 @@ def actionable_idle_of($s; $p; $stopped):
   end;
 
 def lane_ticket_of($id):
-  $id | sub("^(impl|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
+  $id | sub("^(impl|repair|gate|merge)-"; "") | sub("-r[0-9]+$"; "");
 
 def expected_owner_of($state):
   if $state == "in-progress" then "impl"
@@ -50,6 +55,52 @@ def unowned_stages_of($s; $p; $stopped):
         boundary: "observe through the next handoff or scheduler heartbeat; diagnose if the owning lane still has not started"}]
   end;
 
+# Mend does not construct or dispatch the repair queue. It audits the
+# dispositions already derived by the start-owned planner: scheduled repair,
+# capacity deferral, active lease/lane, or explicit awaiting-human state.
+def supervision_audit_of($s; $p; $stopped; $armed):
+  ([($p.actions // [])[]
+    | select(.step == "supervise" and .kind == "spawn")
+    | {ticket, lane, block_token, dependency_impact, direct_dependents}]) as $candidates
+  | ([($p.deferred // [])[]
+      | select(.step == "supervise" and .kind == "awaiting-human")
+      | .ticket]) as $awaiting
+  | ([($p.deferred // [])[]
+      | select(.step == "supervise" and (.kind == "capacity" or .kind == "ui-resource"))
+      | .ticket]) as $capacity
+  | (($s.generated_at | iso_epoch) // 0) as $now
+  | ([$candidates[]
+      | select((.block_token | iso_epoch) as $at
+               | $at == null or $now == 0 or ($now - $at) > 120)
+      | .ticket]) as $candidate_gaps
+  | ([($s.tickets // [])[]
+      | select(.state == "blocked")
+      | . as $ticket
+      | ($ticket.id) as $iid
+      | select(
+          (($candidates | map(.ticket) | index($iid)) == null)
+          and (($awaiting | index($iid)) == null)
+          and (($capacity | index($iid)) == null)
+          and .supervised_lease == null
+          and (any(($s.lanes // [])[];
+                   .state == "running"
+                   and .type == "repair"
+                   and lane_ticket_of(.id) == ($ticket.id | tostring)) | not))
+      | .id] + $candidate_gaps | unique) as $gaps
+  | {policy: ($s.build.supervision_policy // null),
+     scheduler_armed: $armed,
+     candidates: $candidates,
+     awaiting_human: $awaiting,
+     capacity_deferred: $capacity,
+     ownership_gaps: $gaps,
+     assertion:
+       (if $stopped then "stopped"
+        elif ($s.build.supervision_policy // null) != "autonomous-repair-v1"
+        then "fail"
+        elif ($armed | not) then "fail"
+        elif ($gaps | length) > 0 then "fail"
+        else "pass" end)};
+
 def attention_of($s; $p; $stopped):
   ([($s.warnings // [])[] |
       {kind: "snapshot-warning", contract: "MEND-STATE-01", message: .}]
@@ -75,6 +126,7 @@ def attention_of($s; $p; $stopped):
 
 $snapshot[0] as $s
 | $plan[0] as $p
+| supervision_audit_of($s; $p; $stopped; $armed) as $supervision
 | {
     schema: 1,
     generated_at: $s.generated_at,
@@ -99,5 +151,6 @@ $snapshot[0] as $s
       residue: ($p.residue // []),
       deferred: ($p.deferred // [])
     },
+    supervision: $supervision,
     attention: attention_of($s; $p; $stopped)
   }

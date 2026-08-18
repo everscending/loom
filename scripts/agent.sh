@@ -41,7 +41,7 @@ _load_adapter() {
     . "$adapter"
 }
 
-_valid_job() { case "$1" in wave|implementation|gate|merge|probe) return 0;; *) return 1;; esac; }
+_valid_job() { case "$1" in wave|implementation|repair|gate|merge|probe) return 0;; *) return 1;; esac; }
 _valid_tier() { case "$1" in medium|high) return 0;; *) return 1;; esac; }
 _absolute_dir() { case "$1" in /*) [ -d "$1" ];; *) return 1;; esac; }
 

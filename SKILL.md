@@ -47,10 +47,10 @@ technique of its own.
 | `epics` | 3 | Epic breakdown, adjusted on a surface, created in tracker |
 | `tickets` | 4 | Tickets per epic with contracts, tiers, PRD IDs, edges |
 | `build` | 5 | Define a new build (epic selection) or adjust one — **never starts it** |
-| `start` | 5→6 | Detect/bind the provider, sync its guardrails, then kick the unattended loop; also resumes |
+| `start` | 5→6 | Bind provider + supervision policy, sync guardrails, then run the unattended loop; also resumes |
 | `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
 | `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
-| `mend [--once\|--observe-only]` | 6 | Continuous progress supervision and repair while the scheduler keeps ownership |
+| `mend [--once\|--observe-only]` | 6 | Read-only assertion that start-owned supervision is working |
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
@@ -91,7 +91,7 @@ back.
 **Lanes, and chaining as a fast path.** Lanes are spawned with
 `tick.sh spawn-lane <id> --provider <id> --job <kind> --tier <medium|high>
 --brief <file> --cwd <worktree>`, whose `<id>` is
-`impl-<ticket>`, `gate-<ticket>[-r<round>]`, `merge-<ticket>` or
+`impl-<ticket>`, `repair-<ticket>`, `gate-<ticket>[-r<round>]`, `merge-<ticket>` or
 `probe-<epic-slug>` — the scheduler reads a lane's kind off its name, and
 `spawn-lane` refuses anything else, so **slugify the epic**: an id with a
 space corrupts every reader of lane state. A finishing lane fires the next
@@ -137,6 +137,13 @@ lane (`LOOM_LANE_ID` set) while it exists. A lane that cannot chain is not an
 error — the next wave does the same work. The timer, the quiet gate and the
 switch:
 [references/scheduling.md](references/scheduling.md).
+
+**Continuous supervision belongs to `start`.** The installed scheduler
+deterministically detects, ranks, admits, reserves, wakes, deduplicates, and
+cleans up repair work before an agent is involved. Agents receive only one
+bounded, frozen repair ticket. The policy, repair outcomes, and human boundary
+are [references/supervision.md](references/supervision.md). `mend` only asserts
+that this mechanism is healthy.
 
 **Headless runtime and permissions.** Every paid session goes through
 `scripts/agent.sh`; core code passes only provider, Loom job kind, tier, cwd,
@@ -486,11 +493,9 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 [references/build-controls.md](references/build-controls.md); `replan` is in
 [references/phases-1-5.md](references/phases-1-5.md).
 
-- **`mend [--once|--observe-only]`** — stay attached to an active build,
-  close or diagnose actionable idle gaps, help rejection-cap tickets, and
-  turn every confirmed avoidable gap into a regression-backed Loom repair,
-  including any host preflight that suppresses otherwise safe wave actions,
-  without becoming another scheduler or resuming a stopped loop:
+- **`mend [--once|--observe-only]`** — read and report whether the policy,
+  scheduler, lanes, leases, capacity, UI reservation, continuations, panes,
+  and awaiting-human dispositions agree. It never repairs or schedules:
   [references/mend.md](references/mend.md).
 - **`triage`** — every blocked ticket on one `/lavish` surface, six actions
   each (requeue, to review, `rescope`, `model-tier`, leave, close), applied as

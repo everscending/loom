@@ -89,7 +89,7 @@ export LOOM_GLOBAL_CONFIG="$T/global.yml"
 #     9 tests bootstrap itself and switches it back on via BOOTENV.
 export LOOM_WAVE_CMD="true"
 export LOOM_SKIP_BOOTSTRAP=1
-export LOOM_PROVIDER=claude LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT=1
+export LOOM_PROVIDER=claude LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_SUPERVISION_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT=1
 # Most fixture base-checks assert Git tree selection with tiny synthetic repos;
 # they must not contact real package managers merely because a fixture happens
 # to contain a manifest. Section 16 explicitly enables preparation for the
