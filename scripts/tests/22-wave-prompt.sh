@@ -43,6 +43,23 @@ case "$WPROMPT" in
   *"--tier <medium|high>"*) ok "P48: the prompt transports Loom tiers through the agent interface" ;;
   *) bad "P48: the prompt does not describe the provider-neutral tier spawn" ;;
 esac
+
+# A released wave carries its creator's complete contract in the staged brief;
+# a later skill activation cannot replace it via the ambient slash command.
+PIN_ROOT="$WP/pinned-runtime"; mkdir -p "$PIN_ROOT"
+printf 'PINNED-SKILL-CONTRACT-A\n' > "$PIN_ROOT/SKILL.md"
+: > "$WP/pinned-brief.md"
+LOOM_HOME="$WP/pinned-home" LOOM_REPO="$WP/repo" \
+  LOOM_RUNTIME_RELEASE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa LOOM_RUNTIME_ROOT="$PIN_ROOT" \
+  LOOM_WAVE_CMD="cp \"\$LOOM_SCRATCH/wave.md\" '$WP/pinned-brief.md'" \
+  "$TICK" tick --provider claude >/dev/null 2>&1
+if head -1 "$WP/pinned-brief.md" | grep -q 'contract pinned to runtime' \
+   && grep -q 'PINNED-SKILL-CONTRACT-A' "$WP/pinned-brief.md" \
+   && ! head -1 "$WP/pinned-brief.md" | grep -q '/loom tick'; then
+    ok "runtime release: wave brief embeds the creator release's skill contract"
+else
+    bad "runtime release: wave can reload a different ambient skill contract"
+fi
 # Production waves consume a plan derived before the provider sandbox opens.
 # Opt this command-seam test into that path and prove the prompt no longer asks
 # the provider to prepare worktrees itself.

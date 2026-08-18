@@ -192,6 +192,27 @@ SNAP_BATCH="${SNAP_BATCH:-8}"
 # Absolute path to this script, so a lane can re-invoke it on completion
 # regardless of the cwd it exits in.
 SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
+LOOM_RUNTIME_HOME="${LOOM_RUNTIME_HOME:-$HOME/.loom/runtime}"
+LOOM_RUNTIME_SELECTOR="${LOOM_RUNTIME_SELECTOR:-$LOOM_RUNTIME_HOME/consumers/$REPO_KEY.active}"
+LOOM_RUNTIME_LAUNCHER="${LOOM_RUNTIME_LAUNCHER:-$LOOM_RUNTIME_HOME/bin/loom-runtime}"
+export LOOM_RUNTIME_HOME LOOM_RUNTIME_SELECTOR LOOM_RUNTIME_LAUNCHER
+
+_valid_runtime_release() {
+    [ "${#1}" -eq 40 ] || return 1
+    case "$1" in *[!0-9a-f]*) return 1 ;; esac
+}
+
+_runtime_ready() {
+    [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]
+}
+
+# Public commands enter the selected immutable release once one exists. The
+# runtime administration verb stays in the checkout so it can publish a new
+# committed tree rather than trying to publish the archive it is running from.
+if [ -z "${LOOM_RUNTIME_RELEASE:-}" ] && [ "${1:-}" != runtime ] \
+   && _runtime_ready; then
+    exec "$LOOM_RUNTIME_LAUNCHER" run -- tick "$@"
+fi
 # Sibling script, same seam pattern as LAUNCHCTL_CMD: `start` raises the herdr
 # viewer itself (see _raise_viewer), and the test suite must never open a real
 # pane.
@@ -2405,7 +2426,11 @@ _launch_wave() { # the spend half of cmd_tick: prompt assembly through the
     # "repo was never bootstrapped" (build-1 2026-08-02: the recovery wave
     # concluded exactly that, asked two questions to nobody, and exited having
     # harvested nothing — stalling the build).
-    LOOM_WAVE_PROMPT="/loom tick
+    local wave_entry="/loom tick"
+    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}"; then
+      wave_entry="Loom scheduling contract pinned to runtime $LOOM_RUNTIME_RELEASE."
+    fi
+    LOOM_WAVE_PROMPT="$wave_entry
 
 Wave context from tick.sh — trust it over rediscovery:
 - repo root: $REPO_ROOT (this repo IS loom-managed; bootstrap already ran)
@@ -2419,6 +2444,11 @@ Wave context from tick.sh — trust it over rediscovery:
     export LOOM_WAVE_PROMPT
     local wave_brief="$LOOM_SCRATCH/wave.md"
     printf '%s\n' "$LOOM_WAVE_PROMPT" > "$wave_brief"
+    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}" \
+       && [ -f "${LOOM_RUNTIME_ROOT:-}/SKILL.md" ]; then
+        printf '\n## Authoritative pinned Loom contract\n\n' >> "$wave_brief"
+        cat "$LOOM_RUNTIME_ROOT/SKILL.md" >> "$wave_brief"
+    fi
     # Seconds alone collided when two test/manual ticks began in one second:
     # the later limit parser inherited reset_at=1 from the earlier log and
     # treated an expired timestamp as a fresh pause (full-suite run 2026-08-15).
@@ -2532,6 +2562,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     printf '%s\n' "$repair_block_token" > "$request/repair-block-token"
     printf '%s\n' "$merge_lock" > "$request/merge-lock"
     printf '%s\n' "$on_done" > "$request/on-done"
+    printf '%s\n' "${LOOM_RUNTIME_RELEASE:-legacy}" > "$request/runtime-release"
     if [ "$(_lane_type "$id")" = merge ]; then
         queued_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
         [ -n "$queued_head" ] \
@@ -2556,7 +2587,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done expected_head launch_rc rc=0
+    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done expected_head runtime_release launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -2576,6 +2607,7 @@ _drain_lane_launches() {
         merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
         on_done=$(cat "$launching/on-done" 2>/dev/null || true)
         expected_head=$(cat "$launching/expected-head" 2>/dev/null || true)
+        runtime_release=$(cat "$launching/runtime-release" 2>/dev/null || true)
         local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
                     --brief "$launching/brief.md" --cwd "$cwd")
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
@@ -2586,8 +2618,17 @@ _drain_lane_launches() {
         [ "$on_done" = 0 ] && args+=(--no-tick)
         [ -z "$expected_head" ] || args+=(--expected-head "$expected_head")
         launch_rc=0
-        LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
-          "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
+        if _valid_runtime_release "$runtime_release" && [ -x "$LOOM_RUNTIME_LAUNCHER" ]; then
+            LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
+              "$LOOM_RUNTIME_LAUNCHER" run --release "$runtime_release" -- tick spawn-lane "${args[@]}" \
+              || launch_rc=$?
+        elif [ "$runtime_release" = legacy ] && [ ! -f "$LOOM_RUNTIME_SELECTOR" ]; then
+            LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
+              "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
+        else
+            echo "tick: deferred host launch ${id:-unknown} has no trusted creator release" >&2
+            launch_rc=1
+        fi
         if [ "$launch_rc" -eq 0 ]; then
             rm -rf "$launching"
         elif [ "$launch_rc" -eq 75 ]; then
@@ -4005,6 +4046,11 @@ _cmd_spawn_lane() {
     else
         rm -f "$LANES_DIR/$id.head"
     fi
+    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}"; then
+        printf '%s\n' "$LOOM_RUNTIME_RELEASE" > "$LANES_DIR/$id.release"
+    else
+        rm -f "$LANES_DIR/$id.release"
+    fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a
@@ -4038,6 +4084,9 @@ _cmd_spawn_lane() {
               "HOME=${HOME:-}" "PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}" \
               "PORT=$PORT" "APP_BASE_URL=$APP_BASE_URL" \
               "LOOM_REPO=$REPO_ROOT" "LOOM_HOME=$LOOM_HOME" "LOOM_PROVIDER=${LOOM_PROVIDER:-}" \
+              "LOOM_RUNTIME_HOME=$LOOM_RUNTIME_HOME" "LOOM_RUNTIME_SELECTOR=$LOOM_RUNTIME_SELECTOR" \
+              "LOOM_RUNTIME_LAUNCHER=$LOOM_RUNTIME_LAUNCHER" "LOOM_RUNTIME_RELEASE=${LOOM_RUNTIME_RELEASE:-}" \
+              "LOOM_RUNTIME_ROOT=${LOOM_RUNTIME_ROOT:-}" \
               "LOOM_LANE_ID=$id" "LOOM_LANE_CWD=$abs" "LOOM_SCRATCH=$LOOM_SCRATCH" \
               "LOOM_LANE_JSONL=${LOOM_LANE_JSONL:-}" "LOOM_LANE_LAUNCHER=launchd" \
               "LOOM_GLOBAL_CONFIG=${LOOM_GLOBAL_CONFIG:-}" "LOOM_CONFIG=${LOOM_CONFIG:-}" \
@@ -4052,7 +4101,7 @@ _cmd_spawn_lane() {
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
             rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
-                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
+                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" "$LANES_DIR/$id.release" \
                   "$LANES_DIR/$id.host-probe.json"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
@@ -4071,7 +4120,7 @@ _cmd_spawn_lane() {
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
         rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
-              "$LANES_DIR/$id.host-probe.json"
+              "$LANES_DIR/$id.host-probe.json" "$LANES_DIR/$id.release"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
     fi
@@ -4680,7 +4729,7 @@ cmd_clear_lane() {
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
           "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.ui-resource" "$LANES_DIR/$1.head" \
-          "$LANES_DIR/$1.host-probe.json" "$launch_marker" "$launch_plist"
+          "$LANES_DIR/$1.host-probe.json" "$LANES_DIR/$1.release" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
@@ -5404,7 +5453,7 @@ PLIST_DIR="${LOOM_PLIST_DIR:-$HOME/Library/LaunchAgents}"
 HEARTBEAT_INTERVAL=60
 
 _write_plist() {  # _write_plist <path> <interval>
-    local path="$1" interval="$2" provider="${3:-${LOOM_PROVIDER:-}}" b d toolpath=""
+    local path="$1" interval="$2" provider="${3:-${LOOM_PROVIDER:-}}" b d toolpath="" program_args
     [ -n "$provider" ] || die "install: provider is required before writing the scheduler"
     "$AGENT_SH" detect --provider "$provider" >/dev/null \
       || die "install: no registered adapter for '$provider'"
@@ -5415,6 +5464,11 @@ _write_plist() {  # _write_plist <path> <interval>
         d="$(command -v "$b" 2>/dev/null)" && toolpath="$toolpath:$(dirname "$d")"
     done
     local pathval="${toolpath#:}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    if [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]; then
+        program_args="<array><string>$LOOM_RUNTIME_LAUNCHER</string><string>run</string><string>--</string><string>tick</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>"
+    else
+        program_args="<array><string>$SELF_PATH</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>"
+    fi
     cat > "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -5422,11 +5476,14 @@ _write_plist() {  # _write_plist <path> <interval>
 <dict>
     <key>Label</key><string>$LOOM_LABEL</string>
     <key>ProgramArguments</key>
-    <array><string>$SELF_PATH</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>
+    $program_args
     <key>EnvironmentVariables</key>
     <dict>
         <key>LOOM_REPO</key><string>$REPO_ROOT</string>
         <key>LOOM_HOME</key><string>$LOOM_HOME</string>
+        <key>LOOM_RUNTIME_HOME</key><string>$LOOM_RUNTIME_HOME</string>
+        <key>LOOM_RUNTIME_SELECTOR</key><string>$LOOM_RUNTIME_SELECTOR</string>
+        <key>LOOM_RUNTIME_LAUNCHER</key><string>$LOOM_RUNTIME_LAUNCHER</string>
         <key>LOOM_LANE_LAUNCHER</key><string>launchd</string>
         <key>HOME</key><string>$HOME</string>
         <key>PATH</key><string>$pathval</string>
@@ -6141,6 +6198,8 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
       *) die "install: unknown argument '$1'";;
     esac; done
     [ -n "$provider" ] || die "install: --provider <id> is required"
+    _runtime_ready || [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" = 1 ] \
+      || die "install: no validated runtime release is selected; run /loom publish first"
     [ -x "$AGENT_SH" ] || die "install: provider runtime missing: $AGENT_SH"
     "$AGENT_SH" detect --provider "$provider" >/dev/null \
       || die "install: no registered adapter for '$provider'"
@@ -6351,9 +6410,19 @@ cmd_agent_status() {
     else
         echo "loop switch: running — lanes chain to their successor and start the next wave"
     fi
+    if [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]; then
+        LOOM_RUNTIME_SELECTOR="$LOOM_RUNTIME_SELECTOR" "$LOOM_RUNTIME_LAUNCHER" status
+    else
+        echo "runtime release: not published — scheduler would use the mutable checkout"
+    fi
     if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$WATCH_LABEL" >/dev/null 2>&1; then
         echo "$WATCH_LABEL: loaded — the OLD separate watcher, now redundant; \`/loom start\` retires it"
     fi
+}
+
+cmd_runtime() {
+    LOOM_RUNTIME_SOURCE="${SELF_PATH%/*}/.." \
+      "${SELF_PATH%/*}/runtime.sh" "$@"
 }
 
 case "${1:-}" in
@@ -6396,9 +6465,10 @@ case "${1:-}" in
     install)      shift; cmd_install "$@" ;;
     uninstall)    shift; cmd_uninstall "$@" ;;
     agent-status) shift; cmd_agent_status "$@" ;;
+    runtime)      shift; cmd_runtime "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release|fix-ticket <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release|fix-ticket <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | runtime publish|rollback|status | chain-gate <impl-id> | chain-merge" ;;
 esac

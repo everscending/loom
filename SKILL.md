@@ -1,6 +1,6 @@
 ---
 name: loom
-description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over tracker-backed state. Verbs: plan, epics, tickets, build, tick, watch, mend, unblock, replan, qa, retro."
+description: "Weave a PRD into an unattended parallel build: grill architecture + UX to closure, generate epics and dependency-linked tickets, then run cron-driven build waves over tracker-backed state. Verbs: plan, epics, tickets, build, start, tick, watch, mend, stop, publish, rollback, runtime-status, unblock, replan, qa, retro."
 disable-model-invocation: true
 ---
 
@@ -54,6 +54,9 @@ technique of its own.
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
+| `publish [git-ref]` | any | Validate and atomically select one committed immutable Loom release |
+| `rollback` | any | Select the previously active Loom release for future heartbeats |
+| `runtime-status` | any | Show active/previous releases plus live lane and queued pins |
 | `replan` | any | Diff amended PRD, regenerate only affected tickets |
 | `qa` | any | Review this skill's own files; report defects, never fix |
 | `optimize` | any | Compact this SKILL.md without changing behaviour |
@@ -75,7 +78,8 @@ and manual-drive in [references/phases-1-5.md](references/phases-1-5.md);
 bootstrap, config, the skill/repo boundary** in
 [references/setup.md](references/setup.md); the rest of the human-run verbs
 under "Human-run verbs" below. **`mend`** follows the active-build supervisory
-contract in [references/mend.md](references/mend.md).
+contract in [references/mend.md](references/mend.md). **`publish`, `rollback`,
+and `runtime-status`** follow [references/runtime-releases.md](references/runtime-releases.md).
 
 ## Phase 6 · the build loop
 

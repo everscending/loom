@@ -76,6 +76,25 @@ else
     bad "merged agent: wrong interval or mode in $mplist"
 fi
 
+# Once a validated selector exists, fresh heartbeats enter through the stable
+# dispatcher. The plist must never pin the mutable checkout or one release.
+RID=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+RTH="$T/runtime"; RSEL="$RTH/consumers/test.active"; RLAUNCH="$RTH/bin/loom-runtime"
+mkdir -p "${RSEL%/*}" "${RLAUNCH%/*}"
+printf 'schema 1\ncurrent %s\n' "$RID" > "$RSEL"
+printf '#!/bin/sh\nexit 0\n' > "$RLAUNCH"; chmod +x "$RLAUNCH"
+runtime_out=$(LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" LOOM_PLIST_DIR="$MT/agents" \
+  LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 LOOM_RUNTIME_RELEASE="$RID" \
+  LOOM_RUNTIME_HOME="$RTH" LOOM_RUNTIME_SELECTOR="$RSEL" LOOM_RUNTIME_LAUNCHER="$RLAUNCH" \
+  "$TICK" install --dry-run 2>&1)
+runtime_plist=$(echo "$runtime_out" | sed -n 's/^generated (dry-run): //p')
+if grep -qF "<string>$RLAUNCH</string><string>run</string><string>--</string><string>tick</string><string>tick</string>" "$runtime_plist" \
+   && grep -qF "<string>$RSEL</string>" "$runtime_plist"; then
+    ok "runtime release: scheduler plist selects through the stable dispatcher"
+else
+    bad "runtime release: scheduler plist still pins mutable or release-local code"
+fi
+
 # The scheduler is the durable host for Codex-deferred lanes, and launchd
 # starts it with only the PATH baked into this plist. A repo gate invokes its
 # package manager by name, so resolving node alone is insufficient when node
