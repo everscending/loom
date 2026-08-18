@@ -200,6 +200,7 @@ case "${1:-}" in
     issue)            shift; v_issue "$@" ;;
     issue-notes)      shift; v_issue_notes "$@" ;;
     issue-links)      shift; v_issue_links "$@" ;;
+    board)            exit 2 ;;
     milestones)       shift; v_milestones "$@" ;;
     labels)           shift; v_labels "$@" ;;
     whoami)           shift; v_whoami "$@" ;;
