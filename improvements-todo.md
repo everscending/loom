@@ -7,8 +7,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 ## Practical improvements
 
 - [x] **DONE — Move proactive blocker supervision into `/loom start`.**
-  Implemented provider-neutrally in `d5a390b` (`feat(start): supervise blocked
-  repairs`). It binds a tracker-resident Build policy before
+  Implemented provider-neutrally in `d5a390b`, installed as `f520d1b`
+  (`feat(start): supervise blocked repairs`). It binds a tracker-resident Build
+  policy before
   scheduler install, deterministically ranks blocked tickets by downstream
   impact, directly dispatches all-blocked repair lanes without a scheduling
   agent, shares implementation/UI capacity, freezes block generation and MR
