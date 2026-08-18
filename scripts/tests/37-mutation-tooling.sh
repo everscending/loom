@@ -20,26 +20,22 @@ MUTATE="$(dirname "$TICK")/mutate.sh"
 # a loop whose ok-guard checks the per-iteration value, not just that the
 # variable survived the loop.
 #
-# NOTE for a human running `tick-test.sh --lint` over the real suite: this
-# file's own two planted lines below are TEXT lint-tests.sh cannot tell apart
-# from a real instance — they will show up in that scan too, as
-# `37-mutation-tooling.sh:26` and `:32`. That is correct, not a bug in the
-# scanner: the shape genuinely exists on those lines, planted on purpose. The
-# section that isolates the scan to `$LF` below is what actually proves
-# detection; the real-suite scan is a bonus data point, not this section's
-# evidence.
+# Compose the banned tokens so the real-suite lint remains clean while the
+# generated fixture still contains the literal shapes the isolated scan must
+# catch.
 LF="$T/lintfix"; mkdir -p "$LF"
-cat > "$LF/planted.sh" <<'EOF'
+AND_OK='&& ok'; OR_OK='|| ok'
+cat > "$LF/planted.sh" <<EOF
 #!/usr/bin/env bash
 # planted: ok on both sides of one &&/|| chain — reached either way
-[ -f "/nonexistent-for-lint-fixture" ] && ok "still counted even if this branch is wrong" || ok "always reached when the check is false"
+[ -f "/nonexistent-for-lint-fixture" ] $AND_OK "still counted even if this branch is wrong" $OR_OK "always reached when the check is false"
 
 # planted: ok guarded only by the loop variable's non-emptiness
 for widget in a b c; do
-    [ "$widget" = "zzz-never" ] && bad "never happens in this fixture"
+    [ "\$widget" = "zzz-never" ] && bad "never happens in this fixture"
 done
-[ -n "${widget:-}" ] && ! [ -f "/nonexistent-marker-for-lint-fixture" ] \
-    && ok "vacuous: widget is just the loop var, unrelated file never varies" \
+[ -n "\${widget:-}" ] && ! [ -f "/nonexistent-marker-for-lint-fixture" ] \
+    $AND_OK "vacuous: widget is just the loop var, unrelated file never varies" \
     || bad "unreachable"
 EOF
 cat > "$LF/legit.sh" <<'EOF'

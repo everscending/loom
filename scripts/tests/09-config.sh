@@ -123,9 +123,11 @@ echo "$out" | jq -e '.guardrails.allow | index("Bash(CRUCIBLE_LIVE=1 uv *)")' >/
     && ok "P4: env-prefixed gate command gets its own matching allow rule" \
     || bad "P4: env-prefixed command has no matching rule"
 # Planted violation: the bare-command rule alone must NOT be what matches it.
-echo "$out" | jq -e '.guardrails.allow | index("Bash(uv *)") | not' >/dev/null \
-    && ok "P4-violation: bare Bash(uv *) is absent, so only the prefixed rule can match" \
-    || ok "P4: bare rule also present (harmless — the prefixed rule is what matters)"
+if echo "$out" | jq -e '.guardrails.allow | index("Bash(uv *)") | not' >/dev/null; then
+    ok "P4-violation: bare Bash(uv *) is absent, so only the prefixed rule can match"
+else
+    echo "P4: bare rule also present (harmless — the prefixed rule is what matters)"
+fi
 
 # 8g. Every generated allow rule traces to a command that will actually run.
 missing=0
