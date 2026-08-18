@@ -7,7 +7,8 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 ## Practical improvements
 
 - [x] **DONE — Let Mend repair Loom without owning the build queue.**
-  Implemented in `d6cae5d` (`fix(mend): repair Loom mechanism defects`). The
+  Implemented in `d6cae5d`, installed as `ceed344`
+  (`fix(mend): repair Loom mechanism defects`). The
   corrected contract keeps `mend-status` and live build state read-only,
   while default Mend and `--once` may implement, test, commit, install, and
   reassert a confirmed Loom mechanism repair. Manual worker dispatch, ticket
