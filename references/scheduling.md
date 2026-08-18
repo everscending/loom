@@ -39,11 +39,23 @@ A successful human `transition --release-hold` or release of an active
 supervised-repair lease is also an explicit change from no runnable owner to
 runnable work, but neither is a second `start` verb and neither launches a
 wave directly. The release writes one durable
-`continuation.request`; the ordinary heartbeat consumes it only when a wave is
-admitted. That heartbeat bypasses the stale wave gap once while still honoring
-the loop-stopped switch, quiet state, usage gate, and lock. Without this
-handoff, a status-only halted wave can leave newly released work idle for the
-full configured gap even though every 60-second heartbeat sees it.
+`continuation.request` and, on its absent-to-present transition, kicks the one
+already-armed launchd label without replacing a running scheduler. Duplicate
+requests coalesce; a stopped or unarmed build retains the marker and wakes
+nothing. It also raises the scheduler's one-shot `tick.pending` flag: an
+already-running heartbeat re-ticks on exit, while an idle heartbeat consumes
+the preexisting flag when it acquires the tick lock and therefore runs only
+once. Its final no-pending check publishes the exiting pid under the
+continuation lock, so a writer at that boundary waits and kicks only after
+launchd can start the job again. The ordinary heartbeat atomically moves
+`continuation.request` to its owned claim; a request that arrives during the
+heartbeat therefore creates the next generation instead of being erased with
+the current one. The heartbeat
+consumes only its claim when a wave is admitted, bypassing the stale wave gap
+once while still honoring the
+loop-stopped switch, quiet state, usage gate, and lock. Without this handoff, a
+status-only halted wave can leave newly released work idle until the next
+periodic firing even though the durable request already exists.
 
 Quiet gates spend before any of that, and the gate is an **allowlist**:
 `halted` skips the wave entirely, `stalled` + `stall_action: notify_only` skips

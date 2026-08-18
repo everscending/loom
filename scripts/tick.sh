@@ -121,12 +121,13 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 # finishing lanes cannot both observe the last auxiliary slot as free. Queued
 # Codex launches count as reservations until the durable host starts them.
 AUX_LOCK_DIR="${LOOM_AUX_LOCK_DIR:-$LOOM_HOME/aux-admission.lock.d}"
-# A tick that arrives while a wave holds the lock used to be discarded outright,
-# and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
-# was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
-# unmerged. The skipped tick now leaves this note instead, and the lock holder
-# re-ticks once on its way out (P1). It is a single flag, not a queue, so a burst
-# of finishing lanes costs one extra wave rather than one per lane.
+# A tick or continuation that arrives while a wave holds the lock used to be
+# discarded outright, and that is how build 2 ended: a gate exited at 23:36:03
+# during W13, the kick was dropped, and the loop never ran again — leaving a
+# ticket in `merge-queue`, unmerged. The request now leaves this note, and the
+# lock holder re-ticks once on its way out (P1). It is a single flag, not a
+# queue, so a burst of newly runnable work costs one extra wave rather than one
+# per request.
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 # `start` is a human request to resume now. Its launchd RunAtLoad firing still
 # uses --auto so every later heartbeat keeps the normal pacing contract, but
@@ -139,8 +140,14 @@ START_KICK_FILE="${LOOM_START_KICK_FILE:-$LOOM_HOME/start.kick}"
 # without a finishing lane to issue `tick --from-lane`. Keep that state change
 # as a one-shot request for the ordinary heartbeat: it bypasses only the old
 # wave gap, never the loop-stopped or quiet/usage gates, and is consumed only
-# when a wave is admitted. This is scheduler plumbing, not another start verb.
+# when a wave is admitted. The request also kicks the already-armed launchd
+# label once so "ordinary heartbeat" means now rather than up to 60s later;
+# the scheduler still owns every admission decision. This is plumbing, not
+# another start verb.
 CONTINUATION_FILE="${LOOM_CONTINUATION_FILE:-$LOOM_HOME/continuation.request}"
+CONTINUATION_CLAIM_FILE="${LOOM_CONTINUATION_CLAIM_FILE:-$LOOM_HOME/continuation.claimed}"
+CONTINUATION_LOCK_DIR="${LOOM_CONTINUATION_LOCK_DIR:-$LOOM_HOME/continuation.lock.d}"
+CONTINUATION_EXIT_FILE="${LOOM_CONTINUATION_EXIT_FILE:-$LOOM_HOME/continuation.exiting}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
 # P82: a lane's brief lives HERE, never in the working tree it is about.
@@ -1895,8 +1902,56 @@ cmd_resume() {
     echo "resume: consecutive-wave-failure count reset"
 }
 
+_continuation_lock_acquire() {
+    local attempt rc
+    for attempt in $(seq 1 200); do
+        rc=0; _lock_reserve "$CONTINUATION_LOCK_DIR" || rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            1) sleep 0.01 ;;
+            *) die "continuation: cannot reserve the request lock safely" ;;
+        esac
+    done
+    die "continuation: request lock remained busy"
+}
+
+_continuation_lock_release() {
+    rm -f "$CONTINUATION_LOCK_DIR/pid" 2>/dev/null \
+        && rmdir "$CONTINUATION_LOCK_DIR" 2>/dev/null \
+        || die "continuation: cannot release the request lock safely"
+}
+
+_continuation_claim() { # [own-pending] — prints 1 when this tick owns a generation
+    local own_pending="${1:-0}" claimed=0
+    _continuation_lock_acquire
+    if [ -f "$CONTINUATION_CLAIM_FILE" ]; then
+        claimed=1
+    elif [ -f "$CONTINUATION_FILE" ]; then
+        if ! mv "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE"; then # mutate:continuation-claim
+            _continuation_lock_release
+            die "continuation: cannot claim the pending request"
+        fi
+        claimed=1
+    fi
+    # At successful tick admission, a pending marker belongs to this tick only
+    # when no later continuation.request remains. Keep the marker when an older
+    # claim prevented this pass from owning the next generation; EXIT must
+    # replay it. Request creation and this decision share the same lock.
+    if [ "$own_pending" = 1 ] && [ ! -f "$CONTINUATION_FILE" ]; then
+        rm -f "$PENDING_FILE" # mutate:continuation-pending-owner
+    fi
+    _continuation_lock_release
+    printf '%s\n' "$claimed"
+}
+
+_continuation_consume() {
+    _continuation_lock_acquire
+    rm -f "$CONTINUATION_CLAIM_FILE"
+    _continuation_lock_release
+}
+
 cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticket>
-    local reason="${1:-}" ticket="${2:-}"
+    local reason="${1:-}" ticket="${2:-}" first_request=0 exit_owner="" attempt
     [ "$#" -eq 2 ] \
         || die "request-continuation: usage: request-continuation hold-release|supervised-release|fix-ticket <ticket>"
     case "$reason" in
@@ -1904,8 +1959,66 @@ cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticke
         *) die "request-continuation: unknown reason '$reason'" ;;
     esac
     case "$ticket" in ''|*[!0-9]*) die "request-continuation: ticket must be numeric" ;; esac
-    : > "$CONTINUATION_FILE"
+    _continuation_lock_acquire
+    exit_owner=$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")
+    if ! _lock_owner_valid "$exit_owner" \
+       || [ -z "$exit_owner" ] || ! kill -0 "$exit_owner" 2>/dev/null; then
+        exit_owner=""
+        rm -f "$CONTINUATION_EXIT_FILE"
+    fi
+    if [ ! -f "$CONTINUATION_FILE" ]; then
+        if ! : > "$CONTINUATION_FILE"; then
+            _continuation_lock_release
+            die "request-continuation: cannot record the durable request"
+        fi
+        first_request=1
+    fi
+    : > "$PENDING_FILE"
+    _continuation_lock_release
     _ev continuation_requested reason "$reason" ticket "$ticket"
+    # The marker is the durable request and the ordinary scheduler remains the
+    # sole admission owner. Wake that existing launchd label once when the
+    # marker changes absent -> present; duplicate Mend writes coalesce without
+    # creating another scheduler, and a stopped build keeps the request for an
+    # explicit start. Never use `kickstart -k`: replacing an in-flight
+    # heartbeat would trade the old delay for lost scheduler work.
+    [ "$first_request" -eq 1 ] || return 0
+    if _loop_stopped; then
+        _ev continuation_wake_deferred reason stopped
+        return 0
+    fi
+    if _agent_armed; then
+        # The previous heartbeat may have completed its final pending check but
+        # not exited its launchd job yet. A non-replacing kick in that window
+        # starts nothing, so wait for the exact pid it published at the exit
+        # boundary. The durable request/pending markers already survive if the
+        # short wait cannot prove process death.
+        if [ -n "$exit_owner" ]; then
+            for attempt in $(seq 1 500); do
+                kill -0 "$exit_owner" 2>/dev/null || break
+                sleep 0.01
+            done
+            if kill -0 "$exit_owner" 2>/dev/null; then
+                _ev continuation_wake_deferred reason exiting
+                return 0
+            fi
+            _continuation_lock_acquire
+            if [ "$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")" = "$exit_owner" ]; then
+                rm -f "$CONTINUATION_EXIT_FILE"
+            fi
+            _continuation_lock_release
+        fi
+        if "$LAUNCHCTL_CMD" kickstart "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
+            _ev continuation_wake_requested reason "$reason" ticket "$ticket"
+        else
+            # The label may already be running or this process may be outside
+            # its GUI domain. Either way the marker survives for the 60s
+            # heartbeat; an immediate wake is an optimization, never state.
+            _ev continuation_wake_deferred reason kickstart-refused
+        fi
+    else
+        _ev continuation_wake_deferred reason unarmed
+    fi
 }
 
 # --- subcommands ----------------------------------------------------------
@@ -1951,13 +2064,23 @@ _start_handoff_tick() {
 _tick_exit() {
     local rc=$?
     rm -rf "$LOCK_DIR"
+    # Serialize the last pending observation with request-continuation. When
+    # there is no replay, publish the exact exiting pid before releasing: a
+    # late writer can record durable work now but delays its ordinary kick
+    # until launchd can actually start the job again.
+    _continuation_lock_acquire
     if [ -f "$PENDING_FILE" ]; then
         rm -f "$PENDING_FILE"
+        rm -f "$CONTINUATION_EXIT_FILE"
+        _continuation_lock_release
         _ev tick_replayed
-        echo "tick: a lane finished during this wave — re-ticking once"
+        echo "tick: work became runnable during this wave — re-ticking once"
         _start_handoff_tick
+    else
+        printf '%s\n' "$$" > "$CONTINUATION_EXIT_FILE"
+        _continuation_lock_release
     fi
-    return $rc
+    return $rc # mutate:continuation-exit-boundary
 }
 
 # --- the loop switch and the wave gap ------------------------------------
@@ -2060,7 +2183,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 pending_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -2145,8 +2268,9 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
     [ ! -f "$START_KICK_FILE" ] || start_kick=1
-    [ ! -f "$CONTINUATION_FILE" ] || continuation_kick=1
-    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
+    continuation_kick=$(_continuation_claim)
+    [ ! -f "$PENDING_FILE" ] || pending_kick=1
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && [ "$pending_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0
@@ -2171,6 +2295,10 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         echo "tick: wave already running — noted, the running wave will re-tick on exit"
         exit 0
     fi
+    # Recheck under the same lock request-continuation uses: a request can land
+    # after the pre-gap claim. Own it now when possible, or retain tick.pending
+    # when an older claim means the later generation needs an EXIT replay.
+    continuation_kick=$(_continuation_claim 1)
     trap _tick_exit EXIT
     _usage_gate || exit 0
     _bootstrap_once
@@ -2218,7 +2346,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
                  # No scheduling agent is needed to rediscover this choice:
                  # the snapshot plan already names exact repair lanes.
                  [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-                 [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
+                 [ "$continuation_kick" -eq 0 ] || _continuation_consume
                  _dispatch_start_supervision
                  _ev tick_deterministic_supervision
                  return 0 ;;
@@ -2235,7 +2363,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # Consume only at the cost boundary. A start kick that met a lock, a usage
     # pause, or a quiet-board refusal must survive for the next heartbeat.
     [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-    [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
+    [ "$continuation_kick" -eq 0 ] || _continuation_consume
     tick_go=1
 }
 
@@ -6330,7 +6458,8 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
-    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE"
+    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE" \
+          "$CONTINUATION_EXIT_FILE"
     local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"
