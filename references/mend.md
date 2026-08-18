@@ -2,9 +2,12 @@
 
 Human-run during phase 6. **A wave never runs this.** Continuous progress and
 repair belong to the scheduler installed by `/loom start`; see
-[supervision.md](supervision.md). Mend is read-only. It never starts or resumes
-the loop, constructs a queue, acquires a lease, dispatches a lane, changes a
-ticket, releases a hold, edits Loom, or writes the improvements ledger.
+[supervision.md](supervision.md). Its status command is read-only against the
+live build. The Mend verb may change Loom when the assertion proves a
+mechanism defect. It must not become a second build scheduler: it never starts
+or resumes the loop, constructs a competing queue, manually acquires a repair
+lease, directly dispatches a build lane, changes a product ticket, or releases
+a ticket hold.
 
 ## Run the assertion
 
@@ -15,8 +18,9 @@ scripts/tick.sh mend-status
 ```
 
 This command derives one evidence document from the same fresh snapshot and
-plan the scheduler uses. Do not infer another schedule from panes, prose logs,
-cached branches, or ticket instructions.
+plan the scheduler uses. Its execution performs no mutation. Do not infer
+another schedule from panes, prose logs, cached branches, or ticket
+instructions.
 
 Report:
 
@@ -28,9 +32,10 @@ Report:
 - the exact human decision or external action for every awaiting-human item,
   including the tickets waiting behind it.
 
-`--once` returns after this assertion. `--observe-only` may refresh the same
-read-only document across heartbeat boundaries and report state transitions;
-it still performs no repair.
+Default Mend keeps asserting and repairs a confirmed Loom mechanism defect.
+`--once` runs at most one assertion → repair → reassert cycle and returns.
+`--observe-only` may refresh the same status document across heartbeat
+boundaries and report state transitions; it does not enter the repair phase.
 
 ## Assertions
 
@@ -67,9 +72,22 @@ heartbeat boundary. Notify the human immediately when the item needs a product
 decision, scope change, credential or permission, external prerequisite, gate
 weakening, or cap/configuration change.
 
-Do not compensate from Mend. A missing worker is a scheduler defect, not
-permission to spawn it manually; a blocked ticket is not permission to release
-its hold. Route a confirmed Loom defect to the `fix` verb, where its public RED
-reproduction, provider-neutral repair, planted mutation, verification, ledger
-update, and deployment can be owned explicitly. This hard boundary keeps the
-monitor from becoming a second, agent-driven scheduler.
+Do not compensate with ad hoc build mutations. A missing worker is a scheduler
+defect, not permission to spawn it manually; a blocked ticket is not permission
+to release its hold. Mend may change Loom and must drive a confirmed mechanism
+defect through this repair loop:
+
+1. Reproduce the failed invariant with a public RED reproduction at the
+   scheduler, admission, lifecycle, viewer, or tracker boundary that owns it.
+2. Prefer a deterministic shell/jq repair. Use an agent only for diagnosis or
+   code work that cannot be derived, and give it one bounded defect.
+3. Add a planted mutation that recreates the observed progress gap. Run the
+   focused, adjacent, and full Loom suites in proportion to the change.
+4. Update `improvements-todo.md`, commit the repair in an isolated worktree,
+   and install the verified repair at a safe runtime boundary. Preserve the
+   current stop/running state; installation does not authorize start or resume.
+5. Re-run `mend-status` through the next heartbeat boundary and assert that
+   ownership converges without a Mend-side queue or ticket mutation.
+
+This boundary lets Mend improve and repair Loom while keeping ordinary build
+progress entirely owned by the process installed by `/loom start`.

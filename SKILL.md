@@ -50,7 +50,7 @@ technique of its own.
 | `start` | 5→6 | Bind provider + supervision policy, sync guardrails, then run the unattended loop; also resumes |
 | `tick` | 6 | One stateless scheduling wave (scheduler/self-trigger entry point) |
 | `watch [--no-panes]` | 6 | Narrated summary; in herdr, a pane per live lane |
-| `mend [--once\|--observe-only]` | 6 | Read-only assertion that start-owned supervision is working |
+| `mend [--once\|--observe-only]` | 6 | Assert start-owned supervision; repair confirmed Loom mechanism defects |
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
@@ -142,8 +142,9 @@ switch:
 deterministically detects, ranks, admits, reserves, wakes, deduplicates, and
 cleans up repair work before an agent is involved. Agents receive only one
 bounded, frozen repair ticket. The policy, repair outcomes, and human boundary
-are [references/supervision.md](references/supervision.md). `mend` only asserts
-that this mechanism is healthy.
+are [references/supervision.md](references/supervision.md). `mend` asserts this
+mechanism is healthy and repairs Loom itself when the assertion proves it is
+not; it never takes over the build queue.
 
 **Headless runtime and permissions.** Every paid session goes through
 `scripts/agent.sh`; core code passes only provider, Loom job kind, tier, cwd,
@@ -495,7 +496,9 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 
 - **`mend [--once|--observe-only]`** — read and report whether the policy,
   scheduler, lanes, leases, capacity, UI reservation, continuations, panes,
-  and awaiting-human dispositions agree. It never repairs or schedules:
+  and awaiting-human dispositions agree. Repair confirmed defects in Loom's
+  mechanism, tests, and skill contract; never substitute manual build-state
+  changes or a second queue for the start-owned repair:
   [references/mend.md](references/mend.md).
 - **`triage`** — every blocked ticket on one `/lavish` surface, six actions
   each (requeue, to review, `rescope`, `model-tier`, leave, close), applied as

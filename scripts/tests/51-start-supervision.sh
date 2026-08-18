@@ -502,6 +502,7 @@ fi
 SKILL_ROOT="$(cd "$(dirname "$TICK")/.." && pwd)"
 if grep -q 'Derive every decision that can be computed' "$SKILL_ROOT/references/supervision.md" \
    && grep -q 'Mend does not create a competing queue' "$SKILL_ROOT/references/supervision.md" \
+   && grep -q 'repairs confirmed defects in' "$SKILL_ROOT/references/supervision.md" \
    && grep -q '\[supervision.md\](supervision.md)' "$SKILL_ROOT/references/phases-1-5.md"; then
   ok "start supervision: deterministic-first ownership is codified at the start boundary"
 else

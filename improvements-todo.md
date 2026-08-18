@@ -6,6 +6,15 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
 
+- [ ] **IN PROGRESS — Let Mend repair Loom without owning the build queue.**
+  The corrected contract keeps `mend-status` and live build state read-only,
+  while default Mend and `--once` may implement, test, commit, install, and
+  reassert a confirmed Loom mechanism repair. Manual worker dispatch, ticket
+  mutation, hold release, lease acquisition, start, and resume remain outside
+  Mend; they stay owned by the process installed by `/loom start`. Public
+  contract RED reproduced in sections 50 and 51; focused GREEN is 36/36.
+  Remaining before DONE: full suite, commit, install, and record the revision.
+
 - [x] **DONE — Move proactive blocker supervision into `/loom start`.**
   Implemented provider-neutrally in `d5a390b`, installed as `f520d1b`
   (`feat(start): supervise blocked repairs`). It binds a tracker-resident Build
@@ -15,9 +24,11 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   agent, shares implementation/UI capacity, freezes block generation and MR
   head, and rechecks both before lease publication. Restricted repair outcomes
   either return a clean pushed head to independent Review or persist one
-  awaiting-human disposition. Crash cleanup releases exact ownership. Mend is
-  now a read-only assertion and fails an unowned candidate after one heartbeat
-  grace. Verification: focused supervision 22/22, diagnostic attribution
+  awaiting-human disposition. Crash cleanup releases exact ownership. Mend's
+  status read is read-only against the live build and fails an unowned
+  candidate after one heartbeat grace; the Mend verb may repair a confirmed
+  Loom mechanism defect. Verification: focused supervision 22/22, diagnostic
+  attribution
   29/29, adjacent runtime/planner/Mend 556/556, and final full Loom suite
   1,385/1,385. The block-generation and planner-deletion planted violations
   both recreate the unsafe gap and are caught.

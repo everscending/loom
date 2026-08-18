@@ -235,12 +235,16 @@ MEND_REF="$(dirname "$TICK")/../references/mend.md"
 if grep -q '| `mend' "$SKILL" \
    && grep -q 'references/mend.md' "$SKILL" \
    && grep -q 'assert start-owned supervision' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Mend is read-only' "$MEND_REF" 2>/dev/null \
-   && grep -q 'releases a hold, edits Loom' "$MEND_REF" 2>/dev/null \
+   && grep -q 'status command is read-only' "$MEND_REF" 2>/dev/null \
+   && grep -q 'Mend may change Loom' "$MEND_REF" 2>/dev/null \
+   && grep -q 'must not become a second build scheduler' "$MEND_REF" 2>/dev/null \
+   && grep -q 'Default Mend keeps asserting and repairs' "$MEND_REF" 2>/dev/null \
+   && grep -q '`--once` runs at most one assertion' "$MEND_REF" 2>/dev/null \
+   && grep -q '`--observe-only` may refresh' "$MEND_REF" 2>/dev/null \
    && grep -q 'MEND-FLOW-01' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Do not compensate from Mend' "$MEND_REF" 2>/dev/null \
-   && grep -q 'Route a confirmed Loom defect to the `fix` verb' "$MEND_REF" 2>/dev/null; then
-    ok "mend: the human verb is a read-only assertion of start-owned supervision"
+   && grep -q 'public RED reproduction' "$MEND_REF" 2>/dev/null \
+   && grep -q 'install the verified repair' "$MEND_REF" 2>/dev/null; then
+    ok "mend: audit is read-only against build state but repairs Loom defects"
 else
     bad "mend: the skill/reference contract is absent or incomplete"
 fi

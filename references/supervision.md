@@ -52,4 +52,6 @@ that authority.
 plan and asserts that the policy is bound, the scheduler is armed, and every
 repairable blocker is owned, validly capacity-deferred, or explicitly awaiting
 human attention. Mend does not create a competing queue, acquire a repair
-lease, dispatch a lane, or release a hold.
+lease, dispatch a lane, or release a hold. Mend repairs confirmed defects in
+this mechanism. It changes Loom's deterministic core, tests, contract, and
+installed runtime, then reasserts the behavior across a heartbeat boundary.
