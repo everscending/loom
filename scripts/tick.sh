@@ -206,6 +206,13 @@ _runtime_ready() {
     [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]
 }
 
+_runtime_admission_enabled() {
+    _runtime_ready || {
+        [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ] \
+          && [ -x "${SELF_PATH%/*}/runtime.sh" ]
+    }
+}
+
 _runtime_install_unlock() {
     [ "${_RUNTIME_INSTALL_LOCKED:-}" = 1 ] || return 0
     rm -f "$LOOM_RUNTIME_HOME/publish.lock/pid" 2>/dev/null || true
@@ -1026,16 +1033,27 @@ lock_acquire() {
 # A selector change and a new tick-lock acquisition cannot pass each other.
 # The publisher holds this same short lock while it checks live ABI pins and
 # swaps the selector; after the tick lock exists, compatibility sees it.
-runtime_tick_lock_acquire() { # 0 acquired, 1 wave held, 2 publication held/error
-    local gate="$LOOM_RUNTIME_HOME/publish.lock" rc=0
-    if _runtime_ready; then
+runtime_admission_acquire() { # 0 acquired/not-needed, 1 publication held/error
+    local gate="$LOOM_RUNTIME_HOME/publish.lock"
+    if _runtime_admission_enabled; then
         _lock_reserve "$gate" || return 2
+        _RUNTIME_TICK_GATE_LOCKED=1
     fi
+}
+
+runtime_admission_release() {
+    [ "${_RUNTIME_TICK_GATE_LOCKED:-0}" = 1 ] || return 0
+    local gate="$LOOM_RUNTIME_HOME/publish.lock"
+    rm -f "$gate/pid" 2>/dev/null || true
+    rmdir "$gate" 2>/dev/null || true
+    _RUNTIME_TICK_GATE_LOCKED=0
+}
+
+runtime_tick_lock_acquire() { # 0 acquired, 1 wave held, 2 publication held/error
+    local rc=0
+    [ "${_RUNTIME_TICK_GATE_LOCKED:-0}" = 1 ] || runtime_admission_acquire || return 2
     lock_acquire || rc=1
-    if _runtime_ready; then
-        rm -f "$gate/pid" 2>/dev/null || true
-        rmdir "$gate" 2>/dev/null || true
-    fi
+    runtime_admission_release
     return "$rc"
 }
 
@@ -2106,6 +2124,12 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # the firing after which nothing else may fire. Cheap: one file test once
     # armed.
     _ensure_armed
+    if ! runtime_admission_acquire; then
+        _ev tick_skipped reason runtime_publication
+        echo "tick: runtime publication is in progress — watched, no wave"
+        return 0
+    fi
+    trap runtime_admission_release EXIT
     # Queue draining is work already scheduled, not a new paid wave. It must
     # happen before the auto-wave gap so an interactive Codex tick can hand
     # workers to the very next durable heartbeat without waiting 10–20m.
@@ -6228,10 +6252,10 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
       *) die "install: unknown argument '$1'";;
     esac; done
     [ -n "$provider" ] || die "install: --provider <id> is required"
-    if [ ! -f "$LOOM_RUNTIME_SELECTOR" ] && [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ]; then
+    if [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ]; then
         mkdir -p "$LOOM_RUNTIME_HOME"
         mkdir "$LOOM_RUNTIME_HOME/publish.lock" 2>/dev/null \
-          || die "install: runtime publication or first-cutover start is already in progress"
+          || die "install: runtime publication or another start is already in progress"
         printf '%s\n' "$$" > "$LOOM_RUNTIME_HOME/publish.lock/pid"
         _RUNTIME_INSTALL_LOCKED=1
         trap _runtime_install_unlock EXIT
@@ -6463,9 +6487,10 @@ cmd_agent_status() {
 }
 
 cmd_runtime() {
-    if [ "${1:-}" = publish ] && [ ! -f "$LOOM_RUNTIME_SELECTOR" ]; then
+    if [ "${1:-}" = publish ] \
+       && { [ ! -f "$LOOM_RUNTIME_SELECTOR" ] || [ "${2:-}" = --migrate ]; }; then
         ! _agent_armed \
-          || die "runtime publish: first cutover requires the scheduler to be unloaded with /loom stop"
+          || die "runtime publish: cutover requires the scheduler to be unloaded with /loom stop"
         export LOOM_RUNTIME_CUTOVER_UNARMED=1
     fi
     LOOM_RUNTIME_SOURCE="${SELF_PATH%/*}/.." \

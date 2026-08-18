@@ -54,7 +54,7 @@ technique of its own.
 | `unblock <n> [--to-review]` | 6 | Post decision, relabel, requeue |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop: switch off, unload the agent; `--now` also kills live lanes |
-| `publish [git-ref]` | any | Validate and atomically select one committed immutable Loom release |
+| `publish [--migrate] [git-ref]` | any | Validate and atomically select one committed immutable Loom release |
 | `rollback` | any | Select the previously active Loom release for future heartbeats |
 | `runtime-status` | any | Show active/previous releases plus live lane and queued pins |
 | `replan` | any | Diff amended PRD, regenerate only affected tickets |

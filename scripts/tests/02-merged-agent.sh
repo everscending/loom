@@ -106,6 +106,34 @@ if printf '%s' "$publish_tick_out" | grep -q 'runtime publication is in progress
 else
     bad "runtime release: a new old-runtime tick crossed selector publication"
 fi
+start_during_publish=$(env -u LOOM_ALLOW_MUTABLE_RUNTIME LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" \
+  LOOM_PLIST_DIR="$MT/agents" LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 \
+  LOOM_RUNTIME_RELEASE="$RID" LOOM_RUNTIME_HOME="$RTH" LOOM_RUNTIME_SELECTOR="$RSEL" \
+  LOOM_RUNTIME_LAUNCHER="$RLAUNCH" "$TICK" install --provider claude 2>&1)
+start_during_publish_rc=$?
+if [ "$start_during_publish_rc" -ne 0 ] \
+   && printf '%s' "$start_during_publish" | grep -q 'runtime publication'; then
+    ok "runtime release: start cannot race a selected-runtime migration"
+else
+    bad "runtime release: start crossed a selected-runtime migration"
+fi
+rm -f "$RSEL"
+mkdir -p "$MT/home/lane-launch-queue/request-late"
+printf 'still queued\n' > "$MT/home/lane-launch-queue/request-late/proof"
+legacy_tick_out=$(env -u LOOM_ALLOW_MUTABLE_RUNTIME LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" \
+  LOOM_PLIST_DIR="$MT/agents" LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 \
+  LOOM_RUNTIME_RELEASE= LOOM_RUNTIME_HOME="$RTH" LOOM_RUNTIME_SELECTOR="$RSEL" \
+  LOOM_RUNTIME_LAUNCHER="$RLAUNCH" "$TICK" tick --provider claude 2>&1)
+if printf '%s' "$legacy_tick_out" | grep -q 'runtime publication is in progress' \
+   && [ ! -d "$MT/home/tick.lock.d" ] \
+   && [ -f "$MT/home/lane-launch-queue/request-late/proof" ] \
+   && [ -z "$(find "$MT/home/lane-launch-queue" -type d -name 'launching-*' -print)" ]; then
+    ok "runtime release: first cutover blocks a late mutable tick before queue drain"
+else
+    bad "runtime release: a mutable tick drained work across first-cutover publication"
+fi
+rm -rf "$MT/home/lane-launch-queue"
+printf 'schema 1\ncurrent %s\n' "$RID" > "$RSEL"
 rm -rf "$RTH/publish.lock"
 
 # The scheduler is the durable host for Codex-deferred lanes, and launchd
@@ -131,7 +159,7 @@ MENV "$TICK" install 60 >/dev/null 2>&1
 [ ! -f "$MT/home/loop.stopped" ] && ok "start: clears the switch a previous stop left" \
                                  || bad "start: stale switch survived, build would never run"
 cutover_out=$(MENV "$TICK" runtime publish 2>&1); cutover_rc=$?
-if [ "$cutover_rc" -ne 0 ] && printf '%s' "$cutover_out" | grep -q 'requires the scheduler to be unloaded'; then
+if [ "$cutover_rc" -ne 0 ] && printf '%s' "$cutover_out" | grep -q 'cutover requires the scheduler to be unloaded'; then
     ok "runtime release: first cutover refuses an armed mutable scheduler"
 else
     bad "runtime release: first cutover left an armed mutable scheduler behind"

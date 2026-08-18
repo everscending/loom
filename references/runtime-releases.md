@@ -3,18 +3,20 @@
 These are human-run host controls. They do not merge branches, edit tickets,
 restart lanes, or start a stopped build.
 
-## `publish [git-ref]`
+## `publish [--migrate] [git-ref]`
 
-Run `scripts/tick.sh runtime publish [git-ref]` from the installed Loom Git
+Run `scripts/tick.sh runtime publish [--migrate] [git-ref]` from the installed Loom Git
 checkout. The default is committed `HEAD`. Refuse a dirty checkout. Publication
 exports the exact committed tree, rejects symlinks and submodules, validates
-every shell file and the full Loom suite, then atomically selects the complete
+every shell file and the full Loom suite, retains the commit objects needed to
+verify it without the source checkout, then atomically selects the complete
 read-only release for this repository. A failed validation leaves the selector
 unchanged.
 
 The first publication requires `/loom stop`, no live wave, no lane or deferred
 launch metadata, and an unloaded scheduler. Each release carries `runtime-abi`;
-an API change is refused until a separate stopped-state migration exists.
+an API change requires the same boundary and the explicit `--migrate` flag.
+Rollback never crosses an API boundary.
 
 Fresh human commands and scheduler heartbeats use the new release. A running
 wave, lane, epilogue, or deferred handoff stays pinned to its creator release.

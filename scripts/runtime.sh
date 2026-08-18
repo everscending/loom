@@ -9,6 +9,7 @@ RELEASES="$RUNTIME_HOME/releases"
 ACTIVE="${LOOM_RUNTIME_SELECTOR:-$RUNTIME_HOME/active}"
 BIN="$RUNTIME_HOME/bin/loom-runtime"
 BIN_RELEASE="$RUNTIME_HOME/bin/loom-runtime.release"
+STORE="$RUNTIME_HOME/store.git"
 LOCK="$RUNTIME_HOME/publish.lock"
 STAGING=""
 LOCKED=""
@@ -39,11 +40,28 @@ release_complete() { # <id>
       && [ -x "$dir/scripts/tick.sh" ] && [ -x "$dir/scripts/runtime.sh" ]
 }
 
+release_verified() { # <id>
+    local dir commit tree
+    release_complete "$1" || die "release '$1' is missing or incomplete"
+    [ -d "$STORE" ] && [ ! -L "$STORE" ] \
+      && [ "$(git -C "$STORE" rev-parse --is-bare-repository 2>/dev/null)" = true ] \
+      || die "retained runtime object store is missing or untrusted: $STORE"
+    dir=$(release_path "$1")
+    commit=$(sed -n 's/^commit //p' "$dir/.loom-release")
+    valid_release "$commit" || die "release '$1' has an invalid commit identity"
+    tree=$(git -C "$STORE" rev-parse --verify "$commit^{tree}" 2>/dev/null) \
+      || die "release '$1' commit is unavailable from retained runtime objects"
+    [ "$tree" = "$1" ] || die "release '$1' commit names tree '$tree'"
+    verify_exact_tree "$STORE" "$commit" "$dir" published
+}
+
 write_active() { # <current> <previous>
     local tmp="${ACTIVE%/*}/.active.$$"
-    valid_release "$1" && release_complete "$1" || die "refusing incomplete current release '$1'"
+    valid_release "$1" || die "refusing invalid current release '$1'"
+    release_verified "$1"
     if [ -n "${2:-}" ]; then
-        valid_release "$2" && release_complete "$2" || die "refusing incomplete previous release '$2'"
+        valid_release "$2" || die "refusing invalid previous release '$2'"
+        release_verified "$2"
     fi
     { printf 'current %s\n' "$1"; [ -z "${2:-}" ] || printf 'previous %s\n' "$2"; } > "$tmp"
     mv -f "$tmp" "$ACTIVE"
@@ -97,12 +115,21 @@ export_tree() { # <source> <commit> <empty-destination>
 }
 
 verify_exact_tree() { # <source> <commit> <export> [published]
-    local source="$1" commit="$2" dir="$3" published="${4:-}" record meta path mode type object actual count=0 files
+    local source="$1" commit="$2" dir="$3" published="${4:-}" record meta path mode type object actual count=0 files dirs expected_dirs links nodes
+    links=$(find "$dir" -type l -print) || die "cannot traverse committed export"
+    [ -z "$links" ] || die "committed export contains a symbolic link"
+    nodes=$(find "$dir" ! -type f ! -type d -print) \
+      || die "cannot traverse committed export"
+    [ -z "$nodes" ] || die "committed export contains an unexpected special node"
     while IFS= read -r -d '' record; do
         meta="${record%%$'\t'*}"; path="${record#*$'\t'}"
         set -- $meta; mode="$1" type="$2" object="$3"
         [ "$type" = blob ] || die "release tree contains unsupported entry '$path'"
-        [ -f "$dir/$path" ] || die "committed export omitted '$path'"
+        case "$path" in
+            ''|/*|.|..|./*|../*|*/./*|*/../*|*/.|*/..|.loom-release|.validated)
+                die "release tree contains an unsafe path '$path'" ;;
+        esac
+        [ ! -L "$dir/$path" ] && [ -f "$dir/$path" ] || die "committed export omitted '$path'"
         actual=$(git hash-object --no-filters "$dir/$path")
         [ "$actual" = "$object" ] || die "committed export transformed '$path'"
         case "$mode" in
@@ -112,9 +139,31 @@ verify_exact_tree() { # <source> <commit> <export> [published]
         esac
         count=$((count + 1))
     done < <(git -C "$source" ls-tree -r -z "$commit")
-    files=$(find "$dir" -type f | wc -l | tr -d ' ')
+    files=$(find "$dir" -type f -print0 | tr -cd '\000' | wc -c | tr -d ' ') \
+      || die "cannot count committed export files"
+    dirs=$(find "$dir" -type d -print0 | tr -cd '\000' | wc -c | tr -d ' ') \
+      || die "cannot count committed export directories"
+    expected_dirs=$(git -C "$source" ls-tree -r -d -z "$commit" | tr -cd '\000' | wc -c | tr -d ' ') \
+      || die "cannot count committed tree directories"
+    expected_dirs=$((expected_dirs + 1))
+    [ "$dirs" = "$expected_dirs" ] || die "committed export contains an unexpected directory"
     [ "$published" != published ] || count=$((count + 2))
     [ "$files" = "$count" ] || die "committed export contains an unexpected file"
+}
+
+retain_commit() { # <source> <commit>
+    local source="$1" commit="$2" tmp
+    if [ ! -e "$STORE" ]; then
+        tmp="$RUNTIME_HOME/.store.$$"
+        git init --bare -q "$tmp" || die "cannot initialize retained runtime objects"
+        mv "$tmp" "$STORE"
+    fi
+    [ -d "$STORE" ] && [ ! -L "$STORE" ] \
+      && [ "$(git -C "$STORE" rev-parse --is-bare-repository 2>/dev/null)" = true ] \
+      || die "retained runtime object store is missing or untrusted: $STORE"
+    git -C "$STORE" fetch -q "$source" \
+      "$commit:refs/loom-runtime/$commit" \
+      || die "cannot retain committed runtime objects for '$commit'"
 }
 
 on_signal() {
@@ -145,35 +194,56 @@ validate_tree() { # <staging>
       || die "release test suite failed"
 }
 
-compatible_with_active() { # <staging-or-release>
-    local target="$1" current old_api new_api
+compatible_with_active() { # <staging-or-release> [allow-migration]
+    local target="$1" allow_migration="${2:-0}" current old_api new_api
     current=$(active_value current 2>/dev/null || true)
-    [ -n "$current" ] && release_complete "$current" || return 0
-    old_api=$(sed -n 's/^host_state_api //p' "$RELEASES/$current/.loom-release")
-    new_api=$(sed -n 's/^host_state_api //p' "$target/.loom-release")
-    [ "$old_api" = "$new_api" ] \
-      || die "runtime state API differs from the active release; a deliberate stopped-state migration is required"
+    [ -n "$current" ] || return 0
+    release_verified "$current"
+    old_api=$(sed -n 's/^host_state_api //p' "$RELEASES/$current/runtime-abi")
+    new_api=$(sed -n 's/^host_state_api //p' "$target/runtime-abi")
+    [ "$old_api" = "$new_api" ] && return 0
+    [ "$allow_migration" = 1 ] \
+      || die "runtime state API differs from the active release; publish --migrate at a stopped/drained boundary"
+    require_stopped_drained_boundary "runtime state API migration"
 }
 
-require_initial_cutover_boundary() {
-    [ -n "${LOOM_HOME:-}" ] || die "first publication requires LOOM_HOME for the stopped/drained check"
+require_stopped_drained_boundary() { # <reason>
+    local reason="$1" f lanes="$LOOM_HOME/lanes" queue="$LOOM_HOME/lane-launch-queue"
+    [ -n "${LOOM_HOME:-}" ] || die "$reason requires LOOM_HOME for the stopped/drained check"
     [ "${LOOM_RUNTIME_CUTOVER_UNARMED:-}" = 1 ] \
-      || die "first publication must run through 'tick.sh runtime publish' to verify the scheduler is unloaded"
-    [ -f "$LOOM_HOME/loop.stopped" ] || die "first publication requires a stopped build"
-    ! find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.pid' -print -quit 2>/dev/null | grep -q . \
-      || die "first publication requires all lane metadata to be drained"
-    [ ! -d "$LOOM_HOME/tick.lock.d" ] \
-      || die "first publication requires the scheduling wave to be drained"
-    ! find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 -type d \
-        \( -name 'request-*' -o -name 'launching-*' \) -print -quit 2>/dev/null | grep -q . \
-      || die "first publication requires deferred launches to be drained"
+      || die "$reason must run through 'tick.sh runtime publish' to verify the scheduler is unloaded"
+    [ -f "$LOOM_HOME/loop.stopped" ] && [ ! -L "$LOOM_HOME/loop.stopped" ] \
+      || die "$reason requires a stopped build"
+    if [ -e "$lanes" ] || [ -L "$lanes" ]; then
+        [ -d "$lanes" ] && [ ! -L "$lanes" ] && [ -r "$lanes" ] && [ -x "$lanes" ] \
+          || die "$reason cannot prove lane metadata is drained"
+        for f in "$lanes"/*.pid; do
+            [ ! -e "$f" ] && [ ! -L "$f" ] && continue
+            die "$reason requires all lane metadata to be drained"
+        done
+    fi
+    if [ -e "$LOOM_HOME/tick.lock.d" ] || [ -L "$LOOM_HOME/tick.lock.d" ]; then
+        die "$reason requires the scheduling wave to be drained"
+    fi
+    if [ -e "$queue" ] || [ -L "$queue" ]; then
+        [ -d "$queue" ] && [ ! -L "$queue" ] && [ -r "$queue" ] && [ -x "$queue" ] \
+          || die "$reason cannot prove deferred launches are drained"
+        for f in "$queue"/request-* "$queue"/launching-*; do
+            [ ! -e "$f" ] && [ ! -L "$f" ] && continue
+            die "$reason requires deferred launches to be drained"
+        done
+    fi
 }
 
-cmd_publish() { # [git-ref]
+cmd_publish() { # [--migrate] [git-ref]
     local source="${LOOM_RUNTIME_SOURCE:-$(cd "${SELF%/*}/.." 2>/dev/null && pwd)}"
-    local ref="${1:-HEAD}" commit tree dir current="" previous="" loader_tmp
+    local migrate=0 ref commit tree dir current="" previous="" loader_tmp
+    if [ "${1:-}" = --migrate ]; then migrate=1; shift; fi
+    [ $# -le 1 ] || die "publish takes [--migrate] [git-ref]"
+    ref="${1:-HEAD}"
     [ -d "$source/.git" ] || git -C "$source" rev-parse --git-dir >/dev/null 2>&1 \
       || die "source '$source' is not a Git checkout"
+    source=$(cd "$source" && pwd -P)
     [ -z "$(git -C "$source" status --porcelain 2>/dev/null)" ] \
       || die "source checkout is dirty; publish a committed tree"
     commit=$(git -C "$source" rev-parse --verify "$ref^{commit}" 2>/dev/null) \
@@ -188,7 +258,7 @@ cmd_publish() { # [git-ref]
     trap 'on_signal 130' INT
     trap 'on_signal 143' TERM
     current=$(active_value current 2>/dev/null || true)
-    [ -n "$current" ] || require_initial_cutover_boundary
+    [ -n "$current" ] || require_stopped_drained_boundary "first publication"
     dir="$RELEASES/$tree"
     if ! release_complete "$tree"; then
         [ ! -e "$dir" ] || die "release path exists but is incomplete: $dir"
@@ -201,14 +271,17 @@ cmd_publish() { # [git-ref]
         export_tree "$source" "$commit" "$STAGING"
         verify_exact_tree "$source" "$commit" "$STAGING"
         check_tree "$STAGING"
+        retain_commit "$source" "$commit"
         cat "$STAGING/runtime-abi" > "$STAGING/.loom-release"
-        printf 'tree %s\n' "$tree" >> "$STAGING/.loom-release"
+        printf 'tree %s\ncommit %s\n' "$tree" "$commit" >> "$STAGING/.loom-release"
         printf '%s\n' "$tree" > "$STAGING/.validated"
         chmod -R a-w "$STAGING"
         mv "$STAGING" "$dir"
         STAGING=""
     fi
-    verify_exact_tree "$source" "$commit" "$dir" published
+    git -C "$STORE" cat-file -e "$commit^{commit}" 2>/dev/null \
+      || retain_commit "$source" "$commit"
+    release_verified "$tree"
     if [ ! -e "$BIN" ] && [ ! -e "$BIN_RELEASE" ]; then
         printf '%s\n' "$tree" > "$BIN_RELEASE.tmp.$$"
         mv "$BIN_RELEASE.tmp.$$" "$BIN_RELEASE"
@@ -216,7 +289,8 @@ cmd_publish() { # [git-ref]
     if [ ! -e "$BIN" ] && [ -f "$BIN_RELEASE" ] && [ ! -L "$BIN_RELEASE" ]; then
         local recorded_loader=""
         recorded_loader=$(cat "$BIN_RELEASE" 2>/dev/null || true)
-        valid_release "$recorded_loader" && release_complete "$recorded_loader" \
+        valid_release "$recorded_loader" || die "stable launcher identity is invalid: $BIN_RELEASE"
+        release_verified "$recorded_loader" \
           || die "stable launcher identity is invalid: $BIN_RELEASE"
         loader_tmp="$RUNTIME_HOME/bin/.loom-runtime.$$"
         cp "$RELEASES/$recorded_loader/scripts/runtime.sh" "$loader_tmp"
@@ -226,14 +300,15 @@ cmd_publish() { # [git-ref]
     local loader_release=""
     loader_release=$(cat "$BIN_RELEASE" 2>/dev/null || true)
     [ -f "$BIN_RELEASE" ] && [ ! -L "$BIN_RELEASE" ] \
-      && valid_release "$loader_release" && release_complete "$loader_release" \
+      && valid_release "$loader_release" \
       && [ -f "$BIN" ] && [ ! -L "$BIN" ] && [ -x "$BIN" ] \
       && cmp -s "$BIN" "$RELEASES/$loader_release/scripts/runtime.sh" \
       || die "stable launcher is missing, untrusted, or modified: $BIN"
+    release_verified "$loader_release"
     current=$(active_value current 2>/dev/null || true)
     previous=$(active_value previous 2>/dev/null || true)
     if [ "$current" != "$tree" ]; then previous="$current"; fi
-    compatible_with_active "$dir"
+    compatible_with_active "$dir" "$migrate"
     write_active "$tree" "$previous"
     echo "loom-runtime: published ${current:-none} -> $tree"
     echo "loom-runtime: future heartbeats use $tree; running lanes remain pinned"
@@ -249,7 +324,9 @@ cmd_rollback() {
     current=$(active_value current 2>/dev/null || true)
     previous=$(active_value previous 2>/dev/null || true)
     [ -n "$current" ] && [ -n "$previous" ] || die "no previous release is available"
-    compatible_with_active "$RELEASES/$previous"
+    release_verified "$current"
+    release_verified "$previous"
+    compatible_with_active "$RELEASES/$previous" 0
     write_active "$previous" "$current"
     echo "loom-runtime: rolled back $current -> $previous"
     cleanup; trap - EXIT INT TERM
@@ -284,8 +361,8 @@ cmd_run() {
     shift
     entry="${1:-}"; [ $# -gt 0 ] && shift
     [ -n "$release" ] || release=$(active_value current 2>/dev/null || true)
-    valid_release "$release" && release_complete "$release" \
-      || die "selected release '${release:-none}' is missing or incomplete"
+    valid_release "$release" || die "selected release '${release:-none}' is invalid"
+    release_verified "$release"
     case "$entry" in
         tick) script=tick.sh ;; lane) script=lane.sh ;; agent) script=agent.sh ;;
         watch) script=watch-panes.sh ;; bootstrap) script=bootstrap.sh ;; worktree) script=worktree.sh ;;
@@ -305,5 +382,5 @@ case "${1:-}" in
     rollback) shift; [ $# -eq 0 ] || die "rollback takes no arguments"; cmd_rollback ;;
     status) shift; [ $# -eq 0 ] || die "status takes no arguments"; cmd_status ;;
     run) shift; cmd_run "$@" ;;
-    *) die "usage: loom-runtime publish [git-ref] | rollback | status | run [--release <id>] -- <entry> [args...]" ;;
+    *) die "usage: loom-runtime publish [--migrate] [git-ref] | rollback | status | run [--release <id>] -- <entry> [args...]" ;;
 esac

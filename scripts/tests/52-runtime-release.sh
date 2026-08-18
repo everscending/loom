@@ -56,6 +56,38 @@ else
 fi
 rm -rf "$CUTOVER_HOME/tick.lock.d"
 
+mkdir -p "$CUTOVER_HOME/lanes"
+: > "$CUTOVER_HOME/lanes/legacy.pid"
+lane_out=$(run_runtime publish 2>&1); lane_rc=$?
+if [ "$lane_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
+   && printf '%s' "$lane_out" | grep -q 'lane metadata'; then
+    ok "runtime release: first cutover refuses retained lane metadata"
+else
+    bad "runtime release: first cutover crossed retained lane metadata"
+fi
+rm -f "$CUTOVER_HOME/lanes/legacy.pid"
+rmdir "$CUTOVER_HOME/lanes"
+printf 'malformed\n' > "$CUTOVER_HOME/lanes"
+malformed_out=$(run_runtime publish 2>&1); malformed_rc=$?
+if [ "$malformed_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
+   && printf '%s' "$malformed_out" | grep -q 'cannot prove lane metadata'; then
+    ok "runtime release: malformed lane state fails the drained proof closed"
+else
+    bad "runtime release: malformed lane state passed as drained"
+fi
+rm -f "$CUTOVER_HOME/lanes"
+
+mkdir -p "$CUTOVER_HOME/lane-launch-queue/request-live" \
+         "$CUTOVER_HOME/lane-launch-queue/launching-live"
+queue_out=$(run_runtime publish 2>&1); queue_rc=$?
+if [ "$queue_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
+   && printf '%s' "$queue_out" | grep -q 'deferred launches'; then
+    ok "runtime release: first cutover refuses requested and launching handoffs"
+else
+    bad "runtime release: first cutover crossed durable handoff metadata"
+fi
+rm -rf "$CUTOVER_HOME/lane-launch-queue"
+
 mkdir -p "$RT/bin"
 printf '#!/bin/sh\nexit 0\n' > "$RT/bin/loom-runtime"; chmod +x "$RT/bin/loom-runtime"
 launcher_out=$(run_runtime publish 2>&1); launcher_rc=$?
@@ -77,11 +109,20 @@ if printf '%s' "$out" | grep -q -- "-> $A" \
 else
     bad "runtime release: first committed release was not selected safely"
 fi
+mv "$SRC" "$SRC.moved"
+detached_source=$(run_launcher run -- tick)
+mv "$SRC.moved" "$SRC"
+if printf '%s' "$detached_source" | grep -q "^A:$A:$RT/releases/$A/scripts/tick.sh$"; then
+    ok "runtime release: retained objects keep dispatch independent of the source worktree"
+else
+    bad "runtime release: dispatch still depends on the publishing worktree"
+fi
 LOADER_SUM=$(cksum "$RT/bin/loom-runtime")
 
 printf '#!/usr/bin/env bash\nprintf "B:%%s:%%s\\n" "$LOOM_RUNTIME_RELEASE" "$0"\n' > "$SRC/scripts/tick.sh"
 git -C "$SRC" add scripts/tick.sh
 git -C "$SRC" commit -qm B
+B_COMMIT=$(git -C "$SRC" rev-parse HEAD)
 B=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
 run_runtime publish >/dev/null
 fresh=$(run_launcher run -- tick)
@@ -104,47 +145,83 @@ else
     bad "runtime release: rollback did not restore the previous release"
 fi
 
-chmod u+w "$RT/releases/$B" "$RT/releases/$B/.loom-release"
-sed -i.bak 's/^host_state_api 1$/host_state_api 2/' "$RT/releases/$B/.loom-release"
-rm -f "$RT/releases/$B/.loom-release.bak"
-chmod a-w "$RT/releases/$B/.loom-release" "$RT/releases/$B"
-mkdir -p "$CUTOVER_HOME/lanes"
-printf '%s\n' "$A" > "$CUTOVER_HOME/lanes/live.release"
+printf 'host_state_api 2\n' > "$SRC/runtime-abi"
+git -C "$SRC" add runtime-abi
+git -C "$SRC" commit -qm incompatible-api
+INCOMPATIBLE=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
 compat_out=$(run_runtime publish 2>&1); compat_rc=$?
 if [ "$compat_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
    && printf '%s' "$compat_out" | grep -q 'state API differs'; then
-    ok "runtime release: cached incompatible promotion refuses live pins"
+    ok "runtime release: committed incompatible APIs cannot be promoted"
 else
-    bad "runtime release: cached promotion bypassed live state compatibility"
+    bad "runtime release: promotion trusted derived compatibility metadata"
 fi
-printf 'current %s\nprevious %s\n' "$B" "$A" > "$SELECTOR"
+migrate_out=$(run_runtime publish --migrate 2>&1); migrate_rc=$?
+if [ "$migrate_rc" -eq 0 ] \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$INCOMPATIBLE" ]; then
+    ok "runtime release: explicit stopped migration promotes a new state API"
+else
+    bad "runtime release: stopped state API migration was unavailable ($migrate_out)"
+fi
+printf 'current %s\nprevious %s\n' "$INCOMPATIBLE" "$A" > "$SELECTOR"
 rollback_out=$(run_runtime rollback 2>&1); rollback_rc=$?
-if [ "$rollback_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$B" ] \
+if [ "$rollback_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$INCOMPATIBLE" ] \
    && printf '%s' "$rollback_out" | grep -q 'state API differs'; then
-    ok "runtime release: rollback refuses an incompatible live state transition"
+    ok "runtime release: rollback refuses an incompatible state transition"
 else
-    bad "runtime release: rollback bypassed live state compatibility"
+    bad "runtime release: rollback trusted derived compatibility metadata"
 fi
-chmod u+w "$RT/releases/$B" "$RT/releases/$B/.loom-release"
-sed -i.bak 's/^host_state_api 2$/host_state_api 1/' "$RT/releases/$B/.loom-release"
-rm -f "$RT/releases/$B/.loom-release.bak"
-chmod a-w "$RT/releases/$B/.loom-release" "$RT/releases/$B"
 printf 'current %s\nprevious %s\n' "$A" "$B" > "$SELECTOR"
-rm -f "$CUTOVER_HOME/lanes/live.release"
+git -C "$SRC" checkout -q "$B_COMMIT"
 
 chmod u+w "$RT/releases/$B" "$RT/releases/$B/SKILL.md"
 printf 'tampered\n' >> "$RT/releases/$B/SKILL.md"
 chmod a-w "$RT/releases/$B/SKILL.md" "$RT/releases/$B"
 tamper_out=$(run_runtime publish 2>&1); tamper_rc=$?
-if [ "$tamper_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+rollback_tamper_out=$(run_runtime rollback 2>&1); rollback_tamper_rc=$?
+run_tamper_out=$(run_launcher run --release "$B" -- tick 2>&1); run_tamper_rc=$?
+if [ "$tamper_rc" -ne 0 ] && [ "$rollback_tamper_rc" -ne 0 ] && [ "$run_tamper_rc" -ne 0 ] \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
    && printf '%s' "$tamper_out" | grep -q "committed export transformed 'SKILL.md'"; then
-    ok "runtime release: a modified cached release cannot be selected"
+    ok "runtime release: publish, rollback, and pinned dispatch reject modified cached bytes"
 else
-    bad "runtime release: cached release mutation bypassed committed-tree verification"
+    bad "runtime release: a cached release bypassed committed-tree verification"
 fi
 chmod u+w "$RT/releases/$B" "$RT/releases/$B/SKILL.md"
 cp "$SRC/SKILL.md" "$RT/releases/$B/SKILL.md"
 chmod a-w "$RT/releases/$B/SKILL.md" "$RT/releases/$B"
+
+chmod u+w "$RT/releases/$B" "$RT/releases/$B/SKILL.md"
+mv "$RT/releases/$B/SKILL.md" "$RT/releases/$B/SKILL.real"
+ln -s SKILL.real "$RT/releases/$B/SKILL.md"
+chmod a-w "$RT/releases/$B/SKILL.real" "$RT/releases/$B"
+symlink_out=$(run_runtime publish 2>&1); symlink_rc=$?
+if [ "$symlink_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+   && printf '%s' "$symlink_out" | grep -q 'symbolic link'; then
+    ok "runtime release: symlink substitution cannot preserve a cached release identity"
+else
+    bad "runtime release: cached symlink substitution bypassed exact verification"
+fi
+chmod u+w "$RT/releases/$B"
+rm "$RT/releases/$B/SKILL.md"
+mv "$RT/releases/$B/SKILL.real" "$RT/releases/$B/SKILL.md"
+chmod a-w "$RT/releases/$B/SKILL.md" "$RT/releases/$B"
+
+chmod u+w "$RT/releases/$B"
+mkdir "$RT/releases/$B/unexpected-empty"
+empty_out=$(run_runtime publish 2>&1); empty_rc=$?
+rmdir "$RT/releases/$B/unexpected-empty"
+mkfifo "$RT/releases/$B/unexpected-node"
+node_out=$(run_runtime publish 2>&1); node_rc=$?
+rm -f "$RT/releases/$B/unexpected-node"
+chmod a-w "$RT/releases/$B"
+if [ "$empty_rc" -ne 0 ] && [ "$node_rc" -ne 0 ] \
+   && printf '%s' "$empty_out" | grep -q 'unexpected directory' \
+   && printf '%s' "$node_out" | grep -q 'unexpected special node'; then
+    ok "runtime release: exact verification rejects empty directories and special nodes"
+else
+    bad "runtime release: non-committed filesystem nodes survived exact verification"
+fi
 
 printf '#!/usr/bin/env bash\nif then\n' > "$SRC/scripts/agent.sh"
 git -C "$SRC" add scripts/agent.sh
@@ -201,7 +278,7 @@ fi
 
 printf 'schema 1\ncurrent ../../outside\n' > "$SELECTOR"
 escape_out=$(run_launcher run -- tick 2>&1); escape_rc=$?
-if [ "$escape_rc" -ne 0 ] && printf '%s' "$escape_out" | grep -q 'missing or incomplete'; then
+if [ "$escape_rc" -ne 0 ] && printf '%s' "$escape_out" | grep -q 'selected release'; then
     ok "runtime release: malformed selectors fail closed before code starts"
 else
     bad "runtime release: malformed selector reached executable code"
