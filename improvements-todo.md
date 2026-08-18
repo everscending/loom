@@ -247,9 +247,12 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   worker passed cold and warm. The isolated product commit `1f74d7f`
   (`fix(test): serialize shared browser fixture`) therefore sets `workers: 1`
   and pins that contract in the existing gate test; focused unit coverage is
-  27/27 and the full product browser suite is 127/127 using one worker.
-  Completion requires integrating that reviewed product branch; the dirty,
-  198-commit-behind main checkout was deliberately left untouched.
+  27/27. It is combined with deployed provisioning on clean branch
+  `codex/handoff-product-integration` at `47b47e6`; the integrated gate passes
+  139/139 browser tests using one worker, 30/30 focused unit tests, 2/2 real
+  PostgreSQL integration tests, TypeScript, ESLint, and diff checks. Completion
+  requires an authorized upstream merge; the dirty, 198-commit-behind main
+  checkout remains deliberately untouched.
 
 - [x] **DONE — Scope fake-auth provider counters to the request identity.**
   Parallel Playwright workers shared one fake auth server, so global counters
@@ -361,7 +364,10 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   service-role plus authenticated readiness checks. Verification: provisioning
   unit 3/3, real PostgreSQL failure/retry/idempotency integration 2/2,
   degraded-health Playwright 17/17, plus TypeScript, ESLint, and diff checks.
-  JOR-221 remains blocked until the human authorizes `npm run
+  The commit is also integrated on clean branch
+  `codex/handoff-product-integration` as `3a881b4`; combined verification is
+  139/139 browser tests, 30/30 focused unit tests, and 2/2 real PostgreSQL
+  integration tests. JOR-221 remains blocked until the human authorizes `npm run
   provision:deployed` against the configured Supabase project and the run
   records successful migrations, demo users/assets/rows, grants, cron, and
   PostgREST verification. No external service was changed in this session.
