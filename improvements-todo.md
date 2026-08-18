@@ -299,7 +299,7 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 - [ ] **IN PROGRESS — Provision the deployed application schema before performance work.** JOR-221 is correctly blocked on environment readiness, not product code: the configured Supabase project authenticates the demo user, but both authenticated and service-role PostgREST reads return `PGRST205` for `patients` and `audit_events`, proving migrations/seed are absent from the exposed schema. JOR-252 owns promotion of the finished build; completion must apply migrations 001–008, align `authenticated`/`app_user` grants, seed demo data/assets, and expose a repeatable verification command before JOR-221 can record honest baselines.
 
-- [ ] **IN PROGRESS — Deploy live Loom runtime files atomically.** An epilogue parsed `tick.sh` while it was being updated and logged a transient syntax error near `|`; the completed file passed `bash -n`, proving the reader saw a partial write. Publish complete immutable releases from committed trees, validate Bash/jq and the full suite before visibility, atomically select the active release, pin active lanes and queued handoffs to their creator release, and make rollback one selector change. The first cutover requires the current stopped/drained boundary; after it, compatible Loom improvements may be integrated and promoted while builds run. Larger runtime patches remain isolated until this seam is installed.
+- [x] **DONE — Deploy live Loom runtime files atomically.** An epilogue parsed `tick.sh` while it was being updated and logged a transient syntax error near `|`; the completed file passed `bash -n`, proving the reader saw a partial write. Publish complete immutable releases from committed trees, validate Bash/jq and the full suite before visibility, atomically select the active release, pin active lanes and queued handoffs to their creator release, and make rollback one selector change. The first cutover requires the current stopped/drained boundary; after it, compatible Loom improvements may be integrated and promoted while builds run. Larger runtime patches remain isolated until this seam is installed.
   The reviewed implementation is committed in `c96c64a`
   (`feat(runtime): publish immutable releases`): committed trees are exported as
   raw blobs, validated through the full suite, retained with their Git object
@@ -307,7 +307,9 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   epilogues, and deferred handoffs. Rollback is one selector swap; incompatible
   forward changes require explicit `publish --migrate` at a stopped/drained
   boundary. Focused runtime/scheduler coverage is 59/59 and the final integrated
-  suite is 1,473/1,473. Only the one-time stopped live cutover remains.
+  suite is 1,473/1,473. The stopped first cutover completed from installed HEAD
+  `c302ff7` as active release `b05f8e1f343c6da5bd52a422c5b2859899c778e2`;
+  stable dispatch reports the same release and the build remains stopped.
 
 - [x] **DONE — Canonicalize tick cwd before sweep and provider launch.** Implemented provider-neutrally in `b079cfc` (`fix(tick): enter canonical repo root`): the public tick boundary enters the already-canonical main checkout before tracker helpers, sweep, or provider/version startup and fails loudly if stable ground is unavailable. RED reproduced merge-193's exact deleted-worktree `shell-init/getcwd` failure and rc 71; GREEN is 27/27 focused, 100/100 adjacent, and 1,295/1,295 full-suite assertions. A planted mutant removing only the root entry recreates the failure. No adapter changed.
 
