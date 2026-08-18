@@ -330,6 +330,7 @@ include "lib";
         # shaped token can inflate file_surface by one), which is why `graph`
         # only ever uses them to flag, never to block.
         | ($t.body // "") as $desc
+        | active_scope_reset_of((($N[$t.id | tostring]) // [])) as $scope_reset
         | ($desc | section("Acceptance criteria")
            | [scan("(?m)^[ \\t]*[-*+][ \\t]+\\[[ xX]\\][ \\t]+")] | length) as $criteria_count
         | ($desc
@@ -337,6 +338,11 @@ include "lib";
            | unique | length) as $file_surface
         | { id: $t.id, title: $t.title, url: ($t.url // null), labels: $lb,
             state: state_of($lb), tier: ($t | tier_of($lb)),
+            # Preserve declared ticket metadata in `tier`; `pregate_tier` is
+            # the effective host gate/admission/scope tier. An API change can
+            # still require a host-owned Playwright acceptance spec (JOR-294).
+            pregate_tier: (($t + {active_scope_reset: $scope_reset})
+                           | minimum_pregate_tier($t | tier_of($lb))),
             fix: (($lb | index("fix")) != null),
             assignees: ($t.assignees // []),
             updated_at: ($t.updated_at // null),
@@ -358,7 +364,7 @@ include "lib";
                                   | .sha ] | first // null) as $merged_head
                               | judged_at((($N[$t.id | tostring]) // []); $merged_head)),
             rejections: $rej,
-            active_scope_reset: active_scope_reset_of((($N[$t.id | tostring]) // [])), # mutate:scope-reset-transport
+            active_scope_reset: $scope_reset, # mutate:scope-reset-transport
             active_supervised_repair: active_supervised_repair_of((($N[$t.id | tostring]) // [])),
             active_base_reconcile: (active_base_reconcile_of(
                 (($N[$t.id | tostring]) // []);

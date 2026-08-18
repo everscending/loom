@@ -50,6 +50,40 @@ api
 else
     bad "D-TICK-40: snapshot discarded the ticket body before provider launch"
 fi
+
+# D-TICK-44: pregate_tier is derived from the active replacement scope, not
+# stale original ticket acceptance. Prove both directions at the tracker-backed
+# snapshot seam before the pure planner consumes the row.
+NOTES10_EXISTED=0
+if [ -f "$FX/notes-10.json" ]; then
+    cp "$FX/notes-10.json" "$T/notes-10-before-browser-scope.json"
+    NOTES10_EXISTED=1
+fi
+cat > "$FX/notes-10.json" <<'EOF'
+[{"created_at":"2026-08-17T18:00:00Z","body":"## Acceptance criteria\n\n- [ ] `npx playwright test e2e/rescoped.spec.ts` passes\n\n<!-- orch-scope-reset 2026-08-17T18:00:00Z -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-scope-adds-browser" \
+  "$TICK" snapshot > "$T/snap-scope-adds-browser.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.id==10) | .pregate_tier' "$T/snap-scope-adds-browser.json")" = ui ] \
+    && ok "D-TICK-44: snapshot raises UI when active rescope adds browser acceptance" \
+    || bad "D-TICK-44: snapshot ignored browser acceptance in active rescope"
+
+jq 'map(if .iid == 10 then .description = "## Risk tier\n\napi\n\n## Acceptance criteria\n\n- [ ] `npx playwright test e2e/original.spec.ts` passes" else . end)' \
+  "$FX/open.json" > "$T/open-original-browser.json"
+cat > "$FX/notes-10.json" <<'EOF'
+[{"created_at":"2026-08-17T18:01:00Z","body":"## Acceptance criteria\n\n- [ ] The JSON response is stable\n\n<!-- orch-scope-reset 2026-08-17T18:01:00Z -->"}]
+EOF
+GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-original-browser.json" \
+  STUB_LOG="$T/calls-scope-removes-browser" \
+  "$TICK" snapshot > "$T/snap-scope-removes-browser.json" 2>/dev/null
+[ "$(jq -r '.tickets[] | select(.id==10) | .pregate_tier' "$T/snap-scope-removes-browser.json")" = api ] \
+    && ok "D-TICK-44: snapshot restores API when active rescope removes browser acceptance" \
+    || bad "D-TICK-44: snapshot retained superseded original browser acceptance"
+if [ "$NOTES10_EXISTED" = 1 ]; then
+    cp "$T/notes-10-before-browser-scope.json" "$FX/notes-10.json"
+else
+    rm -f "$FX/notes-10.json"
+fi
 # P52: the lane's turn count travels into the snapshot too — the wave
 # compares it against .config.lane_turn_cap without a second tracker read.
 # Its own stub log: appending to $CALLS would corrupt the 7b call-count test.

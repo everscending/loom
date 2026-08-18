@@ -2750,9 +2750,15 @@ BRIEFEOF
         _verdict_ticket="${_verdict_ticket%-r[0-9]*}"
         _verdict_head="${lane_head:-HEAD}"
         if [ -n "$pregate" ]; then
-            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+            if [ "$pregate" = ui ]; then
+                cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The launchd-owned host runs the configured UI pregate before this review session. A missing runner or red UI suite prevents the provider from starting, so this session is authoritative evidence that the host UI suite passed. Do not rerun that full tier and never launch Playwright/Chromium from this reviewer sandbox. If the ticket requires browser evidence that is not established by the host result, FAIL closed as missing host evidence; do not substitute a sandbox browser attempt.
+BRIEFEOF
+            else
+                cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - The host runs the configured $pregate pregate before this review session. If the provider session starts, that host-owned check passed or explicitly declared a missing-runner reduction in the lane log; the branch was not mechanically rejected. Do not rerun that full tier. Treat the pregate as the deterministic suite evidence and spend this session only on focused adversarial checks, inspection, and the independent verdict.
 BRIEFEOF
+            fi
         fi
         cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - A prose verdict is not a completed gate. Before exit, write the review body to a scratch file and run exactly one tracker verdict for the reviewed HEAD. PASS: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket pass $_verdict_head --file <verdict-body-file>\`. FAIL: \`$(dirname "$SELF_PATH")/lane.sh verdict $_verdict_ticket fail $_verdict_head --class <kebab-defect-class> --file <verdict-body-file>\`. Do not merely print PASS/FAIL in your final response; the verdict verb is the required ticket outcome.
@@ -2766,9 +2772,15 @@ BRIEFEOF
     if [ "$(_lane_type "$id")" = merge ] && [ -n "$pregate" ]; then
         local _merge_ticket="${id#merge-}"
         _merge_ticket="${_merge_ticket%%-*}"
-        cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+        if [ "$pregate" = ui ]; then
+            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
+- The launchd-owned host merge preflight already ran \`lane.sh reconcile\` and then the configured UI tier gate before this provider session started. A missing runner or red UI suite prevents this session from starting, so the host result is authoritative browser-capable evidence. Do not rerun the configured tier gate or launch Playwright/Chromium inside the provider sandbox. Run only \`$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket\` and report its result.
+BRIEFEOF
+        else
+            cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
 - The launchd-owned host merge preflight already ran \`lane.sh reconcile\` and then the configured $pregate tier gate before this provider session started. That host evidence is authoritative and supersedes any source-brief instruction to reconcile or run the full gate here. Do not rerun the configured tier gate inside the provider session; agent sandboxes can deny browser/OS services that the host gate legitimately needs. Run only \`$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket\` and report its result. If the runner was absent, the lane log explicitly declares that reduction; do not invent a replacement command.
 BRIEFEOF
+        fi
     fi
     local _hit=0 _prev=""
     for _b in "$@"; do
@@ -2964,8 +2976,23 @@ ui"
             # a runner); only the report is: the lane log states what was not
             # checked and why, and a `pregate_reduced` event carries it to the
             # ticker.
-            pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
-            pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+            if [ "$pregate" = ui ]; then
+                # JOR-294: browser acceptance was admitted as API, then its
+                # reviewer tried Chromium inside the provider sandbox because
+                # no authoritative host browser result existed. UI is now the
+                # mechanical floor for such contracts, so a missing UI runner
+                # cannot reduce to prose review: no host evidence means no
+                # reviewer. Gate rc 7 and merge rc 9 preserve their existing
+                # classification boundaries.
+                if [ "$lane_kind" = merge ]; then
+                    pre="$pre"' else echo "--- host merge preflight: required host UI evidence is absent because $LOOM_PREGATE_RUNNER is missing — merge provider not started (JOR-294) ---"; _rc=9; fi; '
+                else
+                    pre="$pre"' else echo "--- pregate: required host UI evidence is absent because $LOOM_PREGATE_RUNNER is missing — rejecting before sandboxed review (JOR-294) ---"; _rc=7; fi; '
+                fi
+            else
+                pre="$pre"' else echo "--- pregate: $LOOM_PREGATE_RUNNER is missing from this worktree — tier $LOOM_PREGATE_TIER reduced to review-only; nothing mechanical was checked (P60). If a ticket delivers the runner, this stays reduced until it merges ---";'
+                pre="$pre"" '$SELF_PATH' event pregate_reduced id '$id' tier \"\$LOOM_PREGATE_TIER\" runner \"\$LOOM_PREGATE_RUNNER\" >/dev/null 2>&1 || true; fi; "
+            fi
         fi
 
         # Merge gates must run after reconciliation, but a Codex provider
@@ -3681,8 +3708,6 @@ cmd_chain_gate() { # <impl-lane-id>
       and (((.labels // []) | index("review")) != null)
     ' >/dev/null 2>&1 || { _chain_merge_fallback; return 0; }
     jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
-    tier=$(printf '%s' "$issue" | jq -r -L "$jqd" 'include "lib"; . as $t | $t | tier_of(.labels) // empty' 2>/dev/null)
-    [ -n "$tier" ] || { _chain_merge_fallback; return 0; }
     # Scope resets replace ticket prose and completed supervised repairs are
     # evidence the next independent reviewer must assess. Derive both from the
     # live tracker thread with the exact shared ordering definitions used by
@@ -3696,6 +3721,18 @@ cmd_chain_gate() { # <impl-lane-id>
     ' 2>/dev/null) || { _chain_merge_fallback; return 0; }
     scope_body=$(printf '%s' "$evidence" | jq -r '.scope.body // empty')
     repair_body=$(printf '%s' "$evidence" | jq -r '.repair.body // empty')
+    # The active rescope is replacement authority for browser admission too.
+    # Compute the floor only after reading it so a reset can add Playwright or
+    # retire obsolete browser acceptance in the original ticket (D-TICK-44).
+    tier=$(printf '%s' "$issue" | jq -r -L "$jqd" --arg scope "$scope_body" '
+      include "lib";
+      . as $t
+      | ($t | tier_of(.labels)) as $declared
+      | ($t + {active_scope_reset:
+                 (if $scope == "" then null else {body: $scope} end)})
+      | minimum_pregate_tier($declared) // empty
+    ' 2>/dev/null)
+    [ -n "$tier" ] || { _chain_merge_fallback; return 0; }
     mrs=$("$FORGE_SH" mr-for-ticket "$iid" 2>>"$LOGS_DIR/self-trigger.log") \
         || { _chain_merge_fallback; return 0; }
     branch=$(printf '%s' "$mrs" | jq -r '[.[] | select(.state == "open")][0].branch // empty' 2>/dev/null)
