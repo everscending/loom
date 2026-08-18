@@ -934,6 +934,11 @@ _wave_scratch_tick() { # run one tick whose wave stamps its own scratch dir
 _wave_scratch_tick; w1=$?
 _wave_scratch_tick; w2=$?
 rm -rf "$LOOM_HOME/tick.lock.d"
+for _wait in $(seq 1 100); do
+    WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
+    [ "$WAVES" -ge 2 ] && break
+    sleep 0.05
+done
 WAVES=$(cat "$LOOM_HOME"/scratch/wave-*/wave-marker 2>/dev/null | sort -u | wc -l | tr -d ' ')
 [ "$WAVES" -ge 2 ] && ok "scratch: consecutive waves get separate directories" \
     || bad "scratch: two waves shared a scratch directory ($WAVES marker(s); ticks rc $w1/$w2)"

@@ -48,7 +48,7 @@ ok "planted: a pass printed before the death"
 echo "\$THIS_IS_NOT_SET"
 test_finish
 EOF
-h_out=$(LOOM_TEST_DIR="$HP/dies" bash "$DRIVER" 2>&1); h_rc=$?
+h_out=$(LOOM_TEST_DRIVER_NESTED=1 LOOM_TEST_DIR="$HP/dies" bash "$DRIVER" 2>&1); h_rc=$?
 if [ "$h_rc" != 0 ] && printf '%s' "$h_out" | grep -q "without reporting counts" \
    && printf '%s' "$h_out" | grep -q "== 0 passed, 1 failed =="; then
     ok "suite: a section that dies early is reported as a failure, not counted as zero"
@@ -68,7 +68,7 @@ ok "planted $n b"
 test_finish
 EOF
 done
-h_out=$(LOOM_TEST_DIR="$HP/two" bash "$DRIVER" 2>&1); h_rc=$?
+h_out=$(LOOM_TEST_DRIVER_NESTED=1 LOOM_TEST_DIR="$HP/two" bash "$DRIVER" 2>&1); h_rc=$?
 # Four planted passes plus the pane guard each section runs for itself.
 [ "$h_rc" = 0 ] && printf '%s' "$h_out" | grep -q "== 6 passed, 0 failed ==" \
     && ok "suite: the driver totals the sections' own counts" \
@@ -151,7 +151,7 @@ lint_out=$(LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" bash "$DRIVER" --lint
 if [ "$ui_rc" -ne 0 ] && [ ! -e "$LOOM_HOME/lanes/gate-901.pid" ] \
    && [ -n "$api_pid" ] && kill -0 "$api_pid" 2>/dev/null \
    && [ "$focused_rc" -eq 0 ] && [ "$lint_rc" -eq 0 ] \
-   && printf '%s' "$ui_out" | grep -q 'validation'; then
+   && printf '%s' "$ui_out" | grep -q 'full Loom test suite'; then
     ok "suite admission: direct full validation defers UI but not API, focused, or lint work"
 else
     bad "suite admission: direct validation covered non-heavy work (ui=$ui_rc focused=$focused_rc lint=$lint_rc; $ui_out $focused_out $lint_out)"
