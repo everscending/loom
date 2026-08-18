@@ -206,6 +206,13 @@ _runtime_ready() {
     [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]
 }
 
+_runtime_install_unlock() {
+    [ "${_RUNTIME_INSTALL_LOCKED:-}" = 1 ] || return 0
+    rm -f "$LOOM_RUNTIME_HOME/publish.lock/pid" 2>/dev/null || true
+    rmdir "$LOOM_RUNTIME_HOME/publish.lock" 2>/dev/null || true
+    _RUNTIME_INSTALL_LOCKED=0
+}
+
 # Public commands enter the selected immutable release once one exists. The
 # runtime administration verb stays in the checkout so it can publish a new
 # committed tree rather than trying to publish the archive it is running from.
@@ -1014,6 +1021,22 @@ lock_acquire() {
     _lock_reserve "$LOCK_DIR" || return 1  # genuinely held — skip this tick
     trap 'rm -rf "$LOCK_DIR"' EXIT
     return 0
+}
+
+# A selector change and a new tick-lock acquisition cannot pass each other.
+# The publisher holds this same short lock while it checks live ABI pins and
+# swaps the selector; after the tick lock exists, compatibility sees it.
+runtime_tick_lock_acquire() { # 0 acquired, 1 wave held, 2 publication held/error
+    local gate="$LOOM_RUNTIME_HOME/publish.lock" rc=0
+    if _runtime_ready; then
+        _lock_reserve "$gate" || return 2
+    fi
+    lock_acquire || rc=1
+    if _runtime_ready; then
+        rm -f "$gate/pid" 2>/dev/null || true
+        rmdir "$gate" 2>/dev/null || true
+    fi
+    return "$rc"
 }
 
 # Same rules, no EXIT trap: this lock outlives the process that takes it. It is
@@ -2103,7 +2126,14 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         _ev tick_skipped reason wave_gap
         return 0
     fi
-    if ! lock_acquire; then
+    local tick_lock_rc=0
+    runtime_tick_lock_acquire || tick_lock_rc=$?
+    if [ "$tick_lock_rc" -eq 2 ]; then
+        _ev tick_skipped reason runtime_publication
+        echo "tick: runtime publication is in progress — watched, no wave"
+        return 0
+    fi
+    if [ "$tick_lock_rc" -ne 0 ]; then
         # The pending file is a FLAG, not a counter: every tick after the first
         # during one wave sets something already set, and only one replay
         # follows however many arrive (155 lock_held ticks produced 79 replays
@@ -6198,6 +6228,16 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
       *) die "install: unknown argument '$1'";;
     esac; done
     [ -n "$provider" ] || die "install: --provider <id> is required"
+    if [ ! -f "$LOOM_RUNTIME_SELECTOR" ] && [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ]; then
+        mkdir -p "$LOOM_RUNTIME_HOME"
+        mkdir "$LOOM_RUNTIME_HOME/publish.lock" 2>/dev/null \
+          || die "install: runtime publication or first-cutover start is already in progress"
+        printf '%s\n' "$$" > "$LOOM_RUNTIME_HOME/publish.lock/pid"
+        _RUNTIME_INSTALL_LOCKED=1
+        trap _runtime_install_unlock EXIT
+        trap '_runtime_install_unlock; trap - EXIT INT TERM; exit 130' INT
+        trap '_runtime_install_unlock; trap - EXIT INT TERM; exit 143' TERM
+    fi
     _runtime_ready || [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" = 1 ] \
       || die "install: no validated runtime release is selected; run /loom publish first"
     [ -x "$AGENT_SH" ] || die "install: provider runtime missing: $AGENT_SH"
@@ -6236,6 +6276,8 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
   Then re-run /loom start. Until it loads, the build survives only on lane self-triggers."
     fi
     rm -f "$UNARMED_STATE"
+    _runtime_install_unlock
+    trap - EXIT INT TERM
     echo "loom: build agent LOADED ($LOOM_LABEL, provider $provider, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
     _raise_viewer
 }
@@ -6421,6 +6463,11 @@ cmd_agent_status() {
 }
 
 cmd_runtime() {
+    if [ "${1:-}" = publish ] && [ ! -f "$LOOM_RUNTIME_SELECTOR" ]; then
+        ! _agent_armed \
+          || die "runtime publish: first cutover requires the scheduler to be unloaded with /loom stop"
+        export LOOM_RUNTIME_CUTOVER_UNARMED=1
+    fi
     LOOM_RUNTIME_SOURCE="${SELF_PATH%/*}/.." \
       "${SELF_PATH%/*}/runtime.sh" "$@"
 }

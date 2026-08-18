@@ -8,9 +8,9 @@ RUNTIME_HOME="${LOOM_RUNTIME_HOME:-$HOME/.loom/runtime}"
 RELEASES="$RUNTIME_HOME/releases"
 ACTIVE="${LOOM_RUNTIME_SELECTOR:-$RUNTIME_HOME/active}"
 BIN="$RUNTIME_HOME/bin/loom-runtime"
+BIN_RELEASE="$RUNTIME_HOME/bin/loom-runtime.release"
 LOCK="$RUNTIME_HOME/publish.lock"
 STAGING=""
-INDEX_FILE=""
 LOCKED=""
 
 die() { echo "loom-runtime: $*" >&2; exit 1; }
@@ -33,7 +33,8 @@ release_path() { # <id>
 release_complete() { # <id>
     local dir
     dir=$(release_path "$1") || return 1
-    [ -d "$dir" ] && [ "$(sed -n 's/^tree //p' "$dir/.loom-release" 2>/dev/null)" = "$1" ] \
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ ! -L "$dir/.loom-release" ] && [ ! -L "$dir/.validated" ] \
+      && [ "$(sed -n 's/^tree //p' "$dir/.loom-release" 2>/dev/null)" = "$1" ] \
       && [ "$(cat "$dir/.validated" 2>/dev/null)" = "$1" ] \
       && [ -x "$dir/scripts/tick.sh" ] && [ -x "$dir/scripts/runtime.sh" ]
 }
@@ -51,7 +52,8 @@ write_active() { # <current> <previous>
 lock_acquire() {
     local owner
     mkdir -p "$RUNTIME_HOME" "$RELEASES" "$RUNTIME_HOME/bin" "${ACTIVE%/*}"
-    [ ! -L "$RUNTIME_HOME" ] && [ ! -L "$RELEASES" ] && [ ! -L "${ACTIVE%/*}" ] \
+    [ ! -L "$RUNTIME_HOME" ] && [ ! -L "$RELEASES" ] && [ ! -L "$RUNTIME_HOME/bin" ] \
+      && [ ! -L "${ACTIVE%/*}" ] \
       || die "runtime storage must not traverse symbolic links"
     if ! mkdir "$LOCK" 2>/dev/null; then
         owner=$(cat "$LOCK/pid" 2>/dev/null || true)
@@ -69,18 +71,46 @@ lock_acquire() {
 
 cleanup() {
     if [ -n "$STAGING" ] && [ -d "$STAGING" ]; then chmod -R u+w "$STAGING" 2>/dev/null || true; rm -rf "$STAGING"; fi
-    [ -z "$INDEX_FILE" ] || rm -f "$INDEX_FILE"
     if [ -n "$LOCKED" ]; then rm -f "$LOCK/pid" 2>/dev/null || true; rmdir "$LOCK" 2>/dev/null || true; fi
 }
 
 export_tree() { # <source> <commit> <empty-destination>
-    INDEX_FILE=$(mktemp "$RUNTIME_HOME/.index.XXXXXX") || die "cannot create temporary Git index"
-    rm -f "$INDEX_FILE"
-    GIT_INDEX_FILE="$INDEX_FILE" git -C "$1" read-tree "$2" \
-      && GIT_INDEX_FILE="$INDEX_FILE" git -C "$1" checkout-index --all --prefix="$3/" \
-      || die "cannot export committed Loom tree"
-    rm -f "$INDEX_FILE"
-    INDEX_FILE=""
+    local source="$1" commit="$2" dir="$3" record meta path mode type object parent
+    while IFS= read -r -d '' record; do
+        meta="${record%%$'\t'*}"; path="${record#*$'\t'}"
+        set -- $meta; mode="$1" type="$2" object="$3"
+        [ "$type" = blob ] || die "release tree contains unsupported entry '$path'"
+        parent=$(dirname "$dir/$path")
+        mkdir -p "$parent" || die "cannot create release directory for '$path'"
+        git -C "$source" cat-file blob "$object" > "$dir/$path" \
+          || die "cannot materialize committed blob '$path'"
+        case "$mode" in
+            100755) chmod 755 "$dir/$path" ;;
+            100644) chmod 644 "$dir/$path" ;;
+            *) die "release tree contains unsupported mode $mode at '$path'" ;;
+        esac
+    done < <(git -C "$source" ls-tree -r -z "$commit")
+}
+
+verify_exact_tree() { # <source> <commit> <export> [published]
+    local source="$1" commit="$2" dir="$3" published="${4:-}" record meta path mode type object actual count=0 files
+    while IFS= read -r -d '' record; do
+        meta="${record%%$'\t'*}"; path="${record#*$'\t'}"
+        set -- $meta; mode="$1" type="$2" object="$3"
+        [ "$type" = blob ] || die "release tree contains unsupported entry '$path'"
+        [ -f "$dir/$path" ] || die "committed export omitted '$path'"
+        actual=$(git hash-object --no-filters "$dir/$path")
+        [ "$actual" = "$object" ] || die "committed export transformed '$path'"
+        case "$mode" in
+            100755) [ -x "$dir/$path" ] || die "committed export lost executable mode for '$path'" ;;
+            100644) [ ! -x "$dir/$path" ] || die "committed export added executable mode for '$path'" ;;
+            *) die "release tree contains unsupported mode $mode at '$path'" ;;
+        esac
+        count=$((count + 1))
+    done < <(git -C "$source" ls-tree -r -z "$commit")
+    files=$(find "$dir" -type f | wc -l | tr -d ' ')
+    [ "$published" != published ] || count=$((count + 2))
+    [ "$files" = "$count" ] || die "committed export contains an unexpected file"
 }
 
 on_signal() {
@@ -92,9 +122,12 @@ on_signal() {
 
 check_tree() { # <staging>
     local dir="$1" f
-    for f in SKILL.md scripts/tick.sh scripts/lane.sh scripts/agent.sh scripts/runtime.sh scripts/tick-test.sh; do
+    for f in SKILL.md runtime-abi scripts/tick.sh scripts/lane.sh scripts/agent.sh scripts/runtime.sh scripts/tick-test.sh; do
         [ -f "$dir/$f" ] || die "release is missing $f"
     done
+    [ "$(wc -l < "$dir/runtime-abi" | tr -d ' ')" = 1 ] \
+      && grep -Eq '^host_state_api [1-9][0-9]*$' "$dir/runtime-abi" \
+      || die "release has an invalid runtime-abi"
     [ -z "$(find "$dir" -type l -print -quit)" ] || die "release contains a symbolic link"
     while IFS= read -r f; do bash -n "$f" || die "shell syntax failed: ${f#$dir/}"; done \
       < <(find "$dir" -type f -name '*.sh' | sort)
@@ -108,25 +141,20 @@ validate_tree() { # <staging>
       || die "release test suite failed"
 }
 
-live_release_state() {
-    [ -n "${LOOM_HOME:-}" ] || return 1
-    [ -d "$LOOM_HOME/tick.lock.d" ] \
-      || find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.release' -print -quit 2>/dev/null | grep -q . \
-      || find "$LOOM_HOME/lane-launch-queue" -mindepth 2 -maxdepth 2 -type f -name runtime-release -print -quit 2>/dev/null | grep -q .
-}
-
 compatible_with_active() { # <staging-or-release>
     local target="$1" current old_api new_api
     current=$(active_value current 2>/dev/null || true)
     [ -n "$current" ] && release_complete "$current" || return 0
     old_api=$(sed -n 's/^host_state_api //p' "$RELEASES/$current/.loom-release")
     new_api=$(sed -n 's/^host_state_api //p' "$target/.loom-release")
-    [ "$old_api" = "$new_api" ] || ! live_release_state \
-      || die "runtime state API changed while lanes or queued launches still reference the old release"
+    [ "$old_api" = "$new_api" ] \
+      || die "runtime state API differs from the active release; a deliberate stopped-state migration is required"
 }
 
 require_initial_cutover_boundary() {
     [ -n "${LOOM_HOME:-}" ] || die "first publication requires LOOM_HOME for the stopped/drained check"
+    [ "${LOOM_RUNTIME_CUTOVER_UNARMED:-}" = 1 ] \
+      || die "first publication must run through 'tick.sh runtime publish' to verify the scheduler is unloaded"
     [ -f "$LOOM_HOME/loop.stopped" ] || die "first publication requires a stopped build"
     ! find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.pid' -print -quit 2>/dev/null | grep -q . \
       || die "first publication requires all lane metadata to be drained"
@@ -151,35 +179,53 @@ cmd_publish() { # [git-ref]
     valid_release "$tree" || die "unexpected Git tree id '$tree'"
     [ -z "$(git -C "$source" ls-tree -r "$commit" | awk '$1 == "120000" || $1 == "160000" { print; exit }')" ] \
       || die "release tree contains a symbolic link or submodule"
-    current=$(active_value current 2>/dev/null || true)
-    [ -n "$current" ] || require_initial_cutover_boundary
     lock_acquire
     trap cleanup EXIT
     trap 'on_signal 130' INT
     trap 'on_signal 143' TERM
+    current=$(active_value current 2>/dev/null || true)
+    [ -n "$current" ] || require_initial_cutover_boundary
     dir="$RELEASES/$tree"
     if ! release_complete "$tree"; then
         [ ! -e "$dir" ] || die "release path exists but is incomplete: $dir"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create release staging directory"
         export_tree "$source" "$commit" "$STAGING"
+        verify_exact_tree "$source" "$commit" "$STAGING"
         validate_tree "$STAGING"
         rm -rf "$STAGING"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create final release staging directory"
         export_tree "$source" "$commit" "$STAGING"
+        verify_exact_tree "$source" "$commit" "$STAGING"
         check_tree "$STAGING"
-        printf 'host_state_api 1\ntree %s\n' "$tree" > "$STAGING/.loom-release"
+        cat "$STAGING/runtime-abi" > "$STAGING/.loom-release"
+        printf 'tree %s\n' "$tree" >> "$STAGING/.loom-release"
         printf '%s\n' "$tree" > "$STAGING/.validated"
         chmod -R a-w "$STAGING"
         mv "$STAGING" "$dir"
         STAGING=""
     fi
-    if [ ! -e "$BIN" ]; then
+    verify_exact_tree "$source" "$commit" "$dir" published
+    if [ ! -e "$BIN" ] && [ ! -e "$BIN_RELEASE" ]; then
+        printf '%s\n' "$tree" > "$BIN_RELEASE.tmp.$$"
+        mv "$BIN_RELEASE.tmp.$$" "$BIN_RELEASE"
+    fi
+    if [ ! -e "$BIN" ] && [ -f "$BIN_RELEASE" ] && [ ! -L "$BIN_RELEASE" ]; then
+        local recorded_loader=""
+        recorded_loader=$(cat "$BIN_RELEASE" 2>/dev/null || true)
+        valid_release "$recorded_loader" && release_complete "$recorded_loader" \
+          || die "stable launcher identity is invalid: $BIN_RELEASE"
         loader_tmp="$RUNTIME_HOME/bin/.loom-runtime.$$"
-        cp "$dir/scripts/runtime.sh" "$loader_tmp"
+        cp "$RELEASES/$recorded_loader/scripts/runtime.sh" "$loader_tmp"
         chmod 755 "$loader_tmp"
         mv "$loader_tmp" "$BIN"
     fi
-    [ -x "$BIN" ] || die "stable launcher is missing or not executable: $BIN"
+    local loader_release=""
+    loader_release=$(cat "$BIN_RELEASE" 2>/dev/null || true)
+    [ -f "$BIN_RELEASE" ] && [ ! -L "$BIN_RELEASE" ] \
+      && valid_release "$loader_release" && release_complete "$loader_release" \
+      && [ -f "$BIN" ] && [ ! -L "$BIN" ] && [ -x "$BIN" ] \
+      && cmp -s "$BIN" "$RELEASES/$loader_release/scripts/runtime.sh" \
+      || die "stable launcher is missing, untrusted, or modified: $BIN"
     current=$(active_value current 2>/dev/null || true)
     previous=$(active_value previous 2>/dev/null || true)
     if [ "$current" != "$tree" ]; then previous="$current"; fi
@@ -219,7 +265,8 @@ cmd_status() {
             id="${f##*/}"; id="${id%.release}"
             echo "lane $id: $(cat "$f" 2>/dev/null || echo unreadable)"
         done
-        for f in "$LOOM_HOME"/lane-launch-queue/request-*/runtime-release; do
+        for f in "$LOOM_HOME"/lane-launch-queue/request-*/runtime-release \
+                 "$LOOM_HOME"/lane-launch-queue/launching-*/runtime-release; do
             [ -f "$f" ] || continue
             echo "queued ${f%/runtime-release}: $(cat "$f" 2>/dev/null || echo unreadable)"
         done

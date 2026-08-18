@@ -94,6 +94,19 @@ if grep -qF "<string>$RLAUNCH</string><string>run</string><string>--</string><st
 else
     bad "runtime release: scheduler plist still pins mutable or release-local code"
 fi
+mkdir -p "$RTH/publish.lock"
+printf '%s\n' "$$" > "$RTH/publish.lock/pid"
+publish_tick_out=$(LOOM_REPO="$MT/repo" LOOM_HOME="$MT/home" LOOM_PLIST_DIR="$MT/agents" \
+  LOOM_GLOBAL_CONFIG="$T/none.yml" LOOM_SKIP_BOOTSTRAP=1 LOOM_RUNTIME_RELEASE="$RID" \
+  LOOM_RUNTIME_HOME="$RTH" LOOM_RUNTIME_SELECTOR="$RSEL" LOOM_RUNTIME_LAUNCHER="$RLAUNCH" \
+  "$TICK" tick --provider claude 2>&1)
+if printf '%s' "$publish_tick_out" | grep -q 'runtime publication is in progress' \
+   && [ ! -d "$MT/home/tick.lock.d" ]; then
+    ok "runtime release: tick admission cannot race a selector publication"
+else
+    bad "runtime release: a new old-runtime tick crossed selector publication"
+fi
+rm -rf "$RTH/publish.lock"
 
 # The scheduler is the durable host for Codex-deferred lanes, and launchd
 # starts it with only the PATH baked into this plist. A repo gate invokes its
@@ -117,6 +130,12 @@ MENV "$TICK" uninstall >/dev/null 2>&1
 MENV "$TICK" install 60 >/dev/null 2>&1
 [ ! -f "$MT/home/loop.stopped" ] && ok "start: clears the switch a previous stop left" \
                                  || bad "start: stale switch survived, build would never run"
+cutover_out=$(MENV "$TICK" runtime publish 2>&1); cutover_rc=$?
+if [ "$cutover_rc" -ne 0 ] && printf '%s' "$cutover_out" | grep -q 'requires the scheduler to be unloaded'; then
+    ok "runtime release: first cutover refuses an armed mutable scheduler"
+else
+    bad "runtime release: first cutover left an armed mutable scheduler behind"
+fi
 
 # The three callers, three contracts. A wave is stubbed as a counter.
 MWAVES="$MT/waves"

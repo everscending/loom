@@ -11,7 +11,7 @@ mkdir -p "$SRC/scripts" "$CUTOVER_HOME"
 : > "$CUTOVER_HOME/loop.stopped"
 cp "$RUNTIME" "$SRC/scripts/runtime.sh"
 printf '# test skill\n' > "$SRC/SKILL.md"
-printf 'SKILL.md export-ignore\n' > "$SRC/.gitattributes"
+printf 'host_state_api 1\n' > "$SRC/runtime-abi"
 for name in lane agent; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/$name.sh"
 done
@@ -27,7 +27,8 @@ A=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
 
 run_runtime() {
     LOOM_RUNTIME_HOME="$RT" LOOM_RUNTIME_SELECTOR="$SELECTOR" \
-      LOOM_RUNTIME_SOURCE="$SRC" LOOM_HOME="$CUTOVER_HOME" "$RUNTIME" "$@"
+      LOOM_RUNTIME_SOURCE="$SRC" LOOM_HOME="$CUTOVER_HOME" LOOM_RUNTIME_CUTOVER_UNARMED=1 \
+      "$RUNTIME" "$@"
 }
 
 run_launcher() {
@@ -54,6 +55,17 @@ else
     bad "runtime release: first cutover crossed a live legacy wave"
 fi
 rm -rf "$CUTOVER_HOME/tick.lock.d"
+
+mkdir -p "$RT/bin"
+printf '#!/bin/sh\nexit 0\n' > "$RT/bin/loom-runtime"; chmod +x "$RT/bin/loom-runtime"
+launcher_out=$(run_runtime publish 2>&1); launcher_rc=$?
+if [ "$launcher_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
+   && printf '%s' "$launcher_out" | grep -q 'stable launcher is missing, untrusted, or modified'; then
+    ok "runtime release: first cutover rejects an untrusted pre-existing launcher"
+else
+    bad "runtime release: first cutover trusted an unknown launcher"
+fi
+rm -f "$RT/bin/loom-runtime"
 
 out=$(run_runtime publish)
 first=$(run_launcher run -- tick)
@@ -100,7 +112,7 @@ mkdir -p "$CUTOVER_HOME/lanes"
 printf '%s\n' "$A" > "$CUTOVER_HOME/lanes/live.release"
 compat_out=$(run_runtime publish 2>&1); compat_rc=$?
 if [ "$compat_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
-   && printf '%s' "$compat_out" | grep -q 'state API changed'; then
+   && printf '%s' "$compat_out" | grep -q 'state API differs'; then
     ok "runtime release: cached incompatible promotion refuses live pins"
 else
     bad "runtime release: cached promotion bypassed live state compatibility"
@@ -108,7 +120,7 @@ fi
 printf 'current %s\nprevious %s\n' "$B" "$A" > "$SELECTOR"
 rollback_out=$(run_runtime rollback 2>&1); rollback_rc=$?
 if [ "$rollback_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$B" ] \
-   && printf '%s' "$rollback_out" | grep -q 'state API changed'; then
+   && printf '%s' "$rollback_out" | grep -q 'state API differs'; then
     ok "runtime release: rollback refuses an incompatible live state transition"
 else
     bad "runtime release: rollback bypassed live state compatibility"
@@ -119,6 +131,20 @@ rm -f "$RT/releases/$B/.loom-release.bak"
 chmod a-w "$RT/releases/$B/.loom-release" "$RT/releases/$B"
 printf 'current %s\nprevious %s\n' "$A" "$B" > "$SELECTOR"
 rm -f "$CUTOVER_HOME/lanes/live.release"
+
+chmod u+w "$RT/releases/$B" "$RT/releases/$B/SKILL.md"
+printf 'tampered\n' >> "$RT/releases/$B/SKILL.md"
+chmod a-w "$RT/releases/$B/SKILL.md" "$RT/releases/$B"
+tamper_out=$(run_runtime publish 2>&1); tamper_rc=$?
+if [ "$tamper_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+   && printf '%s' "$tamper_out" | grep -q "committed export transformed 'SKILL.md'"; then
+    ok "runtime release: a modified cached release cannot be selected"
+else
+    bad "runtime release: cached release mutation bypassed committed-tree verification"
+fi
+chmod u+w "$RT/releases/$B" "$RT/releases/$B/SKILL.md"
+cp "$SRC/SKILL.md" "$RT/releases/$B/SKILL.md"
+chmod a-w "$RT/releases/$B/SKILL.md" "$RT/releases/$B"
 
 printf '#!/usr/bin/env bash\nif then\n' > "$SRC/scripts/agent.sh"
 git -C "$SRC" add scripts/agent.sh
@@ -143,6 +169,20 @@ if [ "$suite_rc" -ne 0 ] \
     ok "runtime release: a red full suite cannot become active"
 else
     bad "runtime release: red suite changed the active release"
+fi
+
+git -C "$SRC" checkout -q HEAD^ -- scripts/tick-test.sh
+printf 'SKILL.md export-ignore\n' > "$SRC/.gitattributes"
+git -C "$SRC" add scripts/tick-test.sh .gitattributes
+git -C "$SRC" commit -qm transformed-export
+attribute_out=$(run_runtime publish 2>&1); attribute_rc=$?
+C=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
+if [ "$attribute_rc" -eq 0 ] \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$C" ] \
+   && cmp -s "$SRC/SKILL.md" "$RT/releases/$C/SKILL.md"; then
+    ok "runtime release: raw Git blobs ignore export and checkout transformations"
+else
+    bad "runtime release: attributes changed or omitted committed release bytes ($attribute_out)"
 fi
 
 printf 'schema 1\ncurrent ../../outside\n' > "$SELECTOR"

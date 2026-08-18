@@ -12,10 +12,13 @@ every shell file and the full Loom suite, then atomically selects the complete
 read-only release for this repository. A failed validation leaves the selector
 unchanged.
 
+The first publication requires `/loom stop`, no live wave, no lane or deferred
+launch metadata, and an unloaded scheduler. Each release carries `runtime-abi`;
+an API change is refused until a separate stopped-state migration exists.
+
 Fresh human commands and scheduler heartbeats use the new release. A running
 wave, lane, epilogue, or deferred handoff stays pinned to its creator release.
-Live publication is allowed only while the host-state API remains compatible;
-an incompatible change with live pins must wait for a stopped, drained boundary.
+Live publication is allowed only while the host-state API remains compatible.
 
 ## `rollback`
 
