@@ -1,12 +1,15 @@
 # AGENTS.md — working on the Loom skill
 
-This repository **is** the `loom` Claude Code skill. It is not an application.
-Everything here is either instructions a model reads (`SKILL.md`,
-`references/*.md`) or shell and `jq` machinery those instructions drive
-(`scripts/`).
+This repository **is** the `loom` coding-agent skill. It is not an application.
+Its core is instructions a model reads (`SKILL.md`, `references/*.md`) plus
+shell and `jq` machinery (`scripts/`). The headless runtime is provider-neutral;
+the shipped adapters support Claude Code and Codex.
 
-Read this file before changing anything. It says what Loom is, how a human
-drives it, how the maintenance files work, and which rules a change must obey.
+Read this file before changing anything, then read
+[`CONTRIBUTING.md`](CONTRIBUTING.md) in full and follow its coordination,
+testing, documentation, review, and pull-request requirements. This file is the
+authoritative maintenance contract; `CONTRIBUTING.md` is the contributor-facing
+workflow.
 
 ---
 
@@ -20,15 +23,16 @@ mostly unattended. Six phases:
    epics go into a build. Documented in
    [`references/phases-1-5.md`](references/phases-1-5.md).
 2. **Phase 6 is the unattended loop.** A launchd (or cron) entry fires
-   `scripts/tick.sh tick --auto` every 60 seconds. Each firing watches live
-   lanes first, then may start one *wave* — a headless `claude -p` session
-   running `/loom tick`. A wave reads one JSON snapshot of the tracker, runs the
-   schedule the planner derived from it, and writes back.
+   `scripts/tick.sh tick --auto --provider <id>` every 60 seconds. Each firing
+   watches live lanes first, then may start one *wave* through
+   `scripts/agent.sh`, using the provider bound to the active Build issue. A
+   wave reads one JSON snapshot of the tracker, runs the schedule the planner
+   derived from it, and writes back through Loom's lane verbs.
 
 Each in-flight ticket gets its own git worktree and its own headless session,
-called a **lane**. Lane ids are `impl-<ticket>`, `gate-<ticket>[-r<round>]`,
-`merge-<ticket>` or `probe-<epic-slug>`; the scheduler reads a lane's kind off
-its name, so the naming is load-bearing.
+called a **lane**. Lane ids are `impl-<ticket>`, `repair-<ticket>`,
+`gate-<ticket>[-r<round>]`, `merge-<ticket>` or `probe-<epic-slug>`; the
+scheduler reads a lane's kind off its name, so the naming is load-bearing.
 
 ### The four constitution rules
 
@@ -36,8 +40,9 @@ From `SKILL.md`. A violation is a bug, not a style preference.
 
 1. **No shadow state.** The declared issue tracker is the only mutable build
    state. If a fresh session cannot reconstruct a running build by querying the
-   tracker, that is a defect. The run directory (`~/.loom/<repo>/`) holds locks,
-   pid files and pause markers only — plumbing, never decisions.
+   tracker, that is a defect. The run directory (`~/.loom/<repo>/`) holds only
+   host plumbing such as locks, leases, process records, staged briefs,
+   attestations, release pins, and pause markers — never build decisions.
 2. **Route, don't teach.** Technique lives in the sibling skills (`/grilling`,
    `/lavish`, `/to-tickets`, `/implement`, `/code-review`). `SKILL.md` holds
    only phase order, gate criteria, scheduling, and failure policy.
@@ -54,17 +59,18 @@ Two more rules govern edits in practice:
   Layer order for any change: `scripts/` first, `references/` second,
   `SKILL.md` last resort.
 - **Sibling skills are off limits.** `/to-tickets`, `/implement`,
-  `/code-review`, `/grilling`, `/lavish`, `/prototype` are shared by other work
-  and Loom is their consumer, not their owner. A change that seems to need one
-  of them must be re-scoped into Loom's own layer or dropped.
+  `/code-review`, `/grilling`, `/lavish`, `/domain-modeling`, and `/prototype`
+  are shared by other work and Loom is their consumer, not their owner. A
+  change that seems to need one of them must be re-scoped into Loom's own layer
+  or dropped.
 
 ---
 
 ## Verbs — how a human drives Loom
 
-Every verb is `/loom <verb>` inside Claude Code. **A verb stops at its own
-output and hands back to the human.** It never auto-advances to the next verb,
-and it never writes production code by hand.
+Every verb is `/loom <verb>` in the interactive provider. **A verb stops at
+its own output and hands back to the human.** It never auto-advances to the
+next verb, and it never writes production code by hand.
 
 ### Build verbs
 
@@ -74,12 +80,16 @@ and it never writes production code by hand.
 | `epics` | 3 | Epic breakdown on an annotatable surface, then created on the board |
 | `tickets` | 4 | Ticket bodies per epic, with contracts, tiers, PRD IDs, blocking edges |
 | `build` | 5 | Define or adjust a build (epic selection). Spends nothing, starts nothing |
-| `start` | 5→6 | The trigger: installs the scheduler, clears the stop switch, fires wave one. Also **resume** |
+| `start` | 5→6 | Bind provider and supervision policy, sync guardrails, install the scheduler, and fire wave one. Also **resume** |
 | `tick` | 6 | Force one scheduling wave now |
 | `watch [--no-panes]` | 6 | Narrated summary; inside herdr, a live pane per lane |
+| `mend [--once\|--observe-only]` | 6 | Assert start-owned supervision; repair confirmed Loom mechanism defects |
 | `unblock <n> [--to-review]` | 6 | Post the decision, clear `blocked`, release the ticket |
 | `triage` | 6 | Every blocked ticket on one surface, six actions each, applied as a batch |
 | `stop [--now]` | 6 | Stop the loop; `--now` also kills live lanes |
+| `publish [--migrate] [git-ref]` | any | Validate and atomically select a committed immutable Loom release |
+| `rollback` | any | Select the previous compatible release for future heartbeats |
+| `runtime-status` | any | Show active/previous releases and live or queued runtime pins |
 | `replan` | any | Diff an amended PRD, regenerate only affected tickets |
 
 ### Maintenance verbs (human-run; a wave never invokes these)
@@ -87,7 +97,7 @@ and it never writes production code by hand.
 | Verb | Does | Reference |
 |---|---|---|
 | `qa` | Review the skill's own files, report defects. **Reports, never fixes.** | [`references/qa.md`](references/qa.md) |
-| `fix <Dn>` | Implement one confirmed defect from `OPEN_DEFECTS.md`, prove it with a failing-first test, close the entry | [`references/fix.md`](references/fix.md) |
+| `fix <Dn>\|<severity>` | Implement one confirmed defect, or every open defect at a severity in order; prove each with a failing-first test and close it | [`references/fix.md`](references/fix.md) |
 | `prop <Pn>` | Implement one proposal from `PROPOSALS.md`, test it, archive it | [`references/prop.md`](references/prop.md) |
 | `optimize` | Compact `SKILL.md` without changing what it makes an agent do | [`references/optimize.md`](references/optimize.md) |
 | `retro` | Explain a finished build's time and money, write findings up as proposals | [`references/retro.md`](references/retro.md) |
@@ -103,20 +113,33 @@ fixing six confirmed findings introduced five new ones.
 SKILL.md                  the skill: phase order, gate rules, scheduling, failure policy
 AGENTS.md                 this file
 README.md                 the human-facing introduction: what Loom does, dependencies, setup
+CONTRIBUTING.md           contributor coordination, proof, review, and PR workflow
+runtime-abi               compatibility boundary for immutable host-state releases
 references/
   phases-1-5.md           the conversational front half, in full
   setup.md                bootstrap, config layers, the skill/repo boundary
   loom-config.md          every configuration key, with its options
+  build-controls.md       stop, watch, and unblock
+  scheduling.md           heartbeat, pacing, continuation, and loop switch
+  supervision.md          start-owned deterministic repair policy
+  mend.md                 audit and repair contract for supervision
+  runtime-releases.md     publish, rollback, runtime status, and compatibility
   ticket-template.md      what a ticket body must contain
   merge-brief.md          the rendered merge-lane brief (P93)
   triage.md retro.md qa.md optimize.md prop.md fix.md
 scripts/
-  tick.sh                 the scheduler: lock, spawn, watch, snapshot, notify. READ-ONLY on the tracker
+  tick.sh                 scheduler and host runtime; READ-ONLY against the tracker
   lane.sh                 every tracker write a lane is allowed to make
-  bootstrap.sh            one-time repo setup (the only other script that writes)
+  bootstrap.sh            idempotent repo, tracker, and guardrail setup writes
+  agent.sh agents/        provider-neutral runtime and Claude/Codex adapters
+  trackers/ forges/       tracker and merge-request driver contracts
+  runtime.sh              immutable release publication and selection
+  worktree.sh             deterministic linked-worktree preparation
+  lib.sh lib.jq           shared derivations
   watch-panes.sh          the herdr viewer
   tick-test.sh            the test driver
   test-lib.sh             the shared test harness
+  lint-tests.sh mutate.sh test-quality and planted-mutation checks
   tests/NN-<topic>.sh     the suite, one process per section
   *.jq                    snapshot, plan, graph, report, render queries
 OPEN_DEFECTS.md           confirmed defects awaiting a fix
@@ -126,8 +149,11 @@ PROPOSALS_ARCHIVED.md     implemented/dropped proposals, plus every review round
 ```
 
 `tick.sh` is **read-only against the tracker** by design — a wave re-runs it
-constantly, so a mutating call there would be unsafe to repeat. The test suite
-enforces this. Everything that writes lives in `lane.sh` and `bootstrap.sh`.
+constantly, so a mutating board call there would be unsafe to repeat. The test
+suite enforces this. Lane tracker mutations live in `lane.sh`; setup creates
+tracker metadata and provider guardrails through `bootstrap.sh`. Runtime,
+worktree, lock, lease, and release files are host plumbing, never build
+decisions.
 
 ---
 
@@ -139,9 +165,9 @@ file, none told what the others found. Every entry was reproduced against the
 real lines before it was recorded; unverified claims were dropped.
 
 **Keys are stable and never reused.** The format is `D-<FILE>-<nn>`, where
-`<FILE>` is one of `TICK`, `SNAP`, `LANE`, `BOOT`, `PANE`, `TEST`, `SKILL` or
-`REF` — naming the file the defect lives in. Cite a key in a commit message, a
-proposal, or a ticket: `fixes D-LANE-02`.
+`<FILE>` is one of `TICK`, `SNAP`, `LANE`, `BOOT`, `PANE`, `TEST`, `SKILL`,
+`REF` or `LIN` — naming the file the defect lives in. Cite a key in a commit
+message, a proposal, or a ticket: `fixes D-LANE-02`.
 
 **File structure.**
 
@@ -170,22 +196,24 @@ saying what `tick-test.sh` currently misses. Some carry `Covered by: Pn`.
 - **A fix is not done until a test fails without it.** Add the case named on the
   entry's **Test** line to the right `scripts/tests/NN-<topic>.sh` section,
   asserting the guard both holding and failing with the fix reverted.
-- **Never delete a row and never renumber.** A fixed defect keeps its key and
-  moves to `## Closed` with the date and a `**Shipped:**` paragraph.
+- **Never delete a defect entry or renumber a key.** A fixed defect loses its
+  open-index row and moves to `## Closed` with the date and a `**Shipped:**`
+  paragraph.
 - **A `Covered by: Pn` entry is refused by `fix`.** It is scoped into a larger
   change decided in `PROPOSALS.md` — it belongs to `prop <Pn>` instead.
 - **A partial fix moves nothing.** Leave the entry where it is and note what
   shipped and what remains.
 - **Never run a real build to verify.** It costs hours and real money.
 
-**How `fix <Dn>` runs.** This session resolves the key and refuses a
-`Covered by`. One general-purpose subagent with `isolation: "worktree"` does the
-reproduce-edit-test loop — one defect per subagent, one subagent at a time,
-because every fix touches the test suite and every close touches
-`OPEN_DEFECTS.md`. The subagent never commits and never edits `OPEN_DEFECTS.md`.
-This session re-runs `bash scripts/tick-test.sh` itself — a subagent's green
-claim is the one thing never taken on trust — then closes the entry, commits in
-the worktree, `git merge --no-ff`s back into `main`, and removes the worktree.
+**How `fix <Dn>|<severity>` runs.** A key resolves one defect; a severity
+resolves the live index and processes its entries sequentially. `Covered by:
+Pn` entries belong to `prop`, not a partial fix. One general-purpose subagent
+with `isolation: "worktree"` does each reproduce-edit-test loop, one defect at
+a time. The subagent never commits or edits `OPEN_DEFECTS.md`. This session
+re-runs `bash scripts/tick-test.sh`, closes the entry, commits in the worktree,
+`git merge --no-ff`s back into `main`, removes the worktree, and pushes `main`
+when the repository has a remote. Follow [`references/fix.md`](references/fix.md)
+for ordering and exact handoff rules.
 
 ---
 
@@ -210,20 +238,15 @@ and still produced a broken build.
 - **Status** — `open`, `fixed`, or `fixed-and-recurred`, with a round count.
 
 **One entry per class of failure, not per incident.** When an old failure
-recurs, **do not open a new entry** — reopen the old one and add a round. That
-is the whole point of the file: it lets a later fix tell "this was never
-addressed" apart from "this was addressed and the fix was not enough." PI-02 is
-the worked example — it was marked fixed, then PI-01 showed its fix was drawn
-too narrowly, so PI-02 now reads "fixed, round 1 (partially insufficient — see
-PI-01)".
+recurs, **do not open a new entry** — reopen the old one, add a round, and
+update its status. That is how a later fix distinguishes "never addressed"
+from "addressed, but insufficient."
 
 Some entries carry a **What to watch** section naming what the fix does *not*
 mechanically enforce. Those are the candidates for a future proposal.
 
-**The two files cross-reference.** PI-01 cites `D-REF-16` and
-`D-SKILL-14/15/16` as the in-lane and at-gate lines of defence for the same
-failure class. When a planning lesson has a mechanical residue, that residue is
-a defect entry or a proposal, and the planning entry should name it.
+When a planning lesson has a mechanical residue, that residue is a defect
+entry or proposal, and the planning entry names it.
 
 ---
 
@@ -231,11 +254,12 @@ a defect entry or a proposal, and the planning entry should name it.
 
 `PROPOSALS.md` answers "what is left to do" and nothing else. The status table
 at the top is the single source of truth — the detail sections carry no status.
-IDs (`Pn`) are stable; re-rank the table freely, never renumber. Statuses are
-`open`, `in progress`, `deferred` (with a reason), `dropped` (with a reason).
+IDs (`Pn`) are stable; re-rank the table freely, never renumber. Only `open`,
+`in progress`, and `deferred` (with a reason) remain in this live file.
 
-**Archive on implementation.** Cut both the `## Pn · …` section and its table
-row and append them to `PROPOSALS_ARCHIVED.md` in ID order. Do not leave a stub.
+**Archive when no longer live.** Implemented and dropped proposals move — both
+their `## Pn · …` section and table row — to `PROPOSALS_ARCHIVED.md` in ID
+order. Do not leave a stub.
 
 `PROPOSALS_ARCHIVED.md` also holds every dated `qa` review round's findings —
 that section is the evidence the next round starts from.
@@ -247,6 +271,9 @@ that section is the evidence the next round starts from.
 ```sh
 bash scripts/tick-test.sh              # full suite
 bash scripts/tick-test.sh <name>       # one section, seconds rather than minutes
+bash scripts/tick-test.sh --list        # list section selectors
+bash scripts/tick-test.sh --lint        # reject assertions that cannot fail
+bash scripts/tick-test.sh --mutate <name> # prove a named guard is load-bearing
 ```
 
 Sections are `scripts/tests/NN-<topic>.sh`, one process each, over
@@ -274,16 +301,20 @@ tier's tree`. Proposals: `Implement P93 — the merge queue drains itself`.
 Worktree branches merge back with `git merge --no-ff`, never rebase, so the
 history stays exactly what was tested green.
 
-**Worktrees.** All ticket work happens in a separate worktree branched off the
-base remote branch. Planning happens in the main clone. This mirrors what Loom
-itself does to its target repos.
+**Worktrees.** Runtime ticket work uses deterministic linked worktrees prepared
+by `scripts/worktree.sh` from the remote base. Maintenance work follows the
+verb-specific reference and [`CONTRIBUTING.md`](CONTRIBUTING.md); ordinary
+contributor branches use the ignored `.loom-worktrees/` directory.
 
 **Safety invariants that never bend:**
 
-- Force-push, `git reset --hard` and `rm -rf` are denied in every permission
-  mode, in every lane. The merge step merges; it never rebases.
-- Lanes never run with `bypassPermissions` (no guardrails) or `acceptEdits`
-  (hangs on bash). They run `dontAsk` or `auto`.
+- Force-push, rebase, `git reset --hard`, `git clean`, and unscoped recursive
+  deletion are denied in every provider path. The merge step merges; it never
+  rebases.
+- Every provider adapter supplies an explicit non-interactive approval or
+  permission mode and owns its sandbox policy. Claude defaults to `dontAsk`;
+  Codex explicitly defaults to `workspace-write`. A human-selected broader
+  Codex sandbox does not remove Loom's hard command denials.
 - Every tracker write in a lane goes through `scripts/lane.sh`. A lane needing
   something `lane.sh` cannot do has found a **missing verb**, not a reason for a
   wider allowlist.
@@ -292,6 +323,13 @@ itself does to its target repos.
   the steps in `SKILL.md` decide what a wave does. (Paid for: a hold comment
   ending "Release: when #48 merges, `/loom unblock 67`" was executed by a wave.)
 
-**Run state never lives here.** It lives in `~/.loom/<repo>/`. `.gitignore`
+**Published runtimes are immutable.** Fresh commands and heartbeats use the
+selected release; running waves, lanes, epilogues, and queued handoffs remain
+pinned to their creator release. An incompatible host-state change updates
+`runtime-abi` and requires the migration boundary in
+[`references/runtime-releases.md`](references/runtime-releases.md).
+
+**Run state never lives here.** Per-repository state lives under
+`~/.loom/<repo>/`; published releases live under `~/.loom/runtime`. `.gitignore`
 covers `logs/`, `lanes/`, `*.pid` and `*.progress` against a mis-set
 `LOOM_HOME`.
