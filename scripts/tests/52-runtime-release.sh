@@ -2,12 +2,6 @@
 # Immutable releases switch atomically while old work stays pinned.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
-if [ "${LOOM_RUNTIME_VALIDATING:-}" = 1 ]; then
-    ok "runtime release: nested publication test is skipped during release validation"
-    test_finish
-    exit
-fi
-
 RUNTIME="$(dirname "$TICK")/runtime.sh"
 SRC="$T/source"
 RT="$T/runtime"
@@ -17,6 +11,7 @@ mkdir -p "$SRC/scripts" "$CUTOVER_HOME"
 : > "$CUTOVER_HOME/loop.stopped"
 cp "$RUNTIME" "$SRC/scripts/runtime.sh"
 printf '# test skill\n' > "$SRC/SKILL.md"
+printf 'SKILL.md export-ignore\n' > "$SRC/.gitattributes"
 for name in lane agent; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/$name.sh"
 done
@@ -35,6 +30,11 @@ run_runtime() {
       LOOM_RUNTIME_SOURCE="$SRC" LOOM_HOME="$CUTOVER_HOME" "$RUNTIME" "$@"
 }
 
+run_launcher() {
+    LOOM_RUNTIME_HOME="$RT" LOOM_RUNTIME_SELECTOR="$SELECTOR" \
+      LOOM_HOME="$CUTOVER_HOME" "$RT/bin/loom-runtime" "$@"
+}
+
 rm -f "$CUTOVER_HOME/loop.stopped"
 boundary_out=$(run_runtime publish 2>&1); boundary_rc=$?
 if [ "$boundary_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
@@ -44,40 +44,81 @@ else
     bad "runtime release: first cutover bypassed the stopped boundary"
 fi
 : > "$CUTOVER_HOME/loop.stopped"
+mkdir -p "$CUTOVER_HOME/tick.lock.d"
+printf '%s\n' "$$" > "$CUTOVER_HOME/tick.lock.d/pid"
+wave_out=$(run_runtime publish 2>&1); wave_rc=$?
+if [ "$wave_rc" -ne 0 ] && [ ! -e "$SELECTOR" ] \
+   && printf '%s' "$wave_out" | grep -q 'scheduling wave'; then
+    ok "runtime release: first cutover refuses a live legacy wave"
+else
+    bad "runtime release: first cutover crossed a live legacy wave"
+fi
+rm -rf "$CUTOVER_HOME/tick.lock.d"
 
 out=$(run_runtime publish)
-first=$(run_runtime run -- tick)
+first=$(run_launcher run -- tick)
 if printf '%s' "$out" | grep -q -- "-> $A" \
    && printf '%s' "$first" | grep -q "^A:$A:$RT/releases/$A/scripts/tick.sh$" \
-   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ]; then
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+   && [ -f "$RT/releases/$A/SKILL.md" ]; then
     ok "runtime release: publish exposes one validated committed tree and dispatches its physical path"
 else
     bad "runtime release: first committed release was not selected safely"
 fi
+LOADER_SUM=$(cksum "$RT/bin/loom-runtime")
 
 printf '#!/usr/bin/env bash\nprintf "B:%%s:%%s\\n" "$LOOM_RUNTIME_RELEASE" "$0"\n' > "$SRC/scripts/tick.sh"
 git -C "$SRC" add scripts/tick.sh
 git -C "$SRC" commit -qm B
 B=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
 run_runtime publish >/dev/null
-fresh=$(run_runtime run -- tick)
-pinned=$(run_runtime run --release "$A" -- tick)
+fresh=$(run_launcher run -- tick)
+pinned=$(run_launcher run --release "$A" -- tick)
 if printf '%s' "$fresh" | grep -q "^B:$B:" \
    && printf '%s' "$pinned" | grep -q "^A:$A:" \
-   && [ "$(sed -n 's/^previous //p' "$SELECTOR")" = "$A" ]; then
+   && [ "$(sed -n 's/^previous //p' "$SELECTOR")" = "$A" ] \
+   && [ "$(cksum "$RT/bin/loom-runtime")" = "$LOADER_SUM" ]; then
     ok "runtime release: promotion changes fresh dispatch while explicit old work remains pinned"
 else
     bad "runtime release: promotion mixed or lost the prior release"
 fi
 
 run_runtime rollback >/dev/null
-rolled=$(run_runtime run -- tick)
+rolled=$(run_launcher run -- tick)
 if printf '%s' "$rolled" | grep -q "^A:$A:" \
    && [ "$(sed -n 's/^previous //p' "$SELECTOR")" = "$B" ]; then
     ok "runtime release: rollback atomically selects the previous release"
 else
     bad "runtime release: rollback did not restore the previous release"
 fi
+
+chmod u+w "$RT/releases/$B" "$RT/releases/$B/.loom-release"
+sed -i.bak 's/^host_state_api 1$/host_state_api 2/' "$RT/releases/$B/.loom-release"
+rm -f "$RT/releases/$B/.loom-release.bak"
+chmod a-w "$RT/releases/$B/.loom-release" "$RT/releases/$B"
+mkdir -p "$CUTOVER_HOME/lanes"
+printf '%s\n' "$A" > "$CUTOVER_HOME/lanes/live.release"
+compat_out=$(run_runtime publish 2>&1); compat_rc=$?
+if [ "$compat_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+   && printf '%s' "$compat_out" | grep -q 'state API changed'; then
+    ok "runtime release: cached incompatible promotion refuses live pins"
+else
+    bad "runtime release: cached promotion bypassed live state compatibility"
+fi
+printf 'current %s\nprevious %s\n' "$B" "$A" > "$SELECTOR"
+rollback_out=$(run_runtime rollback 2>&1); rollback_rc=$?
+if [ "$rollback_rc" -ne 0 ] && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$B" ] \
+   && printf '%s' "$rollback_out" | grep -q 'state API changed'; then
+    ok "runtime release: rollback refuses an incompatible live state transition"
+else
+    bad "runtime release: rollback bypassed live state compatibility"
+fi
+chmod u+w "$RT/releases/$B" "$RT/releases/$B/.loom-release"
+sed -i.bak 's/^host_state_api 2$/host_state_api 1/' "$RT/releases/$B/.loom-release"
+rm -f "$RT/releases/$B/.loom-release.bak"
+chmod a-w "$RT/releases/$B/.loom-release" "$RT/releases/$B"
+printf 'current %s\nprevious %s\n' "$A" "$B" > "$SELECTOR"
+rm -f "$CUTOVER_HOME/lanes/live.release"
 
 printf '#!/usr/bin/env bash\nif then\n' > "$SRC/scripts/agent.sh"
 git -C "$SRC" add scripts/agent.sh
@@ -105,7 +146,7 @@ else
 fi
 
 printf 'schema 1\ncurrent ../../outside\n' > "$SELECTOR"
-escape_out=$(run_runtime run -- tick 2>&1); escape_rc=$?
+escape_out=$(run_launcher run -- tick 2>&1); escape_rc=$?
 if [ "$escape_rc" -ne 0 ] && printf '%s' "$escape_out" | grep -q 'missing or incomplete'; then
     ok "runtime release: malformed selectors fail closed before code starts"
 else

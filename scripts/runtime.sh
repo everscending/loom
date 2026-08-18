@@ -10,6 +10,7 @@ ACTIVE="${LOOM_RUNTIME_SELECTOR:-$RUNTIME_HOME/active}"
 BIN="$RUNTIME_HOME/bin/loom-runtime"
 LOCK="$RUNTIME_HOME/publish.lock"
 STAGING=""
+INDEX_FILE=""
 LOCKED=""
 
 die() { echo "loom-runtime: $*" >&2; exit 1; }
@@ -38,12 +39,12 @@ release_complete() { # <id>
 }
 
 write_active() { # <current> <previous>
-    local tmp="$RUNTIME_HOME/.active.$$"
+    local tmp="${ACTIVE%/*}/.active.$$"
     valid_release "$1" && release_complete "$1" || die "refusing incomplete current release '$1'"
     if [ -n "${2:-}" ]; then
         valid_release "$2" && release_complete "$2" || die "refusing incomplete previous release '$2'"
     fi
-    { printf 'schema 1\ncurrent %s\n' "$1"; [ -z "${2:-}" ] || printf 'previous %s\n' "$2"; } > "$tmp"
+    { printf 'current %s\n' "$1"; [ -z "${2:-}" ] || printf 'previous %s\n' "$2"; } > "$tmp"
     mv -f "$tmp" "$ACTIVE"
 }
 
@@ -54,7 +55,10 @@ lock_acquire() {
       || die "runtime storage must not traverse symbolic links"
     if ! mkdir "$LOCK" 2>/dev/null; then
         owner=$(cat "$LOCK/pid" 2>/dev/null || true)
-        case "$owner" in ''|*[!0-9]*) ;; *) kill -0 "$owner" 2>/dev/null && die "publication is already running as pid $owner" ;; esac
+        case "$owner" in
+            ''|*[!0-9]*) die "publication lock has no trustworthy owner; retry after the current publisher finishes" ;;
+            *) kill -0 "$owner" 2>/dev/null && die "publication is already running as pid $owner" ;;
+        esac
         rm -f "$LOCK/pid" 2>/dev/null || true
         rmdir "$LOCK" 2>/dev/null || die "cannot recover stale publication lock"
         mkdir "$LOCK" || die "cannot acquire publication lock"
@@ -65,7 +69,25 @@ lock_acquire() {
 
 cleanup() {
     if [ -n "$STAGING" ] && [ -d "$STAGING" ]; then chmod -R u+w "$STAGING" 2>/dev/null || true; rm -rf "$STAGING"; fi
+    [ -z "$INDEX_FILE" ] || rm -f "$INDEX_FILE"
     if [ -n "$LOCKED" ]; then rm -f "$LOCK/pid" 2>/dev/null || true; rmdir "$LOCK" 2>/dev/null || true; fi
+}
+
+export_tree() { # <source> <commit> <empty-destination>
+    INDEX_FILE=$(mktemp "$RUNTIME_HOME/.index.XXXXXX") || die "cannot create temporary Git index"
+    rm -f "$INDEX_FILE"
+    GIT_INDEX_FILE="$INDEX_FILE" git -C "$1" read-tree "$2" \
+      && GIT_INDEX_FILE="$INDEX_FILE" git -C "$1" checkout-index --all --prefix="$3/" \
+      || die "cannot export committed Loom tree"
+    rm -f "$INDEX_FILE"
+    INDEX_FILE=""
+}
+
+on_signal() {
+    local rc="$1"
+    cleanup
+    trap - EXIT INT TERM
+    exit "$rc"
 }
 
 check_tree() { # <staging>
@@ -88,7 +110,8 @@ validate_tree() { # <staging>
 
 live_release_state() {
     [ -n "${LOOM_HOME:-}" ] || return 1
-    find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.release' -print -quit 2>/dev/null | grep -q . \
+    [ -d "$LOOM_HOME/tick.lock.d" ] \
+      || find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.release' -print -quit 2>/dev/null | grep -q . \
       || find "$LOOM_HOME/lane-launch-queue" -mindepth 2 -maxdepth 2 -type f -name runtime-release -print -quit 2>/dev/null | grep -q .
 }
 
@@ -107,6 +130,8 @@ require_initial_cutover_boundary() {
     [ -f "$LOOM_HOME/loop.stopped" ] || die "first publication requires a stopped build"
     ! find "$LOOM_HOME/lanes" -maxdepth 1 -type f -name '*.pid' -print -quit 2>/dev/null | grep -q . \
       || die "first publication requires all lane metadata to be drained"
+    [ ! -d "$LOOM_HOME/tick.lock.d" ] \
+      || die "first publication requires the scheduling wave to be drained"
     ! find "$LOOM_HOME/lane-launch-queue" -mindepth 1 -maxdepth 1 -type d \
         \( -name 'request-*' -o -name 'launching-*' \) -print -quit 2>/dev/null | grep -q . \
       || die "first publication requires deferred launches to be drained"
@@ -129,34 +154,36 @@ cmd_publish() { # [git-ref]
     current=$(active_value current 2>/dev/null || true)
     [ -n "$current" ] || require_initial_cutover_boundary
     lock_acquire
-    trap cleanup EXIT INT TERM
+    trap cleanup EXIT
+    trap 'on_signal 130' INT
+    trap 'on_signal 143' TERM
     dir="$RELEASES/$tree"
     if ! release_complete "$tree"; then
         [ ! -e "$dir" ] || die "release path exists but is incomplete: $dir"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create release staging directory"
-        git -C "$source" archive "$commit" | tar -x -C "$STAGING" \
-          || die "cannot export committed Loom tree"
+        export_tree "$source" "$commit" "$STAGING"
         validate_tree "$STAGING"
         rm -rf "$STAGING"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create final release staging directory"
-        git -C "$source" archive "$commit" | tar -x -C "$STAGING" \
-          || die "cannot re-export validated Loom tree"
+        export_tree "$source" "$commit" "$STAGING"
         check_tree "$STAGING"
-        printf 'schema 1\nloader_schema 1\nhost_state_api 1\nbroker_api 1\ntree %s\ncommit %s\n' \
-          "$tree" "$commit" > "$STAGING/.loom-release"
+        printf 'host_state_api 1\ntree %s\n' "$tree" > "$STAGING/.loom-release"
         printf '%s\n' "$tree" > "$STAGING/.validated"
-        compatible_with_active "$STAGING"
         chmod -R a-w "$STAGING"
         mv "$STAGING" "$dir"
         STAGING=""
     fi
-    loader_tmp="$RUNTIME_HOME/bin/.loom-runtime.$$"
-    cp "$dir/scripts/runtime.sh" "$loader_tmp"
-    chmod 755 "$loader_tmp"
-    mv -f "$loader_tmp" "$BIN"
+    if [ ! -e "$BIN" ]; then
+        loader_tmp="$RUNTIME_HOME/bin/.loom-runtime.$$"
+        cp "$dir/scripts/runtime.sh" "$loader_tmp"
+        chmod 755 "$loader_tmp"
+        mv "$loader_tmp" "$BIN"
+    fi
+    [ -x "$BIN" ] || die "stable launcher is missing or not executable: $BIN"
     current=$(active_value current 2>/dev/null || true)
     previous=$(active_value previous 2>/dev/null || true)
     if [ "$current" != "$tree" ]; then previous="$current"; fi
+    compatible_with_active "$dir"
     write_active "$tree" "$previous"
     echo "loom-runtime: published ${current:-none} -> $tree"
     echo "loom-runtime: future heartbeats use $tree; running lanes remain pinned"
@@ -166,10 +193,13 @@ cmd_publish() { # [git-ref]
 cmd_rollback() {
     local current previous
     lock_acquire
-    trap cleanup EXIT INT TERM
+    trap cleanup EXIT
+    trap 'on_signal 130' INT
+    trap 'on_signal 143' TERM
     current=$(active_value current 2>/dev/null || true)
     previous=$(active_value previous 2>/dev/null || true)
     [ -n "$current" ] && [ -n "$previous" ] || die "no previous release is available"
+    compatible_with_active "$RELEASES/$previous"
     write_active "$previous" "$current"
     echo "loom-runtime: rolled back $current -> $previous"
     cleanup; trap - EXIT INT TERM
