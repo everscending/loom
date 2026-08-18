@@ -97,6 +97,16 @@ Direct launches, durable queued launches, merge preflights, and probes all use
 the same admission seam; cleanup is the fail-safe release if the host phase
 does not reach its normal release boundary.
 
+An actual UI gate runner PASS writes a private atomic candidate. It becomes
+merge-eligible only when the independent reviewer verdict has successfully
+entered Merge Queue and the gate's host epilogue promotes it. Merge always
+reconciles first, then validates exact ticket, current HEAD, base ref and SHA,
+UI tier, runner path and SHA-256, repository `.loom.yml` SHA-256, normalized
+ordered UI-command manifest SHA-256, local-host identity and a TTL capped at
+six hours. Evidence that is absent, malformed, unsealed, expired, dirty,
+review-invalidated or different in any binding emits an audit miss and runs
+the normal UI gate. Missing-runner/review-only gates never create evidence.
+
 Cleanup also preserves evidence ordering. A gate that exits rc 7 is not
 cleanup-eligible while its ticket remains in Review with no verdict at the
 immutable launch HEAD. Its handoff wave first reads the retained log and posts

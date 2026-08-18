@@ -384,14 +384,18 @@ refuses outside herdr anyway.
    composing one, so a wave-spawned merge and a chained one carry the same
    instructions. Before the provider starts, the launchd-owned host wrapper
    runs `lane.sh reconcile` (fetch + **merge** `origin/<base>`, **never
-   rebase**) and then this ticket's configured tier gate once on the reconciled
-   tree. Reconcile re-installs dependencies itself when the merge moved a
-   manifest or lockfile. A conflict or red gate prevents the provider from
+   rebase**) and then proves this ticket's configured tier gate on the
+   reconciled tree. Reconcile re-installs dependencies itself when the merge
+   moved a manifest or lockfile. A conflict or red gate prevents the provider from
    starting and leaves an ordinary dead merge lane for the wave to classify
    and record exactly once; it is never rc 7, which is reserved for gate
    rejection. Running this integration check at the host boundary is
    provider-neutral and lets browser gates use OS services that a coding-agent
-   sandbox can legitimately deny. If the provider starts, the host evidence is
+   sandbox can legitimately deny. For `ui` only, an independently approved
+   gate pregate may satisfy the merge proof when ticket, HEAD, base ref + SHA,
+   tier, runner path + hash, repo config hash, normalized UI command manifest,
+   host and bounded age still match after reconcile; any absence, dirt or drift
+   runs the normal UI gate. If the provider starts, the host evidence is
    authoritative: it does not reconcile or re-run the gate, and calls only
    **`lane.sh merge <iid>`**, the verb that merges the MR, waits until the
    tracker reports it actually `merged`, closes the ticket and strips its

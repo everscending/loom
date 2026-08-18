@@ -165,6 +165,13 @@ LANE_CLEANUP_DIR="$LOOM_HOME/lane-cleanup-queue"
 # comment that an ordinary implementation worker could write itself.
 SUPERVISED_LEASE_DIR="$LOOM_HOME/supervised-leases"
 SUPERVISED_ADMISSION_DIR="$LOOM_HOME/supervised-admission"
+# Successful UI pregates are expensive host evidence, not build decisions.
+# Candidates are private plumbing until the tracker-backed reviewer verdict
+# enters Merge Queue; only then can the host epilogue promote one for the
+# merge preflight to consider. Every read is fail-closed.
+UI_ATTEST_DIR="$LOOM_HOME/ui-pregate-attestations"
+UI_ATTEST_CANDIDATES="$UI_ATTEST_DIR/candidates"
+UI_ATTEST_APPROVED="$UI_ATTEST_DIR/approved"
 # P85: what the last sweep pass could not remove, and why. Sweep said all of
 # this to stdout inside a wave session for five builds — the right message,
 # addressed to a human, into a file no human reads.
@@ -194,6 +201,8 @@ AGENT_SH="${LOOM_AGENT_CMD:-${SELF_PATH%/*}/agent.sh}"
 mkdir -p "$LOOM_HOME" "$LANES_DIR" "$LOGS_DIR" "$SCRATCH_ROOT" "$BRIEFS_DIR" \
          "$LANE_LAUNCH_DIR" "$LANE_CLEANUP_DIR" "$SUPERVISED_LEASE_DIR"
 mkdir -p "$SUPERVISED_ADMISSION_DIR"
+mkdir -p "$UI_ATTEST_CANDIDATES" "$UI_ATTEST_APPROVED"
+chmod 700 "$UI_ATTEST_DIR" "$UI_ATTEST_CANDIDATES" "$UI_ATTEST_APPROVED" 2>/dev/null || true
 
 TRUST_FILE="${LOOM_TRUST_FILE:-$HOME/.claude.json}"
 
@@ -1233,6 +1242,260 @@ _ev() { # _ev <event> [key value]...  — one JSON line, appended
 cmd_event() { # event <name> [key value]...  — so a lane can record its own exit
     [ -n "${1:-}" ] || die "event: missing event name"
     _ev "$@"
+}
+
+# --- exact-SHA UI pregate evidence ---------------------------------------
+# UI is the only tier expensive enough to reuse. The attestation repeats
+# fields that HEAD already implies because the merge log must explain exactly
+# which contract was reused, and because every individual drift has a named
+# fail-closed reason rather than one opaque cache miss.
+_sha256_file() { # <file>
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'
+    else return 1
+    fi
+}
+
+_sha256_text() { # stdin
+    if command -v shasum >/dev/null 2>&1; then shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then sha256sum | awk '{print $1}'
+    else return 1
+    fi
+}
+
+_ui_attestation_host() {
+    local raw=""
+    if [ -r /etc/machine-id ]; then raw=$(cat /etc/machine-id 2>/dev/null || true)
+    elif command -v ioreg >/dev/null 2>&1; then
+        raw=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null \
+          | sed -n 's/.*"IOPlatformUUID" = "\([^"]*\)".*/\1/p' | head -1)
+    fi
+    [ -n "$raw" ] || raw=$(hostname 2>/dev/null || true)
+    [ -n "$raw" ] || return 1
+    printf '%s' "$raw" | _sha256_text
+}
+
+_ui_attestation_ttl() {
+    local ttl="${LOOM_UI_ATTESTATION_TTL_SECONDS:-21600}"
+    case "$ttl" in ''|*[!0-9]*) ttl=21600 ;; esac
+    [ "$ttl" -ge 1 ] || ttl=1
+    # Human authority was for bounded reuse. Environment drift cannot turn
+    # that into an unbounded cache: six hours is the hard ceiling.
+    [ "$ttl" -le 21600 ] || ttl=21600
+    printf '%s\n' "$ttl"
+}
+
+_ui_attestation_manifest() { # <worktree> — normalized ordered UI commands
+    local cwd="$1" line="" out=""
+    while IFS="$(printf '\t')" read -r tier command; do
+        [ "$tier" = ui ] || continue
+        line=$(printf '%s\n' "$command" | awk '{$1=$1; print}')
+        [ -n "$line" ] || continue
+        out="$out$line
+"
+    done <<EOF
+$(_repo_gates_tsv "$cwd/.loom.yml")
+EOF
+    [ -n "$out" ] || return 1
+    printf '%s' "$out"
+}
+
+_ui_attestation_context() { # <lane-id> <ticket> <worktree> -> unsigned JSON
+    local lane="$1" ticket="$2" cwd="$3" head expected base base_ref base_sha
+    local runner runner_file config_sha runner_sha manifest manifest_sha host issued ttl
+    case "$ticket" in ''|*[!0-9]*) return 1 ;; esac
+    [ -d "$cwd" ] && [ -f "$cwd/.loom.yml" ] || return 1
+    [ -z "$(git -C "$cwd" status --porcelain --untracked-files=normal 2>/dev/null)" ] || return 1
+    head=$(git -C "$cwd" rev-parse --verify 'HEAD^{commit}' 2>/dev/null) || return 1
+    expected=$(cat "$LANES_DIR/$lane.head" 2>/dev/null || true)
+    # Gate candidates must describe the immutable HEAD the lane launched on.
+    # Merge validation intentionally runs after reconcile, so its current HEAD
+    # may differ; that difference is a named binding miss, not an unreadable
+    # context that hides whether reconciliation happened first.
+    case "$lane" in gate-*) [ -n "$expected" ] && [ "$head" = "$expected" ] || return 1 ;; esac
+    base="${LOOM_PREGATE_BASE:-$(_detect_base "$cwd" "$CONFIG")}"
+    base_ref="origin/$base"
+    base_sha=$(git -C "$cwd" rev-parse --verify "refs/remotes/$base_ref^{commit}" 2>/dev/null) || return 1
+    runner="${LOOM_PREGATE_RUNNER:-$(_yaml_scalar "$cwd/.loom.yml" runner)}"
+    [ -n "$runner" ] || runner="scripts/gate.sh"
+    case "$runner" in
+      /*) runner_file="$runner" ;;
+      *) runner="${runner#./}"; runner_file="$cwd/$runner" ;;
+    esac
+    [ -f "$runner_file" ] || return 1
+    config_sha=$(_sha256_file "$cwd/.loom.yml") || return 1
+    runner_sha=$(_sha256_file "$runner_file") || return 1
+    manifest=$(_ui_attestation_manifest "$cwd") || return 1
+    manifest_sha=$(printf '%s' "$manifest" | _sha256_text) || return 1
+    host=$(_ui_attestation_host) || return 1
+    issued=$(date +%s); ttl=$(_ui_attestation_ttl)
+    jq -nc --arg lane "$lane" --argjson ticket "$ticket" --arg head "$head" \
+      --arg base_ref "$base_ref" --arg base_sha "$base_sha" --arg tier ui \
+      --arg runner_path "$runner" --arg runner_sha256 "$runner_sha" \
+      --arg config_sha256 "$config_sha" --arg ui_manifest_sha256 "$manifest_sha" \
+      --arg host "$host" --argjson issued_at "$issued" --argjson ttl_seconds "$ttl" \
+      '{schema:1,lane:$lane,ticket:$ticket,head:$head,base_ref:$base_ref,base_sha:$base_sha,
+        tier:$tier,runner_path:$runner_path,runner_sha256:$runner_sha256,
+        config_sha256:$config_sha256,ui_manifest_sha256:$ui_manifest_sha256,
+        host:$host,issued_at:$issued_at,ttl_seconds:$ttl_seconds}'
+}
+
+_ui_attestation_seal() { # unsigned or sealed JSON file
+    jq -cS 'del(.seal_sha256)' "$1" 2>/dev/null | _sha256_text
+}
+
+_ui_attestation_write() { # <unsigned-json-file> <target>
+    local src="$1" target="$2" dir tmp seal
+    dir=$(dirname "$target")
+    tmp=$(mktemp "$dir/.attestation.XXXXXX") || return 1
+    seal=$(_ui_attestation_seal "$src") || { rm -f "$tmp"; return 1; }
+    jq -c --arg seal "$seal" '. + {seal_sha256:$seal}' "$src" > "$tmp" 2>/dev/null \
+      || { rm -f "$tmp"; return 1; }
+    chmod 600 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$target"
+}
+
+_ui_attestation_is_sealed() { # <file>
+    local file="$1" have want
+    [ -f "$file" ] || return 1
+    have=$(jq -er '.seal_sha256 | select(type == "string" and test("^[0-9a-f]{64}$"))' "$file" 2>/dev/null) || return 1
+    want=$(_ui_attestation_seal "$file") || return 1
+    [ "$have" = "$want" ]
+}
+
+_ui_attestation_is_approved() { # <file>
+    _ui_attestation_is_sealed "$1" || return 1
+    jq -e '
+      type == "object" and .schema == 1 and .verdict == "PASS"
+      and (.lane | type == "string" and test("^gate-[0-9]+(-r[0-9]+)?$"))
+      and (.ticket | type == "number" and . > 0 and floor == .)
+      and (.head | type == "string" and test("^[0-9a-f]{40}$"))
+      and (.base_ref | type == "string" and test("^origin/[A-Za-z0-9._/-]+$"))
+      and (.base_sha | type == "string" and test("^[0-9a-f]{40}$"))
+      and .tier == "ui"
+      and (.runner_path | type == "string" and length > 0)
+      and (.runner_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.config_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.ui_manifest_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.host | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.issued_at | type == "number" and . > 0 and floor == .)
+      and (.approved_at | type == "number" and . > 0 and floor == .)
+      and (.ttl_seconds | type == "number" and . >= 1 and . <= 21600 and floor == .)
+    ' "$1" >/dev/null 2>&1
+}
+
+cmd_ui_attestation_candidate() { # <lane-id>; called only after actual UI runner PASS
+    local lane="${1:-}" ticket context tmp target
+    case "$lane" in gate-[0-9]*) ;; *) return 1 ;; esac
+    [ "${LOOM_LANE_ID:-}" = "$lane" ] || return 1
+    ticket="${lane#gate-}"; ticket="${ticket%%-*}"
+    context=$(mktemp "$UI_ATTEST_CANDIDATES/.context.XXXXXX") || return 1
+    if ! _ui_attestation_context "$lane" "$ticket" "${LOOM_LANE_CWD:-$PWD}" > "$context"; then
+        rm -f "$context"
+        _ev ui_pregate_attestation_skipped id "$lane" ticket "$ticket" reason unsafe-context
+        return 1
+    fi
+    target="$UI_ATTEST_CANDIDATES/$lane.json"
+    _ui_attestation_write "$context" "$target" || { rm -f "$context"; return 1; }
+    rm -f "$context"
+    _ev ui_pregate_attestation_candidate id "$lane" ticket "$ticket" head "$(jq -r .head "$target")"
+}
+
+cmd_record_gate_verdict() { # <ticket> pass|fail <sha>; lane.sh calls after tracker transition
+    local ticket="${1:-}" verdict="${2:-}" sha="${3:-}" lane="${LOOM_LANE_ID:-}" tmp
+    case "$ticket" in ''|*[!0-9]*) return 1 ;; esac
+    case "$lane" in gate-"$ticket"|gate-"$ticket"-r[0-9]*) ;; *) return 0 ;; esac
+    case "$verdict" in
+      pass)
+        [ "$(cat "$LANES_DIR/$lane.head" 2>/dev/null || true)" = "$sha" ] || return 1
+        tmp=$(mktemp "$LANES_DIR/.verdict.XXXXXX") || return 1
+        jq -nc --argjson ticket "$ticket" --arg lane "$lane" --arg sha "$sha" \
+          '{ticket:$ticket,lane:$lane,sha:$sha,verdict:"PASS"}' > "$tmp" || { rm -f "$tmp"; return 1; }
+        chmod 600 "$tmp" 2>/dev/null || true
+        mv -f "$tmp" "$LANES_DIR/$lane.attestation-verdict" ;;
+      fail)
+        rm -f "$UI_ATTEST_CANDIDATES/$lane.json" "$UI_ATTEST_APPROVED/$ticket.json"
+        _ev ui_pregate_attestation_invalidated id "$lane" ticket "$ticket" reason reviewer-fail ;;
+      *) return 1 ;;
+    esac
+}
+
+cmd_invalidate_ui_attestation() { # <ticket> <reason>; tracker mutation already succeeded
+    local ticket="${1:-}" reason="${2:-tracker-contract-changed}"
+    case "$ticket" in ''|*[!0-9]*) return 1 ;; esac
+    case "$reason" in ''|*[!a-z0-9-]*) reason=tracker-contract-changed ;; esac
+    rm -f "$UI_ATTEST_APPROVED/$ticket.json" "$UI_ATTEST_CANDIDATES/gate-$ticket.json" \
+      "$UI_ATTEST_CANDIDATES/gate-$ticket-r"*.json 2>/dev/null || true
+    _ev ui_pregate_attestation_invalidated ticket "$ticket" reason "$reason"
+}
+
+cmd_promote_ui_attestation() { # <gate-lane-id>; host epilogue only
+    local lane="${1:-}" candidate marker ticket sha tmp approved
+    candidate="$UI_ATTEST_CANDIDATES/$lane.json"
+    marker="$LANES_DIR/$lane.attestation-verdict"
+    _ui_attestation_is_sealed "$candidate" || { rm -f "$candidate" "$marker"; return 1; }
+    [ -f "$marker" ] || { rm -f "$candidate"; return 1; }
+    ticket=$(jq -er '.ticket' "$marker" 2>/dev/null) || { rm -f "$candidate" "$marker"; return 1; }
+    sha=$(jq -er '.sha' "$marker" 2>/dev/null) || { rm -f "$candidate" "$marker"; return 1; }
+    jq -se --arg lane "$lane" --argjson ticket "$ticket" --arg sha "$sha" '
+      .[0] as $marker | .[1] as $candidate
+      | $marker.verdict == "PASS" and $marker.lane == $lane
+        and $marker.ticket == $ticket and $marker.sha == $sha
+        and $candidate.lane == $lane and $candidate.ticket == $ticket
+        and $candidate.head == $sha
+    ' "$marker" "$candidate" >/dev/null 2>&1 \
+      || { rm -f "$candidate" "$marker"; return 1; }
+    tmp=$(mktemp "$UI_ATTEST_APPROVED/.approved.XXXXXX") || return 1
+    jq -c --argjson approved_at "$(date +%s)" '. + {verdict:"PASS",approved_at:$approved_at} | del(.seal_sha256)' \
+      "$candidate" > "$tmp" || { rm -f "$tmp"; return 1; }
+    approved="$UI_ATTEST_APPROVED/$ticket.json"
+    _ui_attestation_write "$tmp" "$approved" || { rm -f "$tmp"; return 1; }
+    rm -f "$tmp" "$candidate" "$marker"
+    _ev ui_pregate_attestation_approved id "$lane" ticket "$ticket" head "$sha"
+}
+
+cmd_reuse_ui_attestation() { # <merge-lane-id>; after reconcile, before normal UI runner
+    local lane="${1:-}" ticket approved tmp now issued approved_at ttl drift
+    case "$lane" in merge-[0-9]*) ;; *) return 1 ;; esac
+    ticket="${lane#merge-}"; ticket="${ticket%%-*}"
+    approved="$UI_ATTEST_APPROVED/$ticket.json"
+    if ! _ui_attestation_is_approved "$approved"; then
+        _ev ui_pregate_reuse_miss id "$lane" ticket "$ticket" reason missing-or-tampered
+        return 1
+    fi
+    tmp=$(mktemp "$UI_ATTEST_APPROVED/.expected.XXXXXX") || return 1
+    if ! _ui_attestation_context "$lane" "$ticket" "${LOOM_LANE_CWD:-$PWD}" > "$tmp"; then
+        rm -f "$tmp"
+        _ev ui_pregate_reuse_miss id "$lane" ticket "$ticket" reason unsafe-current-context
+        return 1
+    fi
+    drift=$(jq -nr --slurpfile approved "$approved" --slurpfile current "$tmp" '
+      ["schema","ticket","head","base_ref","base_sha","tier","runner_path",
+       "runner_sha256","config_sha256","ui_manifest_sha256","host"]
+      | map(. as $key | select($approved[0][$key] != $current[0][$key]))
+      | first // empty
+    ' 2>/dev/null) || drift=unreadable
+    if [ -n "$drift" ]; then
+        rm -f "$tmp"
+        _ev ui_pregate_reuse_miss id "$lane" ticket "$ticket" reason "$drift-drift"
+        return 1
+    fi
+    issued=$(jq -er '.issued_at' "$approved" 2>/dev/null) || issued=0
+    approved_at=$(jq -er '.approved_at' "$approved" 2>/dev/null) || approved_at=0
+    ttl=$(jq -er '.ttl_seconds' "$approved" 2>/dev/null) || ttl=0
+    now=$(date +%s)
+    if [ "$issued" -le 0 ] 2>/dev/null || [ "$ttl" -le 0 ] 2>/dev/null \
+       || [ "$ttl" -gt 21600 ] 2>/dev/null || [ "$issued" -gt "$now" ] 2>/dev/null \
+       || [ "$approved_at" -lt "$issued" ] 2>/dev/null || [ "$approved_at" -gt "$now" ] 2>/dev/null \
+       || [ "$now" -gt "$((issued + ttl))" ]; then
+        rm -f "$tmp"
+        _ev ui_pregate_reuse_miss id "$lane" ticket "$ticket" reason expired
+        return 1
+    fi
+    rm -f "$tmp"
+    _ev ui_pregate_reused id "$lane" ticket "$ticket" head "$(jq -r .head "$approved")" \
+      base_sha "$(jq -r .base_sha "$approved")" manifest_sha256 "$(jq -r .ui_manifest_sha256 "$approved")"
+    echo "--- host merge preflight: reused independently approved exact-SHA UI pregate evidence ---"
 }
 
 _now() { date +%s; }
@@ -2774,7 +3037,7 @@ BRIEFEOF
         _merge_ticket="${_merge_ticket%%-*}"
         if [ "$pregate" = ui ]; then
             cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
-- The launchd-owned host merge preflight already ran \`lane.sh reconcile\` and then the configured UI tier gate before this provider session started. A missing runner or red UI suite prevents this session from starting, so the host result is authoritative browser-capable evidence. Do not rerun the configured tier gate or launch Playwright/Chromium inside the provider sandbox. Run only \`$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket\` and report its result.
+- The launchd-owned host merge preflight already ran \`lane.sh reconcile\` and then proved the configured UI tier before this provider session started. That proof is either a fresh runner PASS or an auditable exact-binding reuse of the independently approved gate result after reconcile. A missing runner or red UI suite prevents this session from starting, so the host result is authoritative browser-capable evidence. Do not rerun the configured tier gate or launch Playwright/Chromium inside the provider sandbox. Run only \`$(dirname "$SELF_PATH")/lane.sh merge $_merge_ticket\` and report its result.
 BRIEFEOF
         else
             cat >> "$BRIEFS_DIR/$id.md" <<BRIEFEOF
@@ -2825,6 +3088,12 @@ _spawn_build_epilogue() {
     fi
     [ "$merge_lock" -eq 1 ] && epi="$epi rm -rf '$MERGE_LOCK_DIR'; "
     [ -n "$gate_lock_key" ] && epi="$epi rm -rf '$GATE_LOCK_DIR/$gate_lock_key'; "
+    # A host PASS is only a candidate until the independent reviewer writes
+    # PASS to the tracker and enters Merge Queue. Promotion happens in this
+    # host epilogue, never in the provider process that judged the branch.
+    if [ "$(_lane_type "$id")" = gate ]; then
+        epi="$epi '$SELF_PATH' promote-ui-attestation '$id' >/dev/null 2>&1 || true; "
+    fi
     # Release the host-scoped pregate reservation before draining a queued
     # successor, so the next UI gate can launch immediately rather than wait
     # for a heartbeat. clear-lane owns the hard-kill path for the same file.
@@ -2929,7 +3198,8 @@ _pregate_artifact_validate() { # <lane-id> <cwd> -> physical cwd
     local id="${1:-}" cwd="${2:-}" abs="" repo_main="" cwd_main="" kind="" iid=""
     case "$id" in *[!A-Za-z0-9_-]*) die "pregate-artifacts: invalid lane id '$id'" ;; esac
     kind=$(_lane_type "$id" 2>/dev/null || true)
-    iid=$(_supervised_lane_ticket "$id" 2>/dev/null || true)
+    iid="${id#*-}"; iid="${iid%%-*}"
+    case "$iid" in ''|*[!0-9]*) iid="" ;; esac
     case "$kind" in impl|gate|merge) [ -n "$iid" ] ;; *) false ;; esac \
         || die "pregate-artifacts: '$id' is not an implementation, gate, or merge lane id"
     [ -n "$cwd" ] && [ -d "$cwd" ] \
@@ -3124,6 +3394,7 @@ ui"
   tiers ($(printf '%s' "$tiers" | tr '\n' ' '))"
         runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
         export LOOM_PREGATE_TIER="$pregate" LOOM_PREGATE_RUNNER="$runner"
+        export LOOM_PREGATE_BASE="$(_detect_base "$REPO_ROOT" "$CONFIG")"
         # P31: the adversarial half, and it runs INSTEAD of the runner — the
         # verdict is rc 7 either way, so paying for the suite first buys
         # nothing. A gate lane only: the check reads a finished branch, and
@@ -3169,6 +3440,9 @@ ui"
             else
                 pre="$pre"' else echo "--- pregate artifact snapshot FAILED — rejecting with no review session ---"; _rc=7; fi;'
             fi
+            if [ "$lane_kind" = gate ] && [ "$pregate" = ui ]; then
+                pre="$pre"' if [ "$_rc" -eq 0 ]; then '"'$SELF_PATH'"' ui-attestation-candidate '"'$id'"' >/dev/null 2>&1 || true; fi;'
+            fi
             # P60: a missing runner is a DECLARED bootstrap stage, never a
             # silent skip. ai-workout build-1 logged "no scripts/gate.sh here,
             # skipping" on every gate all night while the runner sat in an
@@ -3205,8 +3479,12 @@ ui"
         # merge-failed harvest path records and classifies it exactly once.
         if [ "$lane_kind" = merge ]; then
             local merge_pre
-            merge_pre='echo "--- host merge preflight: lane.sh reconcile ---"; if lane.sh reconcile; then :; else _merge_rc=$?; git merge --abort >/dev/null 2>&1 || true; echo "--- host merge preflight reconcile FAILED — merge provider not started ---"; _rc=9; fi; '
-            pre="$merge_pre"'if [ "$_rc" -eq 0 ]; then '"$pre"' fi; '
+            merge_pre='echo "--- host merge preflight: lane.sh reconcile ---"; if lane.sh reconcile "$LOOM_PREGATE_BASE"; then :; else _merge_rc=$?; git merge --abort >/dev/null 2>&1 || true; echo "--- host merge preflight reconcile FAILED — merge provider not started ---"; _rc=9; fi; '
+            if [ "$pregate" = ui ]; then
+                pre="$merge_pre"'if [ "$_rc" -eq 0 ]; then if '"'$SELF_PATH'"' reuse-ui-attestation '"'$id'"'; then :; else '"$pre"' fi; fi; '
+            else
+                pre="$merge_pre"'if [ "$_rc" -eq 0 ]; then '"$pre"' fi; '
+            fi
         fi
     fi
 
@@ -6078,6 +6356,11 @@ case "${1:-}" in
     spawn-lane)   shift; cmd_spawn_lane "$@" ;;
     pregate-artifacts) shift; cmd_pregate_artifacts "$@" ;;
     run-host-probe) shift; cmd_run_host_probe "$@" ;;
+    ui-attestation-candidate) shift; cmd_ui_attestation_candidate "$@" ;;
+    record-gate-verdict) shift; cmd_record_gate_verdict "$@" ;;
+    invalidate-ui-attestation) shift; cmd_invalidate_ui_attestation "$@" ;;
+    promote-ui-attestation) shift; cmd_promote_ui_attestation "$@" ;;
+    reuse-ui-attestation) shift; cmd_reuse_ui_attestation "$@" ;;
     drain-lane-cleanups) shift; cmd_drain_lane_cleanups "$@" ;;
     drain-lane-kills) shift; cmd_drain_lane_cleanups "$@" ;; # compatibility/readable operator alias
     drain-lane-launches) shift; cmd_drain_lane_launches "$@" ;;

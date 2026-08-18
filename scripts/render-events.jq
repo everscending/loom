@@ -105,6 +105,9 @@ fromjson? // empty | . as $e
   elif $e.ev == "pregate_reduced" then
     $warn + "⚠ " + (stage($e.id // "") | "\(.t) — \(.s)")
     + ": \($e.runner // "the gate runner") missing — tier \($e.tier // "?") reduced to review-only (bootstrap not merged)" + $rst
+  elif $e.ev == "ui_pregate_reused" then
+    $good + "✓ " + (stage($e.id // "") | "\(.t) — \(.s)")
+    + ": exact-SHA UI gate evidence reused after reconcile" + $rst
   elif $e.ev == "viewer_note" then "viewer: \($e.note // "")"
   elif $e.ev == "notify" then
     (if (($e.event // "") | test("complete")) then $good else $warn end)
