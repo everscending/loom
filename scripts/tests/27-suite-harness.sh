@@ -112,7 +112,7 @@ chmod +x "$FULL_TESTS/01-heavy.sh"
 printf '%s\n' "$$" > "$PRODUCT_HOME/lanes/gate-900.pid"
 printf 'ui\n' > "$PRODUCT_HOME/lanes/gate-900.ui-resource"
 rm -f "$FULL_STARTED" "$FULL_RELEASE" "$FULL_OUT"
-LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
+LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
   bash "$DRIVER" >"$FULL_OUT" 2>&1 & full_pid=$!
 for _wait in $(seq 1 100); do
     grep -q 'deferring full suite' "$FULL_OUT" 2>/dev/null && break
@@ -133,7 +133,7 @@ else
 fi
 
 rm -f "$FULL_STARTED" "$FULL_RELEASE" "$FULL_OUT"
-LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
+LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$FULL_TESTS" \
   bash "$DRIVER" >"$FULL_OUT" 2>&1 & full_pid=$!
 for _wait in $(seq 1 100); do
     [ -f "$FULL_STARTED" ] && [ -f "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid" ] && break

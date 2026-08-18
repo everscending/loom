@@ -99,7 +99,7 @@ RACE_PAUSED="$RACE_PAUSED" RACE_GO="$RACE_GO" PATH="$RACE_BIN:$PATH" \
   --cwd "$LOOM_REPO" -- sleep 30 >"$RACE_SPAWN_OUT" 2>&1 & race_spawn_pid=$!
 for _wait in $(seq 1 100); do [ -f "$RACE_PAUSED" ] && break; sleep 0.02; done
 RACE_SUITE_ATTEMPTS="$RACE_SUITE_ATTEMPTS" PATH="$RACE_BIN:$PATH" \
-  LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$RACE_TESTS" \
+  LOOM_RUNTIME_VALIDATING= LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$RACE_TESTS" \
   bash "$DRIVER" >"$RACE_SUITE_OUT" 2>&1 & race_suite_pid=$!
 for _wait in $(seq 1 100); do
     [ "$(wc -l < "$RACE_SUITE_ATTEMPTS" 2>/dev/null | tr -d ' ')" -ge 2 ] 2>/dev/null && break
