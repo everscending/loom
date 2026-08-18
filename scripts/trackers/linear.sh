@@ -833,16 +833,19 @@ v_issue_create() { # --title T --body-file F --labels CSV [--milestone-id ID] â†
 }
 
 v_label_create() { # <name> <color> <description>
-    local name="${1:-}" color="${2:-}" desc="${3:-}"
+    local name="${1:-}" color="${2:-}" desc="${3:-}" variables response
     [ -n "$name" ] || die "label-create: needs a name"
     _resolve_team
     # Idempotent, like the GitLab one: a label that already exists is not an
     # error, because `bootstrap labels` re-runs over a board it set up before.
-    _graphql 'mutation($input: IssueLabelCreateInput!) {
+    variables=$(jq -nc --arg n "$name" --arg c "$color" --arg d "$desc" --arg t "$TEAM_ID" \
+        '{input: ({name: $n, teamId: $t, description: $d}
+                 + (if $c == "" then {} else {color: $c} end))}') \
+        || die "label-create: could not build the Linear mutation payload"
+    response=$(_graphql 'mutation($input: IssueLabelCreateInput!) {
   issueLabelCreate(input: $input) { success }
-}' "$(jq -nc --arg n "$name" --arg c "$color" --arg d "$desc" --arg t "$TEAM_ID" \
-        '{input: {name: $n, teamId: $t, description: $d}
-                 + (if $c == "" then {} else {color: $c} end)}')" >/dev/null 2>&1 || true
+}' "$variables") || return 1
+    printf '%s' "$response" | jq -e '.issueLabelCreate.success == true' >/dev/null || die "label-create: Linear did not create '$name'" # mutate:linear-label-payload
 }
 
 # P92: in project mode `milestones` hands out ProjectMilestone ids, which have

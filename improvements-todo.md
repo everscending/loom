@@ -1,10 +1,19 @@
 # Loom build-efficiency improvements
 
-Last updated: 2026-08-17 20:09 America/Chicago
+Last updated: 2026-08-17 21:06 America/Chicago
 
 Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
 
 ## Practical improvements
+
+- [x] **DONE — Make Linear label creation fail closed.** Patient Imaging
+  Portal Build JOR-267 exposed a malformed `IssueLabelCreateInput`: `jq`
+  rejected the payload while the driver swallowed the failure and bootstrap
+  falsely reported both start-supervision labels created. Implemented in
+  `d726e02` (`fix(linear): create labels reliably`): the driver builds the
+  payload before transport, propagates GraphQL errors, and requires
+  `success:true`. RED was 75/77; GREEN is focused 77/77, adjacent 164/164,
+  and full Loom 1,387/1,387. The planted payload mutation is caught.
 
 - [x] **DONE — Let Mend repair Loom without owning the build queue.**
   Implemented in `d6cae5d`, installed as `ceed344`
