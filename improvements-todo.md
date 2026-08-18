@@ -252,7 +252,13 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   139/139 browser tests using one worker, 30/30 focused unit tests, 2/2 real
   PostgreSQL integration tests, TypeScript, ESLint, and diff checks. Completion
   requires an authorized upstream merge; the dirty, 198-commit-behind main
-  checkout remains deliberately untouched.
+  checkout remains deliberately untouched. Host calibration then ran two
+  isolated full `gate:ui` processes concurrently twice; all four passed with
+  761/761 unit, 44/44 integration, 8/8 E8, 1/1 E8 Playwright, and 139/139
+  product/E2 assertions per process. Replayed Loom commit `2866aed` keeps the portable
+  `ui_capacity` default at 1 and permits the proven machine override of 2; it
+  passes in the reconstructed 1,510/1,510 full suite. This evidence does not
+  replace the required product-branch merge.
 
 - [x] **DONE — Scope fake-auth provider counters to the request identity.**
   Parallel Playwright workers shared one fake auth server, so global counters
@@ -372,21 +378,45 @@ Status markers: `DONE`, `IN PROGRESS`, `TODO`, `BLOCKED`, `NEEDS DECISION`.
   records successful migrations, demo users/assets/rows, grants, cron, and
   PostgREST verification. No external service was changed in this session.
 
-- [x] **DONE — Deploy live Loom runtime files atomically.** An epilogue parsed `tick.sh` while it was being updated and logged a transient syntax error near `|`; the completed file passed `bash -n`, proving the reader saw a partial write. Publish complete immutable releases from committed trees, validate Bash/jq and the full suite before visibility, atomically select the active release, pin active lanes and queued handoffs to their creator release, and make rollback one selector change. The first cutover requires the current stopped/drained boundary; after it, compatible Loom improvements may be integrated and promoted while builds run. Larger runtime patches remain isolated until this seam is installed.
-  The reviewed implementation is committed in `c96c64a`
-  (`feat(runtime): publish immutable releases`): committed trees are exported as
-  raw blobs, validated through the full suite, retained with their Git object
-  proof, selected atomically per repository, and pinned across waves, lanes,
-  epilogues, and deferred handoffs. Rollback is one selector swap; incompatible
-  forward changes require explicit `publish --migrate` at a stopped/drained
-  boundary. Focused runtime/scheduler coverage is 59/59 and the final integrated
-  suite is 1,473/1,473. The stopped first cutover completed from installed HEAD
-  `c302ff7` as active release `b05f8e1f343c6da5bd52a422c5b2859899c778e2`;
-  stable dispatch reports the same release and the build remains stopped.
-
 - [x] **DONE — Canonicalize tick cwd before sweep and provider launch.** Implemented provider-neutrally in `b079cfc` (`fix(tick): enter canonical repo root`): the public tick boundary enters the already-canonical main checkout before tracker helpers, sweep, or provider/version startup and fails loudly if stable ground is unavailable. RED reproduced merge-193's exact deleted-worktree `shell-init/getcwd` failure and rc 71; GREEN is 27/27 focused, 100/100 adjacent, and 1,295/1,295 full-suite assertions. A planted mutant removing only the root entry recreates the failure. No adapter changed.
 
 - [x] **DONE — Make the planner reserve the serialized UI resource.** Implemented provider-neutrally in `d1223af` (`fix(plan): reserve shared UI resource`): snapshot freezes live/queued UI ownership, the pure planner selects no UI work while occupied and exactly the highest-priority UI gate when free, and a planned UI gate also reserves the same-wave UI merge seam. API gates and API merges remain parallel; final admission remains the atomic race guard. RED was 2 pass/3 fail with duplicate UI gates and an overlapping UI merge; GREEN is 6/6 focused, 199/199 snapshot/planner, 67/67 adjacent admission/chaining, and full Loom 1,307/1,307. A planted selection mutant recreates the overlap.
+
+- [x] **DONE — Keep Loom self-validation from starving active product gates.**
+  JOR-293's unchanged merge preflight crossed 30-second Vitest limits while two
+  Loom full suites consumed the same host; its unit phase took 373 seconds.
+  Reimplemented as a direct-suite-only guard in `770f7f7` and `450187a`:
+  no-argument Loom suites take one host-global maintenance claim, while product
+  UI admission publishes its local queue or PID-backed ownership atomically.
+  Maintenance waits for every active UI slot and resumes after release;
+  focused checks, lint, and API work remain concurrent. The marker-before-PID
+  race is covered explicitly. Focused sections 27 and 44 pass, and the
+  reconstructed full suite is 1,510/1,510.
+
+- [x] **DONE — Wake the scheduler immediately after Mend releases work.**
+  Releasing JOR-293's supervised lease wrote the durable continuation at
+  23:16:11Z, but the next heartbeat did not start a wave until 23:19:03Z or its
+  gate until 23:20:00Z. Replayed provider-neutrally in `97f95cd` (`fixes
+  MEND-FLOW-01: wake released work immediately`).
+  Mend writes one coalesced durable request plus the existing pending replay;
+  the active heartbeat claims generations under the continuation lock, and an
+  exit-boundary PID marker makes a late writer wait for the old launchd job to
+  finish before the ordinary kick. Stop, quiet, and usage gates remain
+  authoritative; no second scheduler or direct worker path was added. Focused
+  continuation coverage is 53/53, lock/replay coverage is 93/93, and the
+  reconstructed full suite is 1,510/1,510.
+
+- [x] **DONE — Make snapshot ticket population total or fail visibly.**
+  Linear reported 28 open build tickets and all 26 dependency rows, while three
+  full snapshots returned only 21, 15, and 15 ticket rows with no warning.
+  Missing rows varied between calls. Replayed provider-neutrally in
+  `5663690` (`fixes MEND-STATE-01: refuse partial snapshots`): every supported
+  batched board read must return a JSON array whose
+  sorted member IDs exactly equal the foundational population, including empty
+  populations. Malformed output, read failure, or disagreement refuses before
+  planning; only explicit capability rc 2 uses fan-out. Focused tracker and
+  snapshot coverage is 140/140, and the reconstructed full suite is
+  1,510/1,510.
 
 ## Supporting safety work completed during this build
 
