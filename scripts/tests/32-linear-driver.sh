@@ -127,7 +127,14 @@ case "$q" in
   *"states(first: 50)"*)     file "${STATES_JSON:?}" ;;
   *viewer*)
       say '{"data":{"viewer":{"id":"user-uuid","name":"loom","displayName":"Loom Bot"}}}' ;;
-  *issueUpdate*|*issueCreate*|*commentCreate*|*issueLabelCreate*|*projectMilestoneUpdate*|*projectUpdate*|*workflowStateCreate*)
+  *issueLabelCreate*)
+      if [ "${FAIL_LABEL_CREATE:-0}" = 1 ]; then
+          say '{"errors":[{"message":"label mutation refused"}]}'
+      else
+          jq -c '.variables' "$data" >> "${MUT_LOG:-/dev/null}"
+          say '{"data":{"issueLabelCreate":{"success":true}}}'
+      fi ;;
+  *issueUpdate*|*issueCreate*|*commentCreate*|*projectMilestoneUpdate*|*projectUpdate*|*workflowStateCreate*)
       jq -c '.variables' "$data" >> "${MUT_LOG:-/dev/null}"
       say '{"data":{"issueCreate":{"success":true,"issue":{"number":99}},"issueUpdate":{"success":true},"commentCreate":{"success":true},"issueLabelCreate":{"success":true},"projectUpdate":{"success":true},"projectMilestoneUpdate":{"success":true},"workflowStateCreate":{"success":true}}}' ;;
   *)  printf '{"errors":[{"message":"unrecognised query"}]}' > "$out"; echo 200 ;;
@@ -338,6 +345,28 @@ MUT_LOG="$TD/mut.log" L issue-close 2 >/dev/null 2>&1 || true
 grep -q 'st-done' "$TD/mut.log" \
     && ok "close: closing is a move to the team's own completed-type state, not a name this driver invented" \
     || bad "close: the completed state was not used ($(tr -d '\n' < "$TD/mut.log" | head -c 200))"
+
+# A label bootstrap is only successful when Linear receives the complete
+# IssueLabelCreateInput. This is the exact boundary `/loom start` uses for its
+# provider and supervision-policy labels.
+: > "$TD/mut.log"
+out=$(MUT_LOG="$TD/mut.log" L label-create "supervision::autonomous-repair-v1" "#34495E" "Start-owned repair policy" 2>&1); rc=$?
+if [ "$rc" = 0 ] && jq -e '
+    .input.name == "supervision::autonomous-repair-v1"
+    and .input.teamId == "team-uuid"
+    and .input.color == "#34495E"
+    and .input.description == "Start-owned repair policy"' "$TD/mut.log" >/dev/null 2>&1; then
+    ok "label-create: sends a valid complete Linear mutation payload"
+else
+    bad "label-create: reported success without a valid mutation payload (rc=$rc, out=$out, payload=$(tr -d '\n' < "$TD/mut.log"))"
+fi
+
+# A rejected mutation must reach bootstrap.sh; swallowing it makes start print
+# "created" while the required tracker authority is still absent.
+out=$(FAIL_LABEL_CREATE=1 L label-create "supervision::autonomous-repair-v1" "#34495E" "Start-owned repair policy" 2>&1); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q "label mutation refused" \
+    && ok "label-create: propagates a Linear mutation failure" \
+    || bad "label-create: swallowed a rejected Linear mutation (rc=$rc, out=$out)"
 
 # --- p90-1. Linear's Status field is loom's state machine ------------------
 # P90: `ready-for-agent`, `in-progress`, `review`, `merge-queue`, `blocked`

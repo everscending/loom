@@ -83,6 +83,7 @@ scope-reset-transport	snapshot.jq	delete
 scope-extend-accumulate	lib.jq	sub	orch-scope-extend	orch-scope-reset
 finished-lane-capacity	lib.jq	sub	== "-"	!= "-"
 wave-prefix-strip	render-events.jq	sub	(?i)^	^
+linear-label-payload	trackers/linear.sh	sub	== true	== false
 EOF
 )
 fi
