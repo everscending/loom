@@ -641,6 +641,7 @@ include "lib";
             # needs this immutable host-resource fact to avoid scheduling UI
             # work that is already guaranteed to be refused.
             ui_pregate_occupied: $ui_pregate_occupied,
+            ui_pregate_usage: $ui_pregate_usage,
             # Claimed but unworked: `in-progress`, yet no ALIVE lane carries
             # the ticket. This is exactly where a gate rejection lands a
             # ticket (verdict fail → in-progress, assignee kept) — and no

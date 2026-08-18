@@ -121,12 +121,13 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 # finishing lanes cannot both observe the last auxiliary slot as free. Queued
 # Codex launches count as reservations until the durable host starts them.
 AUX_LOCK_DIR="${LOOM_AUX_LOCK_DIR:-$LOOM_HOME/aux-admission.lock.d}"
-# A tick that arrives while a wave holds the lock used to be discarded outright,
-# and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
-# was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
-# unmerged. The skipped tick now leaves this note instead, and the lock holder
-# re-ticks once on its way out (P1). It is a single flag, not a queue, so a burst
-# of finishing lanes costs one extra wave rather than one per lane.
+# A tick or continuation that arrives while a wave holds the lock used to be
+# discarded outright, and that is how build 2 ended: a gate exited at 23:36:03
+# during W13, the kick was dropped, and the loop never ran again — leaving a
+# ticket in `merge-queue`, unmerged. The request now leaves this note, and the
+# lock holder re-ticks once on its way out (P1). It is a single flag, not a
+# queue, so a burst of newly runnable work costs one extra wave rather than one
+# per request.
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 # `start` is a human request to resume now. Its launchd RunAtLoad firing still
 # uses --auto so every later heartbeat keeps the normal pacing contract, but
@@ -139,8 +140,14 @@ START_KICK_FILE="${LOOM_START_KICK_FILE:-$LOOM_HOME/start.kick}"
 # without a finishing lane to issue `tick --from-lane`. Keep that state change
 # as a one-shot request for the ordinary heartbeat: it bypasses only the old
 # wave gap, never the loop-stopped or quiet/usage gates, and is consumed only
-# when a wave is admitted. This is scheduler plumbing, not another start verb.
+# when a wave is admitted. The request also kicks the already-armed launchd
+# label once so "ordinary heartbeat" means now rather than up to 60s later;
+# the scheduler still owns every admission decision. This is plumbing, not
+# another start verb.
 CONTINUATION_FILE="${LOOM_CONTINUATION_FILE:-$LOOM_HOME/continuation.request}"
+CONTINUATION_CLAIM_FILE="${LOOM_CONTINUATION_CLAIM_FILE:-$LOOM_HOME/continuation.claimed}"
+CONTINUATION_LOCK_DIR="${LOOM_CONTINUATION_LOCK_DIR:-$LOOM_HOME/continuation.lock.d}"
+CONTINUATION_EXIT_FILE="${LOOM_CONTINUATION_EXIT_FILE:-$LOOM_HOME/continuation.exiting}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
 # P82: a lane's brief lives HERE, never in the working tree it is about.
@@ -262,6 +269,13 @@ LIB_SH="$LIB_DIR/lib.sh"
     || { echo "tick.sh: $LIB_SH is missing — it holds the shared derivations and ships beside tick.sh" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
+HOST_ADMISSION_SH="$LIB_DIR/host-admission.sh"
+_load_host_admission() {
+    command -v host_admission_product_allowed >/dev/null 2>&1 && return 0
+    [ -f "$HOST_ADMISSION_SH" ] \
+      || die "$HOST_ADMISSION_SH is missing — it owns heavyweight host admission"
+    . "$HOST_ADMISSION_SH"
+}
 
 # P86: every tracker read this file makes goes through the driver for the
 # repo's declared tracker, so `glab` is named in scripts/trackers/gitlab.sh and
@@ -1119,15 +1133,23 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
-_ui_pregate_occupied() { # one shared UI host: active browser phase or durable reservation
-    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
+_ui_capacity() {
+    local cap
+    cap=$(cfg ui_capacity 1)
+    case "$cap" in ''|*[!0-9]*|0) die "ui_capacity must be a positive integer, got '$cap'" ;; esac
+    printf '%s\n' "$cap"
+}
+
+_ui_pregate_usage() { # active browser phases + durable reservations
+    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}" count=0 seen=" "
     for metadata in "$LANES_DIR"/*.ui-resource; do
         [ -f "$metadata" ] || continue
         [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || continue
         live_id="${metadata##*/}"; live_id="${live_id%.ui-resource}"
         pid=$(cat "$LANES_DIR/$live_id.pid" 2>/dev/null || true)
         if _lane_process_alive "$live_id" "$pid"; then
-            return 0
+            case "$seen" in *" $live_id "*) ;; *) seen="$seen$live_id "; count=$((count + 1)) ;; esac
+            continue
         fi
         # Admission owns AUX_LOCK_DIR here, so no spawning process can be in
         # the metadata-before-pid window. Retire only a dead lane's stale hint.
@@ -1141,10 +1163,10 @@ _ui_pregate_occupied() { # one shared UI host: active browser phase or durable r
         if [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] \
            || [ "$(cat "$request/reserve-ui" 2>/dev/null || true)" = 1 ] \
            || [ -s "$request/host-probe" ]; then
-            return 0
+            case "$seen" in *" $queued_id "*) ;; *) seen="$seen$queued_id "; count=$((count + 1)) ;; esac
         fi
     done
-    return 1
+    printf '%s\n' "$count"
 }
 
 cmd_release_ui_resource() { # <lane-id>; called by that lane after host UI work
@@ -1173,13 +1195,25 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
     return 1
 }
 
-_ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retryable for drain
-    local id="$1" from="$2"
-    echo "spawn-lane: UI host resource (UI pregate or browser probe) is already reserved — not starting '$id'."
+_ui_pregate_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
+    local id="$1" from="$2" used="$3" cap="$4"
+    echo "spawn-lane: UI host capacity full ($used of $cap held by UI pregates or browser probes) — not starting '$id'."
     if [ -n "$from" ]; then
         echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
     fi
-    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy used "$used" cap "$cap"
+    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
+    [ -n "$from" ] && return 0
+    return 1
+}
+
+_host_maintenance_admission_refusal() { # <id> <from-lane>
+    local id="$1" from="$2"
+    echo "spawn-lane: Loom runtime validation owns the heavyweight host resource — not starting '$id'."
+    if [ -n "$from" ]; then
+        echo "  The ordinary heartbeat retries after runtime validation releases the host."
+    fi
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason host_maintenance_busy
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
     [ -n "$from" ] && return 0
     return 1
@@ -1895,8 +1929,56 @@ cmd_resume() {
     echo "resume: consecutive-wave-failure count reset"
 }
 
+_continuation_lock_acquire() {
+    local attempt rc
+    for attempt in $(seq 1 200); do
+        rc=0; _lock_reserve "$CONTINUATION_LOCK_DIR" || rc=$?
+        case "$rc" in
+            0) return 0 ;;
+            1) sleep 0.01 ;;
+            *) die "continuation: cannot reserve the request lock safely" ;;
+        esac
+    done
+    die "continuation: request lock remained busy"
+}
+
+_continuation_lock_release() {
+    rm -f "$CONTINUATION_LOCK_DIR/pid" 2>/dev/null \
+        && rmdir "$CONTINUATION_LOCK_DIR" 2>/dev/null \
+        || die "continuation: cannot release the request lock safely"
+}
+
+_continuation_claim() { # [own-pending] — prints 1 when this tick owns a generation
+    local own_pending="${1:-0}" claimed=0
+    _continuation_lock_acquire
+    if [ -f "$CONTINUATION_CLAIM_FILE" ]; then
+        claimed=1
+    elif [ -f "$CONTINUATION_FILE" ]; then
+        if ! mv "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE"; then # mutate:continuation-claim
+            _continuation_lock_release
+            die "continuation: cannot claim the pending request"
+        fi
+        claimed=1
+    fi
+    # At successful tick admission, a pending marker belongs to this tick only
+    # when no later continuation.request remains. Keep the marker when an older
+    # claim prevented this pass from owning the next generation; EXIT must
+    # replay it. Request creation and this decision share the same lock.
+    if [ "$own_pending" = 1 ] && [ ! -f "$CONTINUATION_FILE" ]; then
+        rm -f "$PENDING_FILE" # mutate:continuation-pending-owner
+    fi
+    _continuation_lock_release
+    printf '%s\n' "$claimed"
+}
+
+_continuation_consume() {
+    _continuation_lock_acquire
+    rm -f "$CONTINUATION_CLAIM_FILE"
+    _continuation_lock_release
+}
+
 cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticket>
-    local reason="${1:-}" ticket="${2:-}"
+    local reason="${1:-}" ticket="${2:-}" first_request=0 exit_owner="" attempt
     [ "$#" -eq 2 ] \
         || die "request-continuation: usage: request-continuation hold-release|supervised-release|fix-ticket <ticket>"
     case "$reason" in
@@ -1904,8 +1986,66 @@ cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticke
         *) die "request-continuation: unknown reason '$reason'" ;;
     esac
     case "$ticket" in ''|*[!0-9]*) die "request-continuation: ticket must be numeric" ;; esac
-    : > "$CONTINUATION_FILE"
+    _continuation_lock_acquire
+    exit_owner=$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")
+    if ! _lock_owner_valid "$exit_owner" \
+       || [ -z "$exit_owner" ] || ! kill -0 "$exit_owner" 2>/dev/null; then
+        exit_owner=""
+        rm -f "$CONTINUATION_EXIT_FILE"
+    fi
+    if [ ! -f "$CONTINUATION_FILE" ]; then
+        if ! : > "$CONTINUATION_FILE"; then
+            _continuation_lock_release
+            die "request-continuation: cannot record the durable request"
+        fi
+        first_request=1
+    fi
+    : > "$PENDING_FILE"
+    _continuation_lock_release
     _ev continuation_requested reason "$reason" ticket "$ticket"
+    # The marker is the durable request and the ordinary scheduler remains the
+    # sole admission owner. Wake that existing launchd label once when the
+    # marker changes absent -> present; duplicate Mend writes coalesce without
+    # creating another scheduler, and a stopped build keeps the request for an
+    # explicit start. Never use `kickstart -k`: replacing an in-flight
+    # heartbeat would trade the old delay for lost scheduler work.
+    [ "$first_request" -eq 1 ] || return 0
+    if _loop_stopped; then
+        _ev continuation_wake_deferred reason stopped
+        return 0
+    fi
+    if _agent_armed; then
+        # The previous heartbeat may have completed its final pending check but
+        # not exited its launchd job yet. A non-replacing kick in that window
+        # starts nothing, so wait for the exact pid it published at the exit
+        # boundary. The durable request/pending markers already survive if the
+        # short wait cannot prove process death.
+        if [ -n "$exit_owner" ]; then
+            for attempt in $(seq 1 500); do
+                kill -0 "$exit_owner" 2>/dev/null || break
+                sleep 0.01
+            done
+            if kill -0 "$exit_owner" 2>/dev/null; then
+                _ev continuation_wake_deferred reason exiting
+                return 0
+            fi
+            _continuation_lock_acquire
+            if [ "$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")" = "$exit_owner" ]; then
+                rm -f "$CONTINUATION_EXIT_FILE"
+            fi
+            _continuation_lock_release
+        fi
+        if "$LAUNCHCTL_CMD" kickstart "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
+            _ev continuation_wake_requested reason "$reason" ticket "$ticket"
+        else
+            # The label may already be running or this process may be outside
+            # its GUI domain. Either way the marker survives for the 60s
+            # heartbeat; an immediate wake is an optimization, never state.
+            _ev continuation_wake_deferred reason kickstart-refused
+        fi
+    else
+        _ev continuation_wake_deferred reason unarmed
+    fi
 }
 
 # --- subcommands ----------------------------------------------------------
@@ -1951,13 +2091,23 @@ _start_handoff_tick() {
 _tick_exit() {
     local rc=$?
     rm -rf "$LOCK_DIR"
+    # Serialize the last pending observation with request-continuation. When
+    # there is no replay, publish the exact exiting pid before releasing: a
+    # late writer can record durable work now but delays its ordinary kick
+    # until launchd can actually start the job again.
+    _continuation_lock_acquire
     if [ -f "$PENDING_FILE" ]; then
         rm -f "$PENDING_FILE"
+        rm -f "$CONTINUATION_EXIT_FILE"
+        _continuation_lock_release
         _ev tick_replayed
-        echo "tick: a lane finished during this wave — re-ticking once"
+        echo "tick: work became runnable during this wave — re-ticking once"
         _start_handoff_tick
+    else
+        printf '%s\n' "$$" > "$CONTINUATION_EXIT_FILE"
+        _continuation_lock_release
     fi
-    return $rc
+    return $rc # mutate:continuation-exit-boundary
 }
 
 # --- the loop switch and the wave gap ------------------------------------
@@ -2060,7 +2210,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 pending_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -2145,8 +2295,9 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
     [ ! -f "$START_KICK_FILE" ] || start_kick=1
-    [ ! -f "$CONTINUATION_FILE" ] || continuation_kick=1
-    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
+    continuation_kick=$(_continuation_claim)
+    [ ! -f "$PENDING_FILE" ] || pending_kick=1
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && [ "$pending_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0
@@ -2171,6 +2322,10 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         echo "tick: wave already running — noted, the running wave will re-tick on exit"
         exit 0
     fi
+    # Recheck under the same lock request-continuation uses: a request can land
+    # after the pre-gap claim. Own it now when possible, or retain tick.pending
+    # when an older claim means the later generation needs an EXIT replay.
+    continuation_kick=$(_continuation_claim 1)
     trap _tick_exit EXIT
     _usage_gate || exit 0
     _bootstrap_once
@@ -2218,7 +2373,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
                  # No scheduling agent is needed to rediscover this choice:
                  # the snapshot plan already names exact repair lanes.
                  [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-                 [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
+                 [ "$continuation_kick" -eq 0 ] || _continuation_consume
                  _dispatch_start_supervision
                  _ev tick_deterministic_supervision
                  return 0 ;;
@@ -2235,7 +2390,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # Consume only at the cost boundary. A start kick that met a lock, a usage
     # pause, or a quiet-board refusal must survive for the next heartbeat.
     [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-    [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
+    [ "$continuation_kick" -eq 0 ] || _continuation_consume
     tick_go=1
 }
 
@@ -3865,7 +4020,7 @@ _cmd_spawn_lane() {
             fi
             die "spawn-lane: auxiliary admission is busy — retry '$id' on the next heartbeat"
         fi
-        trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
+        trap 'command -v host_admission_product_unlock >/dev/null 2>&1 && host_admission_product_unlock >/dev/null 2>&1 || true; rm -rf "$AUX_LOCK_DIR"' EXIT
         local aux_cap aux_used aux_source_pid="" aux_rc=0
         # An aux-to-aux successor replaces the caller's own slot. Provider
         # sessions must reserve that successor before they return to the host
@@ -3889,14 +4044,32 @@ _cmd_spawn_lane() {
                 return "$aux_rc"
             fi
         fi
+        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+            local host_admission_rc=0 host_admission_root product_home product_key
+            _load_host_admission
+            host_admission_root=$(host_admission_home)
+            product_home=$(cd "$LOOM_HOME" 2>/dev/null && pwd -P) \
+              || die "spawn-lane: cannot resolve product host state '$LOOM_HOME'"
+            product_key="product-$(printf '%s' "$product_home" | cksum | cut -d' ' -f1)"
+            host_admission_product_acquire "$host_admission_root" "$product_key" "$product_home" \
+              || host_admission_rc=$?
+            case "$host_admission_rc" in
+                1) _host_maintenance_admission_refusal "$id" "$handoff_from" || aux_rc=$?; return "$aux_rc" ;;
+                2) die "spawn-lane: heavyweight host admission state is unreadable — refusing '$id'" ;;
+            esac
+        fi
         # UI pregates share identity fixtures and other host-scoped state.
         # Reserve that one resource before a paid worker exists: a Codex
         # handoff lives in the durable queue, while Claude/direct hosts record
         # the pregate beside the live lane. API pregates and non-UI lanes do
         # not enter this resource-specific admission path.
-        if { [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; } && _ui_pregate_occupied; then
-            _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
-            return "$aux_rc"
+        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+            local ui_cap ui_used
+            ui_cap=$(_ui_capacity); ui_used=$(_ui_pregate_usage)
+            if [ "$ui_used" -ge "$ui_cap" ]; then
+                _ui_pregate_admission_refusal "$id" "$handoff_from" "$ui_used" "$ui_cap" || aux_rc=$?
+                return "$aux_rc"
+            fi
         fi
     fi
     # The lane's own id, inherited by everything it runs — including the
@@ -3942,6 +4115,8 @@ _cmd_spawn_lane() {
     if [ -n "$provider" ] \
        && { [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ] || _codex_host_is_ephemeral; }; then
         _queue_lane_launch
+        command -v host_admission_product_unlock >/dev/null 2>&1 \
+          && host_admission_product_unlock
         return 0
     fi
     # D-TICK-27: evidence produced by this run belongs to the commit present at
@@ -4178,6 +4353,12 @@ _cmd_spawn_lane() {
               "$LANES_DIR/$id.host-probe.json" "$LANES_DIR/$id.release"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
+    fi
+    # The UI marker and its live PID form one host claim. Keep the global
+    # admission lock until both are durable so maintenance can only observe
+    # the complete pair; launch failures release through the EXIT trap.
+    if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+        host_admission_product_unlock
     fi
     _ev lane_spawn id "$id" type "$(_lane_type "$id")" job "${job:-custom}" \
         provider "${provider:-custom}" tier "$lane_tier" \
@@ -5080,10 +5261,10 @@ cmd_snapshot() {
     #
     # A tracker that can return the whole build — every member's blocking edges
     # and comment thread nested inside one list query — makes the entire
-    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot,
-    # and answers non-zero, which is exactly the capability probe. So this is a
-    # fast path with the OLD path as its fallback, not a replacement: anything
-    # that goes wrong here costs one wasted call and the fan-out still runs.
+    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot
+    # and answers 2, the contract's unsupported-capability result. Only that
+    # result falls back: a supported driver's failed or malformed read cannot
+    # safely yield to an independently populated ticket universe.
     #
     # Why it matters more than wall clock: Linear meters 2,500 requests an hour
     # against 3,000,000 complexity points, so the fan-out spends the scarce
@@ -5091,10 +5272,22 @@ cmd_snapshot() {
     # requests before, 4 after, identical output. *(paid: an hour's quota gone
     # to 26 snapshots of a board that had barely moved, which then blocked an
     # unrelated publish for an hour.)*
-    local batched=false
-    if [ -n "$label" ] && [ -n "$member_iids" ]; then
-        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err" \
-           && jq -e 'type == "array" and length > 0' "$SNAP_TMP/board.json" >/dev/null 2>&1; then
+    local batched=false board_rc why
+    if [ -n "$label" ]; then
+        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err"; then
+            board_rc=0
+        else
+            board_rc=$?
+        fi
+        if [ "$board_rc" = 0 ]; then
+            jq -e 'type == "array"' "$SNAP_TMP/board.json" >/dev/null 2>&1 \
+                || die "snapshot: batched board read was not a JSON array for $label — refusing partial population"
+            if ! jq -e -s --arg l "$label" '
+                ([.[0][] | select((.labels // []) | index($l)) | .id] | sort)
+                == ([.[1][].id] | sort)
+              ' "$SNAP_TMP/open.json" "$SNAP_TMP/board.json" >/dev/null 2>&1; then
+                die "snapshot: foundational and batched ticket populations disagree for $label — refusing partial population"
+            fi
             batched=true
             for iid in $member_iids; do
                 jq -c --argjson i "$iid" \
@@ -5106,6 +5299,9 @@ cmd_snapshot() {
                     '[ .[] | select(.id == $i) ][0].notes // []' "$SNAP_TMP/board.json" \
                     > "$SNAP_TMP/tnotes-$iid.json" || printf '[]\n' > "$SNAP_TMP/tnotes-$iid.json"
             done
+        elif [ "$board_rc" != 2 ]; then
+            why=$(head -1 "$SNAP_TMP/board.err" 2>/dev/null | tr -d '\n')
+            die "snapshot: batched board read failed for $label — ${why:-driver exited $board_rc}; refusing partial population"
         fi
         rm -f "$SNAP_TMP/board.err"
     fi
@@ -5170,16 +5366,20 @@ cmd_snapshot() {
     # closed. Resolution is the wave cadence, which is honest and enough.
     [ -n "$label" ] && printf '%s\n' "$label" > "$BUILD_LABEL_CACHE"
 
-    local config_json ui_pregate_occupied=false
+    local config_json ui_pregate_occupied=false ui_pregate_usage ui_capacity
+    ui_capacity=$(_ui_capacity)
+    ui_pregate_usage=$(_ui_pregate_usage)
     config_json=$(jq -n \
         --arg max_lanes "$(cfg max_lanes 4)" --arg rejection_cap "$(cfg rejection_cap 2)" \
         --arg crash_cap "$(cfg crash_cap 2)" --arg stale "$(cfg heartbeat_stale_minutes 30)" \
         --arg merge_attempt_cap "$(cfg merge_attempt_cap 2)" \
         --arg lane_turn_cap "$(cfg lane_turn_cap 150)" \
         --arg base "$(cfg base '')" --arg max_aux "$(cfg max_aux_lanes 4)" \
+        --arg ui_capacity "$ui_capacity" \
         --arg lane_tier "$(_tier_cfg lane_tier medium)" --arg rework_tier "$(_tier_cfg rework_tier high)" \
         '{ max_lanes: ($max_lanes | tonumber? // $max_lanes),
            max_aux_lanes: ($max_aux | tonumber? // $max_aux),
+           ui_capacity: ($ui_capacity | tonumber? // $ui_capacity),
            rejection_cap: ($rejection_cap | tonumber? // $rejection_cap),
            crash_cap: ($crash_cap | tonumber? // $crash_cap),
            merge_attempt_cap: ($merge_attempt_cap | tonumber? // $merge_attempt_cap),
@@ -5193,7 +5393,7 @@ cmd_snapshot() {
     # valid, unexpired leases are represented; an expired supervisor process
     # cannot wedge scheduling and snapshot remains a read-only verb.
     _supervised_leases_json > "$SNAP_TMP/supervised-leases.json"
-    if _ui_pregate_occupied; then ui_pregate_occupied=true; fi
+    if [ "$ui_pregate_usage" -ge "$ui_capacity" ]; then ui_pregate_occupied=true; fi
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
@@ -5210,6 +5410,7 @@ cmd_snapshot() {
         --arg label "$label" --arg build_iid "$build_iid" \
         --arg merge_owner "$(_merge_lock_owner)" \
         --argjson brief "$brief" --argjson ui_pregate_occupied "$ui_pregate_occupied" \
+        --argjson ui_pregate_usage "$ui_pregate_usage" \
         -f "$SNAP_JQ"
 
     # The retro record is derived from the finished snapshot, never recomputed
@@ -6140,13 +6341,14 @@ _tier_cfg() { # <key> <default>
 cmd_resolve_config() {
     command -v jq >/dev/null 2>&1 || die "resolve-config: jq required"
     _refuse_legacy_runtime_config
-    local stack base gates_tsv gates_src runner
+    local stack base gates_tsv gates_src runner ui_capacity
     stack=$(detect_stack)
     # `base` was never a real setting: SKILL.md already states the rule.
     base=$(_detect_base "$REPO_ROOT" "$CONFIG")
     gates_tsv=$(_repo_gates_tsv); gates_src=repo
     [ -n "$gates_tsv" ] || { gates_tsv=$(_derive_gates_tsv); gates_src=derived; }
     runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+    ui_capacity=$(_ui_capacity)
 
     jq -n \
         --arg repo "$REPO_ROOT" --arg stack "$stack" --arg base "$base" \
@@ -6156,6 +6358,7 @@ cmd_resolve_config() {
         --argjson deny  "$(_derive_deny  | _lines_to_json)" \
         --arg lanes "$(cfg max_lanes 4)"           --arg lanes_s "$(cfg_source max_lanes)" \
         --arg aux   "$(cfg max_aux_lanes 4)"       --arg aux_s   "$(cfg_source max_aux_lanes)" \
+        --arg uicap "$ui_capacity"                 --arg uicap_s "$(cfg_source ui_capacity)" \
         --arg stall "$(cfg stall_action resume)"   --arg stall_s "$(cfg_source stall_action)" \
         --arg rej   "$(cfg rejection_cap 2)"       --arg rej_s   "$(cfg_source rejection_cap)" \
         --arg crash "$(cfg crash_cap 2)"           --arg crash_s "$(cfg_source crash_cap)" \
@@ -6178,6 +6381,7 @@ cmd_resolve_config() {
           scalars: {
             max_lanes:               {value: $lanes,  source: $lanes_s},
             max_aux_lanes:           {value: $aux,    source: $aux_s},
+            ui_capacity:              {value: $uicap,  source: $uicap_s},
             stall_action:            {value: $stall,  source: $stall_s},
             rejection_cap:           {value: $rej,    source: $rej_s},
             crash_cap:               {value: $crash,  source: $crash_s},
@@ -6315,7 +6519,8 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
-    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE"
+    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE" \
+          "$CONTINUATION_EXIT_FILE"
     local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"

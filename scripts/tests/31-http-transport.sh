@@ -73,21 +73,22 @@ while [ $# -gt 0 ]; do
   case "$1" in --output) out="$2"; shift 2 ;; --config) cfg="$2"; shift 2 ;; *) shift ;; esac
 done
 ls -l "$cfg" | cut -c1-10 > "${PERM_OUT:?}"
+printf '%s\n' "$cfg" > "${CFG_PATH:?}"
 printf '{"data":{"viewer":{"id":"u1","name":"n"}}}' > "$out"
 echo 200
 EOF
 chmod +x "$TD/curl-perm"
-PERM_OUT="$TD/perm.txt" LINEAR_API_KEY="$SECRET" CURL_CMD="$TD/curl-perm" \
+PERM_OUT="$TD/perm.txt" CFG_PATH="$TD/cfg-path.txt" LINEAR_API_KEY="$SECRET" CURL_CMD="$TD/curl-perm" \
     LOOM_REPO="$TD/repo" "$LIN" whoami >/dev/null 2>&1 || true
 case "$(cat "$TD/perm.txt" 2>/dev/null)" in
     -rw-------*) ok "transport: the config file holding the key is mode 600 while it exists" ;;
     *)           bad "transport: the config file's mode is $(cat "$TD/perm.txt" 2>/dev/null) — the key is readable by others" ;;
 esac
 # It does not outlive the process.
-LEFT=$(find "${TMPDIR:-/tmp}" -maxdepth 2 -name 'curl.cfg' -newer "$TD/perm.txt" 2>/dev/null | head -1)
-[ -z "$LEFT" ] \
+LEFT=$(cat "$TD/cfg-path.txt" 2>/dev/null || true)
+[ -n "$LEFT" ] && [ ! -e "$LEFT" ] \
     && ok "transport: and it is gone when the driver exits — no credential left in a temp directory" \
-    || bad "transport: a curl config file survived the run ($LEFT)"
+    || bad "transport: this run's curl config file survived or was not observed ($LEFT)"
 
 # --- p87-h2. A missing key is a refusal, not a request ---------------------
 out=$(CURL_CMD="$TD/curl-ok" LOOM_REPO="$TD/repo" LINEAR_API_KEY= "$LIN" whoami 2>&1); rc=$?

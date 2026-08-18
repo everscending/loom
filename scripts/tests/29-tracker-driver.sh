@@ -340,6 +340,7 @@ case "$1" in
 JSON
     ;;
   milestones) echo '[{"id":5,"title":"Ledger","state":"open","description":"## Acceptance criteria\n\n- [ ] it balances\n"}]' ;;
+  board)      exit 2 ;;
   *)          echo '[]' ;;
 esac
 EOF

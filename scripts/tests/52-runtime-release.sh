@@ -3,6 +3,7 @@
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
 RUNTIME="$(dirname "$TICK")/runtime.sh"
+HOST_ADMISSION="$(dirname "$TICK")/host-admission.sh"
 SRC="$T/source"
 RT="$T/runtime"
 SELECTOR="$RT/consumers/test.active"
@@ -10,6 +11,7 @@ CUTOVER_HOME="$T/cutover-home"
 mkdir -p "$SRC/scripts" "$CUTOVER_HOME"
 : > "$CUTOVER_HOME/loop.stopped"
 cp "$RUNTIME" "$SRC/scripts/runtime.sh"
+cp "$HOST_ADMISSION" "$SRC/scripts/host-admission.sh"
 printf '# test skill\n' > "$SRC/SKILL.md"
 printf 'host_state_api 1\n' > "$SRC/runtime-abi"
 for name in lane agent; do
@@ -124,7 +126,120 @@ git -C "$SRC" add scripts/tick.sh
 git -C "$SRC" commit -qm B
 B_COMMIT=$(git -C "$SRC" rev-parse HEAD)
 B=$(git -C "$SRC" rev-parse 'HEAD^{tree}')
-run_runtime publish >/dev/null
+
+# A malformed product claim is not "idle". Publication must fail visibly
+# without starting the heavyweight release suite or changing the selector.
+mkdir -p "$CUTOVER_HOME/lanes"
+ln -s missing "$CUTOVER_HOME/lanes/gate-bad.ui-resource"
+unreadable_out=$(run_runtime publish 2>&1); unreadable_rc=$?
+if [ "$unreadable_rc" -ne 0 ] && [ ! -e "$RT/releases/$B" ] \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ] \
+   && printf '%s' "$unreadable_out" | grep -q 'unreadable host admission state'; then
+    ok "runtime release: unreadable product admission state fails visibly before validation"
+else
+    bad "runtime release: malformed product admission state looked idle ($unreadable_out)"
+fi
+rm -f "$CUTOVER_HOME/lanes/gate-bad.ui-resource"
+
+# A queued UI handoff already owns product priority while the build can drain
+# it. Maintenance must wait behind that reservation instead of overtaking it;
+# a stopped build is different because its queue cannot run.
+rm -f "$CUTOVER_HOME/loop.stopped"
+mkdir -p "$CUTOVER_HOME/lane-launch-queue/request-gate-400"
+printf 'ui\n' > "$CUTOVER_HOME/lane-launch-queue/request-gate-400/pregate"
+QUEUED_OUT="$T/queued-publish.out"
+LINEAR_API_KEY=must-not-reach-validation LOOM_RUNTIME_HOME="$RT" LOOM_RUNTIME_SELECTOR="$SELECTOR" \
+  LOOM_RUNTIME_SOURCE="$SRC" LOOM_HOME="$CUTOVER_HOME" LOOM_RUNTIME_CUTOVER_UNARMED=1 \
+  "$RUNTIME" publish >"$QUEUED_OUT" 2>&1 & queued_publish_pid=$!
+for _wait in $(seq 1 100); do
+    grep -q 'deferring release validation' "$QUEUED_OUT" 2>/dev/null && break
+    sleep 0.02
+done
+if kill -0 "$queued_publish_pid" 2>/dev/null && [ ! -e "$RT/releases/$B" ]; then
+    ok "runtime release: queued product UI work keeps priority over maintenance"
+else
+    bad "runtime release: maintenance overtook an admitted UI reservation"
+fi
+kill "$queued_publish_pid" 2>/dev/null || true
+wait "$queued_publish_pid" 2>/dev/null || true
+rm -rf "$CUTOVER_HOME/lane-launch-queue"
+: > "$CUTOVER_HOME/loop.stopped"
+
+# An active product UI gate owns the same heavyweight host class. Publish
+# waits without taking its publication lock, then resumes by itself as soon as
+# the gate releases its claim.
+printf '%s\n' "$$" > "$CUTOVER_HOME/lanes/gate-401.pid"
+printf 'ui\n' > "$CUTOVER_HOME/lanes/gate-401.ui-resource"
+printf '%s\n' "$$" > "$CUTOVER_HOME/lanes/gate-402.pid"
+printf 'ui\n' > "$CUTOVER_HOME/lanes/gate-402.ui-resource"
+DEFERRED_OUT="$T/deferred-publish.out"
+run_runtime publish >"$DEFERRED_OUT" 2>&1 & publish_pid=$!
+for _wait in $(seq 1 100); do
+    grep -q 'deferring release validation' "$DEFERRED_OUT" 2>/dev/null && break
+    sleep 0.02
+done
+if kill -0 "$publish_pid" 2>/dev/null && [ ! -e "$RT/releases/$B" ] \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$A" ]; then
+    ok "runtime release: active product UI work defers the heavyweight full suite"
+else
+    bad "runtime release: validation started while a product UI gate owned the host"
+fi
+rm -f "$CUTOVER_HOME/lanes/gate-401.ui-resource" "$CUTOVER_HOME/lanes/gate-401.pid"
+sleep 0.1
+if kill -0 "$publish_pid" 2>/dev/null && [ ! -e "$RT/releases/$B" ]; then
+    ok "runtime release: maintenance waits for every active UI slot, not one hard-coded owner"
+else
+    bad "runtime release: validation resumed while another product UI claim remained active"
+fi
+rm -f "$CUTOVER_HOME/lanes/gate-402.ui-resource" "$CUTOVER_HOME/lanes/gate-402.pid"
+wait "$publish_pid"; publish_rc=$?
+if [ "$publish_rc" -eq 0 ] && grep -q 'product UI work released; starting release validation' "$DEFERRED_OUT" \
+   && [ "$(sed -n 's/^current //p' "$SELECTOR")" = "$B" ]; then
+    ok "runtime release: deferred validation resumes automatically after product release"
+else
+    bad "runtime release: deferred validation did not resume cleanly ($(cat "$DEFERRED_OUT"))"
+fi
+
+# Claim removal is one admission transition too. Pause it after unlinking the
+# owner file: a product contender must still see the shared lock, never an
+# ownerless maintenance directory that it misclassifies as corrupt.
+RELEASE_HOME="$T/release-home"
+RELEASE_BIN="$T/release-bin"
+RELEASE_SIGNAL="$T/release-unlinked"
+RELEASE_GO="$T/release-go"
+mkdir -p "$RELEASE_HOME" "$RELEASE_BIN"
+cat > "$RELEASE_BIN/rm" <<'EOF'
+#!/bin/sh
+/bin/rm "$@" || exit $?
+case "$*" in
+  *heavy-host-maintenance.d/pid*)
+    : > "$RELEASE_SIGNAL"
+    while [ ! -f "$RELEASE_GO" ]; do sleep 0.01; done
+    ;;
+esac
+EOF
+chmod +x "$RELEASE_BIN/rm"
+(
+    . "$HOST_ADMISSION"
+    host_admission_maintenance_acquire "$RELEASE_HOME" || exit
+    PATH="$RELEASE_BIN:$PATH" RELEASE_SIGNAL="$RELEASE_SIGNAL" RELEASE_GO="$RELEASE_GO" \
+      host_admission_maintenance_release
+) & release_pid=$!
+for _wait in $(seq 1 100); do [ -f "$RELEASE_SIGNAL" ] && break; sleep 0.02; done
+release_probe_rc=0
+(
+    . "$HOST_ADMISSION"
+    _host_admission_lock_take "$RELEASE_HOME"
+) >/dev/null 2>&1 || release_probe_rc=$?
+: > "$RELEASE_GO"
+wait "$release_pid"; release_rc=$?
+if [ "$release_probe_rc" -eq 1 ] && [ "$release_rc" -eq 0 ] \
+   && [ ! -e "$RELEASE_HOME/heavy-host-maintenance.d" ] \
+   && [ ! -e "$RELEASE_HOME/aux-admission.lock" ]; then
+    ok "runtime release: maintenance claim removal stays atomic to product admission"
+else
+    bad "runtime release: claim removal exposed partial state (probe=$release_probe_rc release=$release_rc)"
+fi
 fresh=$(run_launcher run -- tick)
 pinned=$(run_launcher run --release "$A" -- tick)
 if printf '%s' "$fresh" | grep -q "^B:$B:" \

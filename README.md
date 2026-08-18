@@ -218,6 +218,7 @@ only to override a default or state a fact no detector can infer:
 ```yaml
 max_lanes: 4                    # 1-6; each lane is a full worktree
 max_aux_lanes: 4                # repair/gate/merge/probe lane capacity
+ui_capacity: 2                  # opt in above default 1 after a paired host proof
 rejection_cap: 2                # failed gates before focused supervision
 crash_cap: 2                    # crashes before blocked (crashes are not rejections)
 merge_attempt_cap: 2            # failed merge attempts before intervention

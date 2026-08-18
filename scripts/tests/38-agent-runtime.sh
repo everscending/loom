@@ -305,6 +305,7 @@ case "$1" in
   issue-notes)
     if [ -n "${NOTES_JSON:-}" ] && [ "${2:-}" = "${FIXTURE_TICKET:-}" ]; then cat "$NOTES_JSON"
     else printf '[]\n'; fi ;;
+  board) exit 2 ;;
   labels) printf '[{"name":"provider::claude"},{"name":"provider::codex"}]\n' ;;
   issue-relabel) echo "$*" >> "${MUTATIONS:?}"; printf '{}\n' ;;
   *) printf '[]\n' ;;

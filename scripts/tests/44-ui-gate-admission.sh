@@ -2,7 +2,7 @@
 # UI gate pregates share one host resource without shrinking auxiliary capacity
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/test-lib.sh"
 
-printf '\nmax_aux_lanes: 4\n' >> "$LOOM_REPO/.loom.yml"
+printf '\nmax_aux_lanes: 4\nui_capacity: 1\n' >> "$LOOM_REPO/.loom.yml"
 UI_RUNNER="$T/ui-pregate-runner.sh"
 UI_RELEASE="$T/ui-pregate-release"
 UI_STARTED="$T/ui-pregate-started"
@@ -26,6 +26,111 @@ lane_alive() { # <lane-id>
     pid=$(cat "$LOOM_HOME/lanes/$1.pid" 2>/dev/null || true)
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
+HOST_ADMISSION_HOME="$LOOM_HOST_ADMISSION_HOME"
+DRIVER="$(dirname "$TICK")/tick-test.sh"
+
+# Runtime self-validation is heavyweight host work too. Its exclusive claim
+# must hold only UI work: focused/API gates remain free to run while release
+# validation owns the browser-class resource.
+mkdir -p "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
+printf '%s\n' "$$" > "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid"
+rc=0
+out=$("$TICK" spawn-lane gate-348 --no-tick --pregate ui \
+  --cwd "$LOOM_REPO" -- sleep 30 2>&1) || rc=$?
+"$TICK" spawn-lane gate-349 --no-tick --pregate api \
+  --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+if [ "$rc" -ne 0 ] && ! lane_alive gate-348 && lane_alive gate-349 \
+   && printf '%s' "$out" | grep -q 'runtime validation'; then
+    ok "host admission: runtime validation defers UI work but not focused API gates"
+else
+    bad "host admission: maintenance claim did not isolate only heavyweight UI work (rc=$rc; out=$out)"
+fi
+"$TICK" kill-lane gate-349 >/dev/null 2>&1 || true
+"$TICK" kill-lane gate-348 >/dev/null 2>&1 || true
+rm -f "$HOST_ADMISSION_HOME/heavy-host-maintenance.d/pid"
+rmdir "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
+
+ln -s missing "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
+rc=0
+out=$("$TICK" spawn-lane gate-347 --no-tick --pregate ui \
+  --cwd "$LOOM_REPO" -- sleep 30 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && ! lane_alive gate-347 \
+   && printf '%s' "$out" | grep -q 'admission state is unreadable'; then
+    ok "host admission: unreadable maintenance ownership fails product UI admission visibly"
+else
+    bad "host admission: malformed maintenance ownership looked idle (rc=$rc; out=$out)"
+fi
+rm -f "$HOST_ADMISSION_HOME/heavy-host-maintenance.d"
+
+# The active marker and its PID are one host-admission transition. Pause the
+# public process launcher after metadata is written but before the child can
+# stamp ownership: a direct full suite must wait, not inspect the partial pair
+# and reject a valid product spawn as unreadable.
+RACE_BIN="$T/pid-race-bin"
+RACE_PAUSED="$T/pid-race-paused"
+RACE_GO="$T/pid-race-go"
+RACE_SUITE_ATTEMPTS="$T/pid-race-suite-attempts"
+RACE_SPAWN_OUT="$T/pid-race-spawn.out"
+RACE_SUITE_OUT="$T/pid-race-suite.out"
+RACE_TESTS="$T/pid-race-tests"
+mkdir -p "$RACE_BIN" "$RACE_TESTS"
+cat > "$RACE_BIN/nohup" <<'EOF'
+#!/bin/sh
+: > "${RACE_PAUSED:?}"
+while [ ! -f "${RACE_GO:?}" ]; do sleep 0.01; done
+exec /usr/bin/nohup "$@"
+EOF
+cat > "$RACE_BIN/ln" <<'EOF'
+#!/bin/sh
+/bin/ln "$@"; rc=$?
+[ -z "${RACE_SUITE_ATTEMPTS:-}" ] || printf 'attempt\n' >> "$RACE_SUITE_ATTEMPTS"
+exit "$rc"
+EOF
+cat > "$RACE_TESTS/01-ok.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '1 0\n' > "${LOOM_TEST_COUNTS:?}"
+EOF
+chmod +x "$RACE_BIN/nohup" "$RACE_BIN/ln" "$RACE_TESTS/01-ok.sh"
+rm -f "$RACE_PAUSED" "$RACE_GO" "$RACE_SPAWN_OUT" "$RACE_SUITE_OUT" \
+      "$RACE_SUITE_ATTEMPTS" "$UI_RELEASE" "$UI_STARTED"
+: > "$RACE_SUITE_ATTEMPTS"
+RACE_PAUSED="$RACE_PAUSED" RACE_GO="$RACE_GO" PATH="$RACE_BIN:$PATH" \
+  "$TICK" spawn-lane gate-346 --no-tick --pregate ui \
+  --cwd "$LOOM_REPO" -- sleep 30 >"$RACE_SPAWN_OUT" 2>&1 & race_spawn_pid=$!
+for _wait in $(seq 1 100); do [ -f "$RACE_PAUSED" ] && break; sleep 0.02; done
+RACE_SUITE_ATTEMPTS="$RACE_SUITE_ATTEMPTS" PATH="$RACE_BIN:$PATH" \
+  LOOM_HOST_ADMISSION_HOME="$HOST_ADMISSION_HOME" LOOM_TEST_DIR="$RACE_TESTS" \
+  bash "$DRIVER" >"$RACE_SUITE_OUT" 2>&1 & race_suite_pid=$!
+for _wait in $(seq 1 100); do
+    [ "$(wc -l < "$RACE_SUITE_ATTEMPTS" 2>/dev/null | tr -d ' ')" -ge 2 ] 2>/dev/null && break
+    kill -0 "$race_suite_pid" 2>/dev/null || break
+    sleep 0.02
+done
+race_waited=0
+kill -0 "$race_suite_pid" 2>/dev/null \
+  && [ "$(wc -l < "$RACE_SUITE_ATTEMPTS" 2>/dev/null | tr -d ' ')" -ge 2 ] 2>/dev/null \
+  && [ -f "$LOOM_HOME/lanes/gate-346.ui-resource" ] \
+  && [ ! -e "$LOOM_HOME/lanes/gate-346.pid" ] \
+  && race_waited=1
+: > "$RACE_GO"
+wait "$race_spawn_pid"; race_spawn_rc=$?
+for _wait in $(seq 1 100); do
+    grep -q 'deferring full suite' "$RACE_SUITE_OUT" 2>/dev/null && break
+    sleep 0.02
+done
+race_deferred=0
+kill -0 "$race_suite_pid" 2>/dev/null && lane_alive gate-346 \
+  && grep -q 'deferring full suite' "$RACE_SUITE_OUT" 2>/dev/null \
+  && race_deferred=1
+"$TICK" kill-lane gate-346 >/dev/null 2>&1 || true
+wait "$race_suite_pid"; race_suite_rc=$?
+if [ "$race_waited" -eq 1 ] && [ "$race_spawn_rc" -eq 0 ] \
+   && [ "$race_deferred" -eq 1 ] && [ "$race_suite_rc" -eq 0 ] \
+   && ! grep -q 'unreadable' "$RACE_SUITE_OUT"; then
+    ok "host admission: maintenance waits across UI marker and PID publication"
+else
+    bad "host admission: maintenance observed partial UI ownership (waited=$race_waited spawn=$race_spawn_rc deferred=$race_deferred suite=$race_suite_rc; $(cat "$RACE_SUITE_OUT"))"
+fi
 
 # The public spawn seam admits one UI gate. A direct implementation handoff
 # for a second UI gate must fail soft so the finishing implementation is not
@@ -233,5 +338,58 @@ else
 fi
 LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-380 >/dev/null 2>&1 || true
 LOOM_HOME="$UI_MUT_HOME" "$UI_MUT/tick.sh" kill-lane gate-381 >/dev/null 2>&1 || true
+
+# The host has now demonstrated two isolated product UI gates at once. Raising
+# the existing admission interface to two must admit exactly two claims, while
+# retaining the same atomic final guard for the third.
+sed -i.bak 's/^ui_capacity: 1$/ui_capacity: 2/' "$LOOM_REPO/.loom.yml"
+rm -f "$LOOM_REPO/.loom.yml.bak" "$UI_RELEASE" "$UI_STARTED"
+"$TICK" spawn-lane gate-390 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+"$TICK" spawn-lane gate-391 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+rc=0
+out=$("$TICK" spawn-lane gate-392 --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || rc=$?
+if [ "$rc" -ne 0 ] && lane_alive gate-390 && lane_alive gate-391 && ! lane_alive gate-392 \
+   && printf '%s' "$out" | grep -q '2 of 2'; then
+    ok "ui gate capacity: configured capacity two admits two claims and atomically refuses the third"
+else
+    bad "ui gate capacity: expected exactly two live UI claims (rc=$rc; out=$out)"
+fi
+touch "$UI_RELEASE"
+for id in gate-390 gate-391 gate-392; do "$TICK" kill-lane "$id" >/dev/null 2>&1 || true; done
+
+# Planted violation: collapsing the capacity comparison back to one recreates
+# the old ticket-level bottleneck even though ui_capacity resolves to two.
+CAP_MUT=$(mirror_scripts "$T/ui-capacity-mutant")
+sed 's/\[ "$ui_used" -ge "$ui_cap" \]/[ "$ui_used" -ge 1 ]/' \
+  "$CAP_MUT/tick.sh" > "$CAP_MUT/tick-mutant.sh"
+mv "$CAP_MUT/tick-mutant.sh" "$CAP_MUT/tick.sh"
+chmod +x "$CAP_MUT/tick.sh"
+if [ "$(grep -Fc '[ "$ui_used" -ge 1 ]' "$CAP_MUT/tick.sh")" = 1 ]; then
+    ok "ui-capacity-violation: planted guard replaced the configured comparison"
+else
+    bad "ui-capacity-violation: mutation did not change exactly one admission guard"
+fi
+CAP_MUT_HOME="$T/ui-capacity-mutant-home"
+rm -rf "$CAP_MUT_HOME"; mkdir -p "$CAP_MUT_HOME"
+rm -f "$UI_RELEASE" "$UI_STARTED"
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" spawn-lane gate-393 --no-tick \
+  --pregate ui --cwd "$LOOM_REPO" -- sleep 30 >/dev/null
+if LOOM_HOME="$CAP_MUT_HOME" lane_alive gate-393; then
+    ok "ui-capacity-violation: first UI lane is live before the planted refusal"
+else
+    bad "ui-capacity-violation: first UI lane never established the tested contention"
+fi
+mut_rc=0
+mut_out=$(LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" spawn-lane gate-394 \
+  --no-tick --pregate ui --cwd "$LOOM_REPO" -- sleep 30 2>&1) || mut_rc=$?
+if [ "$mut_rc" -ne 0 ] && ! LOOM_HOME="$CAP_MUT_HOME" lane_alive gate-394 \
+   && printf '%s' "$mut_out" | grep -q 'UI host capacity full (1 of 2'; then
+    ok "ui-capacity-violation: a one-slot comparison recreates serialized ticket gates"
+else
+    bad "ui-capacity-violation: planted one-slot guard did not recreate serialization (rc=$mut_rc; out=$mut_out)"
+fi
+touch "$UI_RELEASE"
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" kill-lane gate-393 >/dev/null 2>&1 || true
+LOOM_HOME="$CAP_MUT_HOME" "$CAP_MUT/tick.sh" kill-lane gate-394 >/dev/null 2>&1 || true
 
 test_finish

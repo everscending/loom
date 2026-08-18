@@ -13,6 +13,20 @@ verify it without the source checkout, then atomically selects the complete
 read-only release for this repository. A failed validation leaves the selector
 unchanged.
 
+The full release suite shares heavyweight-host admission with product UI
+pregates and browser probes. Publication waits before taking its publication
+lock while product UI work is active, then resumes automatically after the
+last claim releases. A queued UI reservation keeps product priority while the
+build is running; a stopped build cannot drain it and may validate. While
+validation runs, new UI work waits; API and focused work remain concurrent.
+The same host-global boundary covers a direct no-argument `tick-test.sh` run,
+even from a Loom worktree with no product `LOOM_HOME`; focused sections and
+`--lint` do not take it. Runtime marks its nested full suite so that suite
+reuses the outer claim instead of deadlocking on itself. Unreadable admission
+state refuses validation instead of guessing that the host is idle.
+The host-global admission plumbing lives under `~/.loom/host-admission` by
+default, independent of any product or runtime worktree.
+
 The first publication requires `/loom stop`, no live wave, no lane or deferred
 launch metadata, and an unloaded scheduler. Each release carries `runtime-abi`;
 an API change requires the same boundary and the explicit `--migrate` flag.

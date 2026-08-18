@@ -88,6 +88,8 @@ lock_acquire() {
 }
 
 cleanup() {
+    command -v host_admission_maintenance_release >/dev/null 2>&1 \
+      && host_admission_maintenance_release >/dev/null 2>&1 || true
     if [ -n "$STAGING" ] && [ -d "$STAGING" ]; then chmod -R u+w "$STAGING" 2>/dev/null || true; rm -rf "$STAGING"; fi
     if [ -n "$LOCKED" ]; then rm -f "$LOCK/pid" 2>/dev/null || true; rmdir "$LOCK" 2>/dev/null || true; fi
 }
@@ -175,7 +177,7 @@ on_signal() {
 
 check_tree() { # <staging>
     local dir="$1" f
-    for f in SKILL.md runtime-abi scripts/tick.sh scripts/lane.sh scripts/agent.sh scripts/runtime.sh scripts/tick-test.sh; do
+    for f in SKILL.md runtime-abi scripts/tick.sh scripts/lane.sh scripts/agent.sh scripts/runtime.sh scripts/host-admission.sh scripts/tick-test.sh; do
         [ -f "$dir/$f" ] || die "release is missing $f"
     done
     [ "$(wc -l < "$dir/runtime-abi" | tr -d ' ')" = 1 ] \
@@ -245,15 +247,20 @@ require_stopped_drained_boundary() { # <reason>
 
 cmd_publish() { # [--migrate] [git-ref]
     local source="${LOOM_RUNTIME_SOURCE:-$(cd "${SELF%/*}/.." 2>/dev/null && pwd)}"
-    local migrate=0 ref commit tree dir current="" previous="" loader_tmp
+    local migrate=0 ref commit tree dir current="" previous="" loader_tmp host_admission
+    local host_admission_root product_home product_key
     if [ "${1:-}" = --migrate ]; then migrate=1; shift; fi
     [ $# -le 1 ] || die "publish takes [--migrate] [git-ref]"
     ref="${1:-HEAD}"
     [ -d "$source/.git" ] || git -C "$source" rev-parse --git-dir >/dev/null 2>&1 \
       || die "source '$source' is not a Git checkout"
     source=$(cd "$source" && pwd -P)
+    host_admission="$source/scripts/host-admission.sh"
+    [ -f "$host_admission" ] && [ ! -L "$host_admission" ] \
+      || die "source is missing trusted heavyweight host admission: $host_admission"
     [ -z "$(git -C "$source" status --porcelain 2>/dev/null)" ] \
       || die "source checkout is dirty; publish a committed tree"
+    . "$host_admission"
     commit=$(git -C "$source" rev-parse --verify "$ref^{commit}" 2>/dev/null) \
       || die "cannot resolve committed ref '$ref'"
     tree=$(git -C "$source" rev-parse --verify "$commit^{tree}" 2>/dev/null) \
@@ -261,19 +268,33 @@ cmd_publish() { # [--migrate] [git-ref]
     valid_release "$tree" || die "unexpected Git tree id '$tree'"
     [ -z "$(git -C "$source" ls-tree -r "$commit" | awk '$1 == "120000" || $1 == "160000" { print; exit }')" ] \
       || die "release tree contains a symbolic link or submodule"
-    lock_acquire
     trap cleanup EXIT
     trap 'on_signal 130' INT
     trap 'on_signal 143' TERM
+    dir="$RELEASES/$tree"
     current=$(active_value current 2>/dev/null || true)
     [ -n "$current" ] || require_stopped_drained_boundary "first publication"
-    dir="$RELEASES/$tree"
+    if ! release_complete "$tree"; then
+        [ -n "${LOOM_HOME:-}" ] \
+          || die "host admission requires LOOM_HOME for the product runtime"
+        product_home=$(cd "$LOOM_HOME" 2>/dev/null && pwd -P) \
+          || die "cannot resolve product host state '$LOOM_HOME'"
+        product_key="product-$(printf '%s' "$product_home" | cksum | cut -d' ' -f1)"
+        host_admission_root=$(host_admission_home)
+        host_admission_maintenance_acquire "$host_admission_root" "$product_key" "$product_home" release \
+          || die "unreadable host admission state; release validation did not run"
+    fi
+    lock_acquire
+    current=$(active_value current 2>/dev/null || true)
+    [ -n "$current" ] || require_stopped_drained_boundary "first publication"
     if ! release_complete "$tree"; then
         [ ! -e "$dir" ] || die "release path exists but is incomplete: $dir"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create release staging directory"
         export_tree "$source" "$commit" "$STAGING"
         verify_exact_tree "$source" "$commit" "$STAGING"
         validate_tree "$STAGING"
+        host_admission_maintenance_release \
+          || die "could not release heavyweight host admission after validation"
         rm -rf "$STAGING"
         STAGING=$(mktemp -d "$RELEASES/.staging.XXXXXX") || die "cannot create final release staging directory"
         export_tree "$source" "$commit" "$STAGING"
@@ -286,6 +307,9 @@ cmd_publish() { # [--migrate] [git-ref]
         chmod -R a-w "$STAGING"
         mv "$STAGING" "$dir"
         STAGING=""
+    else
+        host_admission_maintenance_release \
+          || die "could not release unnecessary heavyweight host admission"
     fi
     git -C "$STORE" cat-file -e "$commit^{commit}" 2>/dev/null \
       || retain_commit "$source" "$commit"
