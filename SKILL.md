@@ -276,6 +276,22 @@ refuses outside herdr anyway.
    and `spawn-lane` appends it mechanically to both direct and deferred gate
    briefs before either provider starts.
 
+   A host gate may update only Loom's narrow, known deterministic tracked
+   output surfaces (`tests/artifacts/*` and `docs/deploy.md`) without making
+   that output ticket work. The host boundary snapshots the exact pre-run
+   index and worktree trees, restores only those allowlisted paths to that
+   exact state after the runner (green or red), and consumes the temporary
+   snapshot. The runner transcript is the lasting gate evidence. A pre-existing
+   edit therefore survives even when the runner overwrites the same path; an
+   allowlisted untracked path (including `git rm --cached` with worktree bytes)
+   refuses before the runner because Git's tracked snapshot cannot represent
+   it. An allowlisted untracked path created by the runner is removed to restore
+   its pre-run absence. An unknown output path, changed HEAD, or failed restore
+   stays dirty so sweep keeps the worktree. *(paid:
+   Patient Imaging Portal Build JOR-267 retained nine completed worktrees;
+   eight held only gate-generated `tests/artifacts/e8-run.json`, while older
+   completed trees held generated `docs/deploy.md`.)*
+
    Verdict is a label change: pass → `merge-queue`; fail → `in-progress` with
    a rejection comment. End every verdict comment with
    `<!-- orch-verdict PASS|FAIL <head-sha> -->` — that trailer is how the

@@ -206,6 +206,10 @@ fi
 grep -q '"ev":"lane_spawn".*"id":"merge-28".*"pregate":"logic"' "$LOOM_HOME/events.jsonl" \
     && ok "chain-merge: the ticket tier reaches the host merge preflight" \
     || bad "chain-merge: the chained merge lost its host preflight tier"
+for _ in $(seq 1 60); do
+    if [ -f "$HOST_GATE_MARK" ] || [ -f "$LOOM_HOME/lanes/merge-28.rc" ]; then break; fi
+    sleep 0.1
+done
 if [ -f "$HOST_GATE_MARK" ] && [ -f "$WT28/base-after.txt" ]; then
     ok "chain-merge: host reconciliation completes before the configured gate and provider"
 else
