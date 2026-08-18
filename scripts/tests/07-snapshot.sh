@@ -130,15 +130,17 @@ cat > "$UI_SNAPSHOT_RUNNER" <<EOF
 while :; do sleep 0.05; done
 EOF
 chmod +x "$UI_SNAPSHOT_RUNNER"
-printf 'runner: %s\n' "$UI_SNAPSHOT_RUNNER" >> "$LOOM_REPO/.loom.yml"
+printf 'runner: %s\nui_capacity: 1\n' "$UI_SNAPSHOT_RUNNER" >> "$LOOM_REPO/.loom.yml"
 "$TICK" spawn-lane gate-64 --pregate ui --no-tick -- sleep 20 >/dev/null
 for _wait in $(seq 1 100); do [ -f "$UI_SNAPSHOT_STARTED" ] && break; sleep 0.02; done
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-resource" "$TICK" snapshot \
     > "$T/snap-ui-resource.json" 2>/dev/null
-if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-resource.json")" = true ]; then
-    ok "snapshot: live UI ownership reaches the pure planner"
+if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-resource.json")" = true ] \
+   && [ "$(jq -r '.summary.ui_pregate_usage' "$T/snap-ui-resource.json")" = 1 ] \
+   && [ "$(jq -r '.config.ui_capacity' "$T/snap-ui-resource.json")" = 1 ]; then
+    ok "snapshot: UI usage and configured capacity reach the pure planner"
 else
-    bad "snapshot: live UI ownership was discarded before planning"
+    bad "snapshot: UI usage or capacity was discarded before planning"
 fi
 "$TICK" clear-lane gate-64 >/dev/null 2>&1
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-released" "$TICK" snapshot \

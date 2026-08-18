@@ -1126,15 +1126,23 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
-_ui_pregate_occupied() { # one shared UI host: active browser phase or durable reservation
-    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
+_ui_capacity() {
+    local cap
+    cap=$(cfg ui_capacity 1)
+    case "$cap" in ''|*[!0-9]*|0) die "ui_capacity must be a positive integer, got '$cap'" ;; esac
+    printf '%s\n' "$cap"
+}
+
+_ui_pregate_usage() { # active browser phases + durable reservations
+    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}" count=0 seen=" "
     for metadata in "$LANES_DIR"/*.ui-resource; do
         [ -f "$metadata" ] || continue
         [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || continue
         live_id="${metadata##*/}"; live_id="${live_id%.ui-resource}"
         pid=$(cat "$LANES_DIR/$live_id.pid" 2>/dev/null || true)
         if _lane_process_alive "$live_id" "$pid"; then
-            return 0
+            case "$seen" in *" $live_id "*) ;; *) seen="$seen$live_id "; count=$((count + 1)) ;; esac
+            continue
         fi
         # Admission owns AUX_LOCK_DIR here, so no spawning process can be in
         # the metadata-before-pid window. Retire only a dead lane's stale hint.
@@ -1148,10 +1156,10 @@ _ui_pregate_occupied() { # one shared UI host: active browser phase or durable r
         if [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] \
            || [ "$(cat "$request/reserve-ui" 2>/dev/null || true)" = 1 ] \
            || [ -s "$request/host-probe" ]; then
-            return 0
+            case "$seen" in *" $queued_id "*) ;; *) seen="$seen$queued_id "; count=$((count + 1)) ;; esac
         fi
     done
-    return 1
+    printf '%s\n' "$count"
 }
 
 cmd_release_ui_resource() { # <lane-id>; called by that lane after host UI work
@@ -1180,13 +1188,13 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
     return 1
 }
 
-_ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retryable for drain
-    local id="$1" from="$2"
-    echo "spawn-lane: UI host resource (UI pregate or browser probe) is already reserved — not starting '$id'."
+_ui_pregate_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
+    local id="$1" from="$2" used="$3" cap="$4"
+    echo "spawn-lane: UI host capacity full ($used of $cap held by UI pregates or browser probes) — not starting '$id'."
     if [ -n "$from" ]; then
         echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
     fi
-    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy used "$used" cap "$cap"
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
     [ -n "$from" ] && return 0
     return 1
@@ -4022,9 +4030,13 @@ _cmd_spawn_lane() {
         # handoff lives in the durable queue, while Claude/direct hosts record
         # the pregate beside the live lane. API pregates and non-UI lanes do
         # not enter this resource-specific admission path.
-        if { [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; } && _ui_pregate_occupied; then
-            _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
-            return "$aux_rc"
+        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
+            local ui_cap ui_used
+            ui_cap=$(_ui_capacity); ui_used=$(_ui_pregate_usage)
+            if [ "$ui_used" -ge "$ui_cap" ]; then
+                _ui_pregate_admission_refusal "$id" "$handoff_from" "$ui_used" "$ui_cap" || aux_rc=$?
+                return "$aux_rc"
+            fi
         fi
     fi
     # The lane's own id, inherited by everything it runs — including the
@@ -5313,16 +5325,20 @@ cmd_snapshot() {
     # closed. Resolution is the wave cadence, which is honest and enough.
     [ -n "$label" ] && printf '%s\n' "$label" > "$BUILD_LABEL_CACHE"
 
-    local config_json ui_pregate_occupied=false
+    local config_json ui_pregate_occupied=false ui_pregate_usage ui_capacity
+    ui_capacity=$(_ui_capacity)
+    ui_pregate_usage=$(_ui_pregate_usage)
     config_json=$(jq -n \
         --arg max_lanes "$(cfg max_lanes 4)" --arg rejection_cap "$(cfg rejection_cap 2)" \
         --arg crash_cap "$(cfg crash_cap 2)" --arg stale "$(cfg heartbeat_stale_minutes 30)" \
         --arg merge_attempt_cap "$(cfg merge_attempt_cap 2)" \
         --arg lane_turn_cap "$(cfg lane_turn_cap 150)" \
         --arg base "$(cfg base '')" --arg max_aux "$(cfg max_aux_lanes 4)" \
+        --arg ui_capacity "$ui_capacity" \
         --arg lane_tier "$(_tier_cfg lane_tier medium)" --arg rework_tier "$(_tier_cfg rework_tier high)" \
         '{ max_lanes: ($max_lanes | tonumber? // $max_lanes),
            max_aux_lanes: ($max_aux | tonumber? // $max_aux),
+           ui_capacity: ($ui_capacity | tonumber? // $ui_capacity),
            rejection_cap: ($rejection_cap | tonumber? // $rejection_cap),
            crash_cap: ($crash_cap | tonumber? // $crash_cap),
            merge_attempt_cap: ($merge_attempt_cap | tonumber? // $merge_attempt_cap),
@@ -5336,7 +5352,7 @@ cmd_snapshot() {
     # valid, unexpired leases are represented; an expired supervisor process
     # cannot wedge scheduling and snapshot remains a read-only verb.
     _supervised_leases_json > "$SNAP_TMP/supervised-leases.json"
-    if _ui_pregate_occupied; then ui_pregate_occupied=true; fi
+    if [ "$ui_pregate_usage" -ge "$ui_capacity" ]; then ui_pregate_occupied=true; fi
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
@@ -5353,6 +5369,7 @@ cmd_snapshot() {
         --arg label "$label" --arg build_iid "$build_iid" \
         --arg merge_owner "$(_merge_lock_owner)" \
         --argjson brief "$brief" --argjson ui_pregate_occupied "$ui_pregate_occupied" \
+        --argjson ui_pregate_usage "$ui_pregate_usage" \
         -f "$SNAP_JQ"
 
     # The retro record is derived from the finished snapshot, never recomputed
@@ -6283,13 +6300,14 @@ _tier_cfg() { # <key> <default>
 cmd_resolve_config() {
     command -v jq >/dev/null 2>&1 || die "resolve-config: jq required"
     _refuse_legacy_runtime_config
-    local stack base gates_tsv gates_src runner
+    local stack base gates_tsv gates_src runner ui_capacity
     stack=$(detect_stack)
     # `base` was never a real setting: SKILL.md already states the rule.
     base=$(_detect_base "$REPO_ROOT" "$CONFIG")
     gates_tsv=$(_repo_gates_tsv); gates_src=repo
     [ -n "$gates_tsv" ] || { gates_tsv=$(_derive_gates_tsv); gates_src=derived; }
     runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
+    ui_capacity=$(_ui_capacity)
 
     jq -n \
         --arg repo "$REPO_ROOT" --arg stack "$stack" --arg base "$base" \
@@ -6299,6 +6317,7 @@ cmd_resolve_config() {
         --argjson deny  "$(_derive_deny  | _lines_to_json)" \
         --arg lanes "$(cfg max_lanes 4)"           --arg lanes_s "$(cfg_source max_lanes)" \
         --arg aux   "$(cfg max_aux_lanes 4)"       --arg aux_s   "$(cfg_source max_aux_lanes)" \
+        --arg uicap "$ui_capacity"                 --arg uicap_s "$(cfg_source ui_capacity)" \
         --arg stall "$(cfg stall_action resume)"   --arg stall_s "$(cfg_source stall_action)" \
         --arg rej   "$(cfg rejection_cap 2)"       --arg rej_s   "$(cfg_source rejection_cap)" \
         --arg crash "$(cfg crash_cap 2)"           --arg crash_s "$(cfg_source crash_cap)" \
@@ -6321,6 +6340,7 @@ cmd_resolve_config() {
           scalars: {
             max_lanes:               {value: $lanes,  source: $lanes_s},
             max_aux_lanes:           {value: $aux,    source: $aux_s},
+            ui_capacity:              {value: $uicap,  source: $uicap_s},
             stall_action:            {value: $stall,  source: $stall_s},
             rejection_cap:           {value: $rej,    source: $rej_s},
             crash_cap:               {value: $crash,  source: $crash_s},
