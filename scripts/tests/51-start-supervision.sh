@@ -341,6 +341,132 @@ else
   bad "start supervision: repair-result authority escaped its exact lane (rc=$rr_rc calls=$calls_before/$calls_after)"
 fi
 
+# A machine diagnosis stays in its source state. Its exact source report is
+# nevertheless repair authority, and human-attention must move that ticket to
+# the ordinary blocked/awaiting-human state before posting the outcome.
+MR="$T/start-supervision-machine-result"; mkdir -p "$MR/home/supervised-leases"
+cat > "$MR/fails.json" <<'EOF'
+[{"created_at":"2026-08-18T00:00:02Z","body":"Second failure.\n\n<!-- orch-verdict FAIL bbbb2222 class=response-contract -->"},
+ {"created_at":"2026-08-18T00:00:01Z","body":"First failure.\n\n<!-- orch-verdict FAIL aaaa1111 class=acceptance-gap -->"}]
+EOF
+MR_GEN=$(jq -L "$(dirname "$TICK")" -r 'include "lib"; active_fail_generation(.)' "$MR/fails.json")
+jq --arg gen "$MR_GEN" '[{"created_at":"2026-08-18T00:01:00Z",
+    "body":("Held.\n\n<!-- orch-diagnosis-source state=in-progress generation=" + $gen + " -->\n\n<!-- orch-blocked category=rejection-cap 2026-08-18T00:01:00Z -->")}] + .' \
+  "$MR/fails.json" > "$MR/notes.json"
+printf 'in-progress\n' > "$MR/state"
+cat > "$MR/tracker.sh" <<EOF
+#!/bin/sh
+case "\$1" in
+  issues-open) printf '%s\n' '[{"id":267,"title":"Build 1","state":"open","labels":["supervision::autonomous-repair-v1"]}]' ;;
+  issue) s=\$(cat '$MR/state'); printf '{"id":31,"state":"open","labels":["build-1","%s"]}\n' "\$s" ;;
+  issue-notes) jq '.[0:30]' '$MR/notes.json' ;;
+  issue-relabel) printf 'relabel %s\n' "\$*" >> '$MR/calls' ;;
+  note-add) printf 'note %s\n' "\$*" >> '$MR/calls'; cp "\$3" '$MR/note' ;;
+  *) printf '[]\n' ;;
+esac
+EOF
+chmod +x "$MR/tracker.sh"
+printf '{"schema":1,"ticket":31,"owner":"repair-31","acquired_at":1,"expires_at":4102444800}\n' \
+  > "$MR/home/supervised-leases/31.json"
+: > "$MR/calls"
+LOOM_HOME="$MR/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$MR/tracker.sh" FORGE_CMD="$RR/forge.sh" \
+  "$LANE" repair-result 31 human-attention --block-token 2026-08-18T00:01:00Z \
+  --file "$RR/body" >/dev/null 2>"$MR/active.err"
+if [ "$(sed -n '1p' "$MR/calls")" = 'relabel issue-relabel 31 --add blocked,supervision::awaiting-human --remove ready-for-agent,in-progress,review,merge-queue' ] \
+   && grep -q '^note ' "$MR/calls" \
+   && [ ! -e "$MR/home/supervised-leases/31.json" ]; then
+  ok "start supervision: active machine diagnosis authorizes result and human attention blocks first"
+else
+  bad "start supervision: machine-source repair result did not use the owned transition ($(tr '\n' ';' < "$MR/calls"))"
+fi
+
+# State drift and a newer real verdict both retire the machine authority before
+# repair-result can mutate the ticket.
+for drift in state verdict; do
+  printf '{"schema":1,"ticket":31,"owner":"repair-31","acquired_at":1,"expires_at":4102444800}\n' \
+    > "$MR/home/supervised-leases/31.json"
+  : > "$MR/calls"
+  if [ "$drift" = state ]; then
+    printf 'review\n' > "$MR/state"
+    cp "$MR/notes.json" "$MR/current-notes.json"
+  else
+    printf 'in-progress\n' > "$MR/state"
+    jq '[{"created_at":"2026-08-18T00:02:00Z","body":"Changed.\n\n<!-- orch-verdict FAIL cccc3333 class=new-failure -->"}] + .' \
+      "$MR/notes.json" > "$MR/current-notes.json"
+  fi
+  cp "$MR/current-notes.json" "$MR/notes.json.tmp"; mv "$MR/notes.json.tmp" "$MR/notes.json"
+  set +e
+  LOOM_HOME="$MR/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$MR/tracker.sh" FORGE_CMD="$RR/forge.sh" \
+    "$LANE" repair-result 31 human-attention --block-token 2026-08-18T00:01:00Z \
+    --file "$RR/body" >"$MR/$drift.out" 2>"$MR/$drift.err"
+  drift_rc=$?
+  set -e
+  if [ "$drift_rc" -ne 0 ] && [ ! -s "$MR/calls" ]; then
+    ok "start supervision: machine repair-result refuses $drift drift"
+  else
+    bad "start supervision: machine repair-result accepted $drift drift"
+  fi
+  cp "$MR/fails.json" "$MR/base-fails.tmp"
+  jq --arg gen "$MR_GEN" '[{"created_at":"2026-08-18T00:01:00Z",
+      "body":("Held.\n\n<!-- orch-diagnosis-source state=in-progress generation=" + $gen + " -->\n\n<!-- orch-blocked category=rejection-cap 2026-08-18T00:01:00Z -->")}] + .' \
+    "$MR/base-fails.tmp" > "$MR/notes.json"
+done
+
+# If the suppression relabel lands and the decision-note POST fails, only the
+# same repair token may finish that half-state. The old diagnosis prose is not
+# itself a completed human decision.
+MP="$T/start-supervision-machine-partial"; mkdir -p "$MP/home/supervised-leases"
+cp "$MR/notes.json" "$MP/notes.json"; : > "$MP/calls"; : > "$MP/fail-note"
+cat > "$MP/tracker.sh" <<EOF
+#!/bin/sh
+case "\$1" in
+  issues-open) printf '%s\n' '[{"id":267,"title":"Build 1","state":"open","labels":["supervision::autonomous-repair-v1"]}]' ;;
+  issue) if [ -e '$MP/blocked' ]; then labels='["build-1","blocked","supervision::awaiting-human"]'; else labels='["build-1","in-progress"]'; fi; printf '{"id":31,"state":"open","labels":%s}\n' "\$labels" ;;
+  issue-notes) jq '.[0:30]' '$MP/notes.json' ;;
+  issue-relabel) : > '$MP/blocked'; printf 'relabel %s\n' "\$*" >> '$MP/calls' ;;
+  note-add) if [ -e '$MP/fail-note' ]; then rm '$MP/fail-note'; exit 1; fi; printf 'note %s\n' "\$*" >> '$MP/calls'; cp "\$3" '$MP/note' ;;
+  *) printf '[]\n' ;;
+esac
+EOF
+chmod +x "$MP/tracker.sh"
+printf '{"schema":1,"ticket":31,"owner":"repair-31","acquired_at":1,"expires_at":4102444800}\n' > "$MP/home/supervised-leases/31.json"
+set +e
+LOOM_HOME="$MP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$MP/tracker.sh" FORGE_CMD="$RR/forge.sh" \
+  "$LANE" repair-result 31 human-attention --block-token 2026-08-18T00:01:00Z --file "$RR/body" \
+  >"$MP/first.out" 2>"$MP/first.err"
+mp_first_rc=$?
+set -e
+mkdir -p "$MP/home-spawn"; printf 'build-1\n' > "$MP/home-spawn/.build-label"
+set +e
+LOOM_HOME="$MP/home-spawn" TRACKER_CMD="$MP/tracker.sh" LOOM_AGENT_CMD="$RR/forge.sh" \
+  "$TICK" spawn-lane repair-31 --provider claude --job repair --tier high \
+  --repair-block-token 2026-08-18T00:01:00Z --brief "$RR/body" --cwd "$LOOM_REPO" \
+  >"$MP/spawn.out" 2>"$MP/spawn.err"
+mp_spawn_rc=$?
+set -e
+mp_calls_before=$(wc -l < "$MP/calls" | tr -d ' ')
+set +e
+LOOM_HOME="$MP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$MP/tracker.sh" FORGE_CMD="$RR/forge.sh" \
+  "$LANE" repair-result 31 resolved --block-token 2026-08-18T00:01:00Z --file "$RR/body" \
+  >"$MP/cross.out" 2>"$MP/cross.err"
+mp_cross_rc=$?
+set -e
+mp_calls_after=$(wc -l < "$MP/calls" | tr -d ' ')
+LOOM_HOME="$MP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$MP/tracker.sh" FORGE_CMD="$RR/forge.sh" \
+  "$LANE" repair-result 31 human-attention --block-token 2026-08-18T00:01:00Z --file "$RR/body" \
+  >"$MP/retry.out" 2>"$MP/retry.err"
+if [ "$mp_first_rc" -ne 0 ] && [ "$mp_spawn_rc" -ne 0 ] \
+   && [ ! -e "$MP/home-spawn/supervised-leases/31.json" ] \
+   && [ ! -e "$MP/home-spawn/lanes/repair-31.pid" ] \
+   && [ "$mp_cross_rc" -ne 0 ] \
+   && [ "$mp_calls_before" = "$mp_calls_after" ] && [ -e "$MP/blocked" ] \
+   && grep -q 'orch-blocked category=human-attention' "$MP/note" \
+   && [ ! -e "$MP/home/supervised-leases/31.json" ]; then
+  ok "start supervision: human-attention partial denies respawn/cross-outcome but exact live lane completes it"
+else
+  bad "start supervision: human-attention partial could not finish safely"
+fi
+
 # A resolved repair is stricter than human-attention: the worktree must be
 # clean, pushed, and exactly equal to the ticket's one open MR head before the
 # blocked hold can move to review. Build a local bare remote so this proof
@@ -398,6 +524,47 @@ if grep -q 'orch-supervised-repair' "$RS/note" \
   ok "start supervision: exact pushed MR head returns a repaired blocker to independent review"
 else
   bad "start supervision: resolved repair did not complete its guarded review handoff ($(tr '\n' ';' < "$RS/calls"))"
+fi
+
+# A posted result is a durable prepared half. Review relabel failure may retry
+# the exact token, but only after the branch and MR are validated again.
+RP="$T/start-supervision-resolved-partial"; mkdir -p "$RP/home/supervised-leases"
+cat > "$RP/notes.json" <<'EOF'
+[{"created_at":"2026-08-17T23:40:01Z","body":"report\n\n<!-- orch-blocked category=implementation 2026-08-17T23:40:01Z -->"}]
+EOF
+: > "$RP/fail-relabel"; : > "$RP/calls"
+cat > "$RP/tracker.sh" <<EOF
+#!/bin/sh
+case "\$1" in
+  issues-open) printf '%s\n' '[{"id":267,"title":"Build 1","state":"open","labels":["supervision::autonomous-repair-v1"]}]' ;;
+  issue) printf '%s\n' '{"id":31,"state":"open","labels":["build-1","blocked"]}' ;;
+  issue-notes) jq '.[0:30]' '$RP/notes.json' ;;
+  note-add) printf 'note\n' >> '$RP/calls'; jq --rawfile body "\$3" '[{"created_at":"2026-08-18T01:00:00Z","body":\$body}] + .' '$RP/notes.json' > '$RP/next'; mv '$RP/next' '$RP/notes.json' ;;
+  issue-relabel) printf 'relabel\n' >> '$RP/calls'; if [ -e '$RP/fail-relabel' ]; then rm '$RP/fail-relabel'; exit 1; fi ;;
+  *) printf '[]\n' ;;
+esac
+EOF
+chmod +x "$RP/tracker.sh"
+printf '{"schema":1,"ticket":31,"owner":"repair-31","acquired_at":1,"expires_at":4102444800}\n' > "$RP/home/supervised-leases/31.json"
+set +e
+(cd "$RS/repo" && LOOM_HOME="$RP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$RP/tracker.sh" FORGE_CMD="$RS/forge.sh" \
+  "$LANE" repair-result 31 resolved --block-token 2026-08-17T23:40:01Z --file "$RS/body") >/dev/null 2>"$RP/first.err"
+rp_first_rc=$?
+printf 'dirty\n' > "$RS/repo/prepared-dirty.tmp"
+(cd "$RS/repo" && LOOM_HOME="$RP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$RP/tracker.sh" FORGE_CMD="$RS/forge.sh" \
+  "$LANE" repair-result 31 resolved --block-token 2026-08-17T23:40:01Z --file "$RS/body") >/dev/null 2>"$RP/dirty.err"
+rp_dirty_rc=$?
+set -e
+rm -f "$RS/repo/prepared-dirty.tmp"
+(cd "$RS/repo" && LOOM_HOME="$RP/home" LOOM_LANE_ID=repair-31 TRACKER_CMD="$RP/tracker.sh" FORGE_CMD="$RS/forge.sh" \
+  "$LANE" repair-result 31 resolved --block-token 2026-08-17T23:40:01Z --file "$RS/body") >/dev/null 2>"$RP/retry.err"
+if [ "$rp_first_rc" -ne 0 ] && [ "$rp_dirty_rc" -ne 0 ] \
+   && [ "$(grep -c '^note$' "$RP/calls")" = 1 ] \
+   && [ "$(grep -c '^relabel$' "$RP/calls")" = 2 ] \
+   && [ ! -e "$RP/home/supervised-leases/31.json" ]; then
+  ok "start supervision: prepared result retry revalidates and avoids a duplicate note"
+else
+  bad "start supervision: prepared result retry was not idempotent ($(tr '\n' ';' < "$RP/calls"))"
 fi
 
 # Change only the forge's claimed head. The same clean pushed branch is now a
@@ -459,7 +626,7 @@ if [ ! -e "$DD/wave" ] \
    && grep -q 'no scheduling agent spent' "$DD/tick.out"; then
   ok "start supervision: host directly dispatches the frozen repair worker and UI reservation"
 else
-  bad "start supervision: production dispatcher lost its brief, lease, UI reservation, or no-wave guarantee"
+  bad "start supervision: production dispatcher lost its brief, lease, UI reservation, or no-wave guarantee ($(tr '\n' ';' < "$DD/tick.err"))"
 fi
 LOOM_REPO="$RS/repo" LOOM_HOME="$DD/home" LOOM_AGENT_CMD="$DD/agent.sh" \
   "$TICK" kill-lane repair-31 >/dev/null 2>&1 || true
@@ -475,13 +642,70 @@ LOOM_REPO="$RS/repo" LOOM_HOME="$DD/home-stale" TRACKER_CMD="$HB/tracker.sh" \
 stale_spawn_rc=$?
 set -e
 if [ "$stale_spawn_rc" -ne 0 ] \
-   && grep -q 'block generation changed' "$DD/stale.err" \
+   && grep -q 'no longer has the exact active repair block' "$DD/stale.err" \
    && [ ! -e "$DD/home-stale/supervised-leases/31.json" ] \
    && [ ! -e "$DD/home-stale/lanes/repair-31.pid" ]; then
   ok "start supervision: stale block generation is rejected before lease or agent launch"
 else
   bad "start supervision: stale blocked authority reached repair admission"
 fi
+
+# The public plan freezes the same machine-source token that spawn admission
+# rechecks. This path must not require a synthetic blocked label.
+jq --arg gen "$MR_GEN" '
+  .tickets=[.tickets[0]
+    | .state="in-progress"
+    | .blocked_report.at="2026-08-18T00:01:00Z"
+    | .blocked_report.diagnosis_source={state:"in-progress",generation:$gen}
+    | .blocked_report.released=false]
+  | .summary.impl_slots_free=1
+  | .summary.stranded=[31]' "$FX/snapshot.json" > "$MR/snapshot.json"
+"$TICK" plan "$MR/snapshot.json" > "$MR/plan.json" 2>"$MR/plan.err"
+MR_TOKEN=$(jq -r '.actions[] | select(.lane=="repair-31") | .block_token' "$MR/plan.json")
+mkdir -p "$MR/home-spawn"; printf 'build-1\n' > "$MR/home-spawn/.build-label"
+: > "$MR/home-spawn/events.jsonl"
+printf 'in-progress\n' > "$MR/state"
+set +e
+LOOM_REPO="$RS/repo" LOOM_HOME="$MR/home-spawn" TRACKER_CMD="$MR/tracker.sh" \
+  LOOM_AGENT_CMD="$DD/agent.sh" "$TICK" spawn-lane repair-31 --provider claude \
+  --job repair --tier high --repair-block-token "$MR_TOKEN" --brief "$RR/body" --cwd "$RS/repo" \
+  >"$MR/spawn.out" 2>"$MR/spawn.err"
+machine_spawn_rc=$?
+set -e
+if [ "$machine_spawn_rc" -eq 0 ] \
+   && [ "$MR_TOKEN" = 2026-08-18T00:01:00Z ] \
+   && jq -e '.owner=="repair-31" and .ticket==31' "$MR/home-spawn/supervised-leases/31.json" >/dev/null 2>&1; then
+  ok "start supervision: plan→spawn accepts exact active machine-source authority"
+else
+  bad "start supervision: plan→spawn rejected machine-source authority (rc=$machine_spawn_rc token=$MR_TOKEN $(tr '\n' ';' < "$MR/spawn.err"))"
+fi
+LOOM_REPO="$RS/repo" LOOM_HOME="$MR/home-spawn" LOOM_AGENT_CMD="$DD/agent.sh" \
+  "$TICK" kill-lane repair-31 >/dev/null 2>&1 || true
+
+for drift in state verdict; do
+  rmhome="$MR/home-spawn-$drift"; mkdir -p "$rmhome"; printf 'build-1\n' > "$rmhome/.build-label"
+  if [ "$drift" = state ]; then
+    printf 'review\n' > "$MR/state"
+  else
+    printf 'in-progress\n' > "$MR/state"
+    jq '[{"created_at":"2026-08-18T00:02:00Z","body":"Changed.\n\n<!-- orch-verdict FAIL cccc3333 class=new-failure -->"}] + .' \
+      "$MR/notes.json" > "$MR/notes.changed"; cp "$MR/notes.changed" "$MR/notes.json"
+  fi
+  set +e
+  LOOM_REPO="$RS/repo" LOOM_HOME="$rmhome" TRACKER_CMD="$MR/tracker.sh" \
+    LOOM_AGENT_CMD="$DD/agent.sh" "$TICK" spawn-lane repair-31 --provider claude \
+    --job repair --tier high --repair-block-token "$MR_TOKEN" --brief "$RR/body" --cwd "$RS/repo" \
+    >"$MR/spawn-$drift.out" 2>"$MR/spawn-$drift.err"
+  machine_drift_rc=$?
+  set -e
+  if [ "$machine_drift_rc" -ne 0 ] \
+     && [ ! -e "$rmhome/supervised-leases/31.json" ] \
+     && [ ! -e "$rmhome/lanes/repair-31.pid" ]; then
+    ok "start supervision: machine spawn refuses $drift drift"
+  else
+    bad "start supervision: machine spawn accepted $drift drift"
+  fi
+done
 
 # Hard cleanup must release the exact repair-owned lease even when the worker
 # never reaches its epilogue. Otherwise a killed repair lane strands the

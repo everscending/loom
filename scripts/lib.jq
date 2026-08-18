@@ -86,6 +86,7 @@ def verdicts_after_reset($notes):
       | {at: (.value.created_at // ""), i: .key}]
      | sort_by([.at, -.i]) | last) as $reset
   | [$notes | to_entries[] | .key as $i | .value as $note
+     | select(($note.body // "") | test("<!-- orch-diagnosis-source ") | not)
      | [($note.body // "") | orch_verdict_scan] | to_entries[]
      | {verdict: .value[0], sha: .value[1], class: .value[2],
         at: ($note.created_at // ""), i: $i, mi: .key}]
@@ -100,6 +101,74 @@ def verdicts_after_reset($notes):
   | group_by([.verdict, .sha, .class]) # mutate:duplicate-verdict-comments
   | map(max_by([.at, -.i, .mi]))
   | sort_by([.at, -.i, .mi]);
+
+# One opaque identity for the complete active FAIL evidence set. Snapshot
+# freezes it into the plan; lane.sh recomputes it immediately before writing;
+# the single diagnosis report carries the same token.
+# `tojson` makes object key order explicit here, and base64 keeps the token
+# safe inside argv and HTML-comment trailers.
+def active_fail_generation($notes):
+    ([verdicts_after_reset($notes)[]
+      | select(.verdict == "FAIL")
+      | . as $failure
+      | {at, sha, class, body: ($notes[$failure.i].body // "")}]
+     | tojson | @base64);
+
+# Exact authority for a supervised repair. The token must identify the newest
+# block report, not merely any historical report at that timestamp. Ordinary
+# human holds remain label-backed and unreleased. Machine diagnosis holds are
+# note-owned: current state must still equal the frozen source and no newer
+# ownership-changing note may supersede the atomically posted report. The
+# generation was already checked immediately before that one write. Consumers:
+# snapshot, tick repair admission, lane repair-result.
+def repair_block_active($notes; $ticket_state; $token):
+    ([$notes | to_entries[]
+      | select((.value.body // "") | test("orch-blocked"))
+      | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
+     | sort_by([.at, -.i]) | last) as $report
+  | if $report == null or $report.at != $token then false
+    else
+      ($report.body
+       | (capture("<!-- orch-diagnosis-source state=(?<state>blocked|merge-queue|review|in-progress|ready-for-agent|unlabeled) generation=(?<generation>[A-Za-z0-9+/=]+) -->")
+          // null)) as $source
+    | ([$notes | to_entries[]
+        | select((.value.body // "") | test("<!-- orch-unblock "))
+        | select(((.value.body // "")
+                  | (test("<!-- orch-supervised-repair ")
+                     and contains(" block=" + $token + " -->"))) | not)
+        | {at: (.value.created_at // ""), i: .key}]
+       | sort_by([.at, -.i]) | last) as $unblock
+    | ([$notes | to_entries[]
+        | select((.value.body // "") | test("<!-- orch-(scope-(reset|extend)|verdict-reset) "))
+        | {at: (.value.created_at // ""), i: .key}]
+       | sort_by([.at, -.i]) | last) as $reset
+      | if $source == null then
+        $ticket_state == "blocked"
+        and ($unblock == null or [$unblock.at, -$unblock.i] <= [$report.at, -$report.i])
+        and ($reset == null or [$reset.at, -$reset.i] <= [$report.at, -$report.i])
+      else
+        (($source.generation | try (@base64d | fromjson) catch null) // []) as $frozen
+      | ($frozen | sort_by(.at) | last) as $newest_frozen
+      | ([verdicts_after_reset($notes)[]
+          | select(.verdict == "FAIL")
+          | . as $failure
+          | {at, sha, class, body: ($notes[$failure.i].body // "")}]) as $visible_fails
+      | ([$notes | to_entries[]
+          | select(((.value.body // "") | test("<!-- orch-diagnosis-source ")) | not)
+          | select(((.value.body // "")
+                    | (test("<!-- orch-supervised-repair ")
+                       and contains(" block=" + $token + " -->"))) | not)
+          | select((.value.body // "")
+              | test("<!-- orch-(verdict PASS|verdict-reset|scope-(reset|extend)|supervised-repair|unblock) "))
+          | {at: (.value.created_at // ""), i: .key}]
+         | sort_by([.at, -.i]) | last) as $superseding
+      | $ticket_state == $source.state
+        and $newest_frozen != null
+        and all($visible_fails[]; . as $visible | any($frozen[]; . == $visible))
+        and ($superseding == null
+             or ($newest_frozen != null and $superseding.at < $newest_frozen.at))
+      end
+    end;
 
 # The active replacement scope plus every later additive amendment, not merely
 # the cutoff they create for old verdicts. `rescope` is a true replacement;

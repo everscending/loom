@@ -1615,23 +1615,24 @@ _repair_lease_ensure_locked() { # <ticket> <repair-lane>
 }
 
 _repair_spawn_authority_locked() { # <ticket> <repair-lane> <block-token>
-    local iid="$1" owner="$2" token="$3" issue notes latest
+    local iid="$1" owner="$2" token="$3" issue notes state jqd
     [ -n "$token" ] \
       || die "spawn-lane: '$owner' is missing its frozen repair block token"
     issue=$("$TRACKER_SH" issue "$iid" 2>/dev/null) \
       || die "spawn-lane: cannot verify current blocked state for repair ticket #$iid"
-    printf '%s' "$issue" | jq -e '
-      (.state // "open") == "open"
-      and (((.labels // []) | index("blocked")) != null)
-    ' >/dev/null 2>&1 \
-      || die "spawn-lane: repair ticket #$iid is no longer blocked; discard the stale plan"
-    notes=$("$TRACKER_SH" issue-notes "$iid" --limit 30 2>/dev/null) \
+    printf '%s' "$issue" | jq -e '(.state // "open") == "open"' >/dev/null 2>&1 \
+      || die "spawn-lane: repair ticket #$iid is closed; discard the stale plan"
+    jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
+    state=$(printf '%s' "$issue" | jq -L "$jqd" -r 'include "lib"; state_of(.labels // []) // "unlabeled"')
+    notes=$("$TRACKER_SH" issue-notes "$iid" --limit "$(_ticket_notes_limit)" 2>/dev/null) \
       || die "spawn-lane: cannot verify current block generation for repair ticket #$iid"
-    latest=$(printf '%s' "$notes" | jq -r '
-      [.[] | select((.body // "") | test("<!-- orch-blocked"))]
-      | sort_by(.created_at // "") | last | .created_at // empty')
-    [ -n "$latest" ] && [ "$latest" = "$token" ] \
-      || die "spawn-lane: repair ticket #$iid block generation changed (planned '$token', current '${latest:-none}'); replan before acquiring a lease"
+    printf '%s' "$notes" | jq -L "$jqd" -e --arg state "$state" --arg token "$token" '
+      include "lib";
+      repair_block_active(.; $state; $token)
+      and ($state == "blocked"
+           or any(.[]; (.created_at // "") == $token
+                      and ((.body // "") | test("<!-- orch-diagnosis-source "))))' >/dev/null 2>&1 \
+      || die "spawn-lane: repair ticket #$iid no longer has the exact active repair block planned at '$token'; replan before acquiring a lease"
 }
 
 cmd_repair_lease_release() { # <ticket>; internal repair-lane epilogue
@@ -5123,7 +5124,7 @@ cmd_snapshot() {
     done
     $batched || for iid in $review_iids; do
         ( _snap_api "$SNAP_TMP/tnotes-$iid.json" "issue #$iid comments" \
-            -- issue-notes "$iid" --limit 30 ) &
+            -- issue-notes "$iid" --limit "$(_ticket_notes_limit)" ) &
         _snap_batch_gate
     done
     if [ -n "$build_iid" ]; then
@@ -5278,7 +5279,7 @@ cmd_snapshot_merge_queue() {
                 --forge -- issue-mrs "$iid" ) &
             _snap_batch_gate
             ( _snap_api "$SNAP_QTMP/notes-$iid.json" "issue #$iid comments" \
-                -- issue-notes "$iid" --limit 30 ) &
+                -- issue-notes "$iid" --limit "$(_ticket_notes_limit)" ) &
             _snap_batch_gate
         done
         wait || true

@@ -304,8 +304,9 @@ watch-panes refuses outside herdr anyway.
    `lane.sh verdict <iid> fail <sha> --class <kebab-slug>` folds
    `class=<slug>` into the trailer. Reuse the previous rejection's slug when
    it is the same class so the intervention report preserves the recurring
-   cause. Two failed rounds exhaust `rejection_cap`: round 3 requires human
-   diagnosis, rescope, or prerequisite work, even when the classes differ.
+   cause. Two failed rounds exhaust `rejection_cap`: round 3 enters the exact
+   note-owned diagnosis hold and focused supervised repair described below,
+   even when the classes differ.
 
    **A `fix` ticket's verdict reads its terminal condition** — the block
    `references/ticket-template.md` requires in every fix ticket. Measured
@@ -565,9 +566,13 @@ None of these is ever invoked by a wave. `stop`, `watch` and `unblock` are in
 
 ## Failure policy
 
-- `blocked` = rejection cap exhausted (`rejection_cap`), a product decision
-  only the human can make is missing, or an external dependency. Crashes are
-  counted separately (`crash_cap`). Human-only `lane.sh rescope <n>` replaces
+- At `rejection_cap`, and on the first FAIL after a supervised repair, Loom
+  writes one exact note-owned diagnosis hold and `/loom start` dispatches its
+  focused repair; it does not begin a third blind implementation/gate cycle.
+  `blocked` remains for a missing product decision or external dependency.
+  Crashes are counted separately (`crash_cap`). A human is required only to
+  rescope, make the named product decision, or release a hold. Human-only
+  `lane.sh rescope <n>` replaces
   the active scope; add a later amendment with `rescope <n> --extend` so it
   cannot hide that replacement. Both retire verdict, rejection and merge
   history for changed work. `lane.sh

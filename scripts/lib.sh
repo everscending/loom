@@ -28,6 +28,11 @@
 # exits 2 by contract with the sessions that read it while tick.sh exits 1.
 die() { echo "${0##*/}: $*" >&2; exit "${DIE_RC:-1}"; }
 
+# One evidence window for every reader that derives active gate history. The
+# snapshot freezes that history into plans and lane.sh validates it at the
+# write boundary; different caps make an unchanged thread look stale.
+_ticket_notes_limit() { printf '30\n'; }
+
 # P72: lib.jq — the jq half of this file — ships beside it, and every jq
 # program in this skill opens with `include "lib";`. That include resolves off
 # jq's `-L` path, so every caller has to say where the prelude is; this returns
