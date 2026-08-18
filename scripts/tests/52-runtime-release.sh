@@ -185,6 +185,20 @@ else
     bad "runtime release: attributes changed or omitted committed release bytes ($attribute_out)"
 fi
 
+EVIL_BLOB=$(printf 'escaped\n' | git -C "$SRC" hash-object -w --stdin)
+EVIL_SUBTREE=$(printf '100644 blob %s\toutside-proof\n' "$EVIL_BLOB" | git -C "$SRC" mktree)
+git -C "$SRC" ls-tree HEAD > "$T/evil-tree"
+printf '040000 tree %s\t..\n' "$EVIL_SUBTREE" >> "$T/evil-tree"
+EVIL_TREE=$(git -C "$SRC" mktree < "$T/evil-tree")
+EVIL_COMMIT=$(printf 'unsafe tree\n' | git -C "$SRC" commit-tree "$EVIL_TREE" -p HEAD)
+unsafe_out=$(run_runtime publish "$EVIL_COMMIT" 2>&1); unsafe_rc=$?
+if [ "$unsafe_rc" -ne 0 ] && [ ! -e "$RT/releases/outside-proof" ] \
+   && printf '%s' "$unsafe_out" | grep -q "unsafe path '../outside-proof'"; then
+    ok "runtime release: crafted dot-dot trees cannot escape staging"
+else
+    bad "runtime release: crafted Git path escaped its release staging directory"
+fi
+
 printf 'schema 1\ncurrent ../../outside\n' > "$SELECTOR"
 escape_out=$(run_launcher run -- tick 2>&1); escape_rc=$?
 if [ "$escape_rc" -ne 0 ] && printf '%s' "$escape_out" | grep -q 'missing or incomplete'; then

@@ -79,6 +79,10 @@ export_tree() { # <source> <commit> <empty-destination>
     while IFS= read -r -d '' record; do
         meta="${record%%$'\t'*}"; path="${record#*$'\t'}"
         set -- $meta; mode="$1" type="$2" object="$3"
+        case "$path" in
+            ''|/*|.|..|./*|../*|*/./*|*/../*|*/.|*/..|.loom-release|.validated)
+                die "release tree contains an unsafe path '$path'" ;;
+        esac
         [ "$type" = blob ] || die "release tree contains unsupported entry '$path'"
         parent=$(dirname "$dir/$path")
         mkdir -p "$parent" || die "cannot create release directory for '$path'"
