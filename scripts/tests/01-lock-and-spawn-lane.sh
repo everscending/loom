@@ -620,12 +620,15 @@ if "$TICK" spawn-lane impl-13 >/dev/null 2>&1; then bad "spawn-lane: missing com
 #      `gate-12-r2`, `impl-14` and `probe-e4` interchangeably, so no lane's kind
 #      could be derived and every lane counted against max_lanes. spawn-lane is
 #      the only place an id is created, so it is where the shape is enforced.
+accepted_bad_id=""
 for bad_id in 12 gate12 lane_14 impl impl- xyz-1; do
     if "$TICK" spawn-lane "$bad_id" -- true >/dev/null 2>&1; then
-        bad "lane-id: ad hoc id '$bad_id' was accepted"; break
+        bad "lane-id: ad hoc id '$bad_id' was accepted"
+        accepted_bad_id="$bad_id"
+        break
     fi
 done
-[ -n "${bad_id:-}" ] && ! [ -f "$LOOM_HOME/lanes/12.pid" ] \
+[ -z "$accepted_bad_id" ] && ! [ -f "$LOOM_HOME/lanes/12.pid" ] \
     && ok "lane-id: ad hoc ids are refused, so type is always derivable" \
     || bad "lane-id: an ad hoc id got through"
 # A lane id with a SPACE is the dangerous shape, and the type globs end in `*`
