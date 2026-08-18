@@ -5080,10 +5080,10 @@ cmd_snapshot() {
     #
     # A tracker that can return the whole build — every member's blocking edges
     # and comment thread nested inside one list query — makes the entire
-    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot,
-    # and answers non-zero, which is exactly the capability probe. So this is a
-    # fast path with the OLD path as its fallback, not a replacement: anything
-    # that goes wrong here costs one wasted call and the fan-out still runs.
+    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot
+    # and answers 2, the contract's unsupported-capability result. Only that
+    # result falls back: a supported driver's failed or malformed read cannot
+    # safely yield to an independently populated ticket universe.
     #
     # Why it matters more than wall clock: Linear meters 2,500 requests an hour
     # against 3,000,000 complexity points, so the fan-out spends the scarce
@@ -5091,10 +5091,22 @@ cmd_snapshot() {
     # requests before, 4 after, identical output. *(paid: an hour's quota gone
     # to 26 snapshots of a board that had barely moved, which then blocked an
     # unrelated publish for an hour.)*
-    local batched=false
-    if [ -n "$label" ] && [ -n "$member_iids" ]; then
-        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err" \
-           && jq -e 'type == "array" and length > 0' "$SNAP_TMP/board.json" >/dev/null 2>&1; then
+    local batched=false board_rc why
+    if [ -n "$label" ]; then
+        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err"; then
+            board_rc=0
+        else
+            board_rc=$?
+        fi
+        if [ "$board_rc" = 0 ]; then
+            jq -e 'type == "array"' "$SNAP_TMP/board.json" >/dev/null 2>&1 \
+                || die "snapshot: batched board read was not a JSON array for $label — refusing partial population"
+            if ! jq -e -s --arg l "$label" '
+                ([.[0][] | select((.labels // []) | index($l)) | .id] | sort)
+                == ([.[1][].id] | sort)
+              ' "$SNAP_TMP/open.json" "$SNAP_TMP/board.json" >/dev/null 2>&1; then
+                die "snapshot: foundational and batched ticket populations disagree for $label — refusing partial population"
+            fi
             batched=true
             for iid in $member_iids; do
                 jq -c --argjson i "$iid" \
@@ -5106,6 +5118,9 @@ cmd_snapshot() {
                     '[ .[] | select(.id == $i) ][0].notes // []' "$SNAP_TMP/board.json" \
                     > "$SNAP_TMP/tnotes-$iid.json" || printf '[]\n' > "$SNAP_TMP/tnotes-$iid.json"
             done
+        elif [ "$board_rc" != 2 ]; then
+            why=$(head -1 "$SNAP_TMP/board.err" 2>/dev/null | tr -d '\n')
+            die "snapshot: batched board read failed for $label — ${why:-driver exited $board_rc}; refusing partial population"
         fi
         rm -f "$SNAP_TMP/board.err"
     fi
