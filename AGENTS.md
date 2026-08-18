@@ -298,7 +298,7 @@ history stays exactly what was tested green.
 **Worktrees.** Runtime ticket work uses deterministic linked worktrees prepared
 by `scripts/worktree.sh` from the remote base. Maintenance work follows the
 verb-specific reference and [`CONTRIBUTING.md`](CONTRIBUTING.md); ordinary
-contributor branches use the ignored `.loom-worktrees/` directory.
+contributor branches use the ignored `.worktrees/` directory.
 
 **Safety invariants that never bend:**
 

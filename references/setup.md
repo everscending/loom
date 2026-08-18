@@ -33,8 +33,8 @@ roots, model, and reasoning controls are adapter-owned and explicit. The hard
 denials remain force-push, `git reset --hard`, `git clean`, and unscoped
 recursive deletion.
 
-Loom's own maintenance worktrees now use the git-ignored
-`.loom-worktrees/` path. The old `.claude/worktrees/` remains ignored for a
+Loom's own maintenance worktrees use the git-ignored `.worktrees/` path. The
+old `.claude/worktrees/` remains ignored for a
 transition window; existing registered worktrees are never moved implicitly.
 
 ## Before anything: declare the tracker

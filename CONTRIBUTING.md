@@ -59,7 +59,7 @@ Branch from an up-to-date local `main`, not `origin/HEAD`, and make all edits
 and test runs in the repository's ignored worktree directory:
 
 ```sh
-git worktree add .loom-worktrees/<short-name> -b <short-name> main
+git worktree add .worktrees/<short-name> -b <short-name> main
 ```
 
 If `main` moves, merge it into the branch. Never rebase or force-push Loom work.
