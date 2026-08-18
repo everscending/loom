@@ -198,7 +198,6 @@ for jf in snapshot.jq render.jq render-events.jq usage.jq report.jq report-ticke
     ln -sf "$(dirname "$TICK")/$jf" "$ADVM3/$jf"
 done
 ln -sf "$(dirname "$TICK")/lib.sh" "$ADVM3/lib.sh"
-ln -sf "$(dirname "$TICK")/host-admission.sh" "$ADVM3/host-admission.sh"
 ln -sf "$(dirname "$TICK")/lane.sh" "$ADVM3/lane.sh"
 link_trackers "$ADVM3"
 sed 's/^    \[ "$unknown" -eq 0 \] || return 1$/    : # planted D-TICK-23 violation/' \

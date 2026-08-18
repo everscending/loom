@@ -11,7 +11,6 @@ set -uo pipefail
 TICK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tick.sh"
 T=$(mktemp -d)
 export LOOM_HOME="$T/home" LOOM_REPO="$T/repo"
-export LOOM_HOST_ADMISSION_HOME="$T/host-admission"
 mkdir -p "$LOOM_REPO"
 
 # P86: loom refuses to run in a repo that has not declared its issue tracker,
@@ -90,7 +89,6 @@ export LOOM_GLOBAL_CONFIG="$T/global.yml"
 #     9 tests bootstrap itself and switches it back on via BOOTENV.
 export LOOM_WAVE_CMD="true"
 export LOOM_SKIP_BOOTSTRAP=1
-export LOOM_ALLOW_MUTABLE_RUNTIME=1
 export LOOM_PROVIDER=claude LOOM_SKIP_PROVIDER_CHECK=1 LOOM_SKIP_SUPERVISION_CHECK=1 LOOM_SKIP_AGENT_PREFLIGHT=1
 # Most fixture base-checks assert Git tree selection with tiny synthetic repos;
 # they must not contact real package managers merely because a fixture happens

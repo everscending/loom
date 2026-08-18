@@ -26,10 +26,8 @@ case "$1" in
     printf '%s\n' '{"id":236,"title":"Direct review handoff","state":"open","labels":["review"],"body":"## Risk tier\n\nui\n\n## Acceptance criteria\n\n- [ ] review this exact contract"}' ;;
   issue-notes)
     printf '%s\n' '[
-      {"created_at":"2026-08-17T01:03:00Z","body":"Removed the shared recipient scope guard at guard456.\n\n<!-- orch-supervised-repair 2026-08-17T01:03:00Z -->"},
       {"created_at":"2026-08-17T01:02:00Z","body":"Repaired identity fixture ownership at repair123.\n\n<!-- orch-supervised-repair 2026-08-17T01:02:00Z -->"},
-      {"created_at":"2026-08-17T01:01:00Z","body":"Active scope owns ShareDialog only; exclude unrelated viewer work.\n\n<!-- orch-scope-reset 2026-08-17T01:01:00Z -->"},
-      {"created_at":"2026-08-17T01:00:00Z","body":"Superseded repair from the replaced scope at stale000.\n\n<!-- orch-supervised-repair 2026-08-17T01:00:00Z -->"}
+      {"created_at":"2026-08-17T01:01:00Z","body":"Active scope owns ShareDialog only; exclude unrelated viewer work.\n\n<!-- orch-scope-reset 2026-08-17T01:01:00Z -->"}
     ]' ;;
   *) exit 2 ;;
 esac
@@ -70,9 +68,6 @@ if [ -n "$gate_pid" ] && kill -0 "$gate_pid" 2>/dev/null \
    && grep -q 'review this exact contract' "$LOOM_HOME/briefs/gate-236.md" \
    && grep -q 'Active scope owns ShareDialog only' "$LOOM_HOME/briefs/gate-236.md" \
    && grep -q 'Repaired identity fixture ownership at repair123' "$LOOM_HOME/briefs/gate-236.md" \
-   && grep -q 'Removed the shared recipient scope guard at guard456' "$LOOM_HOME/briefs/gate-236.md" \
-   && ! grep -q 'stale000' "$LOOM_HOME/briefs/gate-236.md" \
-   && [ "$(grep -n 'repair123' "$LOOM_HOME/briefs/gate-236.md" | cut -d: -f1)" -lt "$(grep -n 'guard456' "$LOOM_HOME/briefs/gate-236.md" | cut -d: -f1)" ] \
    && grep -Fq "verdict 236 pass $head --file" "$LOOM_HOME/briefs/gate-236.md" \
    && grep -Fq "verdict 236 fail $head --class" "$LOOM_HOME/briefs/gate-236.md" \
    && grep -q -- '--job gate' "$CHAIN_CALLS"; then
@@ -148,9 +143,6 @@ if [ -n "$request" ] \
    && grep -q 'review this exact contract' "$request/brief.md" \
    && grep -q 'Active scope owns ShareDialog only' "$request/brief.md" \
    && grep -q 'Repaired identity fixture ownership at repair123' "$request/brief.md" \
-   && grep -q 'Removed the shared recipient scope guard at guard456' "$request/brief.md" \
-   && ! grep -q 'stale000' "$request/brief.md" \
-   && [ "$(grep -n 'repair123' "$request/brief.md" | cut -d: -f1)" -lt "$(grep -n 'guard456' "$request/brief.md" | cut -d: -f1)" ] \
    && grep -Fq "verdict 236 pass $head --file" "$request/brief.md" \
    && grep -Fq "verdict 236 fail $head --class" "$request/brief.md" \
    && grep -q 'exactly one tracker verdict' "$request/brief.md" \

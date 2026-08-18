@@ -23,8 +23,8 @@ EOF
 chmod +x "$TRACKER"
 
 # This is the smallest board that produces the incident's immutable action:
-# a blocked report landed before its matching state transition, so the planner
-# repairs that half-finished write by moving it from in-progress to blocked.
+# a stranded implementation has exhausted its rejection cap, so the planner
+# decides to move it from in-progress to blocked.
 cat > "$FX/snapshot.json" <<'EOF'
 {
   "generated_at": "2026-08-16T22:00:00Z",
@@ -41,10 +41,7 @@ cat > "$FX/snapshot.json" <<'EOF'
     "tier": "api", "fix": false, "unblocked": true,
     "assignees": ["agent"],
     "tier_selection": {"effective": "high", "source": "rework_tier"},
-    "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
-    "blocked_report": {"at": "2026-08-16T21:59:00Z",
-      "category": "tracker-rate-limit", "body": "Failure was already reported.",
-      "ticket_state": "in-progress", "released": false},
+    "rejections": {"total": 2, "last_class": "stale-base", "same_class_tail": 1},
     "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
     "gate": {"eligible": false, "reason": "not in review", "head": null,
              "last_verdict": null}
@@ -62,7 +59,7 @@ cat > "$FX/snapshot.json" <<'EOF'
 EOF
 
 "$TICK" plan "$FX/snapshot.json" > "$FX/plan.json"
-planned_argv=$(jq -c '.actions[] | select(.ticket == 283 and .argv[0] == "transition") | .argv' "$FX/plan.json")
+planned_argv=$(jq -c '.actions[] | select(.ticket == 283 and .kind == "transition") | .argv' "$FX/plan.json")
 if [ "$planned_argv" = '["transition","283","blocked","--if-current","in-progress"]' ]; then
     ok "stale wave: a planned transition carries the ticket state it observed"
 else
@@ -70,7 +67,7 @@ else
 fi
 
 run_action() { # <plan.json> — execute its one lane.sh argv through the public verb
-    set -- $(jq -r '.actions[] | select(.ticket == 283 and .argv[0] == "transition") | .argv[]' "$1")
+    set -- $(jq -r '.actions[] | select(.ticket == 283 and .kind == "transition") | .argv[]' "$1")
     "$LANE" "$@"
 }
 
@@ -99,7 +96,7 @@ fi
 
 # Planted violation: remove only the expected-state arguments, recreating the
 # pre-fix public plan. The later review state is overwritten again.
-jq '(.actions[] | select(.ticket == 283 and .argv[0] == "transition") | .argv) |= .[0:3]' \
+jq '(.actions[] | select(.ticket == 283 and .kind == "transition") | .argv) |= .[0:3]' \
   "$FX/plan.json" > "$FX/unguarded-plan.json"
 printf 'review\n' > "$STATE_FILE"
 : > "$CALLS"

@@ -60,20 +60,18 @@ cat > "$FX/snap.json" <<'EOF'
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
      "contract": "## Acceptance criteria\n\n- [ ] Persist the timing record\n\n## Mandatory adversarial tests\n\n- [ ] A failed write emits no success record\n",
      "active_scope_reset": {"at":"2026-08-10T09:58:00Z","body":"Supervisor scope: own lib/scheduling/booking.ts list and persisted-transition seam.\n\n<!-- orch-scope-reset 2026-08-10T09:58:00Z -->"},
-     "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1, "generation":"Z2VuNDI=",
-                    "latest":{"at":"2026-08-10T09:57:00Z","sha":"aaaa0042","class":"marks-attribution"}},
+     "active_supervised_repair": {"at":"2026-08-10T09:59:00Z","body":"Verified repair a84fcf3 adds the deployment runner and its public contract test; preserve those files during later rework.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"},
+     "rejections": {"total": 1, "last_class": "marks-attribution", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 43, "title": "stranded, two same class", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
-     "rejections": {"total": 2, "last_class": "marks-attribution", "same_class_tail": 2, "generation":"Z2VuNDM=",
-                    "latest":{"at":"2026-08-10T09:58:00Z","sha":"aaaa0043","class":"marks-attribution"}},
+     "rejections": {"total": 2, "last_class": "marks-attribution", "same_class_tail": 2},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 52, "title": "stranded, two different classes", "state": "in-progress", "tier": "logic", "fix": false,
      "unblocked": true, "assignees": ["a"], "tier_selection": {"effective": "high", "source": "rework_tier"},
-     "rejections": {"total": 2, "last_class": "api-contract", "same_class_tail": 1, "generation":"Z2VuNTI=",
-                    "latest":{"at":"2026-08-10T09:59:00Z","sha":"aaaa0052","class":"api-contract"}},
+     "rejections": {"total": 2, "last_class": "api-contract", "same_class_tail": 1},
      "merge_attempts": 0, "merge_hold": null, "related_merge_requests": [],
      "gate": {"eligible": false, "reason": "not in review", "head": null, "last_verdict": null}},
     {"id": 44, "title": "ready, but a repair stands against it", "state": "ready-for-agent",
@@ -177,8 +175,8 @@ jq '.tickets = [{
       "tier_selection": {"effective": "high", "source": "rework_tier"},
       "rejections": {"total": 0, "last_class": null, "same_class_tail": 0},
       "active_supervised_repair": {
-        "at": "2026-08-10T10:05:00Z",
-        "body": "Fixed valid response defects at a84fcf3.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->\n\nRemoved the shared recipient scope guard at c0ffee2.\n\n<!-- orch-supervised-repair 2026-08-10T10:05:00Z -->"
+        "at": "2026-08-10T09:59:00Z",
+        "body": "Fixed valid response defects at a84fcf3.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"
       },
       "merge_attempts": 1, "merge_hold": null,
       "related_merge_requests": [{"id": 103, "state": "open", "branch": "t53", "sha": "ffff777"}],
@@ -193,50 +191,11 @@ jq '.tickets = [{
 PLAN "$FX/snap-supervised-repair.json" > "$T/plan-supervised-repair.json" 2>/dev/null
 if jq -e '.actions | length == 1
           and .[0].lane == "gate-53"
-          and (.[0].spawn.brief.active_supervised_repair.body as $body
-               | ($body | index("a84fcf3")) < ($body | index("c0ffee2")))' \
+          and (.[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
           "$T/plan-supervised-repair.json" >/dev/null 2>&1; then
     ok "plan: completed supervised repair advances to gate with immutable evidence"
 else
     bad "plan: supervised repair did not produce the expected gate action ($(jq -c '.actions' "$T/plan-supervised-repair.json"))"
-fi
-# Renewed diagnosis flows through the existing blocked-ticket supervisor. Its
-# repair worker must receive the accumulated prior repair evidence as well as
-# the new blocked report.
-jq '.build.supervision_policy = "autonomous-repair-v1"
-    | .tickets[0].state = "blocked"
-    | .tickets[0].blocked_report = {
-        "at":"2026-08-10T11:00:00Z", "category":"rejection-cap",
-        "body":"The next exact gate failure requires renewed diagnosis.",
-        "ticket_state":"blocked", "released":false}
-    | .tickets[0].gate = {"eligible":false,"reason":"not in review","head":null,"last_verdict":null}
-    | .summary.impl_slots_free = 1' \
-    "$FX/snap-supervised-repair.json" > "$FX/snap-renewed-diagnosis.json"
-PLAN "$FX/snap-renewed-diagnosis.json" > "$T/plan-renewed-diagnosis.json" 2>/dev/null
-if jq -e '.actions[] | select(.lane=="repair-53")
-          | (.spawn.brief.active_supervised_repair.body
-             | contains("a84fcf3") and contains("c0ffee2"))' \
-          "$T/plan-renewed-diagnosis.json" >/dev/null 2>&1; then
-    ok "plan: renewed supervised diagnosis retains all prior repair evidence"
-else
-    bad "plan: renewed diagnosis discarded accumulated repair evidence"
-fi
-# A supervised repair is an evidence-bearing intervention, not permission to
-# restart blind cycles. Its first later FAIL returns to diagnosis immediately.
-jq '(.tickets[] | select(.id==42) | .active_supervised_repair) = {
-      "at":"2026-08-10T09:59:00Z",
-      "body":"Verified repair a84fcf3 adds the deployment runner and its public contract test.\n\n<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->"
-    }' "$FX/snap.json" > "$FX/snap-post-supervised-fail.json"
-PLAN "$FX/snap-post-supervised-fail.json" > "$T/plan-post-supervised-fail.json" 2>/dev/null
-if jq -e '.actions[] | select(.ticket==42 and .kind=="diagnosis-hold")
-          | (.why | contains("first gate failure after supervised repair"))
-            and (.argv[5] == "Z2VuNDI=")' \
-          "$T/plan-post-supervised-fail.json" >/dev/null 2>&1 \
-   && ! jq -e '.actions[] | select(.lane=="impl-42")' \
-          "$T/plan-post-supervised-fail.json" >/dev/null 2>&1; then
-    ok "plan: first post-supervised FAIL returns to diagnosis instead of blind rework"
-else
-    bad "plan: post-supervised FAIL restarted implementation ($(jq -c '.actions[] | select(.ticket==42 or .lane=="impl-42")' "$T/plan-post-supervised-fail.json"))"
 fi
 # The current-head gate deferral is executable input, not prose a new worker
 # must rediscover.  It changes the ordinary stranded action into an explicit
@@ -264,12 +223,10 @@ for provider in claude codex; do
         > "$T/plan-supervised-repair-$provider.json" 2>/dev/null
 done
 if jq -e '.actions[0].spawn.provider == "claude"
-          and (.actions[0].spawn.brief.active_supervised_repair.body
-               | contains("a84fcf3") and contains("c0ffee2"))' \
+          and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
           "$T/plan-supervised-repair-claude.json" >/dev/null 2>&1 \
    && jq -e '.actions[0].spawn.provider == "codex"
-             and (.actions[0].spawn.brief.active_supervised_repair.body
-                  | contains("a84fcf3") and contains("c0ffee2"))' \
+             and (.actions[0].spawn.brief.active_supervised_repair.body | contains("a84fcf3"))' \
           "$T/plan-supervised-repair-codex.json" >/dev/null 2>&1; then
     ok "plan: Claude and Codex share the provider-neutral supervised-repair action"
 else
@@ -487,20 +444,12 @@ if [ "$(p '.actions[] | select(.lane=="gate-40-r2") | .spawn.brief.active_scope_
 else
     bad "D-TICK-38: gate action silently restored the pre-rescope contract"
 fi
-# Step 4: two rejections mean diagnosis, not respawn, even when their classes
-# differ (#43/#52); one does not (#42), and the rework respawn takes the ticket's OWN resolved model — a
+# Step 4: two rejections mean stop, not respawn, even when their classes differ
+# (#43/#52); one does not (#42), and the rework respawn takes the ticket's OWN resolved model — a
 # rework round is exactly where the escalation chain differs from lane_model.
-[ "$(act fill diagnosis-hold)" = "43,52" ] \
-    && ok "plan: two total rejections require supervised diagnosis before round three" \
-    || bad "plan: round-three diagnosis stop wrong ($(act fill diagnosis-hold))"
-if jq -e '.actions[] | select(.ticket==43 and .kind=="diagnosis-hold")
-          | .argv == ["diagnosis-hold","43","--if-current","in-progress",
-                      "--expected-generation","Z2VuNDM="]' \
-          "$T/plan.json" >/dev/null 2>&1; then
-    ok "plan: diagnosis hold freezes the source state and exact latest FAIL identity"
-else
-    bad "plan: diagnosis hold omitted its stale-plan guards"
-fi
+[ "$(act fill transition)" = "43,52" ] \
+    && ok "plan: two total rejections require help before round three, even across different classes" \
+    || bad "plan: round-three help stop wrong ($(act fill transition))"
 [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.tier')" = "high" ] \
     && ok "plan: a rework respawn carries .tier_selection.effective, not lane_tier" \
     || bad "plan: rework tier wrong ($(p '.actions[] | select(.lane=="impl-42") | .spawn.tier'))"
@@ -513,6 +462,16 @@ if [ "$(jq '[.actions[] | select(.lane=="impl-42" or .lane=="impl-45")
     ok "D-TICK-28: new-work and rework actions both carry the active rescope note"
 else
     bad "D-TICK-28: a fill action silently fell back to pre-rescope scope"
+fi
+# D-TICK-39: a later rejection must not erase the completed repair evidence
+# that explains why necessary support files exceed the ticket's old file list.
+if [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.brief.active_supervised_repair.body')" = \
+     "Verified repair a84fcf3 adds the deployment runner and its public contract test; preserve those files during later rework.
+
+<!-- orch-supervised-repair 2026-08-10T09:59:00Z -->" ]; then
+    ok "D-TICK-39: rework action carries completed supervised-repair evidence"
+else
+    bad "D-TICK-39: rework action forgot the repair it must preserve"
 fi
 if [ "$(p '.actions[] | select(.lane=="impl-42") | .spawn.brief.ticket_contract')" = \
      "## Acceptance criteria
@@ -592,12 +551,9 @@ PLAN "$FX/snap-no-merge-outcome.json" > "$T/plan-no-merge-outcome.json" 2>/dev/n
     && [ "$(jq '[.residue[] | select(.ticket==51 and .kind=="merge-failed")] | length' "$T/plan.json")" = 0 ] \
     && ok "plan: an unreleased blocked report suppresses retries and duplicate failure accounting" \
     || bad "plan: half-blocked ticket #51 was retried or double-counted"
-[ "$(res blocked-report)" = "50,49" ] \
-    && ok "plan: generic blocking actions carry a blocked report to write" \
+[ "$(res blocked-report)" = "50,43,52,49" ] \
+    && ok "plan: every blocking action carries a blocked report to write" \
     || bad "plan: blocked-report residue wrong ($(res blocked-report))"
-[ "$(jq '[.residue[] | select(.ticket==43 or .ticket==52)] | length' "$T/plan.json")" = 0 ] \
-    && ok "plan: diagnosis-hold owns its exact report instead of leaving prose residue" \
-    || bad "plan: diagnosis hold still depends on hand-composed residue"
 # Every `transition … blocked` says so, so an executor cannot apply the label
 # without the report the human reads to make the decision.
 [ "$(jq '[.actions[] | select(.kind == "transition" and .argv[2] == "blocked")] | map(.needs_report) | unique | @csv' "$T/plan.json")" \

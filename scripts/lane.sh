@@ -409,7 +409,7 @@ cmd_verdict() { # <iid> pass|fail <head-sha> [--class <kebab-slug>] [--file F]
     # posted. Fail closed on the read, same as the blocked-hold guard above:
     # a transient API failure must never read as "definitely not a duplicate".
     local _notes rc
-    _notes=$("$TRACKER" issue-notes "$iid" --limit "$(_ticket_notes_limit)" 2>/dev/null) && rc=0 || rc=$?
+    _notes=$("$TRACKER" issue-notes "$iid" --limit 100 2>/dev/null) && rc=0 || rc=$?
     [ "$rc" -eq 0 ] \
         || die "issue $iid: could not read existing verdict trailers (tracker read failed, rc=$rc) — refusing to guess whether this is a duplicate. Retry once the tracker is reachable."
     # P72: the trailer regex is `orch_verdict_scan` in lib.jq, the one the
@@ -773,67 +773,6 @@ cmd_blocked_report() { # <iid> [--category <slug>] [--file F]
     echo "lane.sh: blocked report posted on issue $iid${category:+ (category: $category)}"
 }
 
-cmd_diagnosis_hold() { # <iid> --if-current <state> --expected-generation <base64>
-    # The round-three stop is plumbing, not prose generation. Freeze the exact
-    # gate fact the disposable plan saw, refuse if either the ticket state or
-    # newest active FAIL moved, then carry every active FAIL comment into the
-    # ordinary structured blocked report. The existing supervision step owns
-    # what happens after this hold.
-    local iid="${1:-}" expected_state="" expected_generation="" ok=0 s
-    _check_iid "$iid"
-    set -- "${@:2}"
-    while [ $# -gt 0 ]; do case "$1" in
-        --if-current) expected_state="${2:-}"; shift 2 ;;
-        --expected-generation) expected_generation="${2:-}"; shift 2 ;;
-        *) die "diagnosis-hold: unknown option '$1'" ;;
-    esac; done
-    [ -n "$expected_state" ] || die "diagnosis-hold: --if-current is required"
-    for s in $STATES unlabeled; do [ "$s" = "$expected_state" ] && ok=1; done
-    [ "$ok" = 1 ] \
-        || die "diagnosis-hold: unknown --if-current state '$expected_state' (one of: $STATES unlabeled)"
-    case "$expected_generation" in
-        ''|*[!A-Za-z0-9+/=]*) die "diagnosis-hold: --expected-generation must be a base64 token" ;;
-    esac
-
-    _read_issue "$iid" "refusing to apply a diagnosis hold from a stale wave plan."
-    _closed_guard "$iid" "refusing to post a diagnosis report on finished work."
-    local current jqd notes evidence generation report rc
-    jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
-    current=$(printf '%s' "$_ISSUE_JSON" \
-        | jq -L "$jqd" -r 'include "lib"; state_of(.labels // []) // "unlabeled"')
-    [ "$current" = "$expected_state" ] \
-        || die "issue $iid: planned diagnosis hold expected '$expected_state' but is currently '$current' — snapshot is stale; re-run snapshot and plan."
-
-    notes=$("$TRACKER" issue-notes "$iid" --limit "$(_ticket_notes_limit)" 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not read gate evidence (tracker read failed, rc=$rc) — refusing to write a diagnosis hold blind."
-    evidence=$(printf '%s' "$notes" | jq -L "$jqd" -ce '
-        include "lib";
-        . as $notes
-        | [verdicts_after_reset($notes)[] | select(.verdict == "FAIL")] as $fails
-        | {generation: active_fail_generation($notes),
-           failures: [$fails[] | . as $failure
-                      | {at, sha, class,
-                         body: ($notes[$failure.i].body // "")}]}' 2>/dev/null) && rc=0 || rc=$?
-    [ "$rc" -eq 0 ] \
-        || die "issue $iid: could not parse active gate evidence — refusing to write a diagnosis hold blind."
-    generation=$(printf '%s' "$evidence" | jq -r '.generation // empty')
-    [ "$generation" = "$expected_generation" ] \
-        || die "issue $iid: planned diagnosis hold expected a different active FAIL generation — snapshot is stale; re-run snapshot and plan."
-
-    report=$(mktemp "${TMPDIR:-/tmp}/loom-diagnosis-hold.XXXXXX")
-    printf '%s' "$evidence" | jq -r '
-        "Automatic implementation is held for supervised diagnosis after \(.failures | length) active gate failure(s).\n\n"
-        + ([.failures[]
-            | "## Gate failure at \(.at)\n\nHEAD: `\(.sha)`\nClass: `\(.class // "unclassified")`\n\n\(.body)\n"]
-           | join("\n"))
-        + "\nA focused repair worker must prove or invalidate these exact findings before implementation resumes.\n"' \
-        > "$report"
-    printf '\n<!-- orch-diagnosis-source state=%s generation=%s -->\n' \
-        "$expected_state" "$expected_generation" >> "$report"
-    cmd_blocked_report "$iid" --category rejection-cap --file "$report"
-}
-
 cmd_model_tier() { # <iid> <tier>
     # P78: `snapshot.jq`'s `model_of` has read `model::<tier>` since P31, and
     # nothing has ever written one — a human escalation meant editing labels in
@@ -919,8 +858,8 @@ cmd_build_supervision() { # autonomous-repair-v1 — human-only Build N policy
     echo "lane.sh: Build #$build → $target"
 }
 
-_repair_result_authority() { # <iid> <block-token> <outcome> — exact lane, lease, policy, block
-    local iid="$1" token="$2" result="$3" lane="repair-$1" lease raw build policies notes state attention jqd now
+_repair_result_authority() { # <iid> <block-token> — exact lane, lease, policy, block
+    local iid="$1" token="$2" lane="repair-$1" lease raw build policies notes latest now
     [ "${LOOM_LANE_ID:-}" = "$lane" ] \
       || die "repair-result: only lane '$lane' may resolve ticket #$iid (caller: ${LOOM_LANE_ID:-human/wave})"
     [ -n "${LOOM_HOME:-}" ] \
@@ -943,27 +882,15 @@ _repair_result_authority() { # <iid> <block-token> <outcome> — exact lane, lea
       || die "repair-result: Build #$build is not bound to exactly supervision::autonomous-repair-v1"
     _read_issue "$iid" "refusing a repair result against unknown ticket state."
     _closed_guard "$iid" "refusing to record a repair result on finished work."
-    jqd="$(_jq_lib_dir "${LIB_SH%/*}")"
-    state=$(printf '%s' "$_ISSUE_JSON" | jq -L "$jqd" -r 'include "lib"; state_of(.labels // []) // "unlabeled"')
-    attention=$(printf '%s' "$_ISSUE_JSON" | jq -r '((.labels // []) | index("supervision::awaiting-human")) != null')
-    notes=$("$TRACKER" issue-notes "$iid" --limit "$(_ticket_notes_limit)") \
+    printf '%s' "$_ISSUE_JSON" | jq -e '.labels | index("blocked")' >/dev/null 2>&1 \
+      || die "repair-result: issue #$iid is no longer blocked; this repair brief is stale"
+    notes=$("$TRACKER" issue-notes "$iid" --limit 30) \
       || die "repair-result: cannot verify the current block generation"
-    [ -n "$token" ] && printf '%s' "$notes" \
-      | jq -L "$jqd" -e --arg state "$state" --arg token "$token" --arg result "$result" --argjson attention "$attention" '
-          include "lib";
-          (repair_block_active(.; $state; $token)
-           and ($state == "blocked"
-                or any(.[]; (.created_at // "") == $token
-                           and ((.body // "") | test("<!-- orch-diagnosis-source ")))))
-          or ($result == "human-attention" and $state == "blocked" and $attention
-              and ([.[] | select((.created_at // "") == $token)
-                         | (.body // "")
-                         | capture("<!-- orch-diagnosis-source state=(?<state>[^ ]+) ").state] | first) as $source
-              | $source != null and repair_block_active(.; $source; $token))' >/dev/null 2>&1 \
-      || die "repair-result: exact repair block at '$token' is no longer active; replan instead of applying stale authority"
-    _REPAIR_RESULT_PREPARED=$(printf '%s' "$notes" | jq -r --arg token "$token" '
-      any(.[]; ((.body // "") | test("<!-- orch-supervised-repair ")
-                and contains(" block=" + $token + " -->")))')
+    latest=$(printf '%s' "$notes" | jq -r '
+      [.[] | select((.body // "") | test("<!-- orch-blocked"))]
+      | sort_by(.created_at // "") | last | .created_at // empty')
+    [ -n "$token" ] && [ "$latest" = "$token" ] \
+      || die "repair-result: block generation changed (expected '$token', current '${latest:-none}'); replan instead of applying stale authority"
 }
 
 cmd_repair_result() { # <iid> resolved|human-attention --block-token <at> [--file F]
@@ -977,16 +904,13 @@ cmd_repair_result() { # <iid> resolved|human-attention --block-token <at> [--fil
       *) die "repair-result: unknown option '$1'" ;;
     esac; done
     [ -n "$token" ] || die "repair-result: --block-token is required"
-    _repair_result_authority "$iid" "$token" "$result"
+    _repair_result_authority "$iid" "$token"
     f=$(_stage_body "${bodyargs[@]+"${bodyargs[@]}"}")
     if [ "$result" = human-attention ]; then
         # Suppression lands first. If the following note fails, the safe
         # partial state is a held ticket that Mend flags, never an automatic
         # respawn that asks another agent the same human-only question.
-        "$TRACKER" issue-relabel "$iid" \
-          --add "blocked,supervision::awaiting-human" \
-          --remove "ready-for-agent,in-progress,review,merge-queue"
-        _forget_issue
+        "$TRACKER" issue-relabel "$iid" --add "supervision::awaiting-human"
         printf '\n\n<!-- orch-blocked category=human-attention %s -->\n' \
           "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
         _post_note issue "$iid" "$f"
@@ -995,7 +919,7 @@ cmd_repair_result() { # <iid> resolved|human-attention --block-token <at> [--fil
           "$(head -c 500 "$f")" >/dev/null 2>&1 || true
         "$TICK_SH" repair-lease-release "$iid" >/dev/null 2>&1 || true
         _mark_lane_outcome blocked
-        echo "lane.sh: issue $iid → blocked with supervision::awaiting-human"
+        echo "lane.sh: issue $iid remains blocked with supervision::awaiting-human"
         return 0
     fi
 
@@ -1015,12 +939,9 @@ cmd_repair_result() { # <iid> resolved|human-attention --block-token <at> [--fil
     mrsha=$(printf '%s' "$mrrow" | jq -r '.sha // empty')
     [ "$mrsha" = "$head" ] \
       || die "repair-result: open merge request is at ${mrsha:-missing}, not repaired HEAD $head"
-    if [ "${_REPAIR_RESULT_PREPARED:-false}" != true ]; then
-        printf '\n\n<!-- orch-supervised-repair %s block=%s -->\n<!-- orch-unblock %s block=%s -->\n' \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$token" \
-          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$token" >> "$f"
-        _post_note issue "$iid" "$f"
-    fi
+    printf '\n\n<!-- orch-supervised-repair %s -->\n<!-- orch-unblock %s -->\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$f"
+    _post_note issue "$iid" "$f"
     "$TRACKER" issue-relabel "$iid" --add review \
       --remove "ready-for-agent,in-progress,merge-queue,blocked,supervision::awaiting-human"
     _forget_issue
@@ -1728,7 +1649,7 @@ cmd_close() { # <iid> — merged and done: strip every state label, then close.
 }
 
 _usage() {
-    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | repair-result <iid> resolved|human-attention --block-token <at> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | diagnosis-hold <iid> --if-current <state> --expected-generation <base64> | model-tier <iid> <medium|high> | build-provider <provider> | build-supervision autonomous-repair-v1 | rescope <iid> [--extend] [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
+    die "usage: lane.sh scratch | note <iid> [--file F] | mr-note <iid> [--file F] | verdict <iid> pass|fail <sha> [--class <slug>] [--file F] | verdict-reset <iid> [--file F] | supervised-repair <iid> [--file F] | repair-result <iid> resolved|human-attention --block-token <at> [--file F] | merge-failed <iid> [--base-red <check-id> --fix <fix-iid>] [--file F] | base-check [--] <cmd...> | wait-ready --timeout <secs> [--interval <secs>] (--url <url> | -- <cmd...>) | blocked-report <iid> [--category <slug>] [--file F] | model-tier <iid> <medium|high> | build-provider <provider> | build-supervision autonomous-repair-v1 | rescope <iid> [--extend] [--file F] | merge-reset <iid> [--file F] | fix-ticket --title <t> --tier <docs|logic|api|ui> --milestone <title> [--blocked-by <iids>] [--force] [--file F] | probe-result <build-iid> <epic-slug> pass|fail|infrastructure [--file F] | reconcile [<base>] | gate-base-check <iid> | transition <iid> <state> [--release-hold] [--note] [--file F] | claim <iid> | submit <iid> [--title <t>] [--file F] | merge <iid> | close <iid>   (bodies: --file or stdin)"
 }
 
 # The usage path deliberately comes FIRST and needs no tracker: `lane.sh` with
@@ -1761,7 +1682,6 @@ case "${1:-}" in
     verdict)    shift; cmd_verdict "$@" ;;
     merge-failed) shift; cmd_merge_failed "$@" ;;
     blocked-report) shift; cmd_blocked_report "$@" ;;
-    diagnosis-hold) shift; cmd_diagnosis_hold "$@" ;;
     model-tier) shift; cmd_model_tier "$@" ;;
     build-provider) shift; cmd_build_provider "$@" ;;
     build-supervision) shift; cmd_build_supervision "$@" ;;

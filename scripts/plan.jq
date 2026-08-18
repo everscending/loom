@@ -121,10 +121,7 @@ else
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
 | (($cfg.rejection_cap | tonumber?) // 2) as $rejection_cap
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_slots_free
-| (($cfg.ui_capacity | tonumber?) // 1) as $ui_capacity
-| (($sum.ui_pregate_usage | tonumber?) //
-   (if (($sum.ui_pregate_occupied // false) == true) then $ui_capacity else 0 end)) as $ui_pregate_usage
-| ($ui_pregate_usage >= $ui_capacity) as $ui_pregate_occupied
+| (($sum.ui_pregate_occupied // false) == true) as $ui_pregate_occupied
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
 | ([ $tickets[]
@@ -154,7 +151,6 @@ else
 # the same six-minute gate again.)
   ([ $tickets[]
      | select(.state != "blocked" and .blocked_report != null
-              and (.blocked_report.diagnosis_source // null) == null
               and ((.blocked_report.released // false) == false)) ]) as $reported_blocks
 | ([ $reported_blocks[] | .id ]) as $reported_block_ids
 
@@ -187,10 +183,8 @@ else
 
   (open_pairs) as $pairs
 | ([ $tickets[]
+     | select(.state == "blocked")
      | select((.blocked_report.at // null) != null)
-     | select((.state == "blocked" and (.blocked_report.diagnosis_source // null) == null)
-              or ((.blocked_report.diagnosis_source // null) != null
-                  and ((.blocked_report.released // false) == false)))
      | select(.supervised_lease == null)
      | select(.supervision_attention == null)
      | . as $candidate
@@ -209,16 +203,16 @@ else
   as $repair_attention
 | (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
    then (reduce $repairable_blockers[] as $candidate
-          ({items:[], slots:$impl_slots_free, ui:$ui_pregate_usage};
+          ({items:[], slots:$impl_slots_free, ui:$ui_pregate_occupied};
            if .slots <= 0 then .
-           elif ($candidate.tier == "ui" and .ui >= $ui_capacity) then .
+           elif ($candidate.tier == "ui" and .ui) then .
            else .items += [$candidate]
               | .slots -= 1
-              | if $candidate.tier == "ui" then .ui += 1 else . end
+              | if $candidate.tier == "ui" then .ui = true else . end
            end) | .items)
    else [] end) as $repair_take
 | ([$repair_take[].id]) as $repair_take_ids
-| ([$repair_take[] | select(.tier == "ui")] | length) as $repair_ui_count
+| (any($repair_take[]; .tier == "ui")) as $repair_takes_ui
 | ([ $repair_take[]
      | ([.related_merge_requests[]? | select(.state == "open")] | first) as $mr
      | ("repair-\(.id)") as $lid
@@ -239,7 +233,6 @@ else
                          else "the existing ticket worktree at blocked MR head \($mr.sha)" end),
                brief:{ticket_contract:(.contract // null),
                       blocked_report:(.blocked_report // null),
-                      active_supervised_repair:(.active_supervised_repair // null),
                       block_token:(.blocked_report.at // null),
                       dependency_impact:._dependency_impact,
                       direct_dependents:._direct_dependents,
@@ -250,16 +243,14 @@ else
 | ([ $repair_attention[] ]
    + [ $tickets[]
        | select(.state == "blocked" and .supervision_attention == null
-                and ((.blocked_report.at // null) == null
-                     or ((.blocked_report.diagnosis_source // null) != null
-                         and (.blocked_report.released // false))))
+                and (.blocked_report.at // null) == null)
        | {step:"supervise", kind:"repair-report-missing", ticket:.id,
           why:"autonomous repair requires a structured blocked report with a generation token"} ]
    + (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
       then [ $repairable_blockers[]
              | . as $candidate
              | select(($repair_take_ids | index($candidate.id)) == null)
-             | if .tier == "ui" and ($ui_pregate_usage + $repair_ui_count >= $ui_capacity)
+             | if .tier == "ui" and ($ui_pregate_occupied or $repair_takes_ui)
                then {step:"supervise", kind:"ui-resource", ticket:.id,
                      why:"the shared host UI resource is already reserved"}
                else {step:"supervise", kind:"capacity", ticket:.id,
@@ -425,17 +416,19 @@ else
    | sort_by([(-._dependency_releases), (-._dependency_impacts), .id])) as $gate_candidates
 | ([ $gate_candidates[] | select(.supervised_lease != null) ]) as $gate_leased
 | ([ $gate_candidates[] | select(.supervised_lease == null) ]) as $gate_all
-# UI pregates share bounded host capacity even when the auxiliary pool has more
-# free slots. Admission remains the final race guard; the planner spends only
-# the remaining UI slots while API gates retain their normal parallelism.
-| (($ui_capacity - $ui_pregate_usage - $repair_ui_count) | if . < 0 then 0 else . end) as $ui_gate_slots
-| ([ $gate_all[] | select(._pregate_tier == "ui") ][0:$ui_gate_slots] | map(.id)) as $selected_ui_gates
+# UI pregates share one host resource even when the auxiliary pool has several
+# free slots. Admission remains the final race guard, but a snapshot that
+# already sees an owner must not spend a wave attempting every UI candidate.
+# When free, select the highest-priority UI gate once and let API gates retain
+# their normal parallelism and dependency-priority order.
+| ([ $gate_all[] | select(._pregate_tier == "ui") ] | first | .id) as $first_ui_gate
+| (if $ui_pregate_occupied then null else $first_ui_gate end) as $selected_ui_gate
 | ([ $gate_all[]
      | select(._pregate_tier != "ui"
-              or (.id as $id | $selected_ui_gates | index($id) != null)) ]) as $gate_admissible
+              or ($selected_ui_gate != null and .id == $selected_ui_gate)) ]) as $gate_admissible
 | ([ $gate_all[]
      | select(._pregate_tier == "ui"
-              and (.id as $id | $selected_ui_gates | index($id) == null)) ]) as $gate_ui_wait
+              and ($selected_ui_gate == null or .id != $selected_ui_gate)) ]) as $gate_ui_wait
 | ($gate_admissible[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
      | (gate_lane(.id)) as $lid
@@ -459,8 +452,8 @@ else
    + [ $gate_ui_wait[]
      | { step: "gate", ticket: .id,
          why: (if $ui_pregate_occupied
-               then "UI host capacity already full with live or queued UI work"
-               else "configured UI host capacity already assigned to higher-priority work" end) } ]
+               then "UI host resource already reserved by live or queued UI work"
+               else "one UI gate already selected for the shared UI host resource" end) } ]
    + [ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
      | { step: "gate", ticket: .id, lane: $lid,
          why: "lane id `\($lid)` is not one `spawn-lane` accepts — a planner bug, not a lane failure" } ]
@@ -484,35 +477,25 @@ else
 # really in — and a lane spawned from the stale label would be working on a
 # ticket that has already left this step. (paid: the P63 shapes, four
 # stranded finishes in one build.)
-| (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids
-   + [$repairable_blockers[].id]) as $repairing
+| (([ ($sum.repairs // [])[] | .id ]) + $reported_block_ids) as $repairing
 | ([ ($sum.stranded // [])[] | ticket(.) | select(. != null)
      | select(.id as $i | ($repairing | index($i)) == null) ] | sort_by(.id)) as $stranded_candidates
 | ([ $stranded_candidates[] | select(.supervised_lease != null) ]) as $stranded_leased
 | ([ $stranded_candidates[] | select(.supervised_lease == null) ]) as $stranded
 
 # Two rejections mean stop, not respawn: round three needs diagnosis even when
-# the failure classes differ. The first failure after a supervised repair also
-# returns to diagnosis: silently starting a fresh blind implementation cycle
-# would discard the evidence that supervision was meant to accumulate.
-| ([ $stranded[]
-     | select((.rejections.total // 0) >= $rejection_cap
-              or ((.active_supervised_repair // null) != null
-                  and (.rejections.total // 0) >= 1)) ]) as $rejection_spent  # mutate:rejection-total-cap
+# the failure classes differ. Alternating labels are not evidence of healthy
+# convergence; JOR-220 reached round six by oscillating between an exact 204
+# contract, the central response guard, and ticket scope.
+| ([ $stranded[] | select((.rejections.total // 0) >= $rejection_cap) ]) as $rejection_spent  # mutate:rejection-total-cap
 | ([ $rejection_spent[]
-     | { step: "fill", kind: "diagnosis-hold", ticket: .id,
-         via: "lane.sh",
-         argv: ["diagnosis-hold", (.id | tostring),
-                "--if-current", .state,
-                "--expected-generation", (.rejections.generation // "")],
-         why: (if (.active_supervised_repair // null) != null
-                  and (.rejections.total // 0) < $rejection_cap
-               then "the first gate failure after supervised repair requires renewed diagnosis before more implementation"
-               else "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three requires supervised diagnosis before more implementation" end) } ])
+     | { step: "fill", kind: "transition", ticket: .id,
+         via: "lane.sh", argv: transition_argv(.id; "blocked"),
+         why: "\(.rejections.total) gate rejections reached the cap of \($rejection_cap) — round three needs diagnosis, rescope, or prerequisite work instead of another automatic guess",
+         needs_report: true } ])
   as $block_rejections
 
-| ([ $stranded[]
-     | select((.id as $id | any($rejection_spent[]; .id == $id)) | not) ]) as $rework
+| ([ $stranded[] | select((.rejections.total // 0) < $rejection_cap) ]) as $rework
 # Then the backlog. Ready means unblocked (every blocker issue closed, not
 # merely opened — auto-merge is async), unclaimed, and a member of this build;
 # `fix: true` tickets come first, because every open fix ticket holds an
@@ -602,8 +585,8 @@ else
   as $block_merge_cap
 | ([ $merge_available[] | select((.merge_attempts // 0) < $merge_cap and .merge_hold == null) ] | first)
   as $merge_head
-| ([ $gate_actions[] | select(.spawn.pregate == "ui") ] | length) as $planned_ui_gates
-| ($ui_pregate_usage + $repair_ui_count + $planned_ui_gates >= $ui_capacity) as $ui_reserved_after_gate
+| (any($gate_actions[]; .spawn.pregate == "ui")) as $planned_ui_gate
+| ($ui_pregate_occupied or $planned_ui_gate) as $ui_reserved_after_gate
 | (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1
        or (($merge_head | planned_pregate_tier) == "ui" and $ui_reserved_after_gate) then []
    else [ $merge_head
@@ -686,7 +669,7 @@ else
 # trailer.
 # =========================================================================
 
-| ([ ($block_overrun + $block_merge_cap)[]
+| ([ ($block_overrun + $block_rejections + $block_merge_cap)[]
      | { kind: "blocked-report", ticket: .ticket,
          why: .why,
          verb: "lane.sh blocked-report \(.ticket) --category <slug> (body on stdin), then the `transition` action above" } ])

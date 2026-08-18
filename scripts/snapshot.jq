@@ -151,7 +151,6 @@ include "lib";
     # single-quoted shell string, and one would end it mid-word.)
     def rejections_of($notes):
         verdicts_after_reset($notes) as $vs
-      | ($vs | map(select(.verdict == "FAIL")) | last) as $latest
       | ($vs | reverse
              | reduce .[] as $v ({run: 0, cls: null, stop: false};
                  if .stop then .
@@ -161,10 +160,7 @@ include "lib";
                  elif .cls == $v.class then .run += 1
                  else .stop = true end)) as $tail
       | { total: ($vs | map(select(.verdict == "FAIL")) | length),
-          last_class: $tail.cls, same_class_tail: $tail.run,
-          generation: active_fail_generation($notes),
-          latest: (if $latest == null then null
-                   else {at: $latest.at, sha: $latest.sha, class: $latest.class} end) };
+          last_class: $tail.cls, same_class_tail: $tail.run };
     # `merge_attempts_of` and `merge_hold_of` are in lib.jq now (P93: shared
     # with merge-queue.jq).
     # P78: the blocked report `lane.sh blocked-report` wrote — the one comment
@@ -207,20 +203,15 @@ include "lib";
          | sort_by([.at, -.i]) | last) as $r
       | if $r == null then null
         else
-          ($r.body
-           | (capture("<!-- orch-diagnosis-source state=(?<state>blocked|merge-queue|review|in-progress|ready-for-agent|unlabeled) generation=(?<generation>[A-Za-z0-9+/=]+) -->")
-              // null)) as $diagnosis_source
+          ([$notes[] | select((.body // "") | test("orch-unblock"))
+            | .created_at // ""] | sort | last) as $u
         | { at: $r.at,
             category: ($r.body | (capture("orch-blocked category=(?<c>[A-Za-z0-9._-]+)").c // null)),
             # The trailer is machinery, not report: a human reading this field
             # on a surface should see what the lane wrote and nothing else.
-            body: ($r.body
-                   | sub("\\n*<!-- orch-diagnosis-source [^>]*-->\\n*"; "")
-                   | sub("\\n*<!-- orch-blocked[^>]*-->\\n*"; "")
-                   | ltrimstr("\n") | rtrimstr("\n")),
-            diagnosis_source: $diagnosis_source,
+            body: ($r.body | sub("\\n*<!-- orch-blocked[^>]*-->\\n*"; "") | ltrimstr("\n") | rtrimstr("\n")),
             ticket_state: $ticket_state,
-            released: (repair_block_active($notes; $ticket_state; $r.at) | not) } # mutate:blocked-report-reset-cutoff
+            released: ($u != null and $u > $r.at) }
         end;
     # Which Loom tier this ticket's next IMPLEMENTATION job gets. Provider
     # execution profiles are resolved later, inside agent.sh.
@@ -382,13 +373,8 @@ include "lib";
             blocked_report: blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)),
             supervision_attention:
               (if ($lb | index("supervision::awaiting-human")) != null
-                  and ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).category // "") == "human-attention")
-                  and ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).released // true) == false)
                then {category: ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).category) // "human-attention"),
                      body: ((blocked_report_of((($N[$t.id | tostring]) // []); state_of($lb)).body) // null)}
-               elif ($lb | index("supervision::awaiting-human")) != null
-               then {category: "human-attention-incomplete",
-                     body: "Human-attention suppression is active, but its exact decision note is missing. The same live repair lane must finish that note; do not spawn another repair."}
                else null end),
             merge_attempts: merge_attempts_of((($N[$t.id | tostring]) // [])),
             merge_hold: merge_hold_of((($N[$t.id | tostring]) // []); $open_iids),
@@ -641,7 +627,6 @@ include "lib";
             # needs this immutable host-resource fact to avoid scheduling UI
             # work that is already guaranteed to be refused.
             ui_pregate_occupied: $ui_pregate_occupied,
-            ui_pregate_usage: $ui_pregate_usage,
             # Claimed but unworked: `in-progress`, yet no ALIVE lane carries
             # the ticket. This is exactly where a gate rejection lands a
             # ticket (verdict fail → in-progress, assignee kept) — and no

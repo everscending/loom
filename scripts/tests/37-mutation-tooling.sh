@@ -20,22 +20,26 @@ MUTATE="$(dirname "$TICK")/mutate.sh"
 # a loop whose ok-guard checks the per-iteration value, not just that the
 # variable survived the loop.
 #
-# Compose the banned tokens so the real-suite lint remains clean while the
-# generated fixture still contains the literal shapes the isolated scan must
-# catch.
+# NOTE for a human running `tick-test.sh --lint` over the real suite: this
+# file's own two planted lines below are TEXT lint-tests.sh cannot tell apart
+# from a real instance — they will show up in that scan too, as
+# `37-mutation-tooling.sh:26` and `:32`. That is correct, not a bug in the
+# scanner: the shape genuinely exists on those lines, planted on purpose. The
+# section that isolates the scan to `$LF` below is what actually proves
+# detection; the real-suite scan is a bonus data point, not this section's
+# evidence.
 LF="$T/lintfix"; mkdir -p "$LF"
-AND_OK='&& ok'; OR_OK='|| ok'
-cat > "$LF/planted.sh" <<EOF
+cat > "$LF/planted.sh" <<'EOF'
 #!/usr/bin/env bash
 # planted: ok on both sides of one &&/|| chain — reached either way
-[ -f "/nonexistent-for-lint-fixture" ] $AND_OK "still counted even if this branch is wrong" $OR_OK "always reached when the check is false"
+[ -f "/nonexistent-for-lint-fixture" ] && ok "still counted even if this branch is wrong" || ok "always reached when the check is false"
 
 # planted: ok guarded only by the loop variable's non-emptiness
 for widget in a b c; do
-    [ "\$widget" = "zzz-never" ] && bad "never happens in this fixture"
+    [ "$widget" = "zzz-never" ] && bad "never happens in this fixture"
 done
-[ -n "\${widget:-}" ] && ! [ -f "/nonexistent-marker-for-lint-fixture" ] \
-    $AND_OK "vacuous: widget is just the loop var, unrelated file never varies" \
+[ -n "${widget:-}" ] && ! [ -f "/nonexistent-marker-for-lint-fixture" ] \
+    && ok "vacuous: widget is just the loop var, unrelated file never varies" \
     || bad "unreachable"
 EOF
 cat > "$LF/legit.sh" <<'EOF'
@@ -116,8 +120,7 @@ p=$(_probe 0 "the copy's real stdout")
 # that adds this file (mutate.sh's own comment 3 says why: a fresh entry's
 # verdict is read once, not re-asserted here on every run).
 MF="$T/mutfix"; mkdir -p "$MF/src/tests"
-cp "$(dirname "$TICK")/tick-test.sh" "$(dirname "$TICK")/test-lib.sh" \
-   "$(dirname "$TICK")/host-admission.sh" "$MF/src/"
+cp "$(dirname "$TICK")/tick-test.sh" "$(dirname "$TICK")/test-lib.sh" "$MF/src/"
 printf '#!/usr/bin/env bash\nGUARD_OK=1  # mutate:demo-guard\n' > "$MF/src/tick.sh"
 chmod +x "$MF/src/tick.sh"
 printf 'demo-guard\ttick.sh\tdelete\n' > "$MF/registry.tsv"

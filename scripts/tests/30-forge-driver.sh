@@ -167,7 +167,6 @@ case "$1" in
   "epic":"Ledger","url":"u","project":1,"body":"## Risk tier\n\nlogic\n","updated_at":"2026-08-10T00:00:00Z"}]
 JSON
   ;;
-  board) exit 2 ;;
   *) echo '[]' ;;
 esac
 EOF

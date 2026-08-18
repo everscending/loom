@@ -113,7 +113,7 @@ admit_out=$("$TICK" spawn-lane gate-499 --no-tick --pregate ui \
   --cwd "$LOOM_REPO" -- sleep 30 2>&1) || admit_rc=$?
 gate_pid=$(cat "$LOOM_HOME/lanes/gate-499.pid" 2>/dev/null || true)
 if [ "$admit_rc" -ne 0 ] && [ -z "$gate_pid" ] \
-   && printf '%s' "$admit_out" | grep -q 'UI host capacity'; then
+   && printf '%s' "$admit_out" | grep -q 'UI host resource'; then
   ok "host probe: a durable Chromium probe reserves the shared UI host resource"
 else
   bad "host probe: a UI gate overlapped a queued Chromium probe (rc=$admit_rc pid=$gate_pid)"

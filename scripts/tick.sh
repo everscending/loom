@@ -121,13 +121,12 @@ GATE_LOCK_DIR="${LOOM_GATE_LOCK_DIR:-$LOOM_HOME/gate.lock.d}"
 # finishing lanes cannot both observe the last auxiliary slot as free. Queued
 # Codex launches count as reservations until the durable host starts them.
 AUX_LOCK_DIR="${LOOM_AUX_LOCK_DIR:-$LOOM_HOME/aux-admission.lock.d}"
-# A tick or continuation that arrives while a wave holds the lock used to be
-# discarded outright, and that is how build 2 ended: a gate exited at 23:36:03
-# during W13, the kick was dropped, and the loop never ran again — leaving a
-# ticket in `merge-queue`, unmerged. The request now leaves this note, and the
-# lock holder re-ticks once on its way out (P1). It is a single flag, not a
-# queue, so a burst of newly runnable work costs one extra wave rather than one
-# per request.
+# A tick that arrives while a wave holds the lock used to be discarded outright,
+# and that is how build 2 ended: a gate exited at 23:36:03 during W13, the kick
+# was dropped, and the loop never ran again — leaving a ticket in `merge-queue`,
+# unmerged. The skipped tick now leaves this note instead, and the lock holder
+# re-ticks once on its way out (P1). It is a single flag, not a queue, so a burst
+# of finishing lanes costs one extra wave rather than one per lane.
 PENDING_FILE="${LOOM_PENDING_FILE:-$LOOM_HOME/tick.pending}"
 # `start` is a human request to resume now. Its launchd RunAtLoad firing still
 # uses --auto so every later heartbeat keeps the normal pacing contract, but
@@ -140,14 +139,8 @@ START_KICK_FILE="${LOOM_START_KICK_FILE:-$LOOM_HOME/start.kick}"
 # without a finishing lane to issue `tick --from-lane`. Keep that state change
 # as a one-shot request for the ordinary heartbeat: it bypasses only the old
 # wave gap, never the loop-stopped or quiet/usage gates, and is consumed only
-# when a wave is admitted. The request also kicks the already-armed launchd
-# label once so "ordinary heartbeat" means now rather than up to 60s later;
-# the scheduler still owns every admission decision. This is plumbing, not
-# another start verb.
+# when a wave is admitted. This is scheduler plumbing, not another start verb.
 CONTINUATION_FILE="${LOOM_CONTINUATION_FILE:-$LOOM_HOME/continuation.request}"
-CONTINUATION_CLAIM_FILE="${LOOM_CONTINUATION_CLAIM_FILE:-$LOOM_HOME/continuation.claimed}"
-CONTINUATION_LOCK_DIR="${LOOM_CONTINUATION_LOCK_DIR:-$LOOM_HOME/continuation.lock.d}"
-CONTINUATION_EXIT_FILE="${LOOM_CONTINUATION_EXIT_FILE:-$LOOM_HOME/continuation.exiting}"
 LANES_DIR="$LOOM_HOME/lanes"
 LOGS_DIR="$LOOM_HOME/logs"
 # P82: a lane's brief lives HERE, never in the working tree it is about.
@@ -199,41 +192,6 @@ SNAP_BATCH="${SNAP_BATCH:-8}"
 # Absolute path to this script, so a lane can re-invoke it on completion
 # regardless of the cwd it exits in.
 SELF_PATH="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")"
-LOOM_RUNTIME_HOME="${LOOM_RUNTIME_HOME:-$HOME/.loom/runtime}"
-LOOM_RUNTIME_SELECTOR="${LOOM_RUNTIME_SELECTOR:-$LOOM_RUNTIME_HOME/consumers/$REPO_KEY.active}"
-LOOM_RUNTIME_LAUNCHER="${LOOM_RUNTIME_LAUNCHER:-$LOOM_RUNTIME_HOME/bin/loom-runtime}"
-export LOOM_RUNTIME_HOME LOOM_RUNTIME_SELECTOR LOOM_RUNTIME_LAUNCHER
-
-_valid_runtime_release() {
-    [ "${#1}" -eq 40 ] || return 1
-    case "$1" in *[!0-9a-f]*) return 1 ;; esac
-}
-
-_runtime_ready() {
-    [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]
-}
-
-_runtime_admission_enabled() {
-    _runtime_ready || {
-        [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ] \
-          && [ -x "${SELF_PATH%/*}/runtime.sh" ]
-    }
-}
-
-_runtime_install_unlock() {
-    [ "${_RUNTIME_INSTALL_LOCKED:-}" = 1 ] || return 0
-    rm -f "$LOOM_RUNTIME_HOME/publish.lock/pid" 2>/dev/null || true
-    rmdir "$LOOM_RUNTIME_HOME/publish.lock" 2>/dev/null || true
-    _RUNTIME_INSTALL_LOCKED=0
-}
-
-# Public commands enter the selected immutable release once one exists. The
-# runtime administration verb stays in the checkout so it can publish a new
-# committed tree rather than trying to publish the archive it is running from.
-if [ -z "${LOOM_RUNTIME_RELEASE:-}" ] && [ "${1:-}" != runtime ] \
-   && _runtime_ready; then
-    exec "$LOOM_RUNTIME_LAUNCHER" run -- tick "$@"
-fi
 # Sibling script, same seam pattern as LAUNCHCTL_CMD: `start` raises the herdr
 # viewer itself (see _raise_viewer), and the test suite must never open a real
 # pane.
@@ -269,13 +227,6 @@ LIB_SH="$LIB_DIR/lib.sh"
     || { echo "tick.sh: $LIB_SH is missing — it holds the shared derivations and ships beside tick.sh" >&2; exit 1; }
 . "$LIB_SH"
 DIE_RC=1   # lane.sh sets 2; the lib defaults to 1 but never leaves it to chance
-HOST_ADMISSION_SH="$LIB_DIR/host-admission.sh"
-_load_host_admission() {
-    command -v host_admission_product_allowed >/dev/null 2>&1 && return 0
-    [ -f "$HOST_ADMISSION_SH" ] \
-      || die "$HOST_ADMISSION_SH is missing — it owns heavyweight host admission"
-    . "$HOST_ADMISSION_SH"
-}
 
 # P86: every tracker read this file makes goes through the driver for the
 # repo's declared tracker, so `glab` is named in scripts/trackers/gitlab.sh and
@@ -1044,33 +995,6 @@ lock_acquire() {
     return 0
 }
 
-# A selector change and a new tick-lock acquisition cannot pass each other.
-# The publisher holds this same short lock while it checks live ABI pins and
-# swaps the selector; after the tick lock exists, compatibility sees it.
-runtime_admission_acquire() { # 0 acquired/not-needed, 1 publication held/error
-    local gate="$LOOM_RUNTIME_HOME/publish.lock"
-    if _runtime_admission_enabled; then
-        _lock_reserve "$gate" || return 2
-        _RUNTIME_TICK_GATE_LOCKED=1
-    fi
-}
-
-runtime_admission_release() {
-    [ "${_RUNTIME_TICK_GATE_LOCKED:-0}" = 1 ] || return 0
-    local gate="$LOOM_RUNTIME_HOME/publish.lock"
-    rm -f "$gate/pid" 2>/dev/null || true
-    rmdir "$gate" 2>/dev/null || true
-    _RUNTIME_TICK_GATE_LOCKED=0
-}
-
-runtime_tick_lock_acquire() { # 0 acquired, 1 wave held, 2 publication held/error
-    local rc=0
-    [ "${_RUNTIME_TICK_GATE_LOCKED:-0}" = 1 ] || runtime_admission_acquire || return 2
-    lock_acquire || rc=1
-    runtime_admission_release
-    return "$rc"
-}
-
 # Same rules, no EXIT trap: this lock outlives the process that takes it. It is
 # reserved here, stamped with the LANE's pid once the lane exists, and released
 # by the lane itself on exit. A lane killed outright leaves the directory
@@ -1133,23 +1057,15 @@ _aux_capacity_usage() { # live aux lanes + queued reservations, excluding the re
     printf '%s\n' "$((alive + reserved))"
 }
 
-_ui_capacity() {
-    local cap
-    cap=$(cfg ui_capacity 1)
-    case "$cap" in ''|*[!0-9]*|0) die "ui_capacity must be a positive integer, got '$cap'" ;; esac
-    printf '%s\n' "$cap"
-}
-
-_ui_pregate_usage() { # active browser phases + durable reservations
-    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}" count=0 seen=" "
+_ui_pregate_occupied() { # one shared UI host: active browser phase or durable reservation
+    local metadata live_id pid request queued_id drain_id="${LOOM_AUX_DRAIN_ID:-}"
     for metadata in "$LANES_DIR"/*.ui-resource; do
         [ -f "$metadata" ] || continue
         [ "$(cat "$metadata" 2>/dev/null || true)" = ui ] || continue
         live_id="${metadata##*/}"; live_id="${live_id%.ui-resource}"
         pid=$(cat "$LANES_DIR/$live_id.pid" 2>/dev/null || true)
         if _lane_process_alive "$live_id" "$pid"; then
-            case "$seen" in *" $live_id "*) ;; *) seen="$seen$live_id "; count=$((count + 1)) ;; esac
-            continue
+            return 0
         fi
         # Admission owns AUX_LOCK_DIR here, so no spawning process can be in
         # the metadata-before-pid window. Retire only a dead lane's stale hint.
@@ -1163,10 +1079,10 @@ _ui_pregate_usage() { # active browser phases + durable reservations
         if [ "$(cat "$request/pregate" 2>/dev/null || true)" = ui ] \
            || [ "$(cat "$request/reserve-ui" 2>/dev/null || true)" = 1 ] \
            || [ -s "$request/host-probe" ]; then
-            case "$seen" in *" $queued_id "*) ;; *) seen="$seen$queued_id "; count=$((count + 1)) ;; esac
+            return 0
         fi
     done
-    printf '%s\n' "$count"
+    return 1
 }
 
 cmd_release_ui_resource() { # <lane-id>; called by that lane after host UI work
@@ -1195,25 +1111,13 @@ _aux_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff,
     return 1
 }
 
-_ui_pregate_admission_refusal() { # <id> <from-lane> <used> <cap> — soft for handoff, retryable for drain
-    local id="$1" from="$2" used="$3" cap="$4"
-    echo "spawn-lane: UI host capacity full ($used of $cap held by UI pregates or browser probes) — not starting '$id'."
+_ui_pregate_admission_refusal() { # <id> <from-lane> — soft for handoff, retryable for drain
+    local id="$1" from="$2"
+    echo "spawn-lane: UI host resource (UI pregate or browser probe) is already reserved — not starting '$id'."
     if [ -n "$from" ]; then
         echo "  Successor handoff from '$from' is optional; the ordinary heartbeat retries after the current UI gate."
     fi
-    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy used "$used" cap "$cap"
-    [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
-    [ -n "$from" ] && return 0
-    return 1
-}
-
-_host_maintenance_admission_refusal() { # <id> <from-lane>
-    local id="$1" from="$2"
-    echo "spawn-lane: Loom runtime validation owns the heavyweight host resource — not starting '$id'."
-    if [ -n "$from" ]; then
-        echo "  The ordinary heartbeat retries after runtime validation releases the host."
-    fi
-    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason host_maintenance_busy
+    _ev lane_chain_skipped id "$id" from "${from:-scheduler}" reason ui_pregate_busy
     [ "${LOOM_AUX_DRAIN_ID:-}" != "$id" ] || return 75
     [ -n "$from" ] && return 0
     return 1
@@ -1649,24 +1553,23 @@ _repair_lease_ensure_locked() { # <ticket> <repair-lane>
 }
 
 _repair_spawn_authority_locked() { # <ticket> <repair-lane> <block-token>
-    local iid="$1" owner="$2" token="$3" issue notes state jqd
+    local iid="$1" owner="$2" token="$3" issue notes latest
     [ -n "$token" ] \
       || die "spawn-lane: '$owner' is missing its frozen repair block token"
     issue=$("$TRACKER_SH" issue "$iid" 2>/dev/null) \
       || die "spawn-lane: cannot verify current blocked state for repair ticket #$iid"
-    printf '%s' "$issue" | jq -e '(.state // "open") == "open"' >/dev/null 2>&1 \
-      || die "spawn-lane: repair ticket #$iid is closed; discard the stale plan"
-    jqd="$(_jq_lib_dir "$(dirname "$SELF_PATH")")"
-    state=$(printf '%s' "$issue" | jq -L "$jqd" -r 'include "lib"; state_of(.labels // []) // "unlabeled"')
-    notes=$("$TRACKER_SH" issue-notes "$iid" --limit "$(_ticket_notes_limit)" 2>/dev/null) \
+    printf '%s' "$issue" | jq -e '
+      (.state // "open") == "open"
+      and (((.labels // []) | index("blocked")) != null)
+    ' >/dev/null 2>&1 \
+      || die "spawn-lane: repair ticket #$iid is no longer blocked; discard the stale plan"
+    notes=$("$TRACKER_SH" issue-notes "$iid" --limit 30 2>/dev/null) \
       || die "spawn-lane: cannot verify current block generation for repair ticket #$iid"
-    printf '%s' "$notes" | jq -L "$jqd" -e --arg state "$state" --arg token "$token" '
-      include "lib";
-      repair_block_active(.; $state; $token)
-      and ($state == "blocked"
-           or any(.[]; (.created_at // "") == $token
-                      and ((.body // "") | test("<!-- orch-diagnosis-source "))))' >/dev/null 2>&1 \
-      || die "spawn-lane: repair ticket #$iid no longer has the exact active repair block planned at '$token'; replan before acquiring a lease"
+    latest=$(printf '%s' "$notes" | jq -r '
+      [.[] | select((.body // "") | test("<!-- orch-blocked"))]
+      | sort_by(.created_at // "") | last | .created_at // empty')
+    [ -n "$latest" ] && [ "$latest" = "$token" ] \
+      || die "spawn-lane: repair ticket #$iid block generation changed (planned '$token', current '${latest:-none}'); replan before acquiring a lease"
 }
 
 cmd_repair_lease_release() { # <ticket>; internal repair-lane epilogue
@@ -1929,56 +1832,8 @@ cmd_resume() {
     echo "resume: consecutive-wave-failure count reset"
 }
 
-_continuation_lock_acquire() {
-    local attempt rc
-    for attempt in $(seq 1 200); do
-        rc=0; _lock_reserve "$CONTINUATION_LOCK_DIR" || rc=$?
-        case "$rc" in
-            0) return 0 ;;
-            1) sleep 0.01 ;;
-            *) die "continuation: cannot reserve the request lock safely" ;;
-        esac
-    done
-    die "continuation: request lock remained busy"
-}
-
-_continuation_lock_release() {
-    rm -f "$CONTINUATION_LOCK_DIR/pid" 2>/dev/null \
-        && rmdir "$CONTINUATION_LOCK_DIR" 2>/dev/null \
-        || die "continuation: cannot release the request lock safely"
-}
-
-_continuation_claim() { # [own-pending] — prints 1 when this tick owns a generation
-    local own_pending="${1:-0}" claimed=0
-    _continuation_lock_acquire
-    if [ -f "$CONTINUATION_CLAIM_FILE" ]; then
-        claimed=1
-    elif [ -f "$CONTINUATION_FILE" ]; then
-        if ! mv "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE"; then # mutate:continuation-claim
-            _continuation_lock_release
-            die "continuation: cannot claim the pending request"
-        fi
-        claimed=1
-    fi
-    # At successful tick admission, a pending marker belongs to this tick only
-    # when no later continuation.request remains. Keep the marker when an older
-    # claim prevented this pass from owning the next generation; EXIT must
-    # replay it. Request creation and this decision share the same lock.
-    if [ "$own_pending" = 1 ] && [ ! -f "$CONTINUATION_FILE" ]; then
-        rm -f "$PENDING_FILE" # mutate:continuation-pending-owner
-    fi
-    _continuation_lock_release
-    printf '%s\n' "$claimed"
-}
-
-_continuation_consume() {
-    _continuation_lock_acquire
-    rm -f "$CONTINUATION_CLAIM_FILE"
-    _continuation_lock_release
-}
-
 cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticket>
-    local reason="${1:-}" ticket="${2:-}" first_request=0 exit_owner="" attempt
+    local reason="${1:-}" ticket="${2:-}"
     [ "$#" -eq 2 ] \
         || die "request-continuation: usage: request-continuation hold-release|supervised-release|fix-ticket <ticket>"
     case "$reason" in
@@ -1986,66 +1841,8 @@ cmd_request_continuation() { # hold-release|supervised-release|fix-ticket <ticke
         *) die "request-continuation: unknown reason '$reason'" ;;
     esac
     case "$ticket" in ''|*[!0-9]*) die "request-continuation: ticket must be numeric" ;; esac
-    _continuation_lock_acquire
-    exit_owner=$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")
-    if ! _lock_owner_valid "$exit_owner" \
-       || [ -z "$exit_owner" ] || ! kill -0 "$exit_owner" 2>/dev/null; then
-        exit_owner=""
-        rm -f "$CONTINUATION_EXIT_FILE"
-    fi
-    if [ ! -f "$CONTINUATION_FILE" ]; then
-        if ! : > "$CONTINUATION_FILE"; then
-            _continuation_lock_release
-            die "request-continuation: cannot record the durable request"
-        fi
-        first_request=1
-    fi
-    : > "$PENDING_FILE"
-    _continuation_lock_release
+    : > "$CONTINUATION_FILE"
     _ev continuation_requested reason "$reason" ticket "$ticket"
-    # The marker is the durable request and the ordinary scheduler remains the
-    # sole admission owner. Wake that existing launchd label once when the
-    # marker changes absent -> present; duplicate Mend writes coalesce without
-    # creating another scheduler, and a stopped build keeps the request for an
-    # explicit start. Never use `kickstart -k`: replacing an in-flight
-    # heartbeat would trade the old delay for lost scheduler work.
-    [ "$first_request" -eq 1 ] || return 0
-    if _loop_stopped; then
-        _ev continuation_wake_deferred reason stopped
-        return 0
-    fi
-    if _agent_armed; then
-        # The previous heartbeat may have completed its final pending check but
-        # not exited its launchd job yet. A non-replacing kick in that window
-        # starts nothing, so wait for the exact pid it published at the exit
-        # boundary. The durable request/pending markers already survive if the
-        # short wait cannot prove process death.
-        if [ -n "$exit_owner" ]; then
-            for attempt in $(seq 1 500); do
-                kill -0 "$exit_owner" 2>/dev/null || break
-                sleep 0.01
-            done
-            if kill -0 "$exit_owner" 2>/dev/null; then
-                _ev continuation_wake_deferred reason exiting
-                return 0
-            fi
-            _continuation_lock_acquire
-            if [ "$(cat "$CONTINUATION_EXIT_FILE" 2>/dev/null || echo "")" = "$exit_owner" ]; then
-                rm -f "$CONTINUATION_EXIT_FILE"
-            fi
-            _continuation_lock_release
-        fi
-        if "$LAUNCHCTL_CMD" kickstart "gui/$(id -u)/$LOOM_LABEL" >/dev/null 2>&1; then
-            _ev continuation_wake_requested reason "$reason" ticket "$ticket"
-        else
-            # The label may already be running or this process may be outside
-            # its GUI domain. Either way the marker survives for the 60s
-            # heartbeat; an immediate wake is an optimization, never state.
-            _ev continuation_wake_deferred reason kickstart-refused
-        fi
-    else
-        _ev continuation_wake_deferred reason unarmed
-    fi
 }
 
 # --- subcommands ----------------------------------------------------------
@@ -2091,23 +1888,13 @@ _start_handoff_tick() {
 _tick_exit() {
     local rc=$?
     rm -rf "$LOCK_DIR"
-    # Serialize the last pending observation with request-continuation. When
-    # there is no replay, publish the exact exiting pid before releasing: a
-    # late writer can record durable work now but delays its ordinary kick
-    # until launchd can actually start the job again.
-    _continuation_lock_acquire
     if [ -f "$PENDING_FILE" ]; then
         rm -f "$PENDING_FILE"
-        rm -f "$CONTINUATION_EXIT_FILE"
-        _continuation_lock_release
         _ev tick_replayed
-        echo "tick: work became runnable during this wave — re-ticking once"
+        echo "tick: a lane finished during this wave — re-ticking once"
         _start_handoff_tick
-    else
-        printf '%s\n' "$$" > "$CONTINUATION_EXIT_FILE"
-        _continuation_lock_release
     fi
-    return $rc # mutate:continuation-exit-boundary
+    return $rc
 }
 
 # --- the loop switch and the wave gap ------------------------------------
@@ -2210,7 +1997,7 @@ cmd_tick() {
     _require_tracker "$REPO_ROOT" tick >/dev/null
     _require_forge "$REPO_ROOT" tick >/dev/null
     _refuse_legacy_runtime_config
-    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 pending_kick=0 provider="${LOOM_PROVIDER:-}"
+    local mode="manual" quiet="" tick_go=0 start_kick=0 continuation_kick=0 cleanup_kick=0 provider="${LOOM_PROVIDER:-}"
     _tick_gates "$@"
     [ "$tick_go" -eq 1 ] || return 0
     _launch_wave
@@ -2275,12 +2062,6 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # the firing after which nothing else may fire. Cheap: one file test once
     # armed.
     _ensure_armed
-    if ! runtime_admission_acquire; then
-        _ev tick_skipped reason runtime_publication
-        echo "tick: runtime publication is in progress — watched, no wave"
-        return 0
-    fi
-    trap runtime_admission_release EXIT
     # Queue draining is work already scheduled, not a new paid wave. It must
     # happen before the auto-wave gap so an interactive Codex tick can hand
     # workers to the very next durable heartbeat without waiting 10–20m.
@@ -2295,21 +2076,13 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
           || die "tick: one or more queued lanes failed at the durable host boundary"
     fi
     [ ! -f "$START_KICK_FILE" ] || start_kick=1
-    continuation_kick=$(_continuation_claim)
-    [ ! -f "$PENDING_FILE" ] || pending_kick=1
-    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && [ "$pending_kick" -eq 0 ] && ! _wave_gap_ok; then
+    [ ! -f "$CONTINUATION_FILE" ] || continuation_kick=1
+    if [ "$mode" = auto ] && [ "$start_kick" -eq 0 ] && [ "$continuation_kick" -eq 0 ] && [ "$cleanup_kick" -eq 0 ] && ! _wave_gap_ok; then
         echo "tick: last wave was under $(cfg min_wave_gap_minutes 10)m ago — watched, no wave"
         _ev tick_skipped reason wave_gap
         return 0
     fi
-    local tick_lock_rc=0
-    runtime_tick_lock_acquire || tick_lock_rc=$?
-    if [ "$tick_lock_rc" -eq 2 ]; then
-        _ev tick_skipped reason runtime_publication
-        echo "tick: runtime publication is in progress — watched, no wave"
-        return 0
-    fi
-    if [ "$tick_lock_rc" -ne 0 ]; then
+    if ! lock_acquire; then
         # The pending file is a FLAG, not a counter: every tick after the first
         # during one wave sets something already set, and only one replay
         # follows however many arrive (155 lock_held ticks produced 79 replays
@@ -2322,10 +2095,6 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
         echo "tick: wave already running — noted, the running wave will re-tick on exit"
         exit 0
     fi
-    # Recheck under the same lock request-continuation uses: a request can land
-    # after the pre-gap claim. Own it now when possible, or retain tick.pending
-    # when an older claim means the later generation needs an EXIT replay.
-    continuation_kick=$(_continuation_claim 1)
     trap _tick_exit EXIT
     _usage_gate || exit 0
     _bootstrap_once
@@ -2373,7 +2142,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
                  # No scheduling agent is needed to rediscover this choice:
                  # the snapshot plan already names exact repair lanes.
                  [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-                 [ "$continuation_kick" -eq 0 ] || _continuation_consume
+                 [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
                  _dispatch_start_supervision
                  _ev tick_deterministic_supervision
                  return 0 ;;
@@ -2390,7 +2159,7 @@ _tick_gates() { # reads cmd_tick's "$@"; sets, in its caller's scope: mode,
     # Consume only at the cost boundary. A start kick that met a lock, a usage
     # pause, or a quiet-board refusal must survive for the next heartbeat.
     [ "$start_kick" -eq 0 ] || rm -f "$START_KICK_FILE"
-    [ "$continuation_kick" -eq 0 ] || _continuation_consume
+    [ "$continuation_kick" -eq 0 ] || rm -f "$CONTINUATION_FILE"
     tick_go=1
 }
 
@@ -2636,11 +2405,7 @@ _launch_wave() { # the spend half of cmd_tick: prompt assembly through the
     # "repo was never bootstrapped" (build-1 2026-08-02: the recovery wave
     # concluded exactly that, asked two questions to nobody, and exited having
     # harvested nothing — stalling the build).
-    local wave_entry="/loom tick"
-    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}"; then
-      wave_entry="Loom scheduling contract pinned to runtime $LOOM_RUNTIME_RELEASE."
-    fi
-    LOOM_WAVE_PROMPT="$wave_entry
+    LOOM_WAVE_PROMPT="/loom tick
 
 Wave context from tick.sh — trust it over rediscovery:
 - repo root: $REPO_ROOT (this repo IS loom-managed; bootstrap already ran)
@@ -2654,11 +2419,6 @@ Wave context from tick.sh — trust it over rediscovery:
     export LOOM_WAVE_PROMPT
     local wave_brief="$LOOM_SCRATCH/wave.md"
     printf '%s\n' "$LOOM_WAVE_PROMPT" > "$wave_brief"
-    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}" \
-       && [ -f "${LOOM_RUNTIME_ROOT:-}/SKILL.md" ]; then
-        printf '\n## Authoritative pinned Loom contract\n\n' >> "$wave_brief"
-        cat "$LOOM_RUNTIME_ROOT/SKILL.md" >> "$wave_brief"
-    fi
     # Seconds alone collided when two test/manual ticks began in one second:
     # the later limit parser inherited reset_at=1 from the earlier log and
     # treated an expired timestamp as a fresh pause (full-suite run 2026-08-15).
@@ -2772,7 +2532,6 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
     printf '%s\n' "$repair_block_token" > "$request/repair-block-token"
     printf '%s\n' "$merge_lock" > "$request/merge-lock"
     printf '%s\n' "$on_done" > "$request/on-done"
-    printf '%s\n' "${LOOM_RUNTIME_RELEASE:-legacy}" > "$request/runtime-release"
     if [ "$(_lane_type "$id")" = merge ]; then
         queued_head=$(git -C "$abs" rev-parse --verify 'HEAD^{commit}' 2>/dev/null || true)
         [ -n "$queued_head" ] \
@@ -2797,7 +2556,7 @@ _queue_lane_launch() { # caller scope: id/provider/job/tier/abs/brief/pregate/ho
 }
 
 _drain_lane_launches() {
-    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done expected_head runtime_release launch_rc rc=0
+    local request name launching id provider job tier cwd pregate host_probe reserve_ui repair_block_token merge_lock on_done expected_head launch_rc rc=0
     for request in "$LANE_LAUNCH_DIR"/request-*; do
         [ -d "$request" ] || continue
         name="${request##*/request-}"
@@ -2817,7 +2576,6 @@ _drain_lane_launches() {
         merge_lock=$(cat "$launching/merge-lock" 2>/dev/null || true)
         on_done=$(cat "$launching/on-done" 2>/dev/null || true)
         expected_head=$(cat "$launching/expected-head" 2>/dev/null || true)
-        runtime_release=$(cat "$launching/runtime-release" 2>/dev/null || true)
         local args=("$id" --provider "$provider" --job "$job" --tier "$tier" \
                     --brief "$launching/brief.md" --cwd "$cwd")
         [ -z "$pregate" ] || args+=(--pregate "$pregate")
@@ -2828,17 +2586,8 @@ _drain_lane_launches() {
         [ "$on_done" = 0 ] && args+=(--no-tick)
         [ -z "$expected_head" ] || args+=(--expected-head "$expected_head")
         launch_rc=0
-        if _valid_runtime_release "$runtime_release" && [ -x "$LOOM_RUNTIME_LAUNCHER" ]; then
-            LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
-              "$LOOM_RUNTIME_LAUNCHER" run --release "$runtime_release" -- tick spawn-lane "${args[@]}" \
-              || launch_rc=$?
-        elif [ "$runtime_release" = legacy ] && [ ! -f "$LOOM_RUNTIME_SELECTOR" ]; then
-            LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
-              "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
-        else
-            echo "tick: deferred host launch ${id:-unknown} has no trusted creator release" >&2
-            launch_rc=1
-        fi
+        LOOM_DEFER_LANE_LAUNCH= LOOM_AUX_DRAIN_ID="$id" \
+          "$SELF_PATH" spawn-lane "${args[@]}" || launch_rc=$?
         if [ "$launch_rc" -eq 0 ]; then
             rm -rf "$launching"
         elif [ "$launch_rc" -eq 75 ]; then
@@ -4020,7 +3769,7 @@ _cmd_spawn_lane() {
             fi
             die "spawn-lane: auxiliary admission is busy — retry '$id' on the next heartbeat"
         fi
-        trap 'command -v host_admission_product_unlock >/dev/null 2>&1 && host_admission_product_unlock >/dev/null 2>&1 || true; rm -rf "$AUX_LOCK_DIR"' EXIT
+        trap 'rm -rf "$AUX_LOCK_DIR"' EXIT
         local aux_cap aux_used aux_source_pid="" aux_rc=0
         # An aux-to-aux successor replaces the caller's own slot. Provider
         # sessions must reserve that successor before they return to the host
@@ -4044,32 +3793,14 @@ _cmd_spawn_lane() {
                 return "$aux_rc"
             fi
         fi
-        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
-            local host_admission_rc=0 host_admission_root product_home product_key
-            _load_host_admission
-            host_admission_root=$(host_admission_home)
-            product_home=$(cd "$LOOM_HOME" 2>/dev/null && pwd -P) \
-              || die "spawn-lane: cannot resolve product host state '$LOOM_HOME'"
-            product_key="product-$(printf '%s' "$product_home" | cksum | cut -d' ' -f1)"
-            host_admission_product_acquire "$host_admission_root" "$product_key" "$product_home" \
-              || host_admission_rc=$?
-            case "$host_admission_rc" in
-                1) _host_maintenance_admission_refusal "$id" "$handoff_from" || aux_rc=$?; return "$aux_rc" ;;
-                2) die "spawn-lane: heavyweight host admission state is unreadable — refusing '$id'" ;;
-            esac
-        fi
         # UI pregates share identity fixtures and other host-scoped state.
         # Reserve that one resource before a paid worker exists: a Codex
         # handoff lives in the durable queue, while Claude/direct hosts record
         # the pregate beside the live lane. API pregates and non-UI lanes do
         # not enter this resource-specific admission path.
-        if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
-            local ui_cap ui_used
-            ui_cap=$(_ui_capacity); ui_used=$(_ui_pregate_usage)
-            if [ "$ui_used" -ge "$ui_cap" ]; then
-                _ui_pregate_admission_refusal "$id" "$handoff_from" "$ui_used" "$ui_cap" || aux_rc=$?
-                return "$aux_rc"
-            fi
+        if { [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; } && _ui_pregate_occupied; then
+            _ui_pregate_admission_refusal "$id" "$handoff_from" || aux_rc=$?
+            return "$aux_rc"
         fi
     fi
     # The lane's own id, inherited by everything it runs — including the
@@ -4115,8 +3846,6 @@ _cmd_spawn_lane() {
     if [ -n "$provider" ] \
        && { [ "${LOOM_DEFER_LANE_LAUNCH:-}" = 1 ] || _codex_host_is_ephemeral; }; then
         _queue_lane_launch
-        command -v host_admission_product_unlock >/dev/null 2>&1 \
-          && host_admission_product_unlock
         return 0
     fi
     # D-TICK-27: evidence produced by this run belongs to the commit present at
@@ -4276,11 +4005,6 @@ _cmd_spawn_lane() {
     else
         rm -f "$LANES_DIR/$id.head"
     fi
-    if _valid_runtime_release "${LOOM_RUNTIME_RELEASE:-}"; then
-        printf '%s\n' "$LOOM_RUNTIME_RELEASE" > "$LANES_DIR/$id.release"
-    else
-        rm -f "$LANES_DIR/$id.release"
-    fi
     # The log redirect is attached to the subshell, so it resolves before the
     # cd — a relative LOOM_HOME cannot send a lane's log somewhere else. With a
     # stream, stdout goes to the .jsonl and stderr stays on the .log, so a
@@ -4314,9 +4038,6 @@ _cmd_spawn_lane() {
               "HOME=${HOME:-}" "PATH=$PATH" "TMPDIR=${TMPDIR:-/tmp}" \
               "PORT=$PORT" "APP_BASE_URL=$APP_BASE_URL" \
               "LOOM_REPO=$REPO_ROOT" "LOOM_HOME=$LOOM_HOME" "LOOM_PROVIDER=${LOOM_PROVIDER:-}" \
-              "LOOM_RUNTIME_HOME=$LOOM_RUNTIME_HOME" "LOOM_RUNTIME_SELECTOR=$LOOM_RUNTIME_SELECTOR" \
-              "LOOM_RUNTIME_LAUNCHER=$LOOM_RUNTIME_LAUNCHER" "LOOM_RUNTIME_RELEASE=${LOOM_RUNTIME_RELEASE:-}" \
-              "LOOM_RUNTIME_ROOT=${LOOM_RUNTIME_ROOT:-}" \
               "LOOM_LANE_ID=$id" "LOOM_LANE_CWD=$abs" "LOOM_SCRATCH=$LOOM_SCRATCH" \
               "LOOM_LANE_JSONL=${LOOM_LANE_JSONL:-}" "LOOM_LANE_LAUNCHER=launchd" \
               "LOOM_GLOBAL_CONFIG=${LOOM_GLOBAL_CONFIG:-}" "LOOM_CONFIG=${LOOM_CONFIG:-}" \
@@ -4331,7 +4052,7 @@ _cmd_spawn_lane() {
             printf '%s\n' "$launch_label" > "$LANES_DIR/$id.launchd"
         else
             rm -f "$launch_plist" "$LANES_DIR/$id.port" "$LANES_DIR/$id.cwd" \
-                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" "$LANES_DIR/$id.release" \
+                  "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
                   "$LANES_DIR/$id.host-probe.json"
             [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
             [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
@@ -4350,15 +4071,9 @@ _cmd_spawn_lane() {
         [ "$merge_lock" -eq 0 ] || rm -rf "$MERGE_LOCK_DIR"
         [ -z "$gate_lock_key" ] || rm -rf "$GATE_LOCK_DIR/$gate_lock_key"
         rm -f "$LANES_DIR/$id.pregate" "$LANES_DIR/$id.ui-resource" "$LANES_DIR/$id.head" \
-              "$LANES_DIR/$id.host-probe.json" "$LANES_DIR/$id.release"
+              "$LANES_DIR/$id.host-probe.json"
         echo "spawn-lane: supervised lane '$id' never reported its pid" >&2
         return 1
-    fi
-    # The UI marker and its live PID form one host claim. Keep the global
-    # admission lock until both are durable so maintenance can only observe
-    # the complete pair; launch failures release through the EXIT trap.
-    if [ "$pregate" = ui ] || [ -n "$host_probe" ] || [ "$reserve_ui" -eq 1 ]; then
-        host_admission_product_unlock
     fi
     _ev lane_spawn id "$id" type "$(_lane_type "$id")" job "${job:-custom}" \
         provider "${provider:-custom}" tier "$lane_tier" \
@@ -4965,7 +4680,7 @@ cmd_clear_lane() {
     rm -f "$LANES_DIR/$1.pid" "$LANES_DIR/$1.rc" "$LANES_DIR/$1.outcome" "$LANES_DIR/$1.start" \
           "$LANES_DIR/$1.progress" "$LANES_DIR/$1.stale-notified" "$LANES_DIR/$1.port" \
           "$LANES_DIR/$1.cwd" "$LANES_DIR/$1.pregate" "$LANES_DIR/$1.ui-resource" "$LANES_DIR/$1.head" \
-          "$LANES_DIR/$1.host-probe.json" "$LANES_DIR/$1.release" "$launch_marker" "$launch_plist"
+          "$LANES_DIR/$1.host-probe.json" "$launch_marker" "$launch_plist"
     echo "lane $1: cleared"
 }
 
@@ -5261,10 +4976,10 @@ cmd_snapshot() {
     #
     # A tracker that can return the whole build — every member's blocking edges
     # and comment thread nested inside one list query — makes the entire
-    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot
-    # and answers 2, the contract's unsupported-capability result. Only that
-    # result falls back: a supported driver's failed or malformed read cannot
-    # safely yield to an independently populated ticket universe.
+    # per-ticket fan-out below unnecessary. Linear can (`board`); GitLab cannot,
+    # and answers non-zero, which is exactly the capability probe. So this is a
+    # fast path with the OLD path as its fallback, not a replacement: anything
+    # that goes wrong here costs one wasted call and the fan-out still runs.
     #
     # Why it matters more than wall clock: Linear meters 2,500 requests an hour
     # against 3,000,000 complexity points, so the fan-out spends the scarce
@@ -5272,22 +4987,10 @@ cmd_snapshot() {
     # requests before, 4 after, identical output. *(paid: an hour's quota gone
     # to 26 snapshots of a board that had barely moved, which then blocked an
     # unrelated publish for an hour.)*
-    local batched=false board_rc why
-    if [ -n "$label" ]; then
-        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err"; then
-            board_rc=0
-        else
-            board_rc=$?
-        fi
-        if [ "$board_rc" = 0 ]; then
-            jq -e 'type == "array"' "$SNAP_TMP/board.json" >/dev/null 2>&1 \
-                || die "snapshot: batched board read was not a JSON array for $label — refusing partial population"
-            if ! jq -e -s --arg l "$label" '
-                ([.[0][] | select((.labels // []) | index($l)) | .id] | sort)
-                == ([.[1][].id] | sort)
-              ' "$SNAP_TMP/open.json" "$SNAP_TMP/board.json" >/dev/null 2>&1; then
-                die "snapshot: foundational and batched ticket populations disagree for $label — refusing partial population"
-            fi
+    local batched=false
+    if [ -n "$label" ] && [ -n "$member_iids" ]; then
+        if "$TRACKER_SH" board --label "$label" > "$SNAP_TMP/board.json" 2>"$SNAP_TMP/board.err" \
+           && jq -e 'type == "array" and length > 0' "$SNAP_TMP/board.json" >/dev/null 2>&1; then
             batched=true
             for iid in $member_iids; do
                 jq -c --argjson i "$iid" \
@@ -5299,9 +5002,6 @@ cmd_snapshot() {
                     '[ .[] | select(.id == $i) ][0].notes // []' "$SNAP_TMP/board.json" \
                     > "$SNAP_TMP/tnotes-$iid.json" || printf '[]\n' > "$SNAP_TMP/tnotes-$iid.json"
             done
-        elif [ "$board_rc" != 2 ]; then
-            why=$(head -1 "$SNAP_TMP/board.err" 2>/dev/null | tr -d '\n')
-            die "snapshot: batched board read failed for $label — ${why:-driver exited $board_rc}; refusing partial population"
         fi
         rm -f "$SNAP_TMP/board.err"
     fi
@@ -5320,7 +5020,7 @@ cmd_snapshot() {
     done
     $batched || for iid in $review_iids; do
         ( _snap_api "$SNAP_TMP/tnotes-$iid.json" "issue #$iid comments" \
-            -- issue-notes "$iid" --limit "$(_ticket_notes_limit)" ) &
+            -- issue-notes "$iid" --limit 30 ) &
         _snap_batch_gate
     done
     if [ -n "$build_iid" ]; then
@@ -5366,20 +5066,16 @@ cmd_snapshot() {
     # closed. Resolution is the wave cadence, which is honest and enough.
     [ -n "$label" ] && printf '%s\n' "$label" > "$BUILD_LABEL_CACHE"
 
-    local config_json ui_pregate_occupied=false ui_pregate_usage ui_capacity
-    ui_capacity=$(_ui_capacity)
-    ui_pregate_usage=$(_ui_pregate_usage)
+    local config_json ui_pregate_occupied=false
     config_json=$(jq -n \
         --arg max_lanes "$(cfg max_lanes 4)" --arg rejection_cap "$(cfg rejection_cap 2)" \
         --arg crash_cap "$(cfg crash_cap 2)" --arg stale "$(cfg heartbeat_stale_minutes 30)" \
         --arg merge_attempt_cap "$(cfg merge_attempt_cap 2)" \
         --arg lane_turn_cap "$(cfg lane_turn_cap 150)" \
         --arg base "$(cfg base '')" --arg max_aux "$(cfg max_aux_lanes 4)" \
-        --arg ui_capacity "$ui_capacity" \
         --arg lane_tier "$(_tier_cfg lane_tier medium)" --arg rework_tier "$(_tier_cfg rework_tier high)" \
         '{ max_lanes: ($max_lanes | tonumber? // $max_lanes),
            max_aux_lanes: ($max_aux | tonumber? // $max_aux),
-           ui_capacity: ($ui_capacity | tonumber? // $ui_capacity),
            rejection_cap: ($rejection_cap | tonumber? // $rejection_cap),
            crash_cap: ($crash_cap | tonumber? // $crash_cap),
            merge_attempt_cap: ($merge_attempt_cap | tonumber? // $merge_attempt_cap),
@@ -5393,7 +5089,7 @@ cmd_snapshot() {
     # valid, unexpired leases are represented; an expired supervisor process
     # cannot wedge scheduling and snapshot remains a read-only verb.
     _supervised_leases_json > "$SNAP_TMP/supervised-leases.json"
-    if [ "$ui_pregate_usage" -ge "$ui_capacity" ]; then ui_pregate_occupied=true; fi
+    if _ui_pregate_occupied; then ui_pregate_occupied=true; fi
 
     # -- Stage 3: assemble. Every derived field is a pure function of fields
     # already in this document — nothing independently sourced.
@@ -5410,7 +5106,6 @@ cmd_snapshot() {
         --arg label "$label" --arg build_iid "$build_iid" \
         --arg merge_owner "$(_merge_lock_owner)" \
         --argjson brief "$brief" --argjson ui_pregate_occupied "$ui_pregate_occupied" \
-        --argjson ui_pregate_usage "$ui_pregate_usage" \
         -f "$SNAP_JQ"
 
     # The retro record is derived from the finished snapshot, never recomputed
@@ -5480,7 +5175,7 @@ cmd_snapshot_merge_queue() {
                 --forge -- issue-mrs "$iid" ) &
             _snap_batch_gate
             ( _snap_api "$SNAP_QTMP/notes-$iid.json" "issue #$iid comments" \
-                -- issue-notes "$iid" --limit "$(_ticket_notes_limit)" ) &
+                -- issue-notes "$iid" --limit 30 ) &
             _snap_batch_gate
         done
         wait || true
@@ -5709,7 +5404,7 @@ PLIST_DIR="${LOOM_PLIST_DIR:-$HOME/Library/LaunchAgents}"
 HEARTBEAT_INTERVAL=60
 
 _write_plist() {  # _write_plist <path> <interval>
-    local path="$1" interval="$2" provider="${3:-${LOOM_PROVIDER:-}}" b d toolpath="" program_args
+    local path="$1" interval="$2" provider="${3:-${LOOM_PROVIDER:-}}" b d toolpath=""
     [ -n "$provider" ] || die "install: provider is required before writing the scheduler"
     "$AGENT_SH" detect --provider "$provider" >/dev/null \
       || die "install: no registered adapter for '$provider'"
@@ -5720,11 +5415,6 @@ _write_plist() {  # _write_plist <path> <interval>
         d="$(command -v "$b" 2>/dev/null)" && toolpath="$toolpath:$(dirname "$d")"
     done
     local pathval="${toolpath#:}:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-    if [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]; then
-        program_args="<array><string>$LOOM_RUNTIME_LAUNCHER</string><string>run</string><string>--</string><string>tick</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>"
-    else
-        program_args="<array><string>$SELF_PATH</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>"
-    fi
     cat > "$path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -5732,14 +5422,11 @@ _write_plist() {  # _write_plist <path> <interval>
 <dict>
     <key>Label</key><string>$LOOM_LABEL</string>
     <key>ProgramArguments</key>
-    $program_args
+    <array><string>$SELF_PATH</string><string>tick</string><string>--auto</string><string>--provider</string><string>$provider</string></array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>LOOM_REPO</key><string>$REPO_ROOT</string>
         <key>LOOM_HOME</key><string>$LOOM_HOME</string>
-        <key>LOOM_RUNTIME_HOME</key><string>$LOOM_RUNTIME_HOME</string>
-        <key>LOOM_RUNTIME_SELECTOR</key><string>$LOOM_RUNTIME_SELECTOR</string>
-        <key>LOOM_RUNTIME_LAUNCHER</key><string>$LOOM_RUNTIME_LAUNCHER</string>
         <key>LOOM_LANE_LAUNCHER</key><string>launchd</string>
         <key>HOME</key><string>$HOME</string>
         <key>PATH</key><string>$pathval</string>
@@ -6341,14 +6028,13 @@ _tier_cfg() { # <key> <default>
 cmd_resolve_config() {
     command -v jq >/dev/null 2>&1 || die "resolve-config: jq required"
     _refuse_legacy_runtime_config
-    local stack base gates_tsv gates_src runner ui_capacity
+    local stack base gates_tsv gates_src runner
     stack=$(detect_stack)
     # `base` was never a real setting: SKILL.md already states the rule.
     base=$(_detect_base "$REPO_ROOT" "$CONFIG")
     gates_tsv=$(_repo_gates_tsv); gates_src=repo
     [ -n "$gates_tsv" ] || { gates_tsv=$(_derive_gates_tsv); gates_src=derived; }
     runner=$(_yaml_scalar "$CONFIG" runner); [ -n "$runner" ] || runner="scripts/gate.sh"
-    ui_capacity=$(_ui_capacity)
 
     jq -n \
         --arg repo "$REPO_ROOT" --arg stack "$stack" --arg base "$base" \
@@ -6358,7 +6044,6 @@ cmd_resolve_config() {
         --argjson deny  "$(_derive_deny  | _lines_to_json)" \
         --arg lanes "$(cfg max_lanes 4)"           --arg lanes_s "$(cfg_source max_lanes)" \
         --arg aux   "$(cfg max_aux_lanes 4)"       --arg aux_s   "$(cfg_source max_aux_lanes)" \
-        --arg uicap "$ui_capacity"                 --arg uicap_s "$(cfg_source ui_capacity)" \
         --arg stall "$(cfg stall_action resume)"   --arg stall_s "$(cfg_source stall_action)" \
         --arg rej   "$(cfg rejection_cap 2)"       --arg rej_s   "$(cfg_source rejection_cap)" \
         --arg crash "$(cfg crash_cap 2)"           --arg crash_s "$(cfg_source crash_cap)" \
@@ -6381,7 +6066,6 @@ cmd_resolve_config() {
           scalars: {
             max_lanes:               {value: $lanes,  source: $lanes_s},
             max_aux_lanes:           {value: $aux,    source: $aux_s},
-            ui_capacity:              {value: $uicap,  source: $uicap_s},
             stall_action:            {value: $stall,  source: $stall_s},
             rejection_cap:           {value: $rej,    source: $rej_s},
             crash_cap:               {value: $crash,  source: $crash_s},
@@ -6457,18 +6141,6 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
       *) die "install: unknown argument '$1'";;
     esac; done
     [ -n "$provider" ] || die "install: --provider <id> is required"
-    if [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" != 1 ]; then
-        mkdir -p "$LOOM_RUNTIME_HOME"
-        mkdir "$LOOM_RUNTIME_HOME/publish.lock" 2>/dev/null \
-          || die "install: runtime publication or another start is already in progress"
-        printf '%s\n' "$$" > "$LOOM_RUNTIME_HOME/publish.lock/pid"
-        _RUNTIME_INSTALL_LOCKED=1
-        trap _runtime_install_unlock EXIT
-        trap '_runtime_install_unlock; trap - EXIT INT TERM; exit 130' INT
-        trap '_runtime_install_unlock; trap - EXIT INT TERM; exit 143' TERM
-    fi
-    _runtime_ready || [ "${LOOM_ALLOW_MUTABLE_RUNTIME:-}" = 1 ] \
-      || die "install: no validated runtime release is selected; run /loom publish first"
     [ -x "$AGENT_SH" ] || die "install: provider runtime missing: $AGENT_SH"
     "$AGENT_SH" detect --provider "$provider" >/dev/null \
       || die "install: no registered adapter for '$provider'"
@@ -6505,8 +6177,6 @@ cmd_install() {  # install --provider <id> [--dry-run] [interval-seconds]
   Then re-run /loom start. Until it loads, the build survives only on lane self-triggers."
     fi
     rm -f "$UNARMED_STATE"
-    _runtime_install_unlock
-    trap - EXIT INT TERM
     echo "loom: build agent LOADED ($LOOM_LABEL, provider $provider, ${interval}s — watches every tick, waves at most every $(cfg min_wave_gap_minutes 10)m) — repo $REPO_ROOT"
     _raise_viewer
 }
@@ -6519,8 +6189,7 @@ cmd_uninstall() {  # uninstall [--now]
     # honest. (Paid for: found 2026-08-04 while designing the merge.)
     local now=0; [ "${1:-}" = "--now" ] && now=1
     : > "$LOOP_STOPPED"
-    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE" "$CONTINUATION_CLAIM_FILE" \
-          "$CONTINUATION_EXIT_FILE"
+    rm -f "$START_KICK_FILE" "$CONTINUATION_FILE"
     local plist="$PLIST_DIR/$LOOM_LABEL.plist"
     "$LAUNCHCTL_CMD" bootout "gui/$(id -u)/$LOOM_LABEL" 2>/dev/null || true
     rm -f "$plist"
@@ -6682,25 +6351,9 @@ cmd_agent_status() {
     else
         echo "loop switch: running — lanes chain to their successor and start the next wave"
     fi
-    if [ -x "$LOOM_RUNTIME_LAUNCHER" ] && [ -f "$LOOM_RUNTIME_SELECTOR" ]; then
-        LOOM_RUNTIME_SELECTOR="$LOOM_RUNTIME_SELECTOR" "$LOOM_RUNTIME_LAUNCHER" status
-    else
-        echo "runtime release: not published — scheduler would use the mutable checkout"
-    fi
     if "$LAUNCHCTL_CMD" print "gui/$(id -u)/$WATCH_LABEL" >/dev/null 2>&1; then
         echo "$WATCH_LABEL: loaded — the OLD separate watcher, now redundant; \`/loom start\` retires it"
     fi
-}
-
-cmd_runtime() {
-    if [ "${1:-}" = publish ] \
-       && { [ ! -f "$LOOM_RUNTIME_SELECTOR" ] || [ "${2:-}" = --migrate ]; }; then
-        ! _agent_armed \
-          || die "runtime publish: cutover requires the scheduler to be unloaded with /loom stop"
-        export LOOM_RUNTIME_CUTOVER_UNARMED=1
-    fi
-    LOOM_RUNTIME_SOURCE="${SELF_PATH%/*}/.." \
-      "${SELF_PATH%/*}/runtime.sh" "$@"
 }
 
 case "${1:-}" in
@@ -6743,10 +6396,9 @@ case "${1:-}" in
     install)      shift; cmd_install "$@" ;;
     uninstall)    shift; cmd_uninstall "$@" ;;
     agent-status) shift; cmd_agent_status "$@" ;;
-    runtime)      shift; cmd_runtime "$@" ;;
     sweep) shift; cmd_sweep "$@" ;;
     quiet-tick) shift; cmd_quiet_tick "$@" ;;
     chain-merge) shift; cmd_chain_merge "$@" ;;
     chain-gate) shift; cmd_chain_gate "$@" ;;
-    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release|fix-ticket <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | runtime publish|rollback|status | chain-gate <impl-id> | chain-merge" ;;
+    *) die "usage: tick.sh tick --provider <id> [--auto|--from-lane] | supervise acquire <ticket> --owner <id> [--ttl-seconds N] | supervise release <ticket> | request-continuation hold-release|supervised-release|fix-ticket <ticket> | release-ui-resource <lane-id> | spawn-lane <id> [--provider <id> --job <kind> --tier <medium|high> --brief <file> | -- <custom-command...>] [--pregate <tier>] [--host-probe <id>] [--no-tick] [--merge-lock] [--cwd <dir>] | lane-status | render-log <id> [--follow] | resume | clear-lane <id> | snapshot [--brief|--merge-queue] | plan [<snapshot.json>] | mend-status [<snapshot.json>] | graph [file] | gate-deps | report [--ticket <n>] [--build <l>] | retro [--build <l>] [--vs <l>] | resolve-config | trust-check [--notify] [dir] | install-settings [--force] | notify <event> <title> <body> [url] | install --provider <id> [interval] | uninstall | agent-status | chain-gate <impl-id> | chain-merge" ;;
 esac

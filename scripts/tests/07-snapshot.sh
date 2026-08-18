@@ -130,17 +130,15 @@ cat > "$UI_SNAPSHOT_RUNNER" <<EOF
 while :; do sleep 0.05; done
 EOF
 chmod +x "$UI_SNAPSHOT_RUNNER"
-printf 'runner: %s\nui_capacity: 1\n' "$UI_SNAPSHOT_RUNNER" >> "$LOOM_REPO/.loom.yml"
+printf 'runner: %s\n' "$UI_SNAPSHOT_RUNNER" >> "$LOOM_REPO/.loom.yml"
 "$TICK" spawn-lane gate-64 --pregate ui --no-tick -- sleep 20 >/dev/null
 for _wait in $(seq 1 100); do [ -f "$UI_SNAPSHOT_STARTED" ] && break; sleep 0.02; done
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-resource" "$TICK" snapshot \
     > "$T/snap-ui-resource.json" 2>/dev/null
-if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-resource.json")" = true ] \
-   && [ "$(jq -r '.summary.ui_pregate_usage' "$T/snap-ui-resource.json")" = 1 ] \
-   && [ "$(jq -r '.config.ui_capacity' "$T/snap-ui-resource.json")" = 1 ]; then
-    ok "snapshot: UI usage and configured capacity reach the pure planner"
+if [ "$(jq -r '.summary.ui_pregate_occupied' "$T/snap-ui-resource.json")" = true ]; then
+    ok "snapshot: live UI ownership reaches the pure planner"
 else
-    bad "snapshot: UI usage or capacity was discarded before planning"
+    bad "snapshot: live UI ownership was discarded before planning"
 fi
 "$TICK" clear-lane gate-64 >/dev/null 2>&1
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-ui-released" "$TICK" snapshot \
@@ -189,10 +187,6 @@ GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$FX/open-stranded.json" STUB_LOG="$T/call
 [ "$(q '.tickets[] | select(.id==12) | .rejections | "\(.total)/\(.last_class)/\(.same_class_tail)"')" = "2/marks-attribution/2" ] \
     && ok "snapshot: two same-class FAILs count as a tail of 2" \
     || bad "snapshot: same-class tail wrong for #12 ($(q '.tickets[] | select(.id==12) | .rejections | @json'))"
-[ "$(q '.tickets[] | select(.id==12) | .rejections.latest | "\(.sha)/\(.at)/\(.class)"')" = \
-  "bbbb2222/2026-07-28T09:20:00Z/marks-attribution" ] \
-    && ok "snapshot: rejection evidence names the exact latest active FAIL" \
-    || bad "snapshot: latest rejection identity is not executable ($(q '.tickets[] | select(.id==12) | .rejections.latest | @json'))"
 cp "$FX/notes-12.json" "$FX/notes-12-orig.json"
 cp "$FX/notes-12-changed-class.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-cls" "$TICK" snapshot > "$T/snap-cls.json" 2>/dev/null
@@ -203,39 +197,6 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(q '.tickets[] | select(.id==10) | .rejections | "\(.total)/\(.same_class_tail)"')" = "0/0" ] \
     && ok "snapshot: no verdicts means zero rejections" \
     || bad "snapshot: phantom rejections on a clean ticket"
-[ "$(q '.tickets[] | select(.id==10) | .rejections.latest')" = "null" ] \
-    && ok "snapshot: no active FAIL means no stale diagnosis identity" \
-    || bad "snapshot: a clean ticket published phantom diagnosis evidence"
-# Snapshot and the write-boundary validator must inspect the same canonical
-# evidence window. Put an old FAIL behind 35 newer ordinary comments: both
-# sides deliberately see the same newest-30 horizon, never mismatched sets.
-cp "$FX/notes-12.json" "$T/notes-12-before-window.json"
-jq -n '[range(0;35) | {system:false,created_at:("2026-07-29T12:" + ((59 - .) | tostring) + ":00Z"),
-                       author:{username:"human"},body:("ordinary comment " + (. | tostring))}]
-       + [{system:false,created_at:"2026-07-28T09:00:00Z",author:{username:"gate"},
-           body:"older active failure\n\n<!-- orch-verdict FAIL dddd4444 class=older-evidence -->"}]' \
-    > "$FX/notes-12.json"
-cat > "$FX/glab-window-stub.sh" <<'EOF'
-#!/usr/bin/env bash
-FX="$(cd "$(dirname "$0")" && pwd)"
-case "$*" in
-  *"issues/12/notes"*)
-      echo "$*" >> "${STUB_LOG:-/dev/null}"
-      n=$(echo "$*" | sed -n 's/.*per_page=\([0-9]*\).*/\1/p')
-      jq ".[0:${n:-30}]" "$FX/notes-12.json" ;;
-  *) exec "$FX/glab-stub.sh" "$@" ;;
-esac
-EOF
-chmod +x "$FX/glab-window-stub.sh"
-GLAB_CMD="$FX/glab-window-stub.sh" STUB_LOG="$T/calls-evidence-window" \
-    "$TICK" snapshot > "$T/snap-evidence-window.json" 2>/dev/null
-if [ "$(jq -r '.tickets[] | select(.id==12) | .rejections.total' "$T/snap-evidence-window.json")" = 0 ] \
-   && grep -q 'issues/12/notes.*per_page=30' "$T/calls-evidence-window"; then
-    ok "snapshot: canonical newest-30 horizon excludes the same older FAIL as lane validation"
-else
-    bad "snapshot: evidence window did not use the canonical newest-30 horizon"
-fi
-cp "$T/notes-12-before-window.json" "$FX/notes-12.json"
 # D-SNAP-16: a tracker note is one gate outcome even when its body repeats the
 # same machine trailer. Gate prose can already contain the trailer that
 # `lane.sh verdict` appends, so counting regex matches would spend the cap on
@@ -349,14 +310,10 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 # the gate was invalid or the work was replaced. Its narrower marker must not
 # retire merge-attempt history, and its reason must remain visible to the plan.
 cat > "$FX/notes-12-supervised-repair.json" <<'EOF'
-[{"system":false,"created_at":"2026-07-28T10:10:00Z","author":{"username":"human"},"body":"Removed the shared recipient scope guard at c0ffee2.\n\n<!-- orch-supervised-repair 2026-07-28T10:10:00Z -->"},
- {"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Fixed both valid response-contract defects at a84fcf3 and reconciled main.\n\n<!-- orch-supervised-repair 2026-07-28T10:00:00Z -->"},
+[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"human"},"body":"Fixed both valid response-contract defects at a84fcf3 and reconciled main.\n\n<!-- orch-supervised-repair 2026-07-28T10:00:00Z -->"},
  {"system":false,"created_at":"2026-07-28T09:30:00Z","author":{"username":"gate"},"body":"r2\n\n<!-- orch-verdict FAIL bbbb2222 class=response-contract -->"},
  {"system":false,"created_at":"2026-07-28T09:20:00Z","author":{"username":"merge"},"body":"combined gate failed\n\n<!-- orch-merge-attempt 1 -->"},
- {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=response-contract -->"},
- {"system":false,"created_at":"2026-07-28T09:05:00Z","author":{"username":"human"},"body":"Also preserve the cold-hydration acceptance.\n\n<!-- orch-scope-extend 2026-07-28T09:05:00Z -->"},
- {"system":false,"created_at":"2026-07-28T09:00:00Z","author":{"username":"human"},"body":"Replacement scope starts here.\n\n<!-- orch-scope-reset 2026-07-28T09:00:00Z -->"},
- {"system":false,"created_at":"2026-07-28T08:50:00Z","author":{"username":"human"},"body":"Superseded repair from the replaced scope at dead111.\n\n<!-- orch-supervised-repair 2026-07-28T08:50:00Z -->"}]
+ {"system":false,"created_at":"2026-07-28T09:10:00Z","author":{"username":"gate"},"body":"r1\n\n<!-- orch-verdict FAIL aaaa1111 class=response-contract -->"}]
 EOF
 cp "$FX/notes-12-supervised-repair.json" "$FX/notes-12.json"
 GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-supervised-repair" "$TICK" snapshot > "$T/snap-supervised-repair.json" 2>/dev/null
@@ -367,14 +324,11 @@ cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
 [ "$(jq -r '.tickets[] | select(.id==12) | .merge_attempts' "$T/snap-supervised-repair.json")" = "1" ] \
     && ok "snapshot: supervised repair preserves merge-attempt history" \
     || bad "snapshot: supervised repair incorrectly retired merge history"
-repair_evidence=$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.body // ""' "$T/snap-supervised-repair.json")
-if [[ "$repair_evidence" == *"a84fcf3"*"c0ffee2"* ]] \
-   && [[ "$repair_evidence" != *"dead111"* ]] \
-   && [ "$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.at' "$T/snap-supervised-repair.json")" = "2026-07-28T10:10:00Z" ]; then
-    ok "snapshot: supervised repairs accumulate in tracker order after the latest replacement scope"
-else
-    bad "snapshot: a later repair erased earlier active evidence or revived replaced scope ($(printf '%s' "$repair_evidence" | tr '\n' ' '))"
-fi
+case "$(jq -r '.tickets[] | select(.id==12) | .active_supervised_repair.body // ""' "$T/snap-supervised-repair.json")" in
+    *"a84fcf3"*"reconciled main"*)
+        ok "snapshot: supervised repair reason crosses the tracker boundary whole" ;;
+    *)  bad "snapshot: supervised repair reason is missing from the ticket row" ;;
+esac
 # Planted mutant: remove only the supervised-repair marker from the shared
 # verdict cutoff and drive the same public snapshot seam. The two historical
 # rejections must reappear, proving the GREEN result depends on this marker.
@@ -408,9 +362,9 @@ case "$(br .body)" in *"Attempt 3 tried the adapter seam"*) \
 case "$(br .body)" in *orch-blocked*) \
     bad "snapshot: the trailer leaked into the human-readable body";; \
     *) ok "snapshot: the trailer is stripped from the body a human reads";; esac
-[ "$(br .released)" = "true" ] \
-    && ok "snapshot: a human block moved to review is no longer repair authority" \
-    || bad "snapshot: review-state human block remained active ($(br .released))"
+[ "$(br .released)" = "false" ] \
+    && ok "snapshot: a block with no release note reads as not yet decided" \
+    || bad "snapshot: released was $(br .released) with no orch-unblock in the thread"
 # D-SNAP-17: `released: false` alone cannot tell "nobody has answered this
 # hold" from "answered, and the trailer was never stamped" — a hold released by
 # hand in the tracker leaves exactly this thread. #12 is labelled `review`, so
@@ -420,142 +374,6 @@ case "$(br .body)" in *orch-blocked*) \
 [ "$(br .ticket_state)" = "review" ] \
     && ok "snapshot: the blocked report carries the ticket's current state, so released:false is readable" \
     || bad "snapshot: no ticket_state on the report ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedrep.json"))"
-
-# A diagnosis hold freezes both its source workflow state and the exact active
-# FAIL generation in the same report note. If the report POST wins but its
-# guarded transition loses a race to review, that exact report is history and
-# the next plan must not replay `blocked` over the newer state.
-cat > "$T/notes-12-diagnosis-fails.json" <<'EOF'
-[{"system":false,"created_at":"2026-07-28T10:00:00Z","author":{"username":"gate"},"body":"Second exact failure.\n\n<!-- orch-verdict FAIL bbbb2222 class=api-contract -->"},
- {"system":false,"created_at":"2026-07-28T09:00:00Z","author":{"username":"gate"},"body":"First exact failure.\n\n<!-- orch-verdict FAIL aaaa1111 class=acceptance-gap -->"}]
-EOF
-RGEN=$(jq -L "$(dirname "$TICK")" -r 'include "lib"; active_fail_generation(.)' "$T/notes-12-diagnosis-fails.json")
-jq --arg gen "$RGEN" '[{"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},
-      "body":("Automatic diagnosis report.\n\n<!-- orch-diagnosis-source state=in-progress generation=" + $gen + " -->\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->")}] + .' \
-    "$T/notes-12-diagnosis-fails.json" > "$FX/notes-12-diagnosis-race.json"
-cp "$FX/notes-12-diagnosis-race.json" "$FX/notes-12.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-diagnosis-race-review" \
-    "$TICK" snapshot > "$T/snap-diagnosis-race-review.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-race-review.json" > "$T/plan-diagnosis-race-review.json" 2>/dev/null
-if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-diagnosis-race-review.json")" = true ] \
-   && ! jq -e 'any(.actions[]; .ticket==12 and .kind=="repair" and .argv[2]=="blocked")' \
-        "$T/plan-diagnosis-race-review.json" >/dev/null; then
-    ok "snapshot→plan: inter-write diagnosis race cannot replay blocked over review"
-else
-    bad "snapshot→plan: superseded diagnosis report remained repairable"
-fi
-
-# The single source-state report is the atomic diagnosis hold. Its generation
-# was guarded immediately before POST, so no second write is required.
-jq '(.[] | select(.iid==12) | .labels) |=
-      (map(select(. != "blocked" and . != "merge-queue" and . != "review" and
-                  . != "in-progress" and . != "ready-for-agent")) + ["in-progress"])' \
-    "$FX/open.json" > "$T/open-diagnosis-source.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-source.json" \
-    STUB_LOG="$T/calls-diagnosis-source" "$TICK" snapshot > "$T/snap-diagnosis-source.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-source.json" > "$T/plan-diagnosis-source.json" 2>/dev/null
-if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-diagnosis-source.json")" = false ] \
-   && ! jq -e 'any(.actions[]; .ticket==12 and .kind=="diagnosis-hold")' \
-        "$T/plan-diagnosis-source.json" >/dev/null; then
-    ok "snapshot→plan: one guarded diagnosis report activates supervised repair"
-else
-    bad "snapshot→plan: atomic diagnosis report did not route to supervised repair"
-fi
-jq '(.[] | select(.iid==12) | .labels) |=
-      (map(select(. != "blocked" and . != "merge-queue" and . != "review" and
-                  . != "in-progress" and . != "ready-for-agent")) + ["blocked"])' \
-    "$FX/open.json" > "$T/open-diagnosis-blocked.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-blocked.json" \
-    STUB_LOG="$T/calls-diagnosis-blocked" "$TICK" snapshot > "$T/snap-diagnosis-blocked.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-blocked.json" > "$T/plan-diagnosis-blocked.json" 2>/dev/null
-if jq -e '.tickets[] | select(.id==12) | .blocked_report.released == true' \
-        "$T/snap-diagnosis-blocked.json" >/dev/null \
-   && jq -e 'any(.deferred[]; .ticket==12 and .kind=="repair-report-missing")' \
-        "$T/plan-diagnosis-blocked.json" >/dev/null; then
-    ok "snapshot→plan: concurrent state change retires the machine diagnosis"
-else
-    bad "snapshot→plan: changed-state diagnosis became active"
-fi
-
-# A label-first human-attention partial is deliberately human-owned. Snapshot
-# names the missing decision note, and plan defers it instead of respawning a
-# worker from the old diagnosis source.
-jq '(.[] | select(.iid==12) | .labels) += ["supervision::awaiting-human"]' \
-    "$T/open-diagnosis-blocked.json" > "$T/open-diagnosis-attention-partial.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-attention-partial.json" \
-    STUB_LOG="$T/calls-diagnosis-attention-partial" "$TICK" snapshot \
-    > "$T/snap-diagnosis-attention-partial.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-attention-partial.json" \
-    > "$T/plan-diagnosis-attention-partial.json" 2>/dev/null
-if jq -e '.tickets[] | select(.id==12) | .supervision_attention
-          | .category=="human-attention-incomplete"
-            and (.body | contains("exact decision note is missing"))' \
-        "$T/snap-diagnosis-attention-partial.json" >/dev/null \
-   && jq -e 'any(.deferred[]; .ticket==12 and .kind=="awaiting-human")' \
-        "$T/plan-diagnosis-attention-partial.json" >/dev/null \
-   && ! jq -e 'any(.actions[]; .ticket==12 and .lane=="repair-12")' \
-        "$T/plan-diagnosis-attention-partial.json" >/dev/null; then
-    ok "snapshot→plan: incomplete human-attention decision is surfaced, never respawned"
-else
-    bad "snapshot→plan: incomplete human-attention decision escaped human ownership"
-fi
-
-cp "$FX/notes-12-diagnosis-race.json" "$FX/notes-12.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-source.json" \
-    STUB_LOG="$T/calls-diagnosis-acked" "$TICK" snapshot > "$T/snap-diagnosis-acked.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-acked.json" > "$T/plan-diagnosis-acked.json" 2>/dev/null
-if jq -e --arg gen "$RGEN" '.tickets[] | select(.id==12) | .blocked_report
-          | .released == false and .diagnosis_source.generation == $gen' \
-        "$T/snap-diagnosis-acked.json" >/dev/null \
-   && ! jq -e 'any(.actions[]; .ticket==12 and (.kind=="diagnosis-hold" or .lane=="impl-12"))' \
-        "$T/plan-diagnosis-acked.json" >/dev/null; then
-    ok "snapshot: guarded diagnosis report stays active while its source state stands"
-else
-    bad "snapshot: guarded diagnosis hold was not active"
-fi
-
-# The report itself consumes one slot in Linear's newest-30 window. Visible
-# FAILs may therefore be a subset of the frozen generation, but a concurrent
-# new verdict/reset just before POST must still retire the report.
-jq -n '[range(0;28) | {system:false,created_at:"2026-07-28T10:15:00Z",body:("ordinary " + tostring)}]
-       + [{system:false,created_at:"2026-07-28T10:00:00Z",body:"newest frozen\n\n<!-- orch-verdict FAIL bbbb2222 class=api-contract -->"},
-          {system:false,created_at:"2026-07-28T09:00:00Z",body:"oldest frozen\n\n<!-- orch-verdict FAIL aaaa1111 class=acceptance-gap -->"}]' \
-  > "$T/diagnosis-window-pre.json"
-WINDOW_GEN=$(jq -L "$(dirname "$TICK")" -r 'include "lib"; active_fail_generation(.)' "$T/diagnosis-window-pre.json")
-jq --arg gen "$WINDOW_GEN" '[{system:false,created_at:"2026-07-28T12:00:00Z",
-    body:("Held.\n\n<!-- orch-diagnosis-source state=in-progress generation=" + $gen + " -->\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T12:00:00Z -->")}] + .' \
-  "$T/diagnosis-window-pre.json" > "$FX/notes-12.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-source.json" STUB_LOG="$T/calls-diagnosis-window" \
-  "$TICK" snapshot > "$T/snap-diagnosis-window.json" 2>/dev/null
-jq '[.[0], {system:false,created_at:"2026-07-28T11:00:00Z",body:"Concurrent reset.\n\n<!-- orch-verdict-reset 2026-07-28T11:00:00Z -->"}] + .[1:]' \
-  "$FX/notes-12.json" > "$T/diagnosis-window-race.json"
-cp "$T/diagnosis-window-race.json" "$FX/notes-12.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-source.json" STUB_LOG="$T/calls-diagnosis-window-race" \
-  "$TICK" snapshot > "$T/snap-diagnosis-window-race.json" 2>/dev/null
-if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-diagnosis-window.json")" = false ] \
-   && [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-diagnosis-window-race.json")" = true ]; then
-  ok "snapshot: capped-window displacement stays active while a pre-POST reset retires it"
-else
-  bad "snapshot: diagnosis window/race identity was not fail-closed"
-fi
-
-# A changed active FAIL generation retires only the old report. The cap then
-# plans a fresh diagnosis against the new exact identity rather than repairing
-# the stale transition.
-jq '.[0:1] + [{"system":false,"created_at":"2026-07-28T10:30:00Z","author":{"username":"gate"},"body":"New generation.\n\n<!-- orch-verdict FAIL cccc3333 class=response-contract -->"}] + .[1:]' \
-    "$FX/notes-12-diagnosis-race.json" > "$FX/notes-12.json"
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-source.json" \
-    STUB_LOG="$T/calls-diagnosis-generation" "$TICK" snapshot > "$T/snap-diagnosis-generation.json" 2>/dev/null
-"$TICK" plan "$T/snap-diagnosis-generation.json" > "$T/plan-diagnosis-generation.json" 2>/dev/null
-if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-diagnosis-generation.json")" = true ] \
-   && NEWGEN=$(jq -r '.tickets[] | select(.id==12) | .rejections.generation' "$T/snap-diagnosis-generation.json") \
-   && jq -e --arg gen "$NEWGEN" 'any(.actions[]; .ticket==12 and .kind=="diagnosis-hold" and .argv[5]==$gen)' \
-        "$T/plan-diagnosis-generation.json" >/dev/null; then
-    ok "snapshot→plan: changed FAIL generation retires the old report and plans exact new diagnosis"
-else
-    bad "snapshot→plan: changed FAIL generation replayed stale diagnosis state"
-fi
-cp "$FX/notes-12-blocked.json" "$FX/notes-12.json"
 # The half-applied batch: the decision note landed and the relabel did not, so
 # the ticket is still `blocked` but the decision already exists. `triage` must
 # show that as work to finish, never ask the human to decide it twice.
@@ -575,43 +393,11 @@ cat > "$FX/notes-12.json" <<'EOF'
  {"system":false,"created_at":"2026-07-28T12:00:00Z","author":{"username":"human"},"body":"Decision: resume.\n\n<!-- orch-unblock 2026-07-28T12:00:00Z -->"},
  {"system":false,"created_at":"2026-07-28T11:00:00Z","author":{"username":"wave"},"body":"Cap spent.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T11:00:00Z -->"}]
 EOF
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-blocked.json" STUB_LOG="$T/calls-blockedre" "$TICK" snapshot > "$T/snap-blockedre.json" 2>/dev/null
+GLAB_CMD="$FX/glab-stub.sh" STUB_LOG="$T/calls-blockedre" "$TICK" snapshot > "$T/snap-blockedre.json" 2>/dev/null
 rb() { jq -r ".tickets[] | select(.id==12) | .blocked_report | $1" "$T/snap-blockedre.json"; }
 [ "$(rb .released)" = "false" ] && [ "$(rb .category)" = "external-dep" ] \
     && ok "snapshot: a re-blocked ticket asks for its second decision" \
     || bad "snapshot: stale release note swallowed the new block ($(jq -c '.tickets[] | select(.id==12) | .blocked_report' "$T/snap-blockedre.json"))"
-# Verdict and scope resets retire the old hold as well as its verdict counts.
-# Use equal tracker timestamps so the newest-first note index proves the same
-# deterministic ordering used by verdict history. The planner must then leave
-# the retired report as history instead of repairing the ticket back to blocked.
-for reset_marker in verdict-reset scope-reset scope-extend; do
-    cat > "$FX/notes-12.json" <<EOF
-[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"human"},"body":"Reset the obsolete hold.\n\n<!-- orch-$reset_marker 2026-07-28T14:00:00Z -->"},
- {"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"wave"},"body":"Old hold.\n\n<!-- orch-blocked category=rejection-cap 2026-07-28T14:00:00Z -->"}]
-EOF
-    GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-blocked.json" STUB_LOG="$T/calls-blocked-$reset_marker" \
-        "$TICK" snapshot > "$T/snap-blocked-$reset_marker.json" 2>/dev/null
-    "$TICK" plan "$T/snap-blocked-$reset_marker.json" \
-        > "$T/plan-blocked-$reset_marker.json" 2>/dev/null
-    if [ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-blocked-$reset_marker.json")" = "true" ] \
-       && ! jq -e 'any(.actions[]; .ticket == 12 and .kind == "repair" and .argv[2] == "blocked")' \
-            "$T/plan-blocked-$reset_marker.json" >/dev/null; then
-        ok "snapshot: $reset_marker retires an earlier blocked report before planning"
-    else
-        bad "snapshot: $reset_marker left blocked-report repair residue"
-    fi
-done
-# The inverse timestamp tie matters too: a genuinely newer block after a reset
-# is a new hold and must remain unreleased.
-cat > "$FX/notes-12.json" <<'EOF'
-[{"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"wave"},"body":"New hold.\n\n<!-- orch-blocked category=external-dep 2026-07-28T14:00:00Z -->"},
- {"system":false,"created_at":"2026-07-28T14:00:00Z","author":{"username":"human"},"body":"Reset the old hold.\n\n<!-- orch-verdict-reset 2026-07-28T14:00:00Z -->"}]
-EOF
-GLAB_CMD="$FX/glab-stub.sh" STUB_OPEN="$T/open-diagnosis-blocked.json" STUB_LOG="$T/calls-blocked-after-reset" \
-    "$TICK" snapshot > "$T/snap-blocked-after-reset.json" 2>/dev/null
-[ "$(jq -r '.tickets[] | select(.id==12) | .blocked_report.released' "$T/snap-blocked-after-reset.json")" = "false" ] \
-    && ok "snapshot: a newer block after a reset remains current" \
-    || bad "snapshot: an older reset retired a newer blocked report"
 # A thread with no trailer yields null rather than guessing which comment was
 # the report — the state every ticket blocked before this verb existed is in.
 cp "$FX/notes-12-orig.json" "$FX/notes-12.json"
