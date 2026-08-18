@@ -56,6 +56,7 @@ owner_token() {
     fi
     if [ ! -s "$OWNER_FILE" ]; then
         mkdir -p "$ORCH_HOME"
+        [ ! -e "$OWNER_FILE" ] || rm -f "$OWNER_FILE"
         local token
         token=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
         [ -n "$token" ] || token="$(date +%s)-$$-${RANDOM:-0}"
@@ -110,6 +111,18 @@ owned_role_ids() { # <pane-list-json> <role>; incomplete worker metadata is iner
         | .pane_id // empty' 2>/dev/null
 }
 
+owned_metadata_valid() { # <pane-list-json>
+    printf '%s\n' "$1" | jq -e --arg owner "$OWNER_TOKEN" '
+        [.result.panes[]?
+         | select((.tokens | type) == "object" and .tokens.loom_viewer == $owner)
+         | ((.pane_id | type) == "string" and (.pane_id | length) > 0)
+           and ((.tokens.loom_role == "controller" or .tokens.loom_role == "ticker")
+                or (.tokens.loom_role == "worker"
+                    and (.tokens.loom_lane | type) == "string" and (.tokens.loom_lane | length) > 0
+                    and (.tokens.loom_ticket | type) == "string" and (.tokens.loom_ticket | length) > 0))]
+        | all' >/dev/null 2>&1
+}
+
 pane_expected_live() { # <pane> <controller|worker|ticker> [lane] -> 0 live, 1 dead, 2 unknown
     local pane="$1" role="$2" lane="${3:-}" info base
     info=$("$HERDR" pane process-info --pane "$pane" 2>/dev/null) || return 2
@@ -143,7 +156,10 @@ pane_expected_live() { # <pane> <controller|worker|ticker> [lane] -> 0 live, 1 d
 }
 
 _ensure_controller_locked() {
-    [ "${HERDR_ENV:-}" = 1 ] || return 0
+    [ "${HERDR_ENV:-}" = 1 ] || {
+        echo "watch-panes: viewer controller requires a Herdr pane" >&2
+        return 1
+    }
     command -v "$HERDR" >/dev/null 2>&1 || {
         echo "watch-panes: herdr is not on PATH" >&2
         return 1
@@ -242,7 +258,7 @@ process_start_identity() { # <pid>
 CONTROLLER_LOCK="$ORCH_HOME/watch-controller.lock"
 
 controller_lock_acquire() {
-    local tries=0 incomplete=0 pid start live_start
+    local tries=0 incomplete=0 reap_wait=0 pid start live_start
     while [ "$tries" -lt 200 ]; do
         if mkdir "$CONTROLLER_LOCK" 2>/dev/null; then
             printf '%s\n' "$$" > "$CONTROLLER_LOCK/pid"
@@ -264,6 +280,15 @@ controller_lock_acquire() {
             incomplete=$((incomplete + 1))
         else
             incomplete=0
+        fi
+        if [ -d "$CONTROLLER_LOCK/reap" ]; then
+            reap_wait=$((reap_wait + 1))
+            if [ "$reap_wait" -ge 20 ]; then
+                rmdir "$CONTROLLER_LOCK/reap" 2>/dev/null || :
+                reap_wait=0
+            fi
+        else
+            reap_wait=0
         fi
         # Reclamation is itself an atomic transaction. Only one waiter may
         # inspect and retire a stale lock, and it re-reads identity after
@@ -732,6 +757,10 @@ ensure_ticker() {
         "$HERDR" pane close "$tp" >/dev/null 2>&1 || :
     done
     tp=$(new_pane down "$ANCHOR" 0.75)
+    if [ -z "$tp" ] && [ -n "$CONTROLLER_PANE" ] \
+       && grep -q "^$CONTROLLER_PANE controller " "$LIVE" 2>/dev/null; then
+        tp=$(new_pane down "$CONTROLLER_PANE" 0.75)
+    fi
     [ -n "$tp" ] || {
         echo "watch-panes: could not open a ticker pane (run '$TICK render-events --follow' anywhere instead)" >&2
         return 0
@@ -810,7 +839,14 @@ while :; do
     # Liveness and pane topology are each sampled exactly once per poll. A
     # stale-but-alive lane remains active because `lanes-alive` owns that
     # classification.
-    running=$("$TICK" lanes-alive 2>/dev/null | awk '{ print $1 }') || running=""
+    if ! running=$("$TICK" lanes-alive 2>/dev/null | awk '{ print $1 }'); then
+        if [ -z "$DISCOVERY_NOTED" ]; then
+            viewer_note "viewer degraded: cannot read live lanes; no pane changes made"
+            DISCOVERY_NOTED=1
+        fi
+        finish_poll
+        continue
+    fi
     PANE_JSON=$(pane_list) || PANE_JSON=""
     if ! pane_list_valid "$PANE_JSON"; then
         if [ -z "$DISCOVERY_NOTED" ]; then
@@ -819,6 +855,19 @@ while :; do
         fi
         finish_poll
         continue
+    fi
+    if ! owned_metadata_valid "$PANE_JSON"; then
+        if [ -z "$DISCOVERY_NOTED" ]; then
+            viewer_note "viewer degraded: malformed owned pane metadata; no pane changes made"
+            DISCOVERY_NOTED=1
+        fi
+        finish_poll
+        continue
+    fi
+    if [ -f "$VIEWER_OFF" ]; then
+        echo "watch-panes: switched off — closing owned display panes and exiting."
+        close_owned_display_panes
+        exit 0
     fi
     if ! classify_owned_panes; then
         if [ -z "$DISCOVERY_NOTED" ]; then
@@ -829,12 +878,6 @@ while :; do
         continue
     fi
     DISCOVERY_NOTED=""
-
-    if [ -f "$VIEWER_OFF" ]; then
-        echo "watch-panes: switched off — closing owned display panes and exiting."
-        close_owned_display_panes
-        exit 0
-    fi
 
     : > "$MAP"
     : > "$USED"

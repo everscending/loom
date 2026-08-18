@@ -6,6 +6,13 @@ WP="$(dirname "$TICK")/watch-panes.sh"
 CALLS="$T/herdr-durable-calls"
 export VIEWER_TICK="$TICK"
 
+cat > "$T/ps" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'Mon Jan  1 00:00:00 2024'
+EOF
+chmod +x "$T/ps"
+export PATH="$T:$PATH"
+
 cat > "$T/herdr-durable-stub" <<'EOF'
 #!/usr/bin/env bash
 echo "$*" >> "${HERDR_CALLS:?}"
@@ -235,16 +242,15 @@ fi
 rm -f "$H4C/lanes/impl-43.pid"
 
 # Partial metadata never grants adoption, cleanup, or anchor authority. The
-# active lane gets a fresh pane while the incomplete candidate is untouched.
+# whole poll degrades visibly and leaves every pane untouched.
 H4D="$T/partial-home"; mkdir -p "$H4D/lanes"; echo $$ > "$H4D/lanes/impl-44.pid"; : > "$CALLS"
 LIST='{"result":{"panes":[{"pane_id":"stub:partial","tokens":{"loom_viewer":"repo-owner-123","loom_role":"worker","loom_lane":"impl-44"}}]}}'
 HERDR_FIXTURE_LIST="$LIST" WATCH_OWNER_TOKEN="$OWN" run_viewer "$H4D"
-if ! grep -Eq '^pane (close|run|rename|resize) stub:partial' "$CALLS" \
-   && ! grep -Eq '^pane split --pane stub:partial ' "$CALLS" \
-   && grep -q '^pane report-metadata stub:new[0-9][0-9]* .*loom_lane=impl-44' "$CALLS"; then
-    ok "viewer durability: partial metadata is inert"
+if ! grep -Eq '^pane (close|split|run|rename|resize|report-metadata) ' "$CALLS" \
+   && grep -q 'viewer_note' "$H4D/events.jsonl" 2>/dev/null; then
+    ok "viewer durability: malformed exact-owner metadata degrades without mutation"
 else
-    bad "viewer durability: partial metadata granted pane authority"
+    bad "viewer durability: malformed exact-owner metadata was silent or granted pane authority"
 fi
 rm -f "$H4D/lanes/impl-44.pid"
 
@@ -261,6 +267,18 @@ else
     bad "viewer durability: a foreign exact candidate entered reconciliation"
 fi
 rm -f "$H4E/lanes/impl-45.pid"
+
+# An interrupted first launch can leave the owner file present but empty.
+# That partial write is recoverable and must not wedge every later raise.
+H4F="$T/empty-owner-home"; mkdir -p "$H4F/lanes"; : > "$H4F/watch-panes.owner"; : > "$CALLS"
+HERDR_FIXTURE_LIST='{"result":{"panes":[]}}' HERDR_CALLS="$CALLS" \
+  HERDR_CMD="$T/herdr-durable-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+  HERDR_WORKSPACE_ID=stub LOOM_HOME="$H4F" bash "$WP" raise >/dev/null 2>&1
+if [ -s "$H4F/watch-panes.owner" ] && grep -q '^pane split ' "$CALLS"; then
+    ok "viewer durability: an empty owner-token file recovers on the next raise"
+else
+    bad "viewer durability: an empty owner-token file permanently wedged the viewer"
+fi
 
 # A complete controller token plus the expected live command is singleton
 # authority. A dead tagged controller is cleanup authority, never liveness.
@@ -301,6 +319,30 @@ if grep -q '^pane close stub:c2$' "$CALLS" && ! grep -q '^pane split ' "$CALLS";
     ok "viewer durability: controller reconciliation closes a durable duplicate"
 else
     bad "viewer durability: duplicate live controllers survived reconciliation"
+fi
+
+# A crashed stale-lock reaper leaves an empty claim directory. The next
+# waiter retires that claim after its grace window and completes recovery.
+H5R="$T/reap-home"; mkdir -p "$H5R/lanes" "$H5R/watch-controller.lock/reap"; : > "$CALLS"
+printf '%s\n' 99999999 > "$H5R/watch-controller.lock/pid"
+printf '%s\n' 'Mon Jan  1 00:00:00 2024' > "$H5R/watch-controller.lock/start"
+HERDR_FIXTURE_LIST='{"result":{"panes":[]}}' WATCH_OWNER_TOKEN="$OWN" HERDR_CALLS="$CALLS" \
+  HERDR_CMD="$T/herdr-durable-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+  HERDR_WORKSPACE_ID=stub LOOM_HOME="$H5R" bash "$WP" raise >/dev/null 2>&1
+if grep -q '^pane split ' "$CALLS" && [ ! -e "$H5R/watch-controller.lock/reap" ]; then
+    ok "viewer durability: a crashed stale-lock reaper cannot wedge later raises"
+else
+    bad "viewer durability: stale reap ownership blocked controller recovery"
+fi
+
+# Direct raise/on outside Herdr cannot claim success: no pane host exists.
+outside_rc=0
+HERDR_ENV=0 LOOM_HOME="$T/outside-home" WATCH_OWNER_TOKEN="$OWN" bash "$WP" raise \
+  >/dev/null 2>&1 || outside_rc=$?
+if [ "$outside_rc" -ne 0 ]; then
+    ok "viewer durability: direct raise outside Herdr fails visibly"
+else
+    bad "viewer durability: direct raise outside Herdr reported false success"
 fi
 
 # Immediate stage handoff preserves ticket affinity without preserving an
@@ -353,6 +395,46 @@ else
 fi
 rm -f "$H8A/lanes/impl-81.pid"
 
+# The off switch needs only exact ownership metadata. It closes display panes
+# even when follower process inspection is unavailable.
+H8B="$T/off-degraded-home"; mkdir -p "$H8B/lanes"; touch "$H8B/viewer-off"; : > "$CALLS"
+LIST='{"result":{"panes":[{"pane_id":"stub:w1","tokens":{"loom_viewer":"repo-owner-123","loom_role":"worker","loom_lane":"impl-82","loom_ticket":"82"}},{"pane_id":"stub:t1","tokens":{"loom_viewer":"repo-owner-123","loom_role":"ticker"}}]}}'
+HERDR_FIXTURE_LIST="$LIST" HERDR_UNKNOWN_PANES='stub:w1 stub:t1' WATCH_OWNER_TOKEN="$OWN" run_viewer "$H8B"
+if grep -q '^pane close stub:w1$' "$CALLS" && grep -q '^pane close stub:t1$' "$CALLS"; then
+    ok "viewer durability: off cleanup does not depend on follower process inspection"
+else
+    bad "viewer durability: unreadable follower state prevented deliberate off cleanup"
+fi
+
+# A failed lane-liveness read is unknown, never an empty active set with
+# authority to close existing panes.
+H8C="$T/lane-read-home"; mkdir -p "$H8C/lanes"; : > "$CALLS"
+FAIL_TICK="$T/fail-tick.sh"
+cat > "$FAIL_TICK" <<'EOF'
+#!/bin/sh
+case "$1" in
+  orch-home) printf '%s\n' "${LOOM_HOME:?}" ;;
+  resolve-config) printf '%s\n' '{"scalars":{"max_lanes":{"value":4}}}' ;;
+  event) exit 0 ;;
+  lanes-alive) exit 23 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$FAIL_TICK"
+FAIL_VIEWER="$T/fail-viewer.sh"
+sed "s|^TICK=.*|TICK='$FAIL_TICK'|" "$WP" > "$FAIL_VIEWER"
+chmod +x "$FAIL_VIEWER"
+LIST='{"result":{"panes":[{"pane_id":"stub:w1","tokens":{"loom_viewer":"repo-owner-123","loom_role":"worker","loom_lane":"impl-83","loom_ticket":"83"}}]}}'
+HERDR_FIXTURE_LIST="$LIST" WATCH_OWNER_TOKEN="$OWN" HERDR_CALLS="$CALLS" \
+  HERDR_CMD="$T/herdr-durable-stub" HERDR_ENV=1 HERDR_PANE_ID=stub:p0 \
+  HERDR_WORKSPACE_ID=stub WATCH_TICKER=0 WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+  LOOM_HOME="$H8C" bash "$FAIL_VIEWER" worker >/dev/null 2>&1 || :
+if ! grep -Eq '^pane (close|split|run|rename|resize|report-metadata) ' "$CALLS"; then
+    ok "viewer durability: failed lane discovery changes no panes"
+else
+    bad "viewer durability: failed lane discovery was treated as an empty active set"
+fi
+
 # Ticker lifecycle keeps one exact-token pane, closes duplicates, and tags a
 # replacement before starting the event follower.
 H11="$T/ticker-home"; mkdir -p "$H11/lanes"; : > "$CALLS"
@@ -390,6 +472,23 @@ if [ -n "$tmeta" ] && [ -n "$trun" ] && [ "$tmeta" -lt "$trun" ]; then
     ok "viewer durability: replacement ticker is owned before it runs"
 else
     bad "viewer durability: replacement ticker ran without durable ownership"
+fi
+
+# If the original human anchor closed, the durable controller is the bounded
+# fallback for recreating the ticker instead of leaving the viewer blind.
+: > "$CALLS"
+LIST='{"result":{"panes":[{"pane_id":"stub:c1","tokens":{"loom_viewer":"repo-owner-123","loom_role":"controller"}}]}}'
+HERDR_FIXTURE_LIST="$LIST" HERDR_FAIL_SPLIT_PANE=stub:gone WATCH_OWNER_TOKEN="$OWN" \
+  HERDR_CALLS="$CALLS" HERDR_CMD="$T/herdr-durable-stub" HERDR_ENV=1 \
+  HERDR_PANE_ID=stub:p0 HERDR_WORKSPACE_ID=stub WATCH_ANCHOR_PANE=stub:gone \
+  WATCH_CONTROLLER_PANE=stub:c1 WATCH_TICKER=1 WATCH_POLLS=1 WATCH_POLL_SECONDS=0 \
+  LOOM_HOME="$H11" bash "$WP" worker >/dev/null 2>&1 || :
+if grep -q 'pane split --pane stub:gone ' "$CALLS" \
+   && grep -q 'pane split --pane stub:c1 ' "$CALLS" \
+   && grep -q 'render-events --follow' "$CALLS"; then
+    ok "viewer durability: ticker recovery falls back to the live controller anchor"
+else
+    bad "viewer durability: a closed original anchor prevented ticker recovery"
 fi
 
 # The active width cap remains visible in the durable event stream.

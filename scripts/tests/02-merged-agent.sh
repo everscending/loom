@@ -428,7 +428,8 @@ MENV "$TICK" install 60 >/dev/null 2>&1
 touch "$MT/home/ticker-off" "$MT/home/viewer-off"
 MENV "$TICK" install 60 >/dev/null 2>&1
 sleep 0.3
-if [ -s "$WPCAP" ] && [ ! -f "$MT/home/ticker-off" ] && [ ! -f "$MT/home/viewer-off" ]; then
+if grep -qxF 'wp raise' "$WPCAP" \
+   && [ ! -f "$MT/home/ticker-off" ] && [ ! -f "$MT/home/viewer-off" ]; then
     ok "start: raises the viewer and clears a quit ticker / an off viewer"
 else
     bad "start: viewer=$(cat "$WPCAP") ticker-off=$([ -f "$MT/home/ticker-off" ] && echo yes) viewer-off=$([ -f "$MT/home/viewer-off" ] && echo yes)"
@@ -439,6 +440,7 @@ fi
 : > "$WPCAP"; touch "$MT/home/ticker-off" "$MT/home/viewer-off"
 MTICK tick --auto
 MTICK tick --from-lane
+MENV "$TICK" tick --provider claude >/dev/null 2>&1
 if [ -f "$MT/home/ticker-off" ] && [ -f "$MT/home/viewer-off" ] && [ ! -s "$WPCAP" ]; then
     ok "off-switches: a tick never clears them, only a typed start does"
 else
@@ -455,18 +457,18 @@ sleep 0.2
 [ -s "$WPCAP" ] && ok "manual tick: raises the singleton worker viewer in herdr" \
                 || bad "manual tick: ran in herdr without raising the viewer"
 
-# A requested human viewer is part of the command's visible contract. Do not
-# swallow a failed raise or print the success banner when no controller exists.
+# A viewer failure stays visible, but it cannot block the scheduler work the
+# human asked the manual tick to perform.
 WPFAIL="$MT/wp-fail.sh"
 printf '#!/bin/sh\necho "wp $*" >> "%s"\nexit 9\n' "$WPCAP" > "$WPFAIL"; chmod +x "$WPFAIL"
 export WATCH_PANES_CMD="$WPFAIL"; : > "$WPCAP"
 wp_fail_out=$(MENV "$TICK" tick --provider claude 2>&1); wp_fail_rc=$?
-if [ "$wp_fail_rc" -ne 0 ] \
+if [ "$wp_fail_rc" -eq 0 ] \
    && printf '%s\n' "$wp_fail_out" | grep -q 'viewer raise FAILED' \
    && ! printf '%s\n' "$wp_fail_out" | grep -q 'viewer raised'; then
-    ok "manual tick: a failed viewer raise is visible and fails the command"
+    ok "manual tick: a failed viewer raise is visible without blocking scheduling"
 else
-    bad "manual tick: viewer raise failure was swallowed or reported as success"
+    bad "manual tick: viewer failure was hidden, misreported, or blocked scheduling"
 fi
 export WATCH_PANES_CMD="$WPSTUB"
 export HERDR_ENV=
