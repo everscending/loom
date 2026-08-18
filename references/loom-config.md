@@ -20,7 +20,7 @@ about.
 
 1. **Global — `~/.loom/config.yml`** (override with `LOOM_GLOBAL_CONFIG`).
    Machine- and person-level preference, identical across every repo:
-   `max_lanes`, `crash_cap`, `rejection_cap`, `heartbeat_stale_minutes`,
+   `max_lanes`, `ui_capacity`, `crash_cap`, `rejection_cap`, `heartbeat_stale_minutes`,
    `usage_limit`, the ntfy block. Written once, ever.
 2. **Derived — no file.** Anything readable off the repo: `base`
    (`origin/develop` if it exists, else `main`), the `gates` pack (from the
@@ -158,6 +158,7 @@ forge: gitlab                   # gitlab | github — ONLY when the derivation (
                                  # then a github.com/gitlab substring in origin) fails. A human
                                  # writes this after confirming; loom never writes it itself.
 max_lanes: 4                    # 1-6; each lane is a full worktree (+ stack where the repo has one)
+ui_capacity: 2                  # opt in above the portable default 1 only after proving isolated ports/worktrees
 rejection_cap: 2                # gate-review rejections before a ticket is blocked
 crash_cap: 2                    # implementer crashes before blocked (crashes are not rejections)
 heartbeat_stale_minutes: 30     # PID alive but log silent this long = wedged (never a wall-clock ticket timeout)

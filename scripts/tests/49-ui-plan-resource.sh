@@ -6,7 +6,7 @@ cat > "$T/base.json" <<'EOF'
 {
   "generated_at":"2026-08-17T10:00:00Z",
   "logs_dir":"/tmp/logs",
-  "config":{"max_lanes":3,"max_aux_lanes":4,"merge_attempt_cap":2,"lane_tier":"medium","base":"main"},
+  "config":{"max_lanes":3,"max_aux_lanes":4,"ui_capacity":2,"merge_attempt_cap":2,"lane_tier":"medium","base":"main"},
   "build":{"id":1,"label":"build-1","provider":"codex"},
   "epics":[], "dependency_edges":[], "other_iids":[], "supervised_leases":[], "lanes":[],
   "tickets":[
@@ -14,7 +14,7 @@ cat > "$T/base.json" <<'EOF'
     {"id":11,"state":"review","tier":"ui","supervised_lease":null,"related_merge_requests":[{"id":111,"state":"open","branch":"ui-11","sha":"bbbb"}],"gate":{"eligible":true,"head":"bbbb"}},
     {"id":12,"state":"review","tier":"api","supervised_lease":null,"related_merge_requests":[{"id":112,"state":"open","branch":"api-12","sha":"cccc"}],"gate":{"eligible":true,"head":"cccc"}}
   ],
-  "summary":{"impl_slots_free":0,"merge_in_flight":false,"stranded":[],"repairs":[],"epics_awaiting_probe":[],"ui_pregate_occupied":true},
+  "summary":{"impl_slots_free":0,"merge_in_flight":false,"stranded":[],"repairs":[],"epics_awaiting_probe":[],"ui_pregate_usage":2,"ui_pregate_occupied":true},
   "warnings":[]
 }
 EOF
@@ -22,22 +22,21 @@ EOF
 "$TICK" plan "$T/base.json" > "$T/busy.json"
 if jq -e '[.actions[] | select(.step=="gate") | .ticket] == [12]
           and ([.deferred[] | select(.step=="gate" and (.ticket==10 or .ticket==11))
-                | .why | select(test("UI host resource"))] | length) == 2' \
+                | .why | select(test("UI host capacity"))] | length) == 2' \
       "$T/busy.json" >/dev/null; then
     ok "plan: a live or queued UI owner suppresses UI gates while API gates continue"
 else
     bad "plan: occupied UI resource still scheduled redundant gates ($(jq -c '{actions,deferred}' "$T/busy.json"))"
 fi
 
-jq '.summary.ui_pregate_occupied=false' "$T/base.json" > "$T/free.json"
+jq '.summary.ui_pregate_usage=0 | .summary.ui_pregate_occupied=false' "$T/base.json" > "$T/free.json"
 "$TICK" plan "$T/free.json" > "$T/free-plan.json"
-if jq -e '[.actions[] | select(.step=="gate") | .ticket] == [10,12]
-          and ([.deferred[] | select(.step=="gate" and .ticket==11)
-                | .why | select(test("one UI"))] | length) == 1' \
+if jq -e '[.actions[] | select(.step=="gate") | .ticket] == [10,11,12]
+          and ([.deferred[] | select(.step=="gate" and (.ticket==10 or .ticket==11))] | length) == 0' \
       "$T/free-plan.json" >/dev/null; then
-    ok "plan: a free UI resource admits the highest-priority UI gate only"
+    ok "plan: two free UI slots admit the two highest-priority UI gates"
 else
-    bad "plan: free UI resource was not reserved once ($(jq -c '{actions,deferred}' "$T/free-plan.json"))"
+    bad "plan: configured UI capacity was not fully assigned ($(jq -c '{actions,deferred}' "$T/free-plan.json"))"
 fi
 
 jq '.tickets += [{"id":20,"state":"merge-queue","tier":"ui","supervised_lease":null,
@@ -63,17 +62,19 @@ else
     bad "plan: UI reservation suppressed an API merge ($(jq -c '{actions,deferred}' "$T/api-merge-plan.json"))"
 fi
 
-# A private planted violation proves the selection guard, not incidental aux
-# capacity, prevents the duplicate UI attempt.
+# A private planted violation proves the configured slot calculation, not
+# incidental aux capacity, is what permits the second UI ticket.
 MUT=$(mirror_scripts "$T/ui-plan-mutant")
-sed -i.bak 's/| ($gate_admissible\[0:$aux_free\]) as $gate_take/| ($gate_all[0:$aux_free]) as $gate_take/' \
+sed -i.bak 's/($ui_capacity - $ui_pregate_usage - $repair_ui_count)/(1 - $ui_pregate_usage - $repair_ui_count)/' \
     "$MUT/plan.jq"
 "$MUT/tick.sh" plan "$T/free.json" > "$T/free-mutant.json" 2>/dev/null
-if jq -e 'any(.actions[]; .lane=="gate-10") and any(.actions[]; .lane=="gate-11")' \
+if jq -e 'any(.actions[]; .lane=="gate-10")
+          and (any(.actions[]; .lane=="gate-11") | not)
+          and any(.deferred[]; .ticket==11)' \
       "$T/free-mutant.json" >/dev/null; then
-    ok "plan mutant: removing UI selection recreates duplicate UI scheduling"
+    ok "plan mutant: collapsing configured capacity recreates one-at-a-time UI scheduling"
 else
-    bad "plan mutant: planted UI-selection violation did not recreate the overlap"
+    bad "plan mutant: planted one-slot violation did not recreate serialization"
 fi
 
 test_finish

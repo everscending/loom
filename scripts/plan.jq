@@ -121,7 +121,10 @@ else
 | (($cfg.max_aux_lanes | tonumber?) // 4) as $aux_cap
 | (($cfg.rejection_cap | tonumber?) // 2) as $rejection_cap
 | (($sum.impl_slots_free | tonumber?) // 0) as $impl_slots_free
-| (($sum.ui_pregate_occupied // false) == true) as $ui_pregate_occupied
+| (($cfg.ui_capacity | tonumber?) // 1) as $ui_capacity
+| (($sum.ui_pregate_usage | tonumber?) //
+   (if (($sum.ui_pregate_occupied // false) == true) then $ui_capacity else 0 end)) as $ui_pregate_usage
+| ($ui_pregate_usage >= $ui_capacity) as $ui_pregate_occupied
 | ($cfg.lane_tier // "medium") as $lane_tier
 | ($s.logs_dir // "") as $logs
 | ([ $tickets[]
@@ -206,16 +209,16 @@ else
   as $repair_attention
 | (if ($s.build.supervision_policy // null) == "autonomous-repair-v1"
    then (reduce $repairable_blockers[] as $candidate
-          ({items:[], slots:$impl_slots_free, ui:$ui_pregate_occupied};
+          ({items:[], slots:$impl_slots_free, ui:$ui_pregate_usage};
            if .slots <= 0 then .
-           elif ($candidate.tier == "ui" and .ui) then .
+           elif ($candidate.tier == "ui" and .ui >= $ui_capacity) then .
            else .items += [$candidate]
               | .slots -= 1
-              | if $candidate.tier == "ui" then .ui = true else . end
+              | if $candidate.tier == "ui" then .ui += 1 else . end
            end) | .items)
    else [] end) as $repair_take
 | ([$repair_take[].id]) as $repair_take_ids
-| (any($repair_take[]; .tier == "ui")) as $repair_takes_ui
+| ([$repair_take[] | select(.tier == "ui")] | length) as $repair_ui_count
 | ([ $repair_take[]
      | ([.related_merge_requests[]? | select(.state == "open")] | first) as $mr
      | ("repair-\(.id)") as $lid
@@ -256,7 +259,7 @@ else
       then [ $repairable_blockers[]
              | . as $candidate
              | select(($repair_take_ids | index($candidate.id)) == null)
-             | if .tier == "ui" and ($ui_pregate_occupied or $repair_takes_ui)
+             | if .tier == "ui" and ($ui_pregate_usage + $repair_ui_count >= $ui_capacity)
                then {step:"supervise", kind:"ui-resource", ticket:.id,
                      why:"the shared host UI resource is already reserved"}
                else {step:"supervise", kind:"capacity", ticket:.id,
@@ -422,19 +425,17 @@ else
    | sort_by([(-._dependency_releases), (-._dependency_impacts), .id])) as $gate_candidates
 | ([ $gate_candidates[] | select(.supervised_lease != null) ]) as $gate_leased
 | ([ $gate_candidates[] | select(.supervised_lease == null) ]) as $gate_all
-# UI pregates share one host resource even when the auxiliary pool has several
-# free slots. Admission remains the final race guard, but a snapshot that
-# already sees an owner must not spend a wave attempting every UI candidate.
-# When free, select the highest-priority UI gate once and let API gates retain
-# their normal parallelism and dependency-priority order.
-| ([ $gate_all[] | select(._pregate_tier == "ui") ] | first | .id) as $first_ui_gate
-| (if $ui_pregate_occupied then null else $first_ui_gate end) as $selected_ui_gate
+# UI pregates share bounded host capacity even when the auxiliary pool has more
+# free slots. Admission remains the final race guard; the planner spends only
+# the remaining UI slots while API gates retain their normal parallelism.
+| (($ui_capacity - $ui_pregate_usage - $repair_ui_count) | if . < 0 then 0 else . end) as $ui_gate_slots
+| ([ $gate_all[] | select(._pregate_tier == "ui") ][0:$ui_gate_slots] | map(.id)) as $selected_ui_gates
 | ([ $gate_all[]
      | select(._pregate_tier != "ui"
-              or ($selected_ui_gate != null and .id == $selected_ui_gate)) ]) as $gate_admissible
+              or (.id as $id | $selected_ui_gates | index($id) != null)) ]) as $gate_admissible
 | ([ $gate_all[]
      | select(._pregate_tier == "ui"
-              and ($selected_ui_gate == null or .id != $selected_ui_gate)) ]) as $gate_ui_wait
+              and (.id as $id | $selected_ui_gates | index($id) == null)) ]) as $gate_ui_wait
 | ($gate_admissible[0:$aux_free]) as $gate_take
 | ([ $gate_take[]
      | (gate_lane(.id)) as $lid
@@ -458,8 +459,8 @@ else
    + [ $gate_ui_wait[]
      | { step: "gate", ticket: .id,
          why: (if $ui_pregate_occupied
-               then "UI host resource already reserved by live or queued UI work"
-               else "one UI gate already selected for the shared UI host resource" end) } ]
+               then "UI host capacity already full with live or queued UI work"
+               else "configured UI host capacity already assigned to higher-priority work" end) } ]
    + [ $gate_take[] | (gate_lane(.id)) as $lid | select(spawnable($lid) | not)
      | { step: "gate", ticket: .id, lane: $lid,
          why: "lane id `\($lid)` is not one `spawn-lane` accepts — a planner bug, not a lane failure" } ]
@@ -601,8 +602,8 @@ else
   as $block_merge_cap
 | ([ $merge_available[] | select((.merge_attempts // 0) < $merge_cap and .merge_hold == null) ] | first)
   as $merge_head
-| (any($gate_actions[]; .spawn.pregate == "ui")) as $planned_ui_gate
-| ($ui_pregate_occupied or $planned_ui_gate) as $ui_reserved_after_gate
+| ([ $gate_actions[] | select(.spawn.pregate == "ui") ] | length) as $planned_ui_gates
+| ($ui_pregate_usage + $repair_ui_count + $planned_ui_gates >= $ui_capacity) as $ui_reserved_after_gate
 | (if ($sum.merge_in_flight // false) or $merge_head == null or $aux_left < 1
        or (($merge_head | planned_pregate_tier) == "ui" and $ui_reserved_after_gate) then []
    else [ $merge_head
