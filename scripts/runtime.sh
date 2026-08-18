@@ -190,7 +190,7 @@ validate_tree() { # <staging>
     check_tree "$1"
     ( cd "$1" && LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh --lint ) \
       || die "release test lint failed"
-    ( cd "$1" && LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh ) \
+    ( cd "$1" && LOOM_TEST_JOBS=1 LOOM_RUNTIME_VALIDATING=1 scripts/tick-test.sh ) \
       || die "release test suite failed"
 }
 

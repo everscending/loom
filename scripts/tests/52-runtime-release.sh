@@ -15,7 +15,7 @@ printf 'host_state_api 1\n' > "$SRC/runtime-abi"
 for name in lane agent; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/$name.sh"
 done
-printf '#!/usr/bin/env bash\nexit 0\n' > "$SRC/scripts/tick-test.sh"
+printf '#!/usr/bin/env bash\n[ "${1:-}" = --lint ] || [ "${LOOM_TEST_JOBS:-}" = 1 ]\n' > "$SRC/scripts/tick-test.sh"
 printf '#!/usr/bin/env bash\nprintf "A:%%s:%%s\\n" "$LOOM_RUNTIME_RELEASE" "$0"\n' > "$SRC/scripts/tick.sh"
 chmod +x "$SRC/scripts"/*.sh
 git -C "$SRC" init -q
