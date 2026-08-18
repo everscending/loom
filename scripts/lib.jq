@@ -129,15 +129,26 @@ def active_scope_reset_of($notes):
              | join("\n\n"))
     } end;
 
-# The newest completed supervised repair, carried as evidence rather than as
-# replacement scope. snapshot.jq exposes it on the ticket row and plan.jq
-# freezes it into the next gate action. It never participates in merge history.
+# Every completed supervised repair after the newest replacement scope, carried
+# as evidence rather than as replacement scope. A later repair supplements the
+# earlier authority; only a true `scope-reset` makes older repair evidence
+# irrelevant. snapshot.jq exposes the composed record on the ticket row and
+# plan.jq freezes it into the next action. It never participates in merge
+# history. Keep tracker-stamped ordering identical to `active_scope_reset_of`.
 def active_supervised_repair_of($notes):
     ([$notes | to_entries[]
+      | select((.value.body // "") | test("<!-- orch-scope-reset "))
+      | {at: (.value.created_at // ""), i: .key}]
+     | sort_by([.at, -.i]) | last) as $reset
+  | ([$notes | to_entries[]
       | select((.value.body // "") | test("<!-- orch-supervised-repair "))
       | {at: (.value.created_at // ""), i: .key, body: (.value.body // "")}]
-     | sort_by([.at, -.i]) | last) as $repair
-  | if $repair == null then null else ($repair | del(.i)) end;
+     | sort_by([.at, -.i])
+     | if $reset == null then .
+       else map(select([.at, -.i] > [$reset.at, -$reset.i])) end) as $repairs
+  | if ($repairs | length) == 0 then null
+    else {at: $repairs[-1].at,
+          body: ($repairs | map(.body) | join("\n\n"))} end;
 
 # A gate that deliberately returns a stale branch to implementation records
 # the decision against the exact MR head it inspected.  The marker remains
